@@ -1,0 +1,41 @@
+version: '3.8'
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: quantdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+  
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+  
+  backend:
+    build: ../backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:password@postgres/quantdb
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ../backend:/app
+      
+volumes:
+  postgres_data:
+  ollama_data:
