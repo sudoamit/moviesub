@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "commonjs"
+  },
+  "include": ["packages/**/*", "apps/**/*", "prisma/**/*"],
+  "exclude": ["node_modules", "dist", ".next", "coverage"]
+}

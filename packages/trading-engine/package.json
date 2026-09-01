@@ -1,0 +1,20 @@
+{
+  "name": "@quant/trading-engine",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@quant/shared": "*",
+    "@quant/config": "*",
+    "@quant/indicators": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

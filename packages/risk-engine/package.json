@@ -1,0 +1,19 @@
+{
+  "name": "@quant/risk-engine",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@quant/shared": "*",
+    "@quant/config": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

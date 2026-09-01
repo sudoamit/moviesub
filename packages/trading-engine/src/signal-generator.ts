@@ -1,0 +1,299 @@
+import {
+  Direction,
+  ICandle,
+  ISignalSetup,
+  MTFMode,
+  SignalGrade,
+  SignalState,
+  Timeframe,
+} from '@quant/shared';
+import { SMCAnalyzer } from './smc-analyzer';
+import { IMTFTimeframeData, MultiTimeframeAnalyzer } from './mtf-analyzer';
+import { TradeLevelsCalculator } from './trade-levels';
+import { IScoringInputs, SignalScorer } from './signal-scorer';
+import { ReasoningGenerator } from './reasoning-generator';
+import { calculateEMA, calculateRSI } from '@quant/indicators';
+import { SessionFilter } from './session-filter';
+import { SaiyanOCCEngine } from './saiyan-occ-engine';
+
+export interface IGenerateSignalOptions {
+  symbol: string;
+  executionCandles: ICandle[];
+  executionTimeframe?: Timeframe | string;
+  htf1Candles: ICandle[];
+  htf1Timeframe?: Timeframe | string;
+  htf2Candles?: ICandle[];
+  htf2Timeframe?: Timeframe | string;
+  mtfMode?: MTFMode;
+  strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
+}
+
+export class SignalGenerator {
+  /**
+   * Generates analytical LONG / SHORT / NO_TRADE signal setup with full scoring, levels, and rationale
+   */
+  static generateSignal(options: IGenerateSignalOptions): ISignalSetup {
+    const symbol = options.symbol.toUpperCase();
+    const executionTf = options.executionTimeframe || Timeframe.M15;
+    const htf1Tf = options.htf1Timeframe || Timeframe.H1;
+    const htf2Tf = options.htf2Timeframe || Timeframe.H4;
+    const strategyMode = options.strategyMode || 'SMC';
+
+    const execCandles = options.executionCandles;
+    if (!execCandles || execCandles.length < 20) {
+      return SignalGenerator.createNoTradeSignal(symbol, executionTf, 'Insufficient historical candle data');
+    }
+
+    // 1. Direct Routing if Saiyan OCC Strategy is Selected
+    if (strategyMode === 'SAIYAN_OCC') {
+      return SaiyanOCCEngine.generateSignal(symbol, execCandles, String(executionTf));
+    }
+
+    // 2. Run Execution Timeframe SMC Analysis
+    const execAnalysis = SMCAnalyzer.analyze(execCandles);
+
+    // 2. Run Multi-Timeframe Alignment
+    const execTfData: IMTFTimeframeData = { timeframe: executionTf, candles: execCandles, analysis: execAnalysis };
+    const htf1Data: IMTFTimeframeData = { timeframe: htf1Tf, candles: options.htf1Candles };
+    const htf2Data: IMTFTimeframeData | undefined = options.htf2Candles
+      ? { timeframe: htf2Tf, candles: options.htf2Candles }
+      : undefined;
+
+    const mtf = MultiTimeframeAnalyzer.analyzeMTF(execTfData, htf1Data, htf2Data, options.mtfMode ?? MTFMode.BALANCED);
+
+    const lastCandle = execCandles[execCandles.length - 1];
+    const currentPrice = lastCandle.close;
+
+    // 3. Determine Directional Candidate with Strict HTF Bias Gate
+    let candidateDir = mtf.htfBias;
+    if (candidateDir === Direction.NEUTRAL) {
+      candidateDir = execAnalysis.currentTrend;
+    }
+
+    if (candidateDir === Direction.NEUTRAL) {
+      return SignalGenerator.createNoTradeSignal(
+        symbol,
+        executionTf,
+        'No directional trend bias on HTF or execution timeframe (Consolidation/Chop)',
+      );
+    }
+
+    // High-Accuracy Hard Filter 1: Eliminate Counter-Trend Trading against HTF
+    if (mtf.htfBias !== Direction.NEUTRAL && candidateDir !== mtf.htfBias) {
+      return SignalGenerator.createNoTradeSignal(
+        symbol,
+        executionTf,
+        `Rejected: Execution direction (${candidateDir}) conflicts with ${mtf.htfBias} Higher Timeframe Order Flow`,
+      );
+    }
+
+    // 4. Identify Trigger Components (Liquidity Sweep, Order Block, FVG, Structure Break)
+    const recentSweeps = execAnalysis.liquiditySweeps.slice(-4);
+    const hasSweep =
+      recentSweeps.length > 0 &&
+      recentSweeps.some((s) =>
+        candidateDir === Direction.BULLISH ? s.priceLevel <= currentPrice * 1.005 : s.priceLevel >= currentPrice * 0.995,
+      );
+
+    const recentBOS = execAnalysis.breaksOfStructure.slice(-3);
+    const recentCHOCH = execAnalysis.changesOfCharacter.slice(-3);
+    const hasStructureBreak =
+      recentBOS.some((b) => b.direction === candidateDir) ||
+      recentCHOCH.some((c) => c.direction === candidateDir);
+
+    const activeFVG =
+      execAnalysis.activeFVGs.filter((f) => f.direction === candidateDir).slice(-1)[0] || null;
+
+    const activeOB =
+      execAnalysis.activeOrderBlocks.filter((ob) => ob.direction === candidateDir).slice(-1)[0] || null;
+
+    // High-Accuracy Hard Filter 2: Strict Dealing Range Equilibrium Check (Premium vs Discount)
+    const dealingRange = execAnalysis.dealingRange;
+    let inCorrectZone = true;
+    if (dealingRange) {
+      if (candidateDir === Direction.BULLISH && currentPrice > dealingRange.equilibrium * 1.01) {
+        inCorrectZone = false; // Buying at range highs is low probability
+      } else if (candidateDir === Direction.BEARISH && currentPrice < dealingRange.equilibrium * 0.99) {
+        inCorrectZone = false; // Selling at range lows is low probability
+      }
+    }
+
+    // High-Accuracy Filter 3: Indicator Momentum & Trend Alignment
+    const closes = execCandles.map((c) => c.close);
+    const ema20 = calculateEMA(closes, 20);
+    const rsi14 = calculateRSI(closes, 14);
+    const lastEma20 = ema20[closes.length - 1] ?? currentPrice;
+    const lastRsi = rsi14[closes.length - 1] ?? 50;
+
+    let indicatorsAligned = false;
+    if (candidateDir === Direction.BULLISH && currentPrice >= lastEma20 && lastRsi >= 42 && lastRsi <= 72) {
+      indicatorsAligned = true;
+    } else if (candidateDir === Direction.BEARISH && currentPrice <= lastEma20 && lastRsi <= 58 && lastRsi >= 28) {
+      indicatorsAligned = true;
+    }
+
+    // High-Accuracy Filter 4: Relative Volume (RVOL >= 1.25x) & Candle Displacement Body
+    const lastVol = lastCandle.volume;
+    let avgVol = 0;
+    const lookbackVol = Math.min(20, execCandles.length - 1);
+    for (let v = execCandles.length - 1 - lookbackVol; v < execCandles.length - 1; v++) {
+      avgVol += execCandles[v].volume;
+    }
+    avgVol = lookbackVol > 0 ? avgVol / lookbackVol : lastVol;
+    const rvol = avgVol > 0 ? lastVol / avgVol : 1.0;
+    const candleRange = Math.max(0.0001, lastCandle.high - lastCandle.low);
+    const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+    const bodyRatio = candleBody / candleRange;
+    const hasVolumeExpansion = rvol >= 1.2 || bodyRatio >= 0.55;
+
+    // 5. Calculate Trade Levels (Optimal Entry, Stop Loss, Target 1, Target 2, Target 3)
+    const anchorSwings =
+      candidateDir === Direction.BULLISH
+        ? execAnalysis.confirmedSwingLows
+        : execAnalysis.confirmedSwingHighs;
+    const anchorSwing = anchorSwings.slice(-1)[0] || null;
+
+    const levels = TradeLevelsCalculator.calculateLevels(
+      candidateDir,
+      execCandles,
+      anchorSwing,
+      activeOB,
+      activeFVG,
+    );
+
+    if (!levels) {
+      return SignalGenerator.createNoTradeSignal(
+        symbol,
+        executionTf,
+        'Unable to compute valid risk-reward invalidation geometry',
+      );
+    }
+
+    // 6. Institutional Confluence Scoring
+    const scoringInputs: IScoringInputs = {
+      direction: candidateDir,
+      htfAligned: mtf.isAligned,
+      htfAlignmentScore: mtf.alignmentScore,
+      hasLiquiditySweep: hasSweep,
+      hasBOSOrCHOCH: hasStructureBreak,
+      hasOBOrFVG: activeFVG !== null || activeOB !== null,
+      displacementRatio: activeFVG ? 1.5 : hasStructureBreak ? 1.2 : 0.9,
+      inCorrectZone,
+      hasVolumeExpansion,
+      riskRewardRatio: levels.riskRewardRatios.rr2,
+      indicatorsAligned,
+    };
+
+    let { totalScore, grade, breakdown } = SignalScorer.calculateScore(scoringInputs);
+
+    // 7. Generate Trigger Description & Detailed Reasoning
+    let triggerDesc = 'Micro-structure confirmation and price action trigger';
+    if (activeFVG) {
+      triggerDesc = `Mitigation tap into active ${candidateDir} Fair Value Gap [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]`;
+    } else if (activeOB) {
+      triggerDesc = `Institutional ${candidateDir} Order Block tap [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]`;
+    } else if (hasStructureBreak) {
+      triggerDesc = `Fresh ${candidateDir} structural breakout / CHoCH expansion with ${rvol.toFixed(1)}x RVOL volume`;
+    }
+
+    const reasoning = ReasoningGenerator.generateReasoning({
+      symbol,
+      timeframe: executionTf as string,
+      direction: candidateDir,
+      grade,
+      totalScore,
+      mtf,
+      scoring: scoringInputs,
+      levels,
+      triggerDescription: triggerDesc,
+    });
+
+    // 8. Hybrid Strategy Confluence Check
+    if (strategyMode === 'HYBRID') {
+      const saiyanAnalysis = SaiyanOCCEngine.analyze(execCandles);
+      if (saiyanAnalysis.direction !== candidateDir && saiyanAnalysis.direction !== Direction.NEUTRAL) {
+        return SignalGenerator.createNoTradeSignal(
+          symbol,
+          executionTf,
+          `Hybrid Filter: SMC ${candidateDir} bias conflicts with Saiyan OCC ${saiyanAnalysis.direction} momentum`,
+        );
+      }
+      reasoning.confirmedChecklist.push(`🛡️ Hybrid Confluence: SMC ${candidateDir} confirmed by Saiyan ALMA OCC Momentum Crossover`);
+      totalScore = Math.min(100, totalScore + 5);
+      if (totalScore >= 90) grade = SignalGrade.A_PLUS;
+    }
+
+    // 9. ICT Session Killzone Filter Enrichment
+    const session = SessionFilter.getSessionInfo(lastCandle.timestamp, symbol);
+    if (session.isKillZone) {
+      reasoning.confirmedChecklist.push(`ICT Killzone: ${session.badge} (${session.timeRange})`);
+    } else if (session.activeSession === 'NSE_LUNCH_CHOP') {
+      reasoning.confirmedChecklist.push(`⚠️ Midday Chop Session: Exercise lower position sizing`);
+    }
+
+    const finalDirection = grade === SignalGrade.NO_TRADE ? Direction.NEUTRAL : candidateDir;
+    const anchorTime = activeOB ? activeOB.timestamp : activeFVG ? activeFVG.timestamp : anchorSwing ? anchorSwing.timestamp : (execCandles.length >= 2 ? execCandles[execCandles.length - 2].timestamp : lastCandle.timestamp);
+    const signalTimestamp = new Date(anchorTime);
+
+    return {
+      id: `smc_${symbol}_${executionTf}_${signalTimestamp.getTime()}`,
+      symbol,
+      direction: finalDirection,
+      score: totalScore,
+      grade,
+      scoreBreakdown: breakdown,
+      timeframe: executionTf as Timeframe,
+      htfBias: mtf.htfBias,
+      entryZone: levels.entryZone,
+      stopLoss: levels.stopLoss,
+      takeProfits: levels.takeProfits,
+      riskRewardRatios: levels.riskRewardRatios,
+      reasoning,
+      state: SignalState.PENDING,
+      timestamp: signalTimestamp,
+    };
+  }
+
+  private static createNoTradeSignal(
+    symbol: string,
+    timeframe: Timeframe | string,
+    reason: string,
+  ): ISignalSetup {
+    return {
+      symbol,
+      direction: Direction.NEUTRAL,
+      score: 0,
+      grade: SignalGrade.NO_TRADE,
+      scoreBreakdown: {
+        htfBias: 0,
+        liquiditySweep: 0,
+        bos: 0,
+        fvg: 0,
+        orderBlock: 0,
+        displacement: 0,
+        premiumDiscount: 0,
+        volumeConfirmation: 0,
+        riskReward: 0,
+        indicatorAlignment: 0,
+        totalScore: 0,
+        grade: SignalGrade.NO_TRADE,
+      },
+      timeframe: timeframe as Timeframe,
+      htfBias: Direction.NEUTRAL,
+      entryZone: { min: 0, max: 0, optimal: 0 },
+      stopLoss: 0,
+      takeProfits: { tp1: 0, tp2: 0, tp3: 0 },
+      riskRewardRatios: { rr1: 0, rr2: 0, rr3: 0 },
+      reasoning: {
+        htfStructure: reason,
+        liquidityReason: 'N/A',
+        triggerReason: 'N/A',
+        invalidationReason: 'N/A',
+        confirmedChecklist: [],
+        summary: `Setup Score: 0/100 (NO_TRADE). ${reason}`,
+      },
+      state: SignalState.CANCELLED,
+      timestamp: new Date(),
+    };
+  }
+}

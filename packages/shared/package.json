@@ -1,0 +1,19 @@
+{
+  "name": "@quant/shared",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist",
+    "test": "jest"
+  },
+  "dependencies": {
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

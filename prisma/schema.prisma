@@ -1,0 +1,554 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  ADVANCED
+}
+
+enum AssetType {
+  INDEX
+  EQUITY
+  CRYPTO
+  COMMODITY
+  FOREX
+}
+
+enum Timeframe {
+  M1   @map("1m")
+  M5   @map("5m")
+  M15  @map("15m")
+  M30  @map("30m")
+  H1   @map("1h")
+  H4   @map("4h")
+  D1   @map("1d")
+}
+
+enum Direction {
+  BULLISH
+  BEARISH
+  NEUTRAL
+}
+
+enum SignalState {
+  PENDING
+  ACTIVE
+  TP1_HIT
+  TP2_HIT
+  TP3_HIT
+  SL_HIT
+  EXPIRED
+  INVALIDATED
+  CANCELLED
+}
+
+enum SignalGrade {
+  A_PLUS
+  A
+  B
+  C
+  NO_TRADE
+}
+
+enum MarketRegimeType {
+  BULLISH_TREND
+  BEARISH_TREND
+  RANGE
+  HIGH_VOLATILITY
+  LOW_VOLATILITY
+}
+
+enum StructureType {
+  SWING_HIGH
+  SWING_LOW
+  HIGHER_HIGH
+  HIGHER_LOW
+  LOWER_HIGH
+  LOWER_LOW
+}
+
+enum LiquidityType {
+  EQUAL_HIGHS
+  EQUAL_LOWS
+  BUY_SIDE
+  SELL_SIDE
+}
+
+model User {
+  id           String        @id @default(uuid())
+  email        String        @unique
+  passwordHash String
+  name         String?
+  role         Role          @default(USER)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  subscription Subscription?
+  watchlists   Watchlist[]
+  alerts       Alert[]
+  backtests    Backtest[]
+  strategies   Strategy[]
+
+  @@map("users")
+}
+
+model Subscription {
+  id         String           @id @default(uuid())
+  userId     String           @unique
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier       SubscriptionTier @default(FREE)
+  validUntil DateTime?
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@map("subscriptions")
+}
+
+model Instrument {
+  id               String            @id @default(uuid())
+  symbol           String            @unique
+  name             String
+  exchange         String
+  assetType        AssetType
+  tickSize         Decimal           @db.Decimal(12, 6)
+  lotSize          Int               @default(1)
+  contractSize     Decimal           @default(1) @db.Decimal(12, 4)
+  currency         String            @default("INR")
+  tradingHoursJson Json?
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  candles          Candle[]
+  marketStructures MarketStructure[]
+  liquidityEvents  LiquidityEvent[]
+  fairValueGaps    FairValueGap[]
+  orderBlocks      OrderBlock[]
+  signals          Signal[]
+  marketRegimes    MarketRegime[]
+  backtests        Backtest[]
+  watchlistItems   WatchlistItem[]
+
+  @@index([exchange, assetType])
+  @@map("instruments")
+}
+
+model Candle {
+  id           String     @id @default(uuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe    Timeframe
+  timestamp    DateTime
+  open         Decimal    @db.Decimal(18, 6)
+  high         Decimal    @db.Decimal(18, 6)
+  low          Decimal    @db.Decimal(18, 6)
+  close        Decimal    @db.Decimal(18, 6)
+  volume       Decimal    @db.Decimal(24, 6)
+  isClosed     Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+
+  @@unique([instrumentId, timeframe, timestamp])
+  @@index([instrumentId, timeframe, timestamp(sort: Desc)])
+  @@map("candles")
+}
+
+model MarketStructure {
+  id            String        @id @default(uuid())
+  instrumentId  String
+  instrument    Instrument    @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe     Timeframe
+  structureType StructureType
+  direction     Direction
+  price         Decimal       @db.Decimal(18, 6)
+  candleTime    DateTime
+  confirmedAt   DateTime
+  isBOS         Boolean       @default(false)
+  isCHoCH       Boolean       @default(false)
+  brokenLevel   Decimal?      @db.Decimal(18, 6)
+  strength      Decimal       @default(1.0) @db.Decimal(5, 2)
+  createdAt     DateTime      @default(now())
+
+  @@index([instrumentId, timeframe, candleTime(sort: Desc)])
+  @@map("market_structures")
+}
+
+model LiquidityEvent {
+  id             String        @id @default(uuid())
+  instrumentId   String
+  instrument     Instrument    @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe      Timeframe
+  liquidityType  LiquidityType
+  priceLevel     Decimal       @db.Decimal(18, 6)
+  sweepPrice     Decimal?      @db.Decimal(18, 6)
+  isSwept        Boolean       @default(false)
+  sweepTimestamp DateTime?
+  displacement   Decimal?      @db.Decimal(18, 6)
+  createdAt      DateTime      @default(now())
+
+  @@index([instrumentId, timeframe, isSwept])
+  @@map("liquidity_events")
+}
+
+model FairValueGap {
+  id             String     @id @default(uuid())
+  instrumentId   String
+  instrument     Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe      Timeframe
+  direction      Direction
+  upperBound     Decimal    @db.Decimal(18, 6)
+  lowerBound     Decimal    @db.Decimal(18, 6)
+  candleTime     DateTime
+  isFilled       Boolean    @default(false)
+  filledAt       DateTime?
+  fillPercentage Decimal    @default(0) @db.Decimal(5, 2)
+  isInvalidated  Boolean    @default(false)
+  createdAt      DateTime   @default(now())
+
+  @@index([instrumentId, timeframe, isFilled, isInvalidated])
+  @@map("fair_value_gaps")
+}
+
+model OrderBlock {
+  id            String     @id @default(uuid())
+  instrumentId  String
+  instrument    Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe     Timeframe
+  direction     Direction
+  high          Decimal    @db.Decimal(18, 6)
+  low           Decimal    @db.Decimal(18, 6)
+  candleTime    DateTime
+  isMitigated   Boolean    @default(false)
+  mitigatedAt   DateTime?
+  isInvalidated Boolean    @default(false)
+  strength      Decimal    @default(1.0) @db.Decimal(5, 2)
+  createdAt     DateTime   @default(now())
+
+  @@index([instrumentId, timeframe, isMitigated, isInvalidated])
+  @@map("order_blocks")
+}
+
+model MarketRegime {
+  id           String           @id @default(uuid())
+  instrumentId String
+  instrument   Instrument       @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe    Timeframe
+  regime       MarketRegimeType
+  atr          Decimal          @db.Decimal(18, 6)
+  adx          Decimal          @db.Decimal(8, 4)
+  volatility   Decimal          @db.Decimal(8, 4)
+  timestamp    DateTime
+  createdAt    DateTime         @default(now())
+
+  @@index([instrumentId, timeframe, timestamp(sort: Desc)])
+  @@map("market_regimes")
+}
+
+model Strategy {
+  id          String              @id @default(uuid())
+  userId      String?
+  user        User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name        String
+  description String?
+  isDefault   Boolean             @default(false)
+  configJson  Json
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  parameters  StrategyParameter[]
+  signals     Signal[]
+  backtests   Backtest[]
+
+  @@map("strategies")
+}
+
+model StrategyParameter {
+  id         String   @id @default(uuid())
+  strategyId String
+  strategy   Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  key        String
+  value      String
+  valueType  String
+
+  @@unique([strategyId, key])
+  @@map("strategy_parameters")
+}
+
+model Signal {
+  id              String          @id @default(uuid())
+  instrumentId    String
+  instrument      Instrument      @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  strategyId      String?
+  strategy        Strategy?       @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+  direction       Direction
+  state           SignalState     @default(PENDING)
+  grade           SignalGrade
+  score           Int
+  timeframe       Timeframe
+  entryPrice      Decimal         @db.Decimal(18, 6)
+  stopLoss        Decimal         @db.Decimal(18, 6)
+  target1         Decimal         @db.Decimal(18, 6)
+  target2         Decimal         @db.Decimal(18, 6)
+  target3         Decimal?        @db.Decimal(18, 6)
+  riskRewardRatio Decimal         @db.Decimal(6, 2)
+  exitPrice       Decimal?        @db.Decimal(18, 6)
+  pnlAmount       Decimal?        @db.Decimal(18, 6)
+  pnlRMultiple    Decimal?        @db.Decimal(6, 2)
+  reasonsJson     Json
+  risksJson       Json
+  activatedAt     DateTime?
+  closedAt        DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  features        SignalFeature[]
+
+  @@index([instrumentId, state, createdAt(sort: Desc)])
+  @@index([state, score(sort: Desc)])
+  @@map("signals")
+}
+
+model SignalFeature {
+  id           String   @id @default(uuid())
+  signalId     String
+  signal       Signal   @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  featureType  String
+  scoreValue   Int
+  metadataJson Json?
+
+  @@index([signalId])
+  @@map("signal_features")
+}
+
+model Backtest {
+  id                   String          @id @default(uuid())
+  userId               String?
+  user                 User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  strategyId           String?
+  strategy             Strategy?       @relation(fields: [strategyId], references: [id], onDelete: SetNull)
+  instrumentId         String
+  instrument           Instrument      @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  timeframe            Timeframe
+  startDate            DateTime
+  endDate              DateTime
+  initialCapital       Decimal         @db.Decimal(18, 2)
+  riskPerTradePercent  Decimal         @db.Decimal(5, 2)
+  totalTrades          Int             @default(0)
+  winningTrades        Int             @default(0)
+  losingTrades         Int             @default(0)
+  winRate              Decimal         @default(0) @db.Decimal(5, 2)
+  profitFactor         Decimal         @default(0) @db.Decimal(8, 4)
+  netPnL               Decimal         @default(0) @db.Decimal(18, 2)
+  averageR             Decimal         @default(0) @db.Decimal(6, 2)
+  expectancy           Decimal         @default(0) @db.Decimal(10, 4)
+  maxDrawdownPercent   Decimal         @default(0) @db.Decimal(5, 2)
+  maxConsecutiveLosses Int             @default(0)
+  sharpeRatio          Decimal?        @db.Decimal(8, 4)
+  parametersJson       Json
+  createdAt            DateTime        @default(now())
+
+  trades               BacktestTrade[]
+
+  @@index([instrumentId, createdAt(sort: Desc)])
+  @@map("backtests")
+}
+
+model BacktestTrade {
+  id           String      @id @default(uuid())
+  backtestId   String
+  backtest     Backtest    @relation(fields: [backtestId], references: [id], onDelete: Cascade)
+  direction    Direction
+  entryTime    DateTime
+  entryPrice   Decimal     @db.Decimal(18, 6)
+  exitTime     DateTime
+  exitPrice    Decimal     @db.Decimal(18, 6)
+  stopLoss     Decimal     @db.Decimal(18, 6)
+  takeProfit   Decimal     @db.Decimal(18, 6)
+  positionSize Decimal     @db.Decimal(18, 4)
+  pnl          Decimal     @db.Decimal(18, 2)
+  pnlRMultiple Decimal     @db.Decimal(6, 2)
+  exitReason   SignalState
+
+  @@index([backtestId, entryTime])
+  @@map("backtest_trades")
+}
+
+model Watchlist {
+  id        String          @id @default(uuid())
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  items     WatchlistItem[]
+
+  @@map("watchlists")
+}
+
+model WatchlistItem {
+  id           String     @id @default(uuid())
+  watchlistId  String
+  watchlist    Watchlist  @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+
+  @@unique([watchlistId, instrumentId])
+  @@map("watchlist_items")
+}
+
+model Alert {
+  id        String      @id @default(uuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   String
+  target    String
+  minScore  Int         @default(80)
+  minGrade  SignalGrade @default(A)
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@map("alerts")
+}
+
+enum AIModelStatus {
+  CANDIDATE
+  ACTIVE
+  ARCHIVED
+  REJECTED
+}
+
+model AIModel {
+  id                  String           @id @default(uuid())
+  name                String           @unique
+  description         String?
+  algorithm           String           @default("LOGISTIC_REGRESSION")
+  activeVersionId     String?          @unique
+  activeVersion       AIModelVersion?  @relation("ActiveVersion", fields: [activeVersionId], references: [id])
+  versions            AIModelVersion[] @relation("ModelVersions")
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  @@map("ai_models")
+}
+
+model AIModelVersion {
+  id                      String             @id @default(uuid())
+  modelId                 String
+  model                   AIModel            @relation("ModelVersions", fields: [modelId], references: [id], onDelete: Cascade)
+  version                 String
+  featureSchemaVersion    String             @default("1.0")
+  status                  AIModelStatus      @default(CANDIDATE)
+  weightsJson             Json
+  bias                    Float              @default(0.0)
+  hyperparametersJson     Json
+  metricsJson             Json
+  trainingExampleCount    Int
+  validationExampleCount  Int
+  outOfSampleExampleCount Int
+  trainingStartedAt       DateTime?
+  trainingCompletedAt     DateTime?
+  activeForModel          AIModel?           @relation("ActiveVersion")
+  trainingRuns            AITrainingRun[]
+  predictions             AIPrediction[]
+  featureImportances      AIFeatureImportance[]
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+
+  @@unique([modelId, version])
+  @@map("ai_model_versions")
+}
+
+model AITrainingRun {
+  id                  String          @id @default(uuid())
+  modelVersionId      String
+  modelVersion        AIModelVersion  @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+  status              String          @default("COMPLETED")
+  epochsTrained       Int
+  initialLoss         Float
+  finalLoss           Float
+  metricsJson         Json
+  walkForwardJson     Json?
+  startedAt           DateTime        @default(now())
+  completedAt         DateTime?
+
+  @@map("ai_training_runs")
+}
+
+model AITrainingExample {
+  id                      String    @id @default(uuid())
+  signalId                String?
+  symbol                  String
+  featureSchemaVersion    String    @default("1.0")
+  featureVectorJson       Json
+  label                   Int       // 0 or 1
+  outcomeR                Float
+  predictionTimestamp     DateTime
+  availableForTrainingAt  DateTime
+  createdAt               DateTime  @default(now())
+
+  @@index([symbol, predictionTimestamp])
+  @@index([availableForTrainingAt])
+  @@map("ai_training_examples")
+}
+
+model AIPrediction {
+  id                      String          @id @default(uuid())
+  signalId                String?
+  modelVersionId          String
+  modelVersion            AIModelVersion  @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+  symbol                  String
+  timeframe               String          @default("15m")
+  probability             Float
+  confidenceLower         Float?
+  confidenceUpper         Float?
+  confidenceStatus        String          @default("INSUFFICIENT_DATA")
+  expectedValueR          Float
+  recommendation          String          // HIGH_CONFIDENCE, MODERATE_CONFIDENCE, LOW_CONFIDENCE, WAIT
+  sampleSize              Int             @default(0)
+  featuresJson            Json
+  createdAt               DateTime        @default(now())
+
+  @@index([symbol, createdAt])
+  @@map("ai_predictions")
+}
+
+model AIFeatureImportance {
+  id                  String          @id @default(uuid())
+  modelVersionId      String
+  modelVersion        AIModelVersion  @relation(fields: [modelVersionId], references: [id], onDelete: Cascade)
+  featureName         String
+  weight              Float
+  absoluteWeight      Float
+  rank                Int
+
+  @@unique([modelVersionId, featureName])
+  @@map("ai_feature_importances")
+}
+
+model AIPostMortem {
+  id                  String    @id @default(uuid())
+  signalId            String?
+  symbol              String
+  patternType         String    // e.g. "MARKET_PATTERN"
+  classification      String    // e.g. "LIQUIDITY_SWEEP_FAILURE", "HTF_COUNTERTREND"
+  expectedWinRate     Float
+  realizedOutcomeR    Float
+  analysisSummary     String
+  keyFactorsJson      Json
+  createdAt           DateTime  @default(now())
+
+  @@index([symbol, patternType])
+  @@map("ai_post_mortems")
+}
