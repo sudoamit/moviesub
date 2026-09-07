@@ -29,6 +29,14 @@ export class CandleNormalizer {
     return 15 * 60 * 1000;
   }
 
+  static getCandleCloseTimestamp(candle: ICandle, timeframe?: string | number): Date {
+    const openTime = candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
+    const durationMs = timeframe
+      ? CandleNormalizer.getTimeframeDurationMs(timeframe)
+      : 15 * 60 * 1000;
+    return new Date(openTime + durationMs);
+  }
+
   static getClosedCandlesAsOf(
     candles: ICandle[],
     timeframe: string | number | undefined,

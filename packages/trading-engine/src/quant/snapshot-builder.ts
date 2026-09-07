@@ -34,39 +34,39 @@ export class SnapshotBuilder {
   public static buildSnapshot(options: IBuildSnapshotOptions): PointInTimeMarketSnapshot {
     const symbol = options.symbol.toUpperCase();
     const rawCandles = CandleNormalizer.normalize(options.executionCandles);
+    const executionTimeframe = options.executionTimeframe || Timeframe.M15;
+    const htf1Timeframe = options.htf1Timeframe || Timeframe.H1;
+    const htf2Timeframe = options.htf2Timeframe || Timeframe.H4;
 
-    // Strict point-in-time candle slicing for execution and HTF datasets
-    let execCandles = rawCandles;
-    let htf1Candles = options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : undefined;
-    let htf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
-
+    // 1. Determine decision timestamp
+    let timestamp: Date;
     if (options.asOfTimestamp) {
-      execCandles = CandleNormalizer.getClosedCandlesAsOf(
-        rawCandles,
-        options.executionTimeframe || Timeframe.M15,
-        options.asOfTimestamp,
-      );
-      if (htf1Candles) {
-        htf1Candles = CandleNormalizer.getClosedCandlesAsOf(
-          htf1Candles,
-          options.htf1Timeframe || Timeframe.H1,
-          options.asOfTimestamp,
-        );
-      }
-      if (htf2Candles) {
-        htf2Candles = CandleNormalizer.getClosedCandlesAsOf(
-          htf2Candles,
-          options.htf2Timeframe || Timeframe.H4,
-          options.asOfTimestamp,
-        );
-      }
+      timestamp = options.asOfTimestamp;
+    } else {
+      const rawN = rawCandles.length;
+      const rawLast = rawN > 0 ? rawCandles[rawN - 1] : null;
+      timestamp = rawLast
+        ? CandleNormalizer.getCandleCloseTimestamp(rawLast, executionTimeframe)
+        : new Date();
     }
+
+    // 2. Strict point-in-time candle slicing for execution and HTF datasets using decision timestamp
+    const execCandles = CandleNormalizer.getClosedCandlesAsOf(
+      rawCandles,
+      executionTimeframe,
+      timestamp,
+    );
+
+    const htf1Candles = options.htf1Candles
+      ? CandleNormalizer.getClosedCandlesAsOf(options.htf1Candles, htf1Timeframe, timestamp)
+      : undefined;
+
+    const htf2Candles = options.htf2Candles
+      ? CandleNormalizer.getClosedCandlesAsOf(options.htf2Candles, htf2Timeframe, timestamp)
+      : undefined;
 
     const n = execCandles.length;
     const lastCandle = n > 0 ? execCandles[n - 1] : null;
-    const timestamp = lastCandle
-      ? new Date(lastCandle.timestamp)
-      : options.asOfTimestamp || new Date();
     const marketPrice = lastCandle ? lastCandle.close : 0;
 
     // 1. Determine Asset Type & Metadata

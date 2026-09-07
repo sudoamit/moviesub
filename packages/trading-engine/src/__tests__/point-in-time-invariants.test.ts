@@ -617,4 +617,82 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       expect(snapshotB.ml).toEqual(snapshotA.ml);
     });
   });
+
+  // 16. Explicit Unclosed Candle Boundary Test
+  describe('Invariant 16: Explicit 10:00/10:05/10:15 Unclosed Candle Boundary Test', () => {
+    it('rejects candle at 10:05 and accepts at 10:15 if isClosed !== false', () => {
+      const openTime = new Date('2026-01-01T10:00:00.000Z');
+      const candle: ICandle = {
+        timestamp: openTime,
+        open: 100,
+        high: 105,
+        low: 95,
+        close: 102,
+        volume: 1000,
+        isClosed: true,
+      };
+
+      const time1005 = new Date('2026-01-01T10:05:00.000Z');
+      const closedAt1005 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', time1005);
+      expect(closedAt1005).toHaveLength(0);
+
+      const time1015 = new Date('2026-01-01T10:15:00.000Z');
+      const closedAt1015 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', time1015);
+      expect(closedAt1015).toHaveLength(1);
+      expect(closedAt1015[0]).toEqual(candle);
+
+      const unclosedCandle: ICandle = { ...candle, isClosed: false };
+      const closedUnclosedAt1015 = CandleNormalizer.getClosedCandlesAsOf([unclosedCandle], '15m', time1015);
+      expect(closedUnclosedAt1015).toHaveLength(0);
+    });
+  });
+
+  // 17. Incremental Replay Equivalence Test
+  describe('Invariant 17: Incremental Replay Equivalence', () => {
+    it('produces identical states between incremental history feed and full batch with asOfTimestamp', () => {
+      const allCandles: ICandle[] = [];
+      for (let i = 0; i < 50; i++) {
+        allCandles.push(
+          createCandle(
+            i,
+            100 + Math.sin(i / 3) * 5,
+            105 + Math.sin(i / 3) * 5,
+            95 + Math.sin(i / 3) * 5,
+            102 + Math.sin(i / 3) * 5,
+            1000 + i * 10,
+            15 * 60 * 1000,
+          ),
+        );
+      }
+
+      for (let i = 20; i < 45; i += 5) {
+        const targetCandle = allCandles[i];
+        const T = CandleNormalizer.getCandleCloseTimestamp(targetCandle, '15m');
+        const incrementalHistory = allCandles.slice(0, i + 1);
+
+        const incrementalState = SnapshotBuilder.buildSnapshot({
+          symbol: 'BTCUSDT',
+          executionCandles: incrementalHistory,
+          asOfTimestamp: T,
+        });
+
+        const batchState = SnapshotBuilder.buildSnapshot({
+          symbol: 'BTCUSDT',
+          executionCandles: allCandles,
+          asOfTimestamp: T,
+        });
+
+        expect(incrementalState.timestamp).toEqual(batchState.timestamp);
+        expect(incrementalState.marketPrice).toEqual(batchState.marketPrice);
+        expect(incrementalState.smc).toEqual(batchState.smc);
+        expect(incrementalState.quant).toEqual(batchState.quant);
+        expect(incrementalState.regime).toEqual(batchState.regime);
+        expect(incrementalState.volatility).toEqual(batchState.volatility);
+        expect(incrementalState.multiHorizon).toEqual(batchState.multiHorizon);
+        expect(incrementalState.score).toEqual(batchState.score);
+        expect(incrementalState.trace).toEqual(batchState.trace);
+        expect(incrementalState.ml).toEqual(batchState.ml);
+      }
+    });
+  });
 });
