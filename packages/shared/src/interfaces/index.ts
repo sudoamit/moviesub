@@ -76,6 +76,8 @@ export interface ILiquidityPool {
   sweptTimestamp?: Date;
   sweptPrice?: number;
   displacement?: number;
+  availableAtIndex?: number;
+  availableAtTimestamp?: Date;
 }
 
 export interface IFairValueGap {

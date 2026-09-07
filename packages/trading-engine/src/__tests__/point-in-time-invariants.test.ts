@@ -844,4 +844,95 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       }
     });
   });
+
+  // Test C — Future-Data Invariance for Liquidity
+  describe('Invariant Liquidity Test C: Future-Data Invariance for Liquidity', () => {
+    it('liquidity pools and sweeps at T are identical regardless of future candles', () => {
+      const history: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        history.push(
+          createCandle(
+            i,
+            100 + Math.sin(i / 2) * 4,
+            105 + Math.sin(i / 2) * 4,
+            95 + Math.sin(i / 2) * 4,
+            101 + Math.sin(i / 2) * 4,
+            1000,
+            15 * 60 * 1000,
+          ),
+        );
+      }
+      const T = CandleNormalizer.getCandleCloseTimestamp(history[35], '15m');
+
+      const smcA = SMCAnalyzer.analyze(history, { asOfTimestamp: T, timeframe: Timeframe.M15 });
+
+      const future: ICandle[] = [
+        createCandle(40, 108, 300, 107, 295, 500000, 15 * 60 * 1000),
+        createCandle(41, 295, 305, 30, 35, 900000, 15 * 60 * 1000),
+        createCandle(42, 35, 40, 10, 15, 1000000, 15 * 60 * 1000),
+      ];
+
+      const smcB = SMCAnalyzer.analyze([...history, ...future], { asOfTimestamp: T, timeframe: Timeframe.M15 });
+
+      expect(smcB.liquidityPools).toEqual(smcA.liquidityPools);
+      expect(smcB.liquiditySweeps).toEqual(smcA.liquiditySweeps);
+    });
+  });
+
+  // Test D — Incremental vs Batch Liquidity State
+  describe('Invariant Liquidity Test D: Incremental vs Batch Liquidity State', () => {
+    it('incremental liquidity state at T matches batch liquidity state with asOfTimestamp = T', () => {
+      const allCandles: ICandle[] = [];
+      for (let i = 0; i < 50; i++) {
+        allCandles.push(
+          createCandle(
+            i,
+            100 + Math.cos(i / 3) * 5,
+            105 + Math.cos(i / 3) * 5,
+            95 + Math.cos(i / 3) * 5,
+            102 + Math.cos(i / 3) * 5,
+            1000,
+            15 * 60 * 1000,
+          ),
+        );
+      }
+
+      for (let i = 25; i < 45; i += 5) {
+        const targetCandle = allCandles[i];
+        const T = CandleNormalizer.getCandleCloseTimestamp(targetCandle, '15m');
+        const incrementalHistory = allCandles.slice(0, i + 1);
+
+        const smcIncremental = SMCAnalyzer.analyze(incrementalHistory, { asOfTimestamp: T });
+        const smcBatch = SMCAnalyzer.analyze(allCandles, { asOfTimestamp: T });
+
+        expect(smcIncremental.liquidityPools).toEqual(smcBatch.liquidityPools);
+        expect(smcIncremental.liquiditySweeps).toEqual(smcBatch.liquiditySweeps);
+      }
+    });
+  });
+
+  // SMC Propagation Test (Section 11)
+  describe('Invariant Section 11: SMC Propagation Test', () => {
+    it('proves liquidity availability fix propagates cleanly through SMCAnalyzer.analyze', () => {
+      const history: ICandle[] = [];
+      for (let i = 0; i < 35; i++) {
+        history.push(createCandle(i, 100 + i * 0.1, 102 + i * 0.1, 98 + i * 0.1, 101 + i * 0.1));
+      }
+      const T = CandleNormalizer.getCandleCloseTimestamp(history[30], '15m');
+
+      const stateA = SMCAnalyzer.analyze(history, { asOfTimestamp: T });
+
+      const torture: ICandle[] = [
+        ...history,
+        createCandle(35, 105, 500, 104, 490, 1000000),
+        createCandle(36, 490, 500, 10, 15, 2000000),
+      ];
+
+      const stateB = SMCAnalyzer.analyze(torture, { asOfTimestamp: T });
+
+      expect(stateB.liquidityPools).toEqual(stateA.liquidityPools);
+      expect(stateB.liquiditySweeps).toEqual(stateA.liquiditySweeps);
+      expect(stateB.currentTrend).toEqual(stateA.currentTrend);
+    });
+  });
 });

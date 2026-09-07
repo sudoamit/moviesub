@@ -43,4 +43,80 @@ describe('LiquidityEngine', () => {
     expect(sweeps[0].sweptPrice).toBe(102.5);
     expect(sweeps[0].isSwept).toBe(true);
   });
+
+  it('Test A: rejects single swing sweep before confirmation and accepts after confirmation', () => {
+    const swing: ISwingPoint = {
+      index: 10,
+      type: StructureType.SWING_HIGH,
+      price: 100.0,
+      timestamp: new Date(10000),
+      confirmedAtIndex: 13,
+      confirmedAtTimestamp: new Date(13000),
+    };
+
+    const candles: ICandle[] = [];
+    for (let c = 0; c <= 14; c++) {
+      candles.push({
+        timestamp: new Date(c * 1000),
+        open: 90,
+        high: c === 10 ? 100.0 : c === 11 ? 102.0 : c === 14 ? 103.0 : 95,
+        low: 85,
+        close: c === 11 ? 95 : c === 14 ? 96 : 90,
+        volume: 100,
+      });
+    }
+
+    // Evaluate up to index 11 (candle 11 pierces 100.0, but confirmedAtIndex is 13)
+    const resAt11 = LiquidityEngine.detectLiquidity(candles.slice(0, 12), [swing]);
+    expect(resAt11.sweeps).toHaveLength(0);
+
+    // Evaluate up to index 14 (candle 14 pierces 100.0, after confirmation at 13)
+    const resAt14 = LiquidityEngine.detectLiquidity(candles.slice(0, 15), [swing]);
+    expect(resAt14.sweeps).toHaveLength(1);
+    expect(resAt14.sweeps[0].sweptAtIndex).toBe(14);
+  });
+
+  it('Test B: rejects EQH sweep before second swing confirmation and accepts after confirmation', () => {
+    const swing1: ISwingPoint = {
+      index: 10,
+      type: StructureType.SWING_HIGH,
+      price: 100.0,
+      timestamp: new Date(10000),
+      confirmedAtIndex: 13,
+      confirmedAtTimestamp: new Date(13000),
+    };
+    const swing2: ISwingPoint = {
+      index: 15,
+      type: StructureType.SWING_HIGH,
+      price: 100.1,
+      timestamp: new Date(15000),
+      confirmedAtIndex: 18,
+      confirmedAtTimestamp: new Date(18000),
+    };
+
+    const candles: ICandle[] = [];
+    for (let c = 0; c <= 20; c++) {
+      candles.push({
+        timestamp: new Date(c * 1000),
+        open: 90,
+        high: c === 10 ? 100.0 : c === 15 ? 100.1 : c === 16 ? 102.5 : c === 19 ? 103.0 : 95,
+        low: 85,
+        close: c === 16 ? 94 : c === 19 ? 95 : 90,
+        volume: 100,
+      });
+    }
+
+    // Evaluate up to index 16 (candle 16 pierces level after swing2 occurred at 15, but BEFORE swing2 is confirmed at 18)
+    const resAt16 = LiquidityEngine.detectLiquidity(candles.slice(0, 17), [swing1, swing2], {
+      equalHighLowToleranceAtr: 0.2,
+    });
+    expect(resAt16.sweeps).toHaveLength(0);
+
+    // Evaluate up to index 19 (candle 19 pierces level AFTER swing2 confirmed at 18)
+    const resAt19 = LiquidityEngine.detectLiquidity(candles.slice(0, 20), [swing1, swing2], {
+      equalHighLowToleranceAtr: 0.2,
+    });
+    expect(resAt19.sweeps).toHaveLength(1);
+    expect(resAt19.sweeps[0].sweptAtIndex).toBe(19);
+  });
 });

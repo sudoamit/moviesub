@@ -41,6 +41,8 @@ export class LiquidityEngine {
     const consumedHighIndices = new Set<number>();
     const consumedLowIndices = new Set<number>();
 
+    const lastIndex = candles.length - 1;
+
     // 1. Group and detect Equal Highs (EQH) and Buy-Side Liquidity (BSL)
     for (let i = 0; i < swingHighs.length; i++) {
       const h1 = swingHighs[i];
@@ -56,16 +58,25 @@ export class LiquidityEngine {
 
         if (Math.abs(h1.price - h2.price) <= tolerance) {
           const avgLevel = (h1.price + h2.price) / 2;
-          const confirmedAtIdx = Math.max(h1.confirmedAtIndex, h2.confirmedAtIndex);
-          pools.push({
-            id: `eqh-${h1.index}-${h2.index}`,
-            type: LiquidityType.EQUAL_HIGHS,
-            priceLevel: avgLevel,
-            firstTimestamp: h1.timestamp,
-            lastTimestamp: h2.timestamp,
-            touchCount: 2,
-            isSwept: false,
-          });
+          const availableAtIndex = Math.max(h1.confirmedAtIndex, h2.confirmedAtIndex);
+          const availableAtTimestamp =
+            h1.confirmedAtIndex >= h2.confirmedAtIndex
+              ? h1.confirmedAtTimestamp || candles[h1.confirmedAtIndex]?.timestamp || h1.timestamp
+              : h2.confirmedAtTimestamp || candles[h2.confirmedAtIndex]?.timestamp || h2.timestamp;
+
+          if (availableAtIndex <= lastIndex) {
+            pools.push({
+              id: `eqh-${h1.index}-${h2.index}`,
+              type: LiquidityType.EQUAL_HIGHS,
+              priceLevel: avgLevel,
+              firstTimestamp: h1.timestamp,
+              lastTimestamp: h2.timestamp,
+              touchCount: 2,
+              isSwept: false,
+              availableAtIndex,
+              availableAtTimestamp,
+            });
+          }
           consumedHighIndices.add(h1.index);
           consumedHighIndices.add(h2.index);
           matchedEQH = true;
@@ -74,15 +85,23 @@ export class LiquidityEngine {
       }
 
       if (!matchedEQH) {
-        pools.push({
-          id: `bsl-${h1.index}`,
-          type: LiquidityType.BUY_SIDE,
-          priceLevel: h1.price,
-          firstTimestamp: h1.timestamp,
-          lastTimestamp: h1.timestamp,
-          touchCount: 1,
-          isSwept: false,
-        });
+        const availableAtIndex = h1.confirmedAtIndex;
+        const availableAtTimestamp =
+          h1.confirmedAtTimestamp || candles[h1.confirmedAtIndex]?.timestamp || h1.timestamp;
+
+        if (availableAtIndex <= lastIndex) {
+          pools.push({
+            id: `bsl-${h1.index}`,
+            type: LiquidityType.BUY_SIDE,
+            priceLevel: h1.price,
+            firstTimestamp: h1.timestamp,
+            lastTimestamp: h1.timestamp,
+            touchCount: 1,
+            isSwept: false,
+            availableAtIndex,
+            availableAtTimestamp,
+          });
+        }
         consumedHighIndices.add(h1.index);
       }
     }
@@ -102,15 +121,25 @@ export class LiquidityEngine {
 
         if (Math.abs(l1.price - l2.price) <= tolerance) {
           const avgLevel = (l1.price + l2.price) / 2;
-          pools.push({
-            id: `eql-${l1.index}-${l2.index}`,
-            type: LiquidityType.EQUAL_LOWS,
-            priceLevel: avgLevel,
-            firstTimestamp: l1.timestamp,
-            lastTimestamp: l2.timestamp,
-            touchCount: 2,
-            isSwept: false,
-          });
+          const availableAtIndex = Math.max(l1.confirmedAtIndex, l2.confirmedAtIndex);
+          const availableAtTimestamp =
+            l1.confirmedAtIndex >= l2.confirmedAtIndex
+              ? l1.confirmedAtTimestamp || candles[l1.confirmedAtIndex]?.timestamp || l1.timestamp
+              : l2.confirmedAtTimestamp || candles[l2.confirmedAtIndex]?.timestamp || l2.timestamp;
+
+          if (availableAtIndex <= lastIndex) {
+            pools.push({
+              id: `eql-${l1.index}-${l2.index}`,
+              type: LiquidityType.EQUAL_LOWS,
+              priceLevel: avgLevel,
+              firstTimestamp: l1.timestamp,
+              lastTimestamp: l2.timestamp,
+              touchCount: 2,
+              isSwept: false,
+              availableAtIndex,
+              availableAtTimestamp,
+            });
+          }
           consumedLowIndices.add(l1.index);
           consumedLowIndices.add(l2.index);
           matchedEQL = true;
@@ -119,15 +148,23 @@ export class LiquidityEngine {
       }
 
       if (!matchedEQL) {
-        pools.push({
-          id: `ssl-${l1.index}`,
-          type: LiquidityType.SELL_SIDE,
-          priceLevel: l1.price,
-          firstTimestamp: l1.timestamp,
-          lastTimestamp: l1.timestamp,
-          touchCount: 1,
-          isSwept: false,
-        });
+        const availableAtIndex = l1.confirmedAtIndex;
+        const availableAtTimestamp =
+          l1.confirmedAtTimestamp || candles[l1.confirmedAtIndex]?.timestamp || l1.timestamp;
+
+        if (availableAtIndex <= lastIndex) {
+          pools.push({
+            id: `ssl-${l1.index}`,
+            type: LiquidityType.SELL_SIDE,
+            priceLevel: l1.price,
+            firstTimestamp: l1.timestamp,
+            lastTimestamp: l1.timestamp,
+            touchCount: 1,
+            isSwept: false,
+            availableAtIndex,
+            availableAtTimestamp,
+          });
+        }
         consumedLowIndices.add(l1.index);
       }
     }
@@ -138,8 +175,15 @@ export class LiquidityEngine {
 
       for (const pool of pools) {
         if (pool.isSwept) continue;
-        // Candle must be strictly after the pool's last timestamp
-        if (candle.timestamp <= pool.lastTimestamp) continue;
+
+        // Enforce availability boundary: candle can only sweep AFTER pool confirmation
+        if (pool.availableAtIndex !== undefined) {
+          if (c < pool.availableAtIndex) continue;
+        } else if (pool.availableAtTimestamp) {
+          if (candle.timestamp < pool.availableAtTimestamp) continue;
+        } else if (candle.timestamp <= pool.lastTimestamp) {
+          continue;
+        }
 
         // BSL / EQH Sweep: High trades above level, but Close finishes BELOW or AT level (rejection/reclaim wick)
         if (
