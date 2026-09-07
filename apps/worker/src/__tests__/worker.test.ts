@@ -679,6 +679,136 @@ describe('Worker Processors', () => {
       expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
       expect(mockPrisma.paperAccount.update).not.toHaveBeenCalled();
     });
+
+    it('18. worker exit persists complete execution provenance including slippageAmount and slippageBps', async () => {
+      const tickTime = new Date(Date.now() - 1000);
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: tickTime.toISOString() }),
+      );
+
+      const jobProvenance = {
+        id: 'monitor-provenance-complete',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobProvenance);
+
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            outcomeSnapshotJson: expect.objectContaining({
+              executionPriceSource: 'LIVE_TICK',
+              sourceTimestamp: tickTime.toISOString(),
+              livePrice: 24040.0,
+              exitPrice: expect.any(Number),
+              slippageBps: expect.any(Number),
+              slippageAmount: expect.any(Number),
+              exitReason: expect.any(String),
+              holdingDurationSeconds: expect.any(Number),
+              realizedPnL: expect.any(Number),
+              realizedR: expect.any(Number),
+              outcomeClassification: expect.any(String),
+              exitTime: expect.any(String),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('19. worker close performs exact and non-duplicative accounting updates on paperAccount', async () => {
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
+      );
+
+      const jobAccounting = {
+        id: 'monitor-accounting',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobAccounting);
+
+      expect(mockPrisma.paperAccount.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'acc-1' },
+          data: expect.objectContaining({
+            cashBalance: expect.objectContaining({ increment: expect.any(Number) }),
+            usedMargin: expect.objectContaining({ decrement: 31330.0 }),
+            realizedPnL: expect.objectContaining({ increment: expect.any(Number) }),
+            totalChargesPaid: expect.objectContaining({ increment: expect.any(Number) }),
+          }),
+        }),
+      );
+    });
+
+    it('20. enforces strict maxSlippageBps = 10 limit with correct directionality for BUY and SELL exits', async () => {
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue({
+        id: 'SYSTEM_DEFAULT',
+        maxMarketDataAgeSeconds: 5,
+        maxSlippageBps: 10,
+      });
+
+      // Long position exit (selling into market): fillPrice must be <= 24040 and >= 24040 * (1 - 0.0010) = 24015.96
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
+      );
+
+      const jobLong = {
+        id: 'monitor-long-10bps',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobLong);
+
+      const longTradeCall = mockPrisma.paperTrade.create.mock.calls[0][0];
+      const longFillPrice = Number(longTradeCall.data.exitPrice);
+      expect(longFillPrice).toBeLessThanOrEqual(24040.0);
+      expect(longFillPrice).toBeGreaterThanOrEqual(24040.0 * (1 - 0.0010));
+
+      // Short position exit (buying back into market): fillPrice must be >= 24160 and <= 24160 * (1 + 0.0010) = 24184.16
+      jest.clearAllMocks();
+      mockPrisma.paperPosition.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'pos-short-10bps',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BEARISH,
+          quantity: new Decimal(50),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24150.0),
+          initialStopLoss: new Decimal(24150.0),
+          target1: new Decimal(24000.0),
+          target2: new Decimal(23950.0),
+          target3: new Decimal(23900.0),
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(30000.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24160.0, lastUpdated: Date.now() }),
+      );
+
+      const jobShort = {
+        id: 'monitor-short-10bps',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobShort);
+
+      const shortTradeCall = mockPrisma.paperTrade.create.mock.calls[0][0];
+      const shortFillPrice = Number(shortTradeCall.data.exitPrice);
+      expect(shortFillPrice).toBeGreaterThanOrEqual(24160.0);
+      expect(shortFillPrice).toBeLessThanOrEqual(24160.0 * (1 + 0.0010));
+    });
   });
 
   describe('LearningProcessor', () => {

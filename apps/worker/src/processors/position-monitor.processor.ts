@@ -24,6 +24,55 @@ export class PositionMonitorProcessor extends WorkerHost {
   }
 
   /**
+   * Retrieves persisted trading system configuration.
+   */
+  private async getSystemConfig(): Promise<{
+    maxMarketDataAgeSeconds: number;
+    maxSlippageBps: number;
+  } | null> {
+    try {
+      let config = await this.prisma.tradingSystemConfig.findUnique({
+        where: { id: 'SYSTEM_DEFAULT' },
+      });
+
+      if (!config) {
+        config = await this.prisma.tradingSystemConfig.create({
+          data: {
+            id: 'SYSTEM_DEFAULT',
+            paperTradingEnabled: true,
+            liveTradingEnabled: false,
+            emergencyStop: false,
+            maxDailyLossPercent: new Decimal(3.0),
+            maxPositionRiskPercent: new Decimal(1.0),
+            maxTotalExposurePercent: new Decimal(20.0),
+            maxOpenPositions: 5,
+            maxTradesPerDay: 20,
+            maxConsecutiveLosses: 3,
+            maxLeverage: new Decimal(5.0),
+            maxSlippageBps: 50,
+            maxMarketDataAgeSeconds: 5,
+          },
+        });
+      }
+
+      if (
+        config &&
+        typeof config.maxMarketDataAgeSeconds === 'number' &&
+        typeof config.maxSlippageBps === 'number'
+      ) {
+        return {
+          maxMarketDataAgeSeconds: config.maxMarketDataAgeSeconds,
+          maxSlippageBps: config.maxSlippageBps,
+        };
+      }
+      return null;
+    } catch (err: any) {
+      this.logger.error(`[PositionMonitor] Failed to load TradingSystemConfig: ${err?.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Main evaluation loop for all open/partially closed positions across all paper accounts.
    */
   public async evaluateActivePositions(): Promise<{
@@ -31,9 +80,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     closed: number;
     updated: number;
   }> {
-    const config = await this.prisma.tradingSystemConfig.findUnique({
-      where: { id: 'SYSTEM_DEFAULT' },
-    });
+    const config = await this.getSystemConfig();
 
     if (
       !config ||
@@ -359,6 +406,17 @@ export class PositionMonitorProcessor extends WorkerHost {
       });
 
       if (lockResult.count === 0) {
+        // Concurrency check: another worker/thread already closed this position!
+        const existingTrade = await tx.paperTrade.findFirst({
+          where: { positionId: pos.id },
+          orderBy: { exitTime: 'desc' },
+        });
+        if (existingTrade) {
+          this.logger.debug(
+            `[PositionMonitor] Position ${pos.id} is already closed (trade: ${existingTrade.id}); idempotent close recognized.`,
+          );
+          return;
+        }
         this.logger.warn(
           `[PositionMonitor] Position ${pos.id} is already CLOSING or CLOSED by another thread/worker; skipping duplicate close.`,
         );
@@ -407,6 +465,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             livePrice: exitPrice,
             exitPrice: finalExitPrice,
             slippageBps: slip.slippageBps,
+            slippageAmount: slip.slippageAmount,
             exitReason,
             realizedPnL,
             realizedR,
@@ -444,6 +503,8 @@ export class PositionMonitorProcessor extends WorkerHost {
             exitPrice: finalExitPrice,
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
+            slippageBps: slip.slippageBps,
+            slippageAmount: slip.slippageAmount,
             realizedPnL,
             realizedR,
             exitReason,

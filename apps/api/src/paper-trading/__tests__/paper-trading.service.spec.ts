@@ -706,4 +706,84 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     const expectedR = Number(((trade.exitPrice - trade.entryPrice) / expectedRiskDistance).toFixed(2));
     expect(trade.realizedR).toBeCloseTo(expectedR, 1);
   });
+
+  it('should reject close request if position is already in CLOSING state by worker', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24210.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    // Simulate worker transitioning position to CLOSING state
+    dbPositions[0].status = PositionState.CLOSING;
+
+    await expect(service.closePosition(pos.id, 'API Close Race')).rejects.toThrow(
+      /is currently being closed/,
+    );
+  });
+
+  it('should maintain strict accounting invariants across full trade lifecycle', async () => {
+    // Initial account state
+    dbAccounts[0].cashBalance = new Decimal(500000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24100.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    // 1. Enter Trade
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+      leverage: 5,
+    });
+
+    const usedMarginAfterEntry = Number(dbAccounts[0].usedMargin);
+    expect(usedMarginAfterEntry).toBeGreaterThan(0);
+
+    // 2. Exit Trade at higher price
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24200.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    const trade = await service.closePosition(pos.id, 'TP1 Hit');
+
+    // 3. Verify Accounting Invariants:
+    // a. Used margin must be fully released back to 0
+    expect(Number(dbAccounts[0].usedMargin)).toBe(0.0);
+
+    // b. Realized P&L matches trade realized P&L
+    expect(Number(dbAccounts[0].realizedPnL)).toBeCloseTo(trade.realizedPnL, 2);
+
+    // c. Cash balance equals initial (500,000) + grossPnL - totalCharges
+    const expectedCashBalance = 500000.0 + trade.realizedPnL;
+    expect(Number(dbAccounts[0].cashBalance)).toBeCloseTo(expectedCashBalance, 2);
+
+    // d. Exactly 1 PaperTrade record created
+    expect(dbTrades.length).toBe(1);
+  });
 });

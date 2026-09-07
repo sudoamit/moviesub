@@ -356,7 +356,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
    */
   getValidatedTicker(
     symbol: string,
-    maxAgeSeconds: number = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || 5,
+    maxAgeSeconds = 5,
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
     const ticker = this.tickers.get(sym);
