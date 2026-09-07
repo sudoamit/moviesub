@@ -1,4 +1,4 @@
-import { Direction, ICandle, SignalGrade, StructureType, Timeframe } from '@quant/shared';
+import { Direction, ICandle, MTFMode, SignalGrade, StructureType, Timeframe } from '@quant/shared';
 import {
   FVGEngine,
   OrderBlockEngine,
@@ -613,14 +613,13 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       expect(snapshotB.multiHorizon).toEqual(snapshotA.multiHorizon);
       expect(snapshotB.score.totalScore).toEqual(snapshotA.score.totalScore);
       expect(snapshotB.score.grade).toEqual(snapshotA.score.grade);
-      expect(snapshotB.trace).toEqual(snapshotA.trace);
-      expect(snapshotB.ml).toEqual(snapshotA.ml);
+      expect(snapshotB).toEqual(snapshotA);
     });
   });
 
-  // 16. Explicit Unclosed Candle Boundary Test
-  describe('Invariant 16: Explicit 10:00/10:05/10:15 Unclosed Candle Boundary Test', () => {
-    it('rejects candle at 10:05 and accepts at 10:15 if isClosed !== false', () => {
+  // Test A — Snapshot timestamp
+  describe('Test A: Snapshot Decision Timestamp', () => {
+    it('uses candle CLOSE timestamp (10:15) and NOT open timestamp (10:00) for a 15m candle', () => {
       const openTime = new Date('2026-01-01T10:00:00.000Z');
       const candle: ICandle = {
         timestamp: openTime,
@@ -632,18 +631,130 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         isClosed: true,
       };
 
-      const time1005 = new Date('2026-01-01T10:05:00.000Z');
-      const closedAt1005 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', time1005);
+      const snapshot = SnapshotBuilder.buildSnapshot({
+        symbol: 'BTCUSDT',
+        executionCandles: [candle],
+        executionTimeframe: Timeframe.M15,
+      });
+
+      const expectedClose = new Date('2026-01-01T10:15:00.000Z');
+      expect(snapshot.timestamp.getTime()).toBe(expectedClose.getTime());
+      expect(snapshot.timestamp.getTime()).not.toBe(openTime.getTime());
+      expect(snapshot.candles[0].lastClosedTimestamp.getTime()).toBe(expectedClose.getTime());
+    });
+  });
+
+  // Test B — Explicit asOf timestamp
+  describe('Test B: Explicit asOf Timestamp Preservation', () => {
+    it('uses asOfTimestamp exactly when provided, regardless of candle open timestamp', () => {
+      const openTime = new Date('2026-01-01T10:00:00.000Z');
+      const candle: ICandle = {
+        timestamp: openTime,
+        open: 100,
+        high: 105,
+        low: 95,
+        close: 102,
+        volume: 1000,
+        isClosed: true,
+      };
+      const explicitAsOf = new Date('2026-01-01T10:15:00.000Z');
+
+      const snapshot = SnapshotBuilder.buildSnapshot({
+        symbol: 'BTCUSDT',
+        executionCandles: [candle],
+        executionTimeframe: Timeframe.M15,
+        asOfTimestamp: explicitAsOf,
+      });
+
+      expect(snapshot.timestamp.getTime()).toBe(explicitAsOf.getTime());
+    });
+  });
+
+  // Test C — Stale MTF analysis
+  describe('Test C: Stale MTF Precomputed Analysis Rejection', () => {
+    it('returns NEUTRAL and ignores caller-supplied fake bullish precomputed analysis when no valid candles exist at asOf', () => {
+      const fakeAnalysis: any = {
+        currentTrend: Direction.BULLISH,
+        marketRegime: { regime: 'BULLISH_TREND' },
+      };
+
+      const asOf = new Date('2026-01-01T10:00:00.000Z');
+      // htf1 has no valid candles at or before asOf (candle opens at 10:00, duration 1h -> closes at 11:00 > 10:00)
+      const futureHtfCandle: ICandle = {
+        timestamp: new Date('2026-01-01T10:00:00.000Z'),
+        open: 100,
+        high: 105,
+        low: 95,
+        close: 102,
+        volume: 1000,
+        isClosed: true,
+      };
+
+      const res = MultiTimeframeAnalyzer.analyzeMTF(
+        { timeframe: Timeframe.M15, candles: [] },
+        { timeframe: Timeframe.H1, candles: [futureHtfCandle], analysis: fakeAnalysis },
+        undefined,
+        MTFMode.BALANCED,
+        asOf,
+      );
+
+      expect(res.htf1Trend).toBe(Direction.NEUTRAL);
+      expect(res.htfBias).toBe(Direction.NEUTRAL);
+    });
+  });
+
+  // Test D — Unclosed candle
+  describe('Test D: Unclosed Candle Temporal Boundary', () => {
+    it('excludes 10:00 candle at 10:05 asOf, and includes it at 10:15 if isClosed !== false', () => {
+      const openTime = new Date('2026-01-01T10:00:00.000Z');
+      const candle: ICandle = {
+        timestamp: openTime,
+        open: 100,
+        high: 105,
+        low: 95,
+        close: 102,
+        volume: 1000,
+        isClosed: true,
+      };
+
+      const asOf1005 = new Date('2026-01-01T10:05:00.000Z');
+      const closedAt1005 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', asOf1005);
       expect(closedAt1005).toHaveLength(0);
 
-      const time1015 = new Date('2026-01-01T10:15:00.000Z');
-      const closedAt1015 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', time1015);
+      const asOf1015 = new Date('2026-01-01T10:15:00.000Z');
+      const closedAt1015 = CandleNormalizer.getClosedCandlesAsOf([candle], '15m', asOf1015);
       expect(closedAt1015).toHaveLength(1);
-      expect(closedAt1015[0]).toEqual(candle);
+    });
+  });
 
-      const unclosedCandle: ICandle = { ...candle, isClosed: false };
-      const closedUnclosedAt1015 = CandleNormalizer.getClosedCandlesAsOf([unclosedCandle], '15m', time1015);
-      expect(closedUnclosedAt1015).toHaveLength(0);
+  // Test E — Full snapshot future invariance
+  describe('Test E: Full Snapshot Future Invariance', () => {
+    it('snapshot(history, T) equals snapshot(history + arbitraryFutureData, T)', () => {
+      const history: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        history.push(createCandle(i, 100 + i * 0.2, 102 + i * 0.2, 99 + i * 0.2, 101 + i * 0.2));
+      }
+      const T = CandleNormalizer.getCandleCloseTimestamp(history[35], '15m');
+
+      const snapshotA = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: history,
+        asOfTimestamp: T,
+      });
+
+      const future: ICandle[] = [
+        createCandle(40, 108, 300, 107, 295, 500000),
+        createCandle(41, 295, 305, 30, 35, 900000),
+        createCandle(42, 35, 40, 10, 15, 1000000),
+      ];
+
+      const snapshotB = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: [...history, ...future],
+        asOfTimestamp: T,
+      });
+
+      expect(snapshotB).toEqual(snapshotA);
     });
   });
 

@@ -43,10 +43,10 @@ export class SnapshotBuilder {
     if (options.asOfTimestamp) {
       timestamp = options.asOfTimestamp;
     } else {
-      const rawN = rawCandles.length;
-      const rawLast = rawN > 0 ? rawCandles[rawN - 1] : null;
-      timestamp = rawLast
-        ? CandleNormalizer.getCandleCloseTimestamp(rawLast, executionTimeframe)
+      const closedCandles = rawCandles.filter((c) => c.isClosed !== false);
+      const lastClosed = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : null;
+      timestamp = lastClosed
+        ? CandleNormalizer.getCandleCloseTimestamp(lastClosed, executionTimeframe)
         : new Date();
     }
 

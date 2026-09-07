@@ -109,8 +109,7 @@ export class MultiHorizonEngine {
       const normExec = CandleNormalizer.normalize(executionCandles).filter((c) => c.isClosed !== false);
       if (normExec.length > 0) {
         const lastExec = normExec[normExec.length - 1];
-        const duration = CandleNormalizer.getTimeframeDurationMs(executionTf);
-        asOfTimestamp = new Date(lastExec.timestamp.getTime() + duration);
+        asOfTimestamp = CandleNormalizer.getCandleCloseTimestamp(lastExec, executionTf);
       }
     }
 
