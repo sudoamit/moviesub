@@ -21,16 +21,15 @@ interface AlertsManagerModalProps {
   onClose: () => void;
 }
 
-export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
-  isOpen,
-  onClose,
-}) => {
+export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({ isOpen, onClose }) => {
   const [alerts, setAlerts] = useState<any[]>([]);
   const [channel, setChannel] = useState<'TELEGRAM' | 'DISCORD' | 'WEBHOOK'>('DISCORD');
   const [target, setTarget] = useState<string>('');
   const [minScore, setMinScore] = useState<number>(75);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [testStatus, setTestStatus] = useState<{ success?: boolean; message?: string } | null>(null);
+  const [testStatus, setTestStatus] = useState<{ success?: boolean; message?: string } | null>(
+    null,
+  );
 
   const fetchAlerts = async () => {
     try {
@@ -78,7 +77,10 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
 
   const handleTestAlert = async () => {
     if (!target) {
-      setTestStatus({ success: false, message: 'Please enter a valid webhook URL or Telegram chat ID.' });
+      setTestStatus({
+        success: false,
+        message: 'Please enter a valid webhook URL or Telegram chat ID.',
+      });
       return;
     }
     try {
@@ -96,7 +98,10 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
       if (data.success) {
         setTestStatus({ success: true, message: `✓ Test Notification Dispatched to ${channel}!` });
       } else {
-        setTestStatus({ success: false, message: `❌ Dispatch Failed: ${data.message || 'Check URL/Chat ID'}` });
+        setTestStatus({
+          success: false,
+          message: `❌ Dispatch Failed: ${data.message || 'Check URL/Chat ID'}`,
+        });
       }
       setTimeout(() => setTestStatus(null), 6000);
     } catch (e: any) {
@@ -131,7 +136,9 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
                   REAL-TIME PUSH
                 </span>
               </h3>
-              <p className="text-[11px] text-slate-400">Telegram Bot, Discord Webhooks & Custom Endpoint Dispatcher</p>
+              <p className="text-[11px] text-slate-400">
+                Telegram Bot, Discord Webhooks & Custom Endpoint Dispatcher
+              </p>
             </div>
           </div>
 
@@ -188,14 +195,17 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
           </div>
 
           {/* Form */}
-          <form onSubmit={handleCreateAlert} className="space-y-4 bg-slate-900/80 p-4 rounded-xl border border-slate-800">
+          <form
+            onSubmit={handleCreateAlert}
+            className="space-y-4 bg-slate-900/80 p-4 rounded-xl border border-slate-800"
+          >
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-1.5">
                 {channel === 'DISCORD'
                   ? 'DISCORD WEBHOOK URL:'
                   : channel === 'TELEGRAM'
-                  ? 'TELEGRAM CHAT ID / CHANNEL ID:'
-                  : 'CUSTOM JSON WEBHOOK ENDPOINT URL:'}
+                    ? 'TELEGRAM CHAT ID / CHANNEL ID:'
+                    : 'CUSTOM JSON WEBHOOK ENDPOINT URL:'}
               </label>
               <input
                 type="text"
@@ -205,8 +215,8 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
                   channel === 'DISCORD'
                     ? 'https://discord.com/api/webhooks/...'
                     : channel === 'TELEGRAM'
-                    ? '@your_channel or -100123456789'
-                    : 'https://api.yourdomain.com/trading-alerts'
+                      ? '@your_channel or -100123456789'
+                      : 'https://api.yourdomain.com/trading-alerts'
                 }
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-cyan-500"
                 required
@@ -254,8 +264,8 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
                   testStatus.success
                     ? 'bg-emerald-950/80 border-emerald-500 text-emerald-300'
                     : testStatus.success === false
-                    ? 'bg-rose-950/80 border-rose-500 text-rose-300'
-                    : 'bg-slate-800 text-cyan-300 border-slate-700'
+                      ? 'bg-rose-950/80 border-rose-500 text-rose-300'
+                      : 'bg-slate-800 text-cyan-300 border-slate-700'
                 }`}
               >
                 {testStatus.message}
@@ -271,7 +281,8 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
 
             {alerts.length === 0 ? (
               <div className="p-4 rounded-lg bg-slate-900/60 border border-slate-800 text-center text-xs text-slate-500">
-                No active alert webhooks configured yet. Add your Discord Webhook or Telegram Chat above.
+                No active alert webhooks configured yet. Add your Discord Webhook or Telegram Chat
+                above.
               </div>
             ) : (
               <div className="space-y-2">
@@ -285,7 +296,9 @@ export const AlertsManagerModal: React.FC<AlertsManagerModalProps> = ({
                         {al.channel}
                       </span>
                       <span className="truncate text-slate-300 max-w-sm">{al.target}</span>
-                      <span className="text-[10px] text-slate-500 shrink-0">(Min: {al.minScore}+)</span>
+                      <span className="text-[10px] text-slate-500 shrink-0">
+                        (Min: {al.minScore}+)
+                      </span>
                     </div>
 
                     <button

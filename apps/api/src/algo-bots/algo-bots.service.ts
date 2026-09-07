@@ -36,13 +36,11 @@ export class AlgoBotsService {
       minScore: 80,
       smcCondition: 'ORDER_BLOCK',
       lots: 1,
-      autoExecutePaper: true,
+      autoExecutePaper: false,
       notifyWebhook: true,
-      isActive: true,
+      isActive: false,
       createdAt: new Date().toISOString(),
-      triggerCount: 3,
-      lastTriggeredAt: new Date(Date.now() - 3600000).toISOString(),
-      lastTriggerDetails: 'Triggered Bearish OB Rejection @ 24,160.00 (Score: 90)',
+      triggerCount: 0,
     },
     {
       id: 'bot_banknifty_fvg',
@@ -53,13 +51,11 @@ export class AlgoBotsService {
       minScore: 85,
       smcCondition: 'FVG',
       lots: 1,
-      autoExecutePaper: true,
+      autoExecutePaper: false,
       notifyWebhook: true,
-      isActive: true,
+      isActive: false,
       createdAt: new Date().toISOString(),
-      triggerCount: 2,
-      lastTriggeredAt: new Date(Date.now() - 7200000).toISOString(),
-      lastTriggerDetails: 'Triggered Bearish FVG Inversion @ 57,550.00 (Score: 94)',
+      triggerCount: 0,
     },
     {
       id: 'bot_btc_liquidity_sweep',
@@ -70,13 +66,11 @@ export class AlgoBotsService {
       minScore: 75,
       smcCondition: 'LIQUIDITY_SWEEP',
       lots: 1,
-      autoExecutePaper: true,
+      autoExecutePaper: false,
       notifyWebhook: false,
-      isActive: true,
+      isActive: false,
       createdAt: new Date().toISOString(),
-      triggerCount: 4,
-      lastTriggeredAt: new Date(Date.now() - 1800000).toISOString(),
-      lastTriggerDetails: 'Triggered Bullish Liquidity Sweep @ $79,350.00 (Score: 88)',
+      triggerCount: 0,
     },
   ];
 
@@ -84,7 +78,9 @@ export class AlgoBotsService {
     private readonly paperTradingService: PaperTradingService,
     private readonly alertsService: AlertsService,
   ) {
-    this.logger.log(`Algo Strategy Studio initialized with ${this.bots.length} active automated bots.`);
+    this.logger.log(
+      `Algo Strategy Studio initialized with ${this.bots.length} active automated bots.`,
+    );
   }
 
   async listBots(): Promise<IAlgoBot[]> {
@@ -101,9 +97,9 @@ export class AlgoBotsService {
       minScore: Number(dto.minScore || 80),
       smcCondition: dto.smcCondition || 'ANY_CONFLUENCE',
       lots: Number(dto.lots || 1),
-      autoExecutePaper: dto.autoExecutePaper !== false,
+      autoExecutePaper: dto.autoExecutePaper === true,
       notifyWebhook: dto.notifyWebhook !== false,
-      isActive: true,
+      isActive: dto.isActive === true,
       createdAt: new Date().toISOString(),
       triggerCount: 0,
     };
@@ -147,7 +143,9 @@ export class AlgoBotsService {
       bot.lastTriggeredAt = new Date().toISOString();
       bot.lastTriggerDetails = `${signal.direction} Trigger @ ₹${signal.entryZone.optimal.toFixed(2)} (Score: ${signal.score}/100)`;
 
-      this.logger.log(`🤖 [BOT TRIGGERED] '${bot.name}' -> ${signal.symbol} ${signal.direction} @ ₹${signal.entryZone.optimal}`);
+      this.logger.log(
+        `🤖 [BOT TRIGGERED] '${bot.name}' -> ${signal.symbol} ${signal.direction} @ ₹${signal.entryZone.optimal}`,
+      );
 
       // Automated Paper Execution
       if (bot.autoExecutePaper) {
@@ -158,13 +156,21 @@ export class AlgoBotsService {
             continue;
           }
 
-          const lotMultiplier = bot.symbol === 'NIFTY' ? 65 : bot.symbol === 'BANKNIFTY' ? 15 : bot.symbol === 'BTCUSDT' ? 0.20 : 100;
+          const lotMultiplier =
+            bot.symbol === 'NIFTY'
+              ? 65
+              : bot.symbol === 'BANKNIFTY'
+                ? 15
+                : bot.symbol === 'BTCUSDT'
+                  ? 0.2
+                  : 100;
           await this.paperTradingService.placeOrder({
             symbol: bot.symbol,
             direction: signal.direction === 'BULLISH' ? 'BUY' : 'SELL',
             quantity: bot.lots * lotMultiplier,
             orderType: 'MARKET',
-            price: signal.entryZone.optimal,
+            signalPrice: signal.entryZone.optimal,
+            signalTime: signal.timestamp ? new Date(signal.timestamp).toISOString() : undefined,
             stopLoss: signal.stopLoss,
             target1: signal.takeProfits.tp1,
             target2: signal.takeProfits.tp2,

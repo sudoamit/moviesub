@@ -69,7 +69,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       await redisClient.publish(WS_EVENTS.SCANNER_UPDATED, JSON.stringify(summary));
     }
 
-    this.logger.log(`Multi-asset scan completed in ${duration}ms. Signals found: ${validSignals.length}`);
+    this.logger.log(
+      `Multi-asset scan completed in ${duration}ms. Signals found: ${validSignals.length}`,
+    );
     return summary;
   }
 

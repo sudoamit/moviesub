@@ -15,10 +15,7 @@ describe('TradingWebsocketGateway', () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        TradingWebsocketGateway,
-        { provide: RedisService, useValue: mockRedis },
-      ],
+      providers: [TradingWebsocketGateway, { provide: RedisService, useValue: mockRedis }],
     }).compile();
 
     gateway = module.get<TradingWebsocketGateway>(TradingWebsocketGateway);

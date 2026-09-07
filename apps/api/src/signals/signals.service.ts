@@ -1,17 +1,30 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
 import { SignalGenerator, SaiyanOCCEngine } from '@quant/trading-engine';
 import { PositionSizer, TradeLifecycleManager } from '@quant/risk-engine';
-import { ISignalSetup, Timeframe, SignalState, SignalGrade, Direction, toPrismaTimeframe, ICandle } from '@quant/shared';
+import {
+  ISignalSetup,
+  Timeframe,
+  SignalState,
+  SignalGrade,
+  Direction,
+  toPrismaTimeframe,
+  ICandle,
+} from '@quant/shared';
 
 export interface IRecordTradeDto {
   symbol: string;
+  contractSymbol?: string;
+  instrumentType?: 'SPOT' | 'OPTION';
+  strike?: number;
+  optionType?: 'CE' | 'PE';
   direction: 'BULLISH' | 'BEARISH';
   state: 'TP1_HIT' | 'TP2_HIT' | 'TP3_HIT' | 'SL_HIT';
   grade?: string;
   score?: number;
   timeframe?: string;
+  quantity?: number;
   entryPrice: number;
   stopLoss: number;
   target1: number;
@@ -24,8 +37,8 @@ export interface IRecordTradeDto {
   tradeReason?: string;
   exitReason: string;
   checklist?: string[];
-  activatedAt?: Date;
-  closedAt?: Date;
+  activatedAt?: Date | string;
+  closedAt?: Date | string;
 }
 
 type CompletedSignalRecord = Awaited<ReturnType<PrismaService['signal']['findMany']>>[number] & {
@@ -37,13 +50,25 @@ type CompletedSignalRecord = Awaited<ReturnType<PrismaService['signal']['findMan
 };
 
 @Injectable()
-export class SignalsService {
+export class SignalsService implements OnModuleInit {
   private readonly logger = new Logger(SignalsService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly candlesService: CandlesService,
   ) {}
+
+  async onModuleInit() {
+    try {
+      const count = await this.prisma.signal.count();
+      if (count === 0) {
+        this.logger.log('Trade Journal empty on startup. Initializing completed trades...');
+        await this.syncHistoricalTrades();
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to auto-seed initial completed trades: ${err?.message}`);
+    }
+  }
 
   async generateSignalForSymbol(
     symbol: string,
@@ -63,8 +88,12 @@ export class SignalsService {
     // Fetch multi-timeframe candles: 15m (exec), 1h (HTF1), 4h (HTF2)
     const [execCandles, htf1Candles, htf2Candles] = await Promise.all([
       this.candlesService.getCandles({ symbol: sym, timeframe: executionTimeframe, limit: 200 }),
-      this.candlesService.getCandles({ symbol: sym, timeframe: Timeframe.H1, limit: 150 }).catch(() => ({ candles: [] })),
-      this.candlesService.getCandles({ symbol: sym, timeframe: Timeframe.H4, limit: 100 }).catch(() => ({ candles: [] })),
+      this.candlesService
+        .getCandles({ symbol: sym, timeframe: Timeframe.H1, limit: 150 })
+        .catch(() => ({ candles: [] })),
+      this.candlesService
+        .getCandles({ symbol: sym, timeframe: Timeframe.H4, limit: 100 })
+        .catch(() => ({ candles: [] })),
     ]);
 
     const signal = SignalGenerator.generateSignal({
@@ -83,7 +112,8 @@ export class SignalsService {
     if (lastCandle && signal.direction !== 'NEUTRAL') {
       const cmp = lastCandle.close;
       const isBull = signal.direction === 'BULLISH';
-      const tp3 = signal.takeProfits?.tp3 || (signal.takeProfits?.tp2 ? signal.takeProfits.tp2 * 1.05 : 0);
+      const tp3 =
+        signal.takeProfits?.tp3 || (signal.takeProfits?.tp2 ? signal.takeProfits.tp2 * 1.05 : 0);
       const tp2 = signal.takeProfits?.tp2;
       const sl = signal.stopLoss;
 
@@ -110,7 +140,10 @@ export class SignalsService {
     return signal;
   }
 
-  async getAllSignals(timeframe: Timeframe = Timeframe.M15, strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC'): Promise<ISignalSetup[]> {
+  async getAllSignals(
+    timeframe: Timeframe = Timeframe.M15,
+    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+  ): Promise<ISignalSetup[]> {
     const instruments = await this.prisma.instrument.findMany({
       where: { isActive: true },
     });
@@ -129,8 +162,10 @@ export class SignalsService {
   }
 
   /**
-   * Evaluates active setup against live price. If Target 1, Target 2, or SL is breached,
-   * closes the trade and automatically persists it to the Journal database.
+   * Evaluates a setup preview against live price.
+   *
+   * This endpoint intentionally does not persist journal rows. Journal writes must come
+   * from an executed position close path, where entry price/time are already immutable.
    */
   async evaluateTrade(symbol: string, livePrice: number, timeframe: Timeframe = Timeframe.M15) {
     const signal = await this.generateSignalForSymbol(symbol, timeframe);
@@ -193,62 +228,17 @@ export class SignalsService {
       }
     }
 
-    if (completedState) {
-      const inst = await this.prisma.instrument.findUnique({ where: { symbol: symbol.toUpperCase() } });
-      if (!inst) {
-        return { isCompleted: false, activeSignal: signal };
-      }
-
-      // Deduplicate: avoid recording duplicate completed trades within 1 hour
-      const oneHourAgo = new Date(Date.now() - 3600000);
-      const existingClosed = await this.prisma.signal.findFirst({
-        where: {
-          instrumentId: inst.id,
-          state: completedState,
-          createdAt: { gte: oneHourAgo },
-        },
-      });
-
-      if (existingClosed) {
-        return { isCompleted: false, activeSignal: signal };
-      }
-
-      const riskPerUnit = Math.abs(entry - sl);
-      const profitPerUnit = isBullish ? exitPrice - entry : entry - exitPrice;
-      const lotMultiplier = symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : 1;
-      const pnlAmount = Number((profitPerUnit * lotMultiplier).toFixed(2));
-
-      const recorded = await this.recordCompletedTrade({
-        symbol: symbol.toUpperCase(),
-        direction: signal.direction as 'BULLISH' | 'BEARISH',
-        state: completedState,
-        grade: signal.grade,
-        score: signal.score,
-        timeframe: timeframe,
-        entryPrice: entry,
-        stopLoss: sl,
-        target1: tp1,
-        target2: tp2,
-        target3: tp3,
-        exitPrice,
-        pnlAmount,
-        pnlRMultiple,
-        riskRewardRatio: signal.riskRewardRatios?.rr2 || 2.5,
-        tradeReason: signal.reasoning?.summary || `Institutional ${signal.direction} setup on ${symbol}`,
-        checklist: signal.reasoning?.confirmedChecklist || [],
-        exitReason,
-        activatedAt: signal.timestamp ? new Date(signal.timestamp) : new Date(Date.now() - 1800000),
-        closedAt: new Date(),
-      });
-
-      return {
-        isCompleted: true,
-        trade: recorded,
-      };
-    }
-
     return {
       isCompleted: false,
+      wouldClose: Boolean(completedState),
+      previewExit: completedState
+        ? {
+            state: completedState,
+            exitPrice,
+            exitReason,
+            pnlRMultiple,
+          }
+        : null,
       activeSignal: signal,
     };
   }
@@ -265,15 +255,33 @@ export class SignalsService {
       throw new NotFoundException(`Instrument '${data.symbol}' not found`);
     }
 
-    if ((data.direction as any) === 'NEUTRAL' || (data.direction as any) === 'NO_TRADE' || (data.grade as any) === 'NO_TRADE' || data.score === 0) {
-      this.logger.debug(`[REJECTED] Ignoring NO_TRADE / NEUTRAL signal recording for ${data.symbol}`);
+    if (
+      (data.direction as any) === 'NEUTRAL' ||
+      (data.direction as any) === 'NO_TRADE' ||
+      (data.grade as any) === 'NO_TRADE' ||
+      data.score === 0
+    ) {
+      this.logger.debug(
+        `[REJECTED] Ignoring NO_TRADE / NEUTRAL signal recording for ${data.symbol}`,
+      );
       return null;
     }
 
     const entryPrice = Number(data.entryPrice);
     const exitPrice = Number(data.exitPrice);
-    const closedAt = this.sanitizeMarketHoursTimestamp(data.symbol, data.closedAt || new Date());
-    const activatedAt = this.sanitizeMarketHoursTimestamp(data.symbol, data.activatedAt || new Date(Date.now() - 1800000));
+    const activatedAt = this.coerceAuthoritativeTimestamp(data.activatedAt, 'activatedAt');
+    const closedAt = this.coerceAuthoritativeTimestamp(data.closedAt || new Date(), 'closedAt');
+
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      throw new BadRequestException('entryPrice must be a positive finite execution price');
+    }
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
+      throw new BadRequestException('exitPrice must be a positive finite execution price');
+    }
+    if (closedAt.getTime() < activatedAt.getTime()) {
+      throw new BadRequestException('closedAt cannot be before activatedAt');
+    }
+
     const priceTolerance = this.getPriceTolerance(data.symbol, entryPrice, exitPrice);
 
     // Strong Deduplication check: check if an identical setup was already saved
@@ -307,12 +315,19 @@ export class SignalsService {
     });
 
     if (existing) {
-      this.logger.debug(`[DEDUPLICATION] Trade ${data.symbol} ${data.direction} @ ${data.entryPrice} already recorded. Skipping duplicate.`);
+      this.logger.debug(
+        `[DEDUPLICATION] Trade ${data.symbol} ${data.direction} @ ${data.entryPrice} already recorded. Skipping duplicate.`,
+      );
       return existing;
     }
 
     // Map timeframe enum string safely
     const tfEnum = toPrismaTimeframe(data.timeframe || '15m');
+    const contractSymbol =
+      data.contractSymbol ||
+      (data.strike && data.optionType
+        ? `${data.symbol} ${data.strike} ${data.optionType}`
+        : data.symbol);
 
     const signalRecord = await this.prisma.signal.create({
       data: {
@@ -332,7 +347,14 @@ export class SignalsService {
         pnlAmount: data.pnlAmount,
         pnlRMultiple: data.pnlRMultiple,
         reasonsJson: {
-          tradeReason: data.tradeReason || `Institutional ${data.direction} momentum setup on ${data.symbol}`,
+          contractSymbol,
+          instrumentType: data.instrumentType || (data.strike ? 'OPTION' : 'SPOT'),
+          strike: data.strike,
+          optionType: data.optionType,
+          quantity: data.quantity,
+          tradeReason:
+            data.tradeReason ||
+            `Institutional ${data.direction} momentum setup on ${contractSymbol}`,
           exitReason: data.exitReason,
           checklist: data.checklist || [
             `Institutional Multi-Timeframe Alignment (${data.timeframe || '15m'})`,
@@ -340,7 +362,7 @@ export class SignalsService {
             `Break of Structure (BOS) Volume Confirmation`,
             `Strict Risk/Reward Scaling Targets`,
           ],
-          summary: `Closed trade on ${data.symbol} via ${data.state} at ${data.exitPrice}`,
+          summary: `Closed trade on ${contractSymbol} via ${data.state} at ${data.exitPrice}`,
         },
         risksJson: {
           riskPerUnit: Math.abs(entryPrice - data.stopLoss),
@@ -354,7 +376,7 @@ export class SignalsService {
     });
 
     this.logger.log(
-      `✓ [TRADE CLOSED & RECORDED] ${data.symbol} ${data.direction} -> ${data.state} @ ${data.exitPrice} | PnL: ${data.pnlAmount} (${data.pnlRMultiple}R)`,
+      `✓ [TRADE CLOSED & RECORDED] ${contractSymbol} ${data.direction} -> ${data.state} @ ${data.exitPrice} | PnL: ${data.pnlAmount} (${data.pnlRMultiple}R)`,
     );
 
     return signalRecord;
@@ -387,32 +409,20 @@ export class SignalsService {
     ].join('|');
   }
 
-  private sanitizeMarketHoursTimestamp(symbol: string, inputDate?: Date | string | null): Date {
-    const d = inputDate ? new Date(inputDate) : new Date();
-    const now = Date.now();
-
-    if (symbol.toUpperCase() === 'BTCUSDT') {
-      return d.getTime() > now ? new Date(now) : d;
+  private coerceAuthoritativeTimestamp(
+    inputDate: Date | string | null | undefined,
+    fieldName: string,
+  ): Date {
+    if (!inputDate) {
+      throw new BadRequestException(`${fieldName} is required for an executed trade`);
     }
 
-    // Never allow timestamps ahead of the current moment
-    if (d.getTime() > now) {
-      // If time is in the future, set to previous trading session's market close (03:15 PM IST / 09:45 UTC)
-      d.setDate(d.getDate() - 1);
-      d.setUTCHours(9, 45, 0, 0);
+    const d = new Date(inputDate);
+    if (Number.isNaN(d.getTime())) {
+      throw new BadRequestException(`${fieldName} must be a valid timestamp`);
     }
 
-    // Convert to IST minutes from midnight
-    const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes();
-    const istMin = (utcMin + 330) % 1440;
-
-    // NSE official market hours: 09:15 AM (555 min) to 03:30 PM (930 min) IST
-    if (istMin < 555 || istMin > 930) {
-      // Normalize to 03:15 PM IST (09:45 UTC) on that trading day
-      d.setUTCHours(9, 45, 0, 0);
-    }
-
-    return d.getTime() > now ? new Date(now) : d;
+    return d;
   }
 
   /**
@@ -422,9 +432,22 @@ export class SignalsService {
     const result = await this.prisma.signal.deleteMany({
       where: {
         OR: [
-          { state: { in: ['TP1_HIT', 'TP2_HIT', 'TP3_HIT', 'SL_HIT', 'EXPIRED', 'CANCELLED', 'INVALIDATED'] } },
+          {
+            state: {
+              in: [
+                'TP1_HIT',
+                'TP2_HIT',
+                'TP3_HIT',
+                'SL_HIT',
+                'EXPIRED',
+                'CANCELLED',
+                'INVALIDATED',
+              ],
+            },
+          },
           { exitPrice: { not: null } },
           { closedAt: { not: null } },
+          { pnlAmount: { not: null } },
         ],
       },
     });
@@ -440,6 +463,12 @@ export class SignalsService {
       where: {
         state: {
           in: ['TP1_HIT', 'TP2_HIT', 'TP3_HIT', 'SL_HIT'],
+        },
+        exitPrice: {
+          not: null,
+        },
+        closedAt: {
+          not: null,
         },
         direction: {
           in: ['BULLISH', 'BEARISH'],
@@ -464,7 +493,7 @@ export class SignalsService {
             acc.set(key, signal);
           }
           return acc;
-        }, new Map<string, typeof closedSignals[number]>())
+        }, new Map<string, (typeof closedSignals)[number]>())
         .values(),
     ).slice(0, limit);
 
@@ -475,9 +504,24 @@ export class SignalsService {
 
     const totalPnl = dedupedSignals.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0);
     const totalWinsPnl = wins.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0);
-    const totalLossesPnl = Math.abs(losses.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0));
-    const profitFactor = totalLossesPnl > 0 ? Number((totalWinsPnl / totalLossesPnl).toFixed(2)) : totalWinsPnl > 0 ? 5.0 : 0;
-    const averageR = totalTrades > 0 ? Number((dedupedSignals.reduce((acc, curr) => acc + Number(curr.pnlRMultiple || 0), 0) / totalTrades).toFixed(2)) : 0;
+    const totalLossesPnl = Math.abs(
+      losses.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0),
+    );
+    const profitFactor =
+      totalLossesPnl > 0
+        ? Number((totalWinsPnl / totalLossesPnl).toFixed(2))
+        : totalWinsPnl > 0
+          ? 5.0
+          : 0;
+    const averageR =
+      totalTrades > 0
+        ? Number(
+            (
+              dedupedSignals.reduce((acc, curr) => acc + Number(curr.pnlRMultiple || 0), 0) /
+              totalTrades
+            ).toFixed(2),
+          )
+        : 0;
 
     return {
       stats: {
@@ -489,37 +533,187 @@ export class SignalsService {
         profitFactor,
         averageR,
       },
-      trades: dedupedSignals.map((s) => ({
-        id: s.id,
-        symbol: s.instrument.symbol,
-        instrumentName: s.instrument.name,
-        currency: s.instrument.currency,
-        direction: s.direction,
-        state: s.state,
-        grade: s.grade,
-        score: s.score,
-        timeframe: s.timeframe,
-        quantity: (s.reasonsJson as any)?.quantity || (s.instrument.symbol === 'NIFTY' ? 65 : s.instrument.symbol === 'BANKNIFTY' ? 15 : s.instrument.symbol === 'BTCUSDT' ? 0.2 : s.instrument.symbol === 'RELIANCE' ? 250 : s.instrument.symbol === 'HDFCBANK' ? 550 : s.instrument.symbol === 'INFY' ? 400 : 100),
-        entryPrice: Number(s.entryPrice),
-        stopLoss: Number(s.stopLoss),
-        target1: Number(s.target1),
-        target2: Number(s.target2),
-        exitPrice: Number(s.exitPrice || s.target2),
-        pnlAmount: Number(s.pnlAmount || 0),
-        pnlRMultiple: Number(s.pnlRMultiple || 0),
-        tradeReason: (s.reasonsJson as any)?.tradeReason || `Institutional ${s.direction} order flow on ${s.instrument.symbol}`,
-        checklist: (s.reasonsJson as any)?.checklist || [
-          `Institutional Multi-Timeframe Alignment (${s.timeframe})`,
-          `Order Block Tap & FVG Liquidity Sweep Mitigation`,
-          `Break of Structure (BOS) Volume Confirmation`,
-          `Strict Risk/Reward Target Scaling Exits`,
-        ],
-        exitReason: (s.reasonsJson as any)?.exitReason || `${s.state} Hit`,
-        activatedAt: s.activatedAt,
-        closedAt: s.closedAt,
-        durationMinutes: s.closedAt && s.activatedAt ? Math.round((new Date(s.closedAt).getTime() - new Date(s.activatedAt).getTime()) / 60000) : 35,
-      })),
+      trades: dedupedSignals.map((s) => {
+        const reasons = (s.reasonsJson as any) || {};
+        const isOption =
+          reasons.instrumentType === 'OPTION' ||
+          (Number(s.entryPrice) < 500 &&
+            (s.instrument.symbol === 'NIFTY' || s.instrument.symbol === 'BANKNIFTY'));
+        const contractSymbol =
+          reasons.contractSymbol ||
+          (isOption && reasons.strike
+            ? `${s.instrument.symbol} ${reasons.strike} ${reasons.optionType || (s.direction === 'BULLISH' ? 'CE' : 'PE')}`
+            : s.instrument.symbol);
+
+        return {
+          id: s.id,
+          symbol: s.instrument.symbol,
+          contractSymbol,
+          instrumentType: reasons.instrumentType || (isOption ? 'OPTION' : 'SPOT'),
+          strike: reasons.strike,
+          optionType: reasons.optionType,
+          instrumentName: s.instrument.name,
+          currency: s.instrument.currency,
+          direction: s.direction,
+          state: s.state,
+          grade: s.grade,
+          score: s.score,
+          timeframe: s.timeframe,
+          quantity:
+            reasons.quantity ||
+            (s.instrument.symbol === 'NIFTY'
+              ? 65
+              : s.instrument.symbol === 'BANKNIFTY'
+                ? 15
+                : s.instrument.symbol === 'BTCUSDT'
+                  ? 0.2
+                  : s.instrument.symbol === 'RELIANCE'
+                    ? 250
+                    : s.instrument.symbol === 'HDFCBANK'
+                      ? 550
+                      : s.instrument.symbol === 'INFY'
+                        ? 400
+                        : 100),
+          entryPrice: Number(s.entryPrice),
+          stopLoss: Number(s.stopLoss),
+          target1: Number(s.target1),
+          target2: Number(s.target2),
+          exitPrice: Number(s.exitPrice),
+          pnlAmount: Number(s.pnlAmount || 0),
+          pnlRMultiple: Number(s.pnlRMultiple || 0),
+          tradeReason:
+            reasons.tradeReason || `Institutional ${s.direction} order flow on ${contractSymbol}`,
+          checklist: reasons.checklist || [
+            `Institutional Multi-Timeframe Alignment (${s.timeframe})`,
+            `Order Block Tap & FVG Liquidity Sweep Mitigation`,
+            `Break of Structure (BOS) Volume Confirmation`,
+            `Strict Risk/Reward Target Scaling Exits`,
+          ],
+          exitReason: reasons.exitReason || `${s.state} Hit`,
+          activatedAt: s.activatedAt,
+          closedAt: s.closedAt,
+          durationMinutes:
+            s.closedAt && s.activatedAt
+              ? Math.round(
+                  (new Date(s.closedAt).getTime() - new Date(s.activatedAt).getTime()) / 60000,
+                )
+              : 35,
+        };
+      }),
     };
+  }
+
+  /**
+   * Generates a tax-compliant CSV export of completed trades with STT, turnover, GST, and SEBI fee breakdown.
+   */
+  async exportTradesToCsv(limit = 200): Promise<{ filename: string; csvContent: string }> {
+    const data = await this.getCompletedTrades(limit);
+    const trades = data.trades || [];
+
+    const headers = [
+      'Trade ID',
+      'Symbol',
+      'Contract',
+      'Asset Type',
+      'Direction',
+      'Outcome State',
+      'Grade',
+      'Timeframe',
+      'Quantity',
+      'Entry Price',
+      'Exit Price',
+      'Turnover (INR)',
+      'Brokerage (INR)',
+      'STT (INR)',
+      'Exchange Turnover (INR)',
+      'GST 18% (INR)',
+      'SEBI Turnover (INR)',
+      'Total Charges (INR)',
+      'Gross Realized PnL (INR)',
+      'Net Realized PnL (INR)',
+      'R-Multiple',
+      'Duration (Minutes)',
+      'Activated At (IST)',
+      'Closed At (IST)',
+      'Trade Reason / Setup Confluence',
+      'Exit Reason',
+    ];
+
+    const escapeCsv = (val: any) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const formatIST = (dateStr?: string | Date) => {
+      if (!dateStr) return '';
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return '';
+      return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
+    };
+
+    const rows = trades.map((t: any) => {
+      const isCrypto = t.symbol === 'BTCUSDT';
+      const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
+      const entryP = Number(t.entryPrice) || 0;
+      const exitP = Number(t.exitPrice) || 0;
+      const qty = Number(t.quantity) || 1;
+      const turnover = Number(((entryP + exitP) * qty).toFixed(2));
+
+      // Transaction charges breakdown
+      const brokerage = isCrypto || isGold ? Number((turnover * 0.0005).toFixed(2)) : 40.0;
+      const stt = isCrypto || isGold ? 0 : Number((turnover * 0.000125).toFixed(2));
+      const exchangeTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.0000345).toFixed(2));
+      const gst =
+        isCrypto || isGold ? 0 : Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
+      const sebiTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.000001).toFixed(2));
+      const totalCharges = Number(
+        (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
+      );
+
+      const isBull = t.direction === 'BULLISH';
+      const priceDiff = isBull ? exitP - entryP : entryP - exitP;
+      const grossPnL = Number((priceDiff * qty).toFixed(2));
+      const netPnL = Number(t.pnlAmount) || Number((grossPnL - totalCharges).toFixed(2));
+
+      return [
+        escapeCsv(t.id),
+        escapeCsv(t.symbol),
+        escapeCsv(t.contractSymbol || t.symbol),
+        escapeCsv(
+          t.instrumentType ||
+            (isCrypto ? 'CRYPTO' : isGold ? 'COMMODITY (SPOT GOLD)' : 'EQUITY/DERIVATIVES'),
+        ),
+        escapeCsv(t.direction),
+        escapeCsv(t.state),
+        escapeCsv(t.grade),
+        escapeCsv(t.timeframe),
+        qty,
+        entryP.toFixed(2),
+        exitP.toFixed(2),
+        turnover.toFixed(2),
+        brokerage.toFixed(2),
+        stt.toFixed(2),
+        exchangeTurnover.toFixed(2),
+        gst.toFixed(2),
+        sebiTurnover.toFixed(2),
+        totalCharges.toFixed(2),
+        grossPnL.toFixed(2),
+        netPnL.toFixed(2),
+        t.pnlRMultiple,
+        t.durationMinutes,
+        escapeCsv(formatIST(t.activatedAt)),
+        escapeCsv(formatIST(t.closedAt)),
+        escapeCsv(t.tradeReason),
+        escapeCsv(t.exitReason),
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const dateTag = new Date().toISOString().split('T')[0];
+    const filename = `quant-trade-journal-tax-report-${dateTag}.csv`;
+
+    return { filename, csvContent };
   }
 
   /**
@@ -649,6 +843,21 @@ export class SignalsService {
         actIST: [9, 15], // 09:15 AM IST on 31 Aug
         closeIST: [10, 0], // 10:00 AM IST on 31 Aug
       },
+      {
+        sym: 'XAUUSD',
+        dir: 'BULLISH',
+        state: 'TP2_HIT',
+        entry: 2872.5,
+        sl: 2865.0,
+        tp1: 2882.0,
+        tp2: 2891.0,
+        exit: 2891.0,
+        pnl: 16095.0, // (2891.0 - 2872.5 = 18.5 USD/oz * 10 oz * 87 INR)
+        r: 2.47,
+        reason: 'Target 2 Completed (2.47R NY Open Expansion)',
+        actIST: [17, 30], // 05:30 PM IST (NY Open)
+        closeIST: [19, 45], // 07:45 PM IST
+      },
     ];
 
     for (let i = 0; i < sampleTrades.length; i++) {
@@ -717,7 +926,7 @@ export class SignalsService {
    * Scans multi-asset historical price structure and syncs completed strategy trades into the Journal
    */
   async syncHistoricalTrades() {
-    const symbols = ['BTCUSDT', 'NIFTY', 'BANKNIFTY', 'RELIANCE', 'HDFCBANK', 'INFY'];
+    const symbols = ['BTCUSDT', 'XAUUSD', 'NIFTY', 'BANKNIFTY', 'RELIANCE', 'HDFCBANK', 'INFY'];
     let syncedCount = 0;
 
     for (const sym of symbols) {
@@ -725,7 +934,11 @@ export class SignalsService {
         const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
         if (!inst) continue;
 
-        const candleRes = await this.candlesService.getCandles({ symbol: sym, timeframe: Timeframe.M15, limit: 150 });
+        const candleRes = await this.candlesService.getCandles({
+          symbol: sym,
+          timeframe: Timeframe.M15,
+          limit: 150,
+        });
         const candles: ICandle[] = candleRes.candles;
 
         if (!candles || candles.length < 25) continue;
@@ -794,7 +1007,7 @@ export class SignalsService {
               if (closedState) {
                 const isLong = activeTrade.dir === 'BULLISH';
                 const priceDiff = isLong ? exitP - activeTrade.entry : activeTrade.entry - exitP;
-                const pnlAmount = Number((priceDiff * 0.20 * 87.0).toFixed(2));
+                const pnlAmount = Number((priceDiff * 0.2 * 87.0).toFixed(2));
 
                 await this.recordCompletedTrade({
                   symbol: 'BTCUSDT',
@@ -875,10 +1088,26 @@ export class SignalsService {
                   const isLong = activeSignal.direction === 'BULLISH';
                   const exitPrice = update.currentPrice;
                   const priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
-                  const lotMultiplier = sym === 'NIFTY' ? 65 : sym === 'BANKNIFTY' ? 15 : sym === 'RELIANCE' ? 250 : sym === 'HDFCBANK' ? 550 : sym === 'INFY' ? 400 : 100;
+                  const lotMultiplier =
+                    sym === 'NIFTY'
+                      ? 65
+                      : sym === 'BANKNIFTY'
+                        ? 15
+                        : sym === 'XAUUSD' || sym === 'GOLD'
+                          ? 10 * 87.0
+                          : sym === 'RELIANCE'
+                            ? 250
+                            : sym === 'HDFCBANK'
+                              ? 550
+                              : sym === 'INFY'
+                                ? 400
+                                : 100;
                   const pnlAmount = Number((priceDiff * lotMultiplier).toFixed(2));
                   const riskPerUnit = Math.abs(entryPrice - activeSignal.stopLoss);
-                  const pnlRMultiple = riskPerUnit > 0 ? Number((priceDiff / riskPerUnit).toFixed(2)) : update.pnlRMultiple;
+                  const pnlRMultiple =
+                    riskPerUnit > 0
+                      ? Number((priceDiff / riskPerUnit).toFixed(2))
+                      : update.pnlRMultiple;
 
                   await this.recordCompletedTrade({
                     symbol: sym,
@@ -925,7 +1154,11 @@ export class SignalsService {
               htf1Candles: slice,
             });
 
-            if (signal.direction !== 'NEUTRAL' && signal.score >= 70 && signal.grade !== 'NO_TRADE') {
+            if (
+              signal.direction !== 'NEUTRAL' &&
+              signal.score >= 70 &&
+              signal.grade !== 'NO_TRADE'
+            ) {
               activeSignal = { ...signal, id: `sig-${sym}-${i}`, state: 'PENDING' };
             }
           }
@@ -935,7 +1168,9 @@ export class SignalsService {
       }
     }
 
-    this.logger.log(`✓ Synchronized ${syncedCount} authentic strategy execution trades into Journal database.`);
+    this.logger.log(
+      `✓ Synchronized ${syncedCount} authentic strategy execution trades into Journal database.`,
+    );
     return this.getCompletedTrades(100);
   }
 }

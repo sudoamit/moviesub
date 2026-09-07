@@ -13,7 +13,7 @@ export interface IDrawdownStatus {
 
 export interface IDrawdownGuardOptions {
   maxAccountDrawdownPercent?: number; // e.g. 10%
-  maxDailyDrawdownPercent?: number;   // e.g. 5%
+  maxDailyDrawdownPercent?: number; // e.g. 5%
 }
 
 export class DrawdownGuard {
@@ -48,7 +48,10 @@ export class DrawdownGuard {
     } else if (dailyDrawdownPercent >= maxDailyDD) {
       isTradingHalted = true;
       warningMessage = `CRITICAL: Maximum daily drawdown breached (${dailyDrawdownPercent.toFixed(2)}% >= ${maxDailyDD}%). Trading is halted for today.`;
-    } else if (dailyDrawdownPercent >= maxDailyDD * 0.7 || totalDrawdownPercent >= maxAccountDD * 0.7) {
+    } else if (
+      dailyDrawdownPercent >= maxDailyDD * 0.7 ||
+      totalDrawdownPercent >= maxAccountDD * 0.7
+    ) {
       riskReductionMultiplier = 0.5; // Cut risk by 50%
       warningMessage = `WARNING: Approaching drawdown limits. Risk per trade is automatically reduced by 50%.`;
     }

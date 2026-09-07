@@ -552,3 +552,256 @@ model AIPostMortem {
   @@index([symbol, patternType])
   @@map("ai_post_mortems")
 }
+
+model TradingExperience {
+  id                    String    @id @default(uuid())
+  tradeId               String    @unique
+  signalId              String?
+  symbol                String
+  assetType             String
+  action                String    // BUY, SELL, WAIT, NO_TRADE
+  score                 Float
+  grade                 String?
+  entryPrice            Float
+  entryTime             DateTime
+  exitPrice             Float?
+  exitTime              DateTime?
+  stopLoss              Float
+  target1               Float?
+  target2               Float?
+  target3               Float?
+  riskAmount            Float?
+  expectedR             Float?
+  probabilityWin        Float?
+  probabilityTP1        Float?
+  probabilityTP2        Float?
+  probabilityStopFirst  Float?
+  confidence            Float?
+  outcomeStatus         String    // WIN, LOSS, TIMEOUT, SCRATCH
+  pnl                   Float
+  pnlR                  Float
+  maxFavorableExcursion Float     @default(0.0)
+  maxAdverseExcursion   Float     @default(0.0)
+  holdingTimeSeconds    Int       @default(0)
+  outcomeClassification String    // GOOD_TRADE_WIN, GOOD_TRADE_LOSS, BAD_TRADE_WIN, BAD_TRADE_LOSS, etc.
+  regime                String
+  volatilityRegime      String
+  session               String
+  dayOfWeek             Int
+  reasonsJson           Json
+  failureReasonsJson    Json
+  marketSnapshotJson    Json
+  strategyVersion       String    @default("v1.0")
+  modelVersion          String?
+  featureSchemaVersion  String    @default("2.0")
+  createdAt             DateTime  @default(now())
+
+  @@index([symbol, createdAt])
+  @@index([outcomeClassification])
+  @@index([strategyVersion])
+  @@map("trading_experiences")
+}
+
+model LearningRun {
+  id                  String    @id @default(uuid())
+  startedAt           DateTime  @default(now())
+  completedAt         DateTime?
+  trainingStart       DateTime
+  trainingEnd         DateTime
+  evaluationStart     DateTime
+  evaluationEnd       DateTime
+  experiencesUsed     Int
+  featuresTested      Int
+  hypothesesGenerated Int
+  candidatesGenerated Int
+  candidatesPromoted  Int
+  candidatesRejected  Int
+  status              String    @default("COMPLETED")
+  metricsJson         Json?
+  summary             String?
+
+  @@map("learning_runs")
+}
+
+model LearningHypothesis {
+  id                  String    @id @default(uuid())
+  title               String
+  type                String    // POSITIVE_PATTERN, NEGATIVE_FILTER, FEATURE_REMOVAL, PARAMETER_TWEAK
+  conditionRulesJson  Json
+  sampleSize          Int
+  expectancy          Float
+  winRate             Float
+  confidenceLower     Float
+  confidenceUpper     Float
+  status              String    @default("DISCOVERED") // DISCOVERED, TESTING, VALIDATED, PROMOTED, REJECTED
+  rejectionReason     String?
+  createdAt           DateTime  @default(now())
+  lastValidatedAt     DateTime?
+
+  @@map("learning_hypotheses")
+}
+
+model StrategyCandidate {
+  id                        String    @id @default(uuid())
+  baseStrategyVersion       String
+  candidateVersion          String
+  type                      String    // FILTER, THRESHOLD, FEATURE, MODEL, REGIME, VOLATILITY, EXIT, POSITION_SIZE
+  description               String
+  changeJson                Json
+  sampleSize                Int
+  expectancyBefore          Float
+  expectancyAfterHistorical Float
+  walkForwardExpectancy     Float?
+  monteCarloRuinProbability Float?
+  status                    String    @default("GENERATED") // GENERATED, BACKTESTING, VALIDATED, SHADOW, PROMOTED, REJECTED, ROLLED_BACK
+  rejectionReason           String?
+  createdAt                 DateTime  @default(now())
+  promotedAt                DateTime?
+
+  @@map("strategy_candidates")
+}
+
+model ShadowTrade {
+  id                String    @id @default(uuid())
+  candidateId       String
+  symbol            String
+  timeframe         String    @default("15m")
+  signalDirection   String
+  entryPrice        Float
+  entryTime         DateTime
+  exitPrice         Float?
+  exitTime          DateTime?
+  pnl               Float?
+  pnlR              Float?
+  isProductionMatch Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+
+  @@index([candidateId, symbol])
+  @@map("shadow_trades")
+}
+
+model ModelPromotion {
+  id                  String    @id @default(uuid())
+  strategyVersion     String
+  modelVersion        String
+  previousVersion     String
+  reason              String
+  evidenceJson        Json
+  promotedBy          String    @default("SYSTEM_PROMOTION_GATE")
+  promotedAt          DateTime  @default(now())
+
+  @@map("model_promotions")
+}
+
+model ModelRollback {
+  id                  String    @id @default(uuid())
+  fromVersion         String
+  toVersion           String
+  triggerReason       String
+  evidenceJson        Json
+  executedAt          DateTime  @default(now())
+
+  @@map("model_rollbacks")
+}
+
+model DriftEvent {
+  id                  String    @id @default(uuid())
+  driftType           String    // FEATURE_DRIFT, PREDICTION_DRIFT, PERFORMANCE_DRIFT, REGIME_DRIFT, EXECUTION_DRIFT
+  strategyVersion     String
+  modelVersion        String
+  severity            String    // LOW, MEDIUM, HIGH, CRITICAL
+  description         String
+  metricsJson         Json
+  detectedAt          DateTime  @default(now())
+
+  @@index([strategyVersion, driftType])
+  @@map("drift_events")
+}
+
+model LearningMemory {
+  id                  String    @id @default(uuid())
+  memoryType          String    // PROVEN_PATTERN, FAILURE_PATTERN, REJECTED_HYPOTHESIS, REGIME_RULE
+  key                 String    @unique
+  summary             String
+  detailsJson         Json
+  sampleSize          Int       @default(0)
+  confidence          Float     @default(0.0)
+  status              String    @default("ACTIVE")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@map("learning_memories")
+}
+
+model ResearchExperiment {
+  id                        String    @id @default(uuid())
+  experimentHash            String    @unique
+  hypothesisId              String?
+  hypothesis                String
+  instrument                String
+  timeframe                 String    @default("15m")
+  baseStrategyVersion       String
+  candidateStrategyVersion  String
+  featureSchemaVersion      String    @default("2.0")
+  datasetMetadataJson       Json
+  trainingPeriodJson        Json
+  validationPeriodJson      Json
+  testPeriodJson            Json
+  holdoutPeriodJson         Json
+  sampleSize                Int
+  baselineMetricsJson       Json
+  candidateMetricsJson      Json
+  robustnessMetricsJson     Json
+  slippageStressJson        Json?
+  missedTradeStressJson     Json?
+  monteCarloMetricsJson     Json?
+  benchmarksJson            Json?
+  complexityJson            Json?
+  status                    String    @default("PASSED") // RUNNING, PASSED, FAILED, REJECTED
+  rejectionReasonsJson      Json?
+  passedOutOfSample         Boolean   @default(true)
+  passedHoldout             Boolean   @default(true)
+  createdAt                 DateTime  @default(now())
+  completedAt               DateTime?
+
+  @@index([instrument, timeframe])
+  @@index([status])
+  @@map("research_experiments")
+}
+
+model ResearchScorecard {
+  id                          String    @id @default(uuid())
+  experiencesCount            Int
+  newPatternsDiscovered       Int
+  hypothesesGenerated         Int
+  experimentsExecuted         Int
+  candidatesGenerated         Int
+  candidatesPassedOOS         Int
+  candidatesInShadow          Int
+  candidatesPromoted          Int
+  candidatesRejected          Int
+  currentProductionVersion    String
+  bestCandidateVersion        String?
+  expectedImprovementDeltaR   Float     @default(0.0)
+  systemState                 String    @default("IMPROVING") // IMPROVING, OBSERVING_PLATEAU, DRIFT_ALERT
+  scorecardDataJson           Json
+  reportDate                  DateTime  @default(now())
+
+  @@map("research_scorecards")
+}
+
+model ResearchKnowledgeNode {
+  id            String    @id @default(uuid())
+  nodeType      String    // REGIME, SETUP, FEATURE, ENTRY_QUALITY, EXIT_QUALITY, OUTCOME, ERROR
+  name          String    @unique
+  propertiesJson Json?
+  frequency     Int       @default(0)
+  averageR      Float     @default(0.0)
+  winRate       Float     @default(0.0)
+  updatedAt     DateTime  @default(now())
+
+  @@index([nodeType])
+  @@map("research_knowledge_nodes")
+}
+
+

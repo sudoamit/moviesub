@@ -36,7 +36,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   livePrice,
 }) => {
   const isCrypto = currentSymbol === 'BTCUSDT';
-  const currencySymbol = '₹';
+  const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
+  const currencySymbol = isGold || isCrypto ? '$' : '₹';
 
   const [portfolio, setPortfolio] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'analytics'>('positions');
@@ -47,14 +48,17 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>(
     activeSignal?.direction === 'BEARISH' ? 'SELL' : 'BUY',
   );
-  const [leverage, setLeverage] = useState<number>(() => {
+  const [leverage, setLeverage] = useState<number>(5);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  useEffect(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('quant_risk_leverage');
-      if (saved) return Number(saved);
+      if (saved && !isNaN(Number(saved))) {
+        setLeverage(Number(saved));
+      }
     }
-    return 5;
-  });
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  }, []);
 
   // Exact Exchange Lot Multipliers
   const getLotMultiplier = (sym: string): number => {
@@ -73,6 +77,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         return 400;
       case 'BTCUSDT':
         return 0.01;
+      case 'XAUUSD':
+      case 'GOLD':
+        return 1;
       default:
         return 1;
     }
@@ -81,7 +88,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const lotMultiplier = getLotMultiplier(currentSymbol);
   const totalQuantity = customQty > 0 ? customQty : lots * lotMultiplier;
 
-  const cmp = livePrice || (activeSignal?.entryZone?.optimal || 100.0);
+  const cmp = livePrice || activeSignal?.entryZone?.optimal || 100.0;
   const notionalTurnover = cmp * totalQuantity;
   const estimatedCharges = isCrypto
     ? Number((notionalTurnover * 0.0004).toFixed(2))
@@ -138,8 +145,17 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         throw new Error(data.message || 'Failed to place order');
       }
 
-      setStatusMessage(`✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmp.toFixed(2)} (${leverage}x)`);
+      setStatusMessage(
+        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmp.toFixed(2)} (${leverage}x)`,
+      );
       setTimeout(() => setStatusMessage(null), 5000);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(`quant_pos_cut_${currentSymbol}`);
+        localStorage.removeItem(`quant_pos_cut_summary_${currentSymbol}`);
+        window.dispatchEvent(
+          new CustomEvent('quant_trade_opened', { detail: { symbol: currentSymbol } }),
+        );
+      }
       fetchPortfolio();
     } catch (err: any) {
       setStatusMessage(`❌ Order Rejected: ${err.message}`);
@@ -157,8 +173,16 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         body: JSON.stringify({ positionId: posId, reason: 'Manual User Market Exit' }),
       });
       const data = await res.json();
-      setStatusMessage(`✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net PnL: ${currencySymbol}${data.realizedPnL.toFixed(2)}`);
+      setStatusMessage(
+        `✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net PnL: ${currencySymbol}${data.realizedPnL.toFixed(2)}`,
+      );
       setTimeout(() => setStatusMessage(null), 5000);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(`quant_pos_cut_${currentSymbol}`, 'true');
+        window.dispatchEvent(
+          new CustomEvent('quant_trade_closed', { detail: { symbol: currentSymbol } }),
+        );
+      }
       fetchPortfolio();
     } catch (e: any) {
       setStatusMessage(`❌ Close Error: ${e.message}`);
@@ -167,15 +191,25 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   };
 
   const handleResetPortfolio = async () => {
-    if (!confirm(`Are you sure you want to reset your virtual paper balance to ${isCrypto ? '$10,000' : '₹10,00,000'}?`)) return;
+    if (
+      !confirm(
+        `Are you sure you want to reset your virtual paper balance to ${isCrypto ? '$10,000' : '₹10,00,000'}?`,
+      )
+    )
+      return;
     try {
       await fetch('http://localhost:3001/api/paper-trading/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ initialCapital: isCrypto ? 10000.0 : 1000000.0 }),
       });
-      setStatusMessage(`✓ Virtual Brokerage balance reset to ${isCrypto ? '$10,000' : '₹10,00,000'}`);
+      setStatusMessage(
+        `✓ Virtual Brokerage balance reset to ${isCrypto ? '$10,000' : '₹10,00,000'}`,
+      );
       setTimeout(() => setStatusMessage(null), 4000);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol: 'ALL' } }));
+      }
       fetchPortfolio();
     } catch (e) {
       console.error(e);
@@ -203,7 +237,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Simulate live 1-click market execution with real exchange transaction charges, STT, and margin.
+              Simulate live 1-click market execution with real exchange transaction charges, STT,
+              and margin.
             </p>
           </div>
         </div>
@@ -230,17 +265,26 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
           <span className="text-[10px] text-slate-400 block uppercase font-bold">TOTAL EQUITY</span>
           <span className="text-lg sm:text-xl font-black text-white block mt-0.5">
-            {currencySymbol}{portfolio?.totalEquity?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || (isCrypto ? '10,000.00' : '10,00,000.00')}
+            {currencySymbol}
+            {portfolio?.totalEquity?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
+              (isCrypto ? '10,000.00' : '10,00,000.00')}
           </span>
           <span className="text-[9px] text-slate-500">Virtual Portfolio</span>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-          <span className="text-[10px] text-slate-400 block uppercase font-bold">AVAILABLE MARGIN</span>
-          <span className="text-lg sm:text-xl font-black text-cyan-300 block mt-0.5">
-            {currencySymbol}{portfolio?.availableMargin?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || (isCrypto ? '10,000.00' : '10,00,000.00')}
+          <span className="text-[10px] text-slate-400 block uppercase font-bold">
+            AVAILABLE MARGIN
           </span>
-          <span className="text-[9px] text-slate-500">Used: {currencySymbol}{portfolio?.usedMargin?.toLocaleString() || '0'}</span>
+          <span className="text-lg sm:text-xl font-black text-cyan-300 block mt-0.5">
+            {currencySymbol}
+            {portfolio?.availableMargin?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
+              (isCrypto ? '10,000.00' : '10,00,000.00')}
+          </span>
+          <span className="text-[9px] text-slate-500">
+            Used: {currencySymbol}
+            {portfolio?.usedMargin?.toLocaleString() || '0'}
+          </span>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
@@ -250,21 +294,33 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
               (portfolio?.realizedPnL || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
             }`}
           >
-            {(portfolio?.realizedPnL || 0) >= 0 ? '+' : ''}{currencySymbol}{portfolio?.realizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || '0.00'}
+            {(portfolio?.realizedPnL || 0) >= 0 ? '+' : ''}
+            {currencySymbol}
+            {portfolio?.realizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
+              '0.00'}
           </span>
-          <span className="text-[9px] text-slate-500">Win Rate: {portfolio?.winRate || 0}% ({portfolio?.totalTrades || 0} trades)</span>
+          <span className="text-[9px] text-slate-500">
+            Win Rate: {portfolio?.winRate || 0}% ({portfolio?.totalTrades || 0} trades)
+          </span>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-          <span className="text-[10px] text-slate-400 block uppercase font-bold">UNREALIZED P&L</span>
+          <span className="text-[10px] text-slate-400 block uppercase font-bold">
+            UNREALIZED P&L
+          </span>
           <span
             className={`text-lg sm:text-xl font-black block mt-0.5 ${
               (portfolio?.unrealizedPnL || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
             }`}
           >
-            {(portfolio?.unrealizedPnL || 0) >= 0 ? '+' : ''}{currencySymbol}{portfolio?.unrealizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) || '0.00'}
+            {(portfolio?.unrealizedPnL || 0) >= 0 ? '+' : ''}
+            {currencySymbol}
+            {portfolio?.unrealizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
+              '0.00'}
           </span>
-          <span className="text-[9px] text-slate-500">{portfolio?.openPositions?.length || 0} Active Position(s)</span>
+          <span className="text-[9px] text-slate-500">
+            {portfolio?.openPositions?.length || 0} Active Position(s)
+          </span>
         </div>
       </div>
 
@@ -278,14 +334,23 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
               {[1, 2, 5, 10].map((l) => (
                 <button
                   key={l}
-                  onClick={() => { setLots(l); setCustomQty(0); }}
+                  onClick={() => {
+                    setLots(l);
+                    setCustomQty(0);
+                  }}
                   className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${
                     lots === l && customQty === 0
                       ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-md shadow-cyan-500/20'
                       : 'bg-slate-950 text-slate-300 border-slate-700 hover:bg-slate-800'
                   }`}
                 >
-                  {l} Lot{l > 1 ? 's' : ''} ({isCrypto ? (l * lotMultiplier).toFixed(2) : l * lotMultiplier} Qty)
+                  {l} Lot{l > 1 ? 's' : ''} (
+                  {isCrypto
+                    ? `${(l * lotMultiplier).toFixed(2)} BTC`
+                    : isGold
+                      ? `${l * lotMultiplier} oz`
+                      : `${l * lotMultiplier} Qty`}
+                  )
                 </button>
               ))}
             </div>
@@ -317,16 +382,32 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         {/* Cost and Margin Summary Strip */}
         <div className="bg-slate-950/80 border border-slate-800/80 p-2.5 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs">
           <div>
-            CMP: <strong className="text-white">{currencySymbol}{cmp.toFixed(2)}</strong>
+            CMP:{' '}
+            <strong className="text-white">
+              {currencySymbol}
+              {cmp.toFixed(2)}
+            </strong>
           </div>
           <div>
-            Notional: <strong className="text-cyan-300">{currencySymbol}{notionalTurnover.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong>
+            Notional:{' '}
+            <strong className="text-cyan-300">
+              {currencySymbol}
+              {notionalTurnover.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+            </strong>
           </div>
           <div>
-            Margin Req (@ {leverage}x): <strong className="text-emerald-400">{currencySymbol}{estimatedMargin.toLocaleString()}</strong>
+            Margin Req (@ {leverage}x):{' '}
+            <strong className="text-emerald-400">
+              {currencySymbol}
+              {estimatedMargin.toLocaleString()}
+            </strong>
           </div>
           <div>
-            Est. Charges: <strong className="text-amber-400">{currencySymbol}{estimatedCharges}</strong>
+            Est. Charges:{' '}
+            <strong className="text-amber-400">
+              {currencySymbol}
+              {estimatedCharges}
+            </strong>
           </div>
         </div>
 
@@ -338,7 +419,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 text-sm transition-all shadow-lg shadow-emerald-950/50 active:scale-[0.99]"
           >
             <TrendingUp className="w-4 h-4" />
-            1-CLICK BUY MARKET ({totalQuantity} {currentSymbol} @ {currencySymbol}{cmp.toFixed(2)})
+            1-CLICK BUY MARKET ({totalQuantity} {currentSymbol} @ {currencySymbol}
+            {cmp.toFixed(2)})
           </button>
 
           <button
@@ -347,7 +429,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             className="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 text-sm transition-all shadow-lg shadow-rose-950/50 active:scale-[0.99]"
           >
             <TrendingDown className="w-4 h-4" />
-            1-CLICK SELL SHORT ({totalQuantity} {currentSymbol} @ {currencySymbol}{cmp.toFixed(2)})
+            1-CLICK SELL SHORT ({totalQuantity} {currentSymbol} @ {currencySymbol}
+            {cmp.toFixed(2)})
           </button>
         </div>
 
@@ -424,10 +507,15 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 bg-slate-950/60">
                     {portfolio?.openPositions?.map((pos: any) => {
-                      const posCurr = '₹';
+                      const isCryptoPos = pos.symbol === 'BTCUSDT' || pos.symbol?.includes('BTC');
+                      const posCurr = isCryptoPos ? '$' : '₹';
                       return (
                         <tr key={pos.id} className="hover:bg-slate-900/50 transition-colors">
-                          <td className="p-3 font-black text-white">{pos.symbol}</td>
+                          <td className="p-3 font-black text-white">
+                            <span className="text-cyan-300">
+                              {pos.contractSymbol || pos.symbol}
+                            </span>
+                          </td>
                           <td className="p-3">
                             <span
                               className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -440,18 +528,39 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                             </span>
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{pos.quantity}</td>
-                          <td className="p-3 text-slate-300">{posCurr}{pos.averageEntryPrice.toFixed(2)}</td>
-                          <td className="p-3 text-cyan-300 font-bold">{posCurr}{pos.currentPrice.toFixed(2)}</td>
-                          <td className="p-3 text-[11px]">
-                            <span className="text-rose-400 font-bold block">SL: {posCurr}{pos.stopLoss ? pos.stopLoss.toFixed(2) : '-'}</span>
-                            <span className="text-emerald-400 font-bold block">TP: {posCurr}{pos.target2 ? pos.target2.toFixed(2) : '-'}</span>
+                          <td className="p-3 text-slate-300">
+                            {posCurr}
+                            {pos.entryPrice?.toFixed(2) || pos.averageEntryPrice?.toFixed(2)}
                           </td>
-                          <td className="p-3 font-bold">
-                            <span className={pos.unrealizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                              {pos.unrealizedPnL >= 0 ? '+' : ''}{posCurr}{pos.unrealizedPnL.toFixed(2)} ({pos.unrealizedR}R)
+                          <td className="p-3 text-cyan-300 font-bold">
+                            {posCurr}
+                            {pos.currentPrice.toFixed(2)}
+                          </td>
+                          <td className="p-3 text-[11px]">
+                            <span className="text-rose-400 font-bold block">
+                              SL: {posCurr}
+                              {pos.stopLoss ? pos.stopLoss.toFixed(2) : '-'}
+                            </span>
+                            <span className="text-emerald-400 font-bold block">
+                              TP: {posCurr}
+                              {pos.target2 ? pos.target2.toFixed(2) : '-'}
                             </span>
                           </td>
-                          <td className="p-3 text-slate-500">{posCurr}{pos.charges?.totalCharges || 20}</td>
+                          <td className="p-3 font-bold">
+                            <span
+                              className={
+                                pos.unrealizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                              }
+                            >
+                              {pos.unrealizedPnL >= 0 ? '+' : ''}
+                              {posCurr}
+                              {pos.unrealizedPnL.toFixed(2)} ({pos.unrealizedR}R)
+                            </span>
+                          </td>
+                          <td className="p-3 text-slate-500">
+                            {posCurr}
+                            {pos.charges?.totalCharges || 20}
+                          </td>
                           <td className="p-3 text-right">
                             <button
                               onClick={() => handleClosePosition(pos.id)}
@@ -495,10 +604,16 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 bg-slate-950/60">
                     {portfolio?.tradeHistory?.map((trade: any) => {
-                      const posCurr = '₹';
+                      const isCryptoTrade =
+                        trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
+                      const tradeCurr = isCryptoTrade ? '$' : '₹';
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">
-                          <td className="p-3 font-black text-white">{trade.symbol}</td>
+                          <td className="p-3 font-black text-white">
+                            <span className="text-cyan-300">
+                              {trade.contractSymbol || trade.symbol}
+                            </span>
+                          </td>
                           <td className="p-3">
                             <span
                               className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -511,11 +626,23 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                             </span>
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{trade.quantity}</td>
-                          <td className="p-3 text-slate-300">{posCurr}{trade.entryPrice.toFixed(2)}</td>
-                          <td className="p-3 text-cyan-300 font-bold">{posCurr}{trade.exitPrice.toFixed(2)}</td>
+                          <td className="p-3 text-slate-300">
+                            {tradeCurr}
+                            {trade.entryPrice.toFixed(2)}
+                          </td>
+                          <td className="p-3 text-cyan-300 font-bold">
+                            {tradeCurr}
+                            {trade.exitPrice.toFixed(2)}
+                          </td>
                           <td className="p-3 font-black">
-                            <span className={trade.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                              {trade.realizedPnL >= 0 ? '+' : ''}{posCurr}{trade.realizedPnL.toFixed(2)}
+                            <span
+                              className={
+                                trade.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                              }
+                            >
+                              {trade.realizedPnL >= 0 ? '+' : ''}
+                              {tradeCurr}
+                              {trade.realizedPnL.toFixed(2)}
                             </span>
                           </td>
                           <td className="p-3 font-bold text-slate-300">
@@ -526,8 +653,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                               {trade.exitReason}
                             </span>
                           </td>
-                          <td className="p-3 text-slate-500 text-[10px]">
-                            {new Date(trade.closedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          <td className="p-3 text-slate-500 text-[10px]" suppressHydrationWarning>
+                            {new Date(trade.closedAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
                           </td>
                         </tr>
                       );
@@ -553,7 +684,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-              <span className="text-[10px] text-slate-400 block uppercase font-bold">PROFIT FACTOR</span>
+              <span className="text-[10px] text-slate-400 block uppercase font-bold">
+                PROFIT FACTOR
+              </span>
               <span className="text-xl font-black text-cyan-300 mt-1 block">
                 {portfolio?.profitFactor || 0}
               </span>
@@ -561,7 +694,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-              <span className="text-[10px] text-slate-400 block uppercase font-bold">TOTAL TRADES</span>
+              <span className="text-[10px] text-slate-400 block uppercase font-bold">
+                TOTAL TRADES
+              </span>
               <span className="text-xl font-black text-white mt-1 block">
                 {portfolio?.totalTrades || 0}
               </span>
@@ -569,7 +704,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-              <span className="text-[10px] text-slate-400 block uppercase font-bold">CHARGES & TAXES</span>
+              <span className="text-[10px] text-slate-400 block uppercase font-bold">
+                CHARGES & TAXES
+              </span>
               <span className="text-xl font-black text-amber-400 mt-1 block">
                 ₹{portfolio?.totalChargesPaid?.toFixed(2) || '0.00'}
               </span>

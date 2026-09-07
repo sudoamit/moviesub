@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useEffect, useState, useMemo } from 'react';
-import io, { Socket } from 'socket.io-client';
+import dynamic from 'next/dynamic';
 import { ICandle, ISignalSetup, Timeframe, WS_EVENTS } from '@quant/shared';
+import { MarketStreamProvider, useMarketStream } from '../context/MarketStreamContext';
 import { Header, NavTab, StrategyMode } from '../components/Header';
 import { LiveTickerBar, ITickerInfo } from '../components/LiveTickerBar';
-import { TradingChart } from '../components/TradingChart';
 import { ScoreGauge } from '../components/ScoreGauge';
 import { ReasoningCard } from '../components/ReasoningCard';
 import { RiskWidget } from '../components/RiskWidget';
@@ -27,50 +27,149 @@ import { MacroCalendarWidget } from '../components/MacroCalendarWidget';
 import { SMTDivergenceWidget } from '../components/SMTDivergenceWidget';
 import { MTFFlowRadarWidget } from '../components/MTFFlowRadarWidget';
 import { AITradeLearningWidget } from '../components/AITradeLearningWidget';
-import { Bell, Zap, ShieldAlert, CheckCircle2, Target, Layers, Sliders, Sparkles } from 'lucide-react';
+import { QuantIntelligencePanel } from '../components/QuantIntelligencePanel';
+import { LearningEngineDashboard } from '../components/LearningEngineDashboard';
+import { ResearchStudio } from '../components/ResearchStudio';
+import {
+  Bell,
+  Zap,
+  ShieldAlert,
+  CheckCircle2,
+  Target,
+  Layers,
+  Sliders,
+  Sparkles,
+} from 'lucide-react';
 
-export default function DashboardPage() {
+const TradingChart = dynamic(
+  () => import('../components/TradingChart').then((mod) => mod.TradingChart),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-[520px] bg-[#0c121e] rounded-xl flex flex-col items-center justify-center text-slate-500 border border-slate-800 animate-pulse">
+        <div className="w-8 h-8 border-2 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mb-3"></div>
+        <p className="text-xs font-mono text-slate-400">
+          Loading High-Performance Trading Chart...
+        </p>
+      </div>
+    ),
+  },
+);
+
+function getInitialCandlesForSymbol(symbol: string): ICandle[] {
+  const basePrice =
+    symbol === 'BTCUSDT'
+      ? 79200
+      : symbol === 'XAUUSD' || symbol === 'GOLD'
+        ? 2885.5
+        : symbol === 'BANKNIFTY'
+          ? 57450
+          : symbol === 'RELIANCE'
+            ? 1285
+            : symbol === 'HDFCBANK'
+              ? 720
+              : symbol === 'INFY'
+                ? 1140
+                : 24150;
+
+  // Fixed deterministic epoch anchor to guarantee 100% deterministic SSR/client hydration match
+  const anchorTime = 1756972800000;
+  const stepMs = 15 * 60 * 1000;
+  const count = 120;
+  const result: ICandle[] = [];
+  let price = basePrice * 0.985;
+
+  for (let i = count; i >= 0; i--) {
+    const timestamp = new Date(anchorTime - i * stepMs);
+    const change = (Math.sin(i / 6) * 0.0025 + ((i % 5) - 2) * 0.001) * price;
+    const open = Number(price.toFixed(2));
+    const close = Number((price + change).toFixed(2));
+    const high = Number((Math.max(open, close) + 0.0015 * price).toFixed(2));
+    const low = Number((Math.min(open, close) - 0.0015 * price).toFixed(2));
+    const volume = Math.floor(25000 + ((i * 137) % 30000));
+    price = close;
+    result.push({ timestamp, open, high, low, close, volume, isClosed: true });
+  }
+  return result;
+}
+
+function DashboardContent() {
+  const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>('terminal');
-  const [selectedSymbol, setSelectedSymbol] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_selected_symbol');
-      if (saved) return saved;
-    }
-    return 'NIFTY';
-  });
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('NIFTY');
   const [selectedTimeframe, setSelectedTimeframe] = useState<string>('15m');
-  const [candles, setCandles] = useState<ICandle[]>([]);
+  const [selectedStrategy, setSelectedStrategy] = useState<StrategyMode>('SMC');
+  const [candles, setCandles] = useState<ICandle[]>(() => getInitialCandlesForSymbol('NIFTY'));
   const [signals, setSignals] = useState<ISignalSetup[]>([]);
   const [selectedSignal, setSelectedSignal] = useState<ISignalSetup | null>(null);
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [isScanning, setIsScanning] = useState<boolean>(false);
   const [isOptionChainModalOpen, setIsOptionChainModalOpen] = useState<boolean>(false);
   const [isAlertsModalOpen, setIsAlertsModalOpen] = useState<boolean>(false);
   const [isAICopilotModalOpen, setIsAICopilotModalOpen] = useState<boolean>(false);
-  const [activeToast, setActiveToast] = useState<{ title: string; message: string; type?: string } | null>(null);
+  const [activeToast, setActiveToast] = useState<{
+    title: string;
+    message: string;
+    type?: string;
+  } | null>(null);
 
-  // Real-time live market tickers from authentic exchange feeds
-  const [tickers, setTickers] = useState<Record<string, ITickerInfo>>({
-    NIFTY: { symbol: 'NIFTY', price: 24175.65, changePercent: -0.13, changeAmount: -32.15, high: 24220, low: 24135, volume: 1250000 },
-    BANKNIFTY: { symbol: 'BANKNIFTY', price: 57496.3, changePercent: 0.2, changeAmount: 116.3, high: 57596, low: 57307, volume: 850000 },
-    BTCUSDT: { symbol: 'BTCUSDT', price: 79230.0, changePercent: 0.6, changeAmount: 473.35, high: 79840, low: 79001, volume: 45000 },
-    RELIANCE: { symbol: 'RELIANCE', price: 1287.0, changePercent: 0.16, changeAmount: 2.0, high: 1291.5, low: 1280, volume: 320000 },
-    HDFCBANK: { symbol: 'HDFCBANK', price: 720.3, changePercent: 1.17, changeAmount: 8.3, high: 720.3, low: 709.1, volume: 450000 },
-    INFY: { symbol: 'INFY', price: 1144.0, changePercent: 0.53, changeAmount: 6.0, high: 1144.9, low: 1110.8, volume: 280000 },
-  });
+  const {
+    isConnected,
+    tickers,
+    signals: streamSignals,
+    isScanning,
+    activeToast: streamToast,
+    subscribeToSymbol,
+    triggerScan,
+    showToast,
+  } = useMarketStream();
 
-  const [selectedStrategy, setSelectedStrategy] = useState<StrategyMode>(() => {
+  useEffect(() => {
+    setMounted(true);
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_selected_strategy');
-      if (saved === 'SAIYAN_OCC' || saved === 'HYBRID' || saved === 'SMC') return saved;
+      const savedTab = localStorage.getItem('quant_active_tab') as NavTab | null;
+      const validTabs: NavTab[] = [
+        'terminal',
+        'quant',
+        'learning',
+        'research',
+        'options',
+        'multichart',
+        'radar',
+        'smt',
+        'correlation',
+        'paper',
+        'algo',
+        'macro',
+        'scanner',
+        'backtest',
+        'journal',
+        'risk',
+      ];
+      if (savedTab && validTabs.includes(savedTab)) {
+        setActiveTab(savedTab);
+      }
+
+      const savedSymbol = localStorage.getItem('quant_selected_symbol');
+      if (savedSymbol) {
+        setSelectedSymbol(savedSymbol);
+        setCandles(getInitialCandlesForSymbol(savedSymbol));
+      }
+
+      const savedStrat = localStorage.getItem('quant_selected_strategy') as StrategyMode | null;
+      if (savedStrat === 'SAIYAN_OCC' || savedStrat === 'HYBRID' || savedStrat === 'SMC') {
+        setSelectedStrategy(savedStrat);
+      }
     }
-    return 'SMC';
-  });
+  }, []);
 
   // 1. Initial Data Fetching
-  const fetchSignals = async (tf: string = selectedTimeframe, strat: StrategyMode = selectedStrategy) => {
+  const fetchSignals = async (
+    tf: string = selectedTimeframe,
+    strat: StrategyMode = selectedStrategy,
+  ) => {
     try {
-      const res = await fetch(`http://localhost:3001/api/signals?timeframe=${tf}&strategy=${strat}`);
+      const res = await fetch(
+        `http://localhost:3001/api/signals?timeframe=${tf}&strategy=${strat}`,
+      );
       const data = await res.json();
       if (Array.isArray(data)) {
         setSignals(data);
@@ -91,20 +190,29 @@ export default function DashboardPage() {
       strat === 'SMC'
         ? 'Institutional Smart Money Concepts (SMC)'
         : strat === 'SAIYAN_OCC'
-        ? 'Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
-        : 'Hybrid Confluence (SMC + Saiyan OCC)';
-    setActiveToast({
+          ? 'Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
+          : 'Hybrid Confluence (SMC + Saiyan OCC)';
+    showToast({
       title: '⚡ Strategy Mode Switched',
       message: `Active Engine: ${label}`,
       type: 'info',
     });
-    setTimeout(() => setActiveToast(null), 5000);
     fetchSignals(selectedTimeframe, strat);
+  };
+
+  const handleSelectTab = (tab: NavTab) => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('quant_active_tab', tab);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
   const fetchCandles = async (sym: string, tf: string) => {
     try {
-      const res = await fetch(`http://localhost:3001/api/candles/chart-data?symbol=${sym}&timeframe=${tf}&limit=200`);
+      const res = await fetch(
+        `http://localhost:3001/api/candles/chart-data?symbol=${sym}&timeframe=${tf}&limit=200`,
+      );
       const data = await res.json();
       if (data && Array.isArray(data.candles)) {
         const parsedCandles: ICandle[] = data.candles.map((c: any) => ({
@@ -126,89 +234,30 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchSignals(selectedTimeframe, selectedStrategy);
     fetchCandles(selectedSymbol, selectedTimeframe);
-  }, [selectedSymbol, selectedTimeframe, selectedStrategy]);
-
-  // 2. Real-Time WebSocket Connection
-  useEffect(() => {
-    const socket: Socket = io('http://localhost:3001', { transports: ['websocket'] });
-
-    socket.on('connect', () => {
-      setIsConnected(true);
-      socket.emit('subscribe:instrument', { symbol: selectedSymbol });
-    });
-
-    socket.on('disconnect', () => setIsConnected(false));
-
-    socket.on(WS_EVENTS.CANDLE_UPDATED, (data) => {
-      if (!data?.symbol) return;
-      const sym = data.symbol;
-      const newPrice = Number(data.price || data.close);
-
-      setTickers((prev) => {
-        if (!prev[sym] || prev[sym].price === newPrice) return prev;
-        const current = prev[sym];
-        const changeAmount = Number(data.changeAmount ?? current.changeAmount);
-        const changePercent = Number(data.changePercent ?? current.changePercent);
-
-        return {
-          ...prev,
-          [sym]: {
-            ...current,
-            price: newPrice,
-            changeAmount,
-            changePercent,
-            high: Math.max(current.high, newPrice),
-            low: Math.min(current.low, newPrice),
-          },
-        };
-      });
-    });
-
-    socket.on(WS_EVENTS.SIGNAL_GENERATED, (newSignal: ISignalSetup) => {
-      setSignals((prev) => {
-        const filtered = prev.filter((s) => s.symbol !== newSignal.symbol);
-        return [newSignal, ...filtered];
-      });
-      if (newSignal.symbol === selectedSymbol) setSelectedSignal(newSignal);
-      setActiveToast({
-        title: `🔥 A+ SMC Signal Generated: ${newSignal.symbol}`,
-        message: `${newSignal.direction} Setup @ ₹${newSignal.entryZone.optimal.toFixed(2)} | Score: ${newSignal.score}/100`,
-        type: 'signal',
-      });
-      setTimeout(() => setActiveToast(null), 7000);
-    });
-
-    return () => { socket.disconnect(); };
-  }, [selectedSymbol]);
+    subscribeToSymbol(selectedSymbol);
+  }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
 
   const handleSelectSymbol = (rawSym: string) => {
     const s = (rawSym || '').toUpperCase();
-    const sym = s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN' ? 'BTCUSDT' : s;
+    const sym =
+      s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN'
+        ? 'BTCUSDT'
+        : s === 'GOLD' || s === 'XAU' || s === 'XAU/USD' || s === 'SPOTGOLD'
+          ? 'XAUUSD'
+          : s;
     setSelectedSymbol(sym);
     if (typeof window !== 'undefined') {
       localStorage.setItem('quant_selected_symbol', sym);
     }
-    setCandles([]); // Clear previous symbol's candles immediately to avoid stale price bleed
+    setCandles(getInitialCandlesForSymbol(sym)); // Immediate rich fallback to prevent blank chart
     const signalForSymbol = signals.find((item) => item.symbol === sym);
     setSelectedSignal(signalForSymbol || null);
     fetchCandles(sym, selectedTimeframe);
   };
 
   const handleTriggerScan = async () => {
-    try {
-      setIsScanning(true);
-      const res = await fetch('http://localhost:3001/api/scanner/scan', { method: 'POST' });
-      const data = await res.json();
-      if (data && Array.isArray(data.signals)) {
-        setSignals(data.signals);
-        const current = data.signals.find((s: any) => s.symbol === selectedSymbol);
-        if (current) setSelectedSignal(current);
-      }
-    } catch (e) {
-      console.error('Scan failed:', e);
-    } finally {
-      setIsScanning(false);
-    }
+    await triggerScan();
+    await fetchSignals(selectedTimeframe, selectedStrategy);
   };
 
   const handleTradeClosedAlert = (trade: any) => {
@@ -222,12 +271,27 @@ export default function DashboardPage() {
     fetchSignals(selectedTimeframe);
   };
 
-  const defaultPrice = selectedSymbol === 'BTCUSDT' ? 79230.0 : selectedSymbol === 'BANKNIFTY' ? 57496.3 : 24175.65;
+  const defaultPrice =
+    selectedSymbol === 'BTCUSDT'
+      ? 79230.0
+      : selectedSymbol === 'XAUUSD' || selectedSymbol === 'GOLD'
+        ? 2885.5
+        : selectedSymbol === 'BANKNIFTY'
+          ? 57496.3
+          : 24175.65;
   const currentTicker = tickers[selectedSymbol] || {
     symbol: selectedSymbol,
-    price: candles.length > 0 && ((selectedSymbol === 'BTCUSDT' && candles[candles.length - 1].close > 50000) || (selectedSymbol !== 'BTCUSDT' && candles[candles.length - 1].close < 60000))
-      ? candles[candles.length - 1].close
-      : defaultPrice,
+    price:
+      candles.length > 0 &&
+      ((selectedSymbol === 'BTCUSDT' && candles[candles.length - 1].close > 50000) ||
+        (selectedSymbol === 'XAUUSD' &&
+          candles[candles.length - 1].close > 2000 &&
+          candles[candles.length - 1].close < 4000) ||
+        (selectedSymbol !== 'BTCUSDT' &&
+          selectedSymbol !== 'XAUUSD' &&
+          candles[candles.length - 1].close < 60000))
+        ? candles[candles.length - 1].close
+        : defaultPrice,
     changePercent: 0,
     changeAmount: 0,
     high: 0,
@@ -239,16 +303,28 @@ export default function DashboardPage() {
   const isPositionActive = useMemo(() => {
     if (!selectedSignal) return false;
     const direction = selectedSignal.direction || 'BEARISH';
-    if (typeof window !== 'undefined' && localStorage.getItem(`quant_pos_cut_${selectedSymbol}_${direction}`) === 'true') {
+    if (
+      typeof window !== 'undefined' &&
+      localStorage.getItem(`quant_pos_cut_${selectedSymbol}_${direction}`) === 'true'
+    ) {
       return false;
     }
-    if (selectedSignal.state === 'SL_HIT' || selectedSignal.state === 'TP2_HIT' || selectedSignal.state === 'TP1_HIT' || selectedSignal.state === 'TP3_HIT') {
+    if (
+      selectedSignal.state === 'SL_HIT' ||
+      selectedSignal.state === 'TP2_HIT' ||
+      selectedSignal.state === 'TP1_HIT' ||
+      selectedSignal.state === 'TP3_HIT'
+    ) {
       return false;
     }
-    const currentCMP = currentTicker.price || (candles.length > 0 ? candles[candles.length - 1].close : selectedSignal.entryZone.optimal);
+    const currentCMP =
+      currentTicker.price ||
+      (candles.length > 0 ? candles[candles.length - 1].close : selectedSignal.entryZone.optimal);
     if (!currentCMP || !selectedSignal.stopLoss) return true;
     const isBull = selectedSignal.direction === 'BULLISH';
-    const isSLReached = isBull ? currentCMP <= selectedSignal.stopLoss : currentCMP >= selectedSignal.stopLoss;
+    const isSLReached = isBull
+      ? currentCMP <= selectedSignal.stopLoss
+      : currentCMP >= selectedSignal.stopLoss;
     if (isSLReached) return false;
 
     const tp2 = selectedSignal.takeProfits?.tp2;
@@ -265,7 +341,7 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
       <Header
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
         isConnected={isConnected}
         onTriggerScan={handleTriggerScan}
         isScanning={isScanning}
@@ -290,8 +366,8 @@ export default function DashboardPage() {
               activeToast.type === 'danger'
                 ? 'bg-rose-950/90 border-rose-500/80 text-rose-200'
                 : activeToast.type === 'success'
-                ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
-                : 'bg-slate-900/90 border-cyan-500/80 text-cyan-200'
+                  ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
+                  : 'bg-slate-900/90 border-cyan-500/80 text-cyan-200'
             }`}
           >
             <div className="flex items-start gap-3">
@@ -312,7 +388,7 @@ export default function DashboardPage() {
       )}
 
       {/* Main Content Workspace */}
-      <main className="flex-1 p-5 max-w-7xl mx-auto w-full space-y-5">
+      <main className="flex-1 p-3 sm:p-5 max-w-[1720px] mx-auto w-full space-y-5">
         {/* TAB 1: LIVE TERMINAL */}
         {activeTab === 'terminal' && (
           <div className="space-y-5">
@@ -327,8 +403,8 @@ export default function DashboardPage() {
                   {selectedStrategy === 'SMC'
                     ? '🏛️ Institutional Smart Money Concepts (SMC)'
                     : selectedStrategy === 'SAIYAN_OCC'
-                    ? '⚡ Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
-                    : '🛡️ Hybrid Confluence (SMC + Saiyan OCC Momentum)'}
+                      ? '⚡ Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
+                      : '🛡️ Hybrid Confluence (SMC + Saiyan OCC Momentum)'}
                 </span>
               </div>
 
@@ -418,6 +494,13 @@ export default function DashboardPage() {
               }}
             />
 
+            {/* Quant Intelligence Engine Panel */}
+            <QuantIntelligencePanel
+              currentSymbol={selectedSymbol}
+              activeSignal={selectedSignal}
+              livePrice={currentTicker.price}
+            />
+
             {/* Middle Row: Reasoning Card & Risk Management Widget */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
               <ReasoningCard signal={selectedSignal} />
@@ -436,10 +519,29 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* TAB: AI TRADE LEARNING & EXPECTANCY COMMAND CENTER */}
-        {activeTab === 'learning' && (
+        {/* TAB: QUANT INTELLIGENCE FULL COMMAND CENTER */}
+        {activeTab === 'quant' && (
           <div className="space-y-5">
+            <QuantIntelligencePanel
+              currentSymbol={selectedSymbol}
+              activeSignal={selectedSignal}
+              livePrice={currentTicker.price}
+            />
+          </div>
+        )}
+
+        {/* TAB: AI TRADE LEARNING & SELF-IMPROVING ENGINE COMMAND CENTER */}
+        {activeTab === 'learning' && (
+          <div className="space-y-6">
+            <LearningEngineDashboard />
             <AITradeLearningWidget initialSymbol={selectedSymbol} />
+          </div>
+        )}
+
+        {/* TAB: QUANT RESEARCH LAB & SELF-IMPROVEMENT SUITE */}
+        {activeTab === 'research' && (
+          <div className="space-y-6">
+            <ResearchStudio />
           </div>
         )}
 
@@ -447,8 +549,18 @@ export default function DashboardPage() {
         {activeTab === 'options' && (
           <div className="space-y-5">
             <OptionsSuiteView
-              initialSymbol={selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY'}
-              liveSpotPrice={tickers[selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY']?.price || currentTicker.price}
+              initialSymbol={
+                selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY'
+                  ? selectedSymbol
+                  : 'NIFTY'
+              }
+              liveSpotPrice={
+                tickers[
+                  selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY'
+                    ? selectedSymbol
+                    : 'NIFTY'
+                ]?.price || currentTicker.price
+              }
             />
           </div>
         )}
@@ -527,15 +639,12 @@ export default function DashboardPage() {
               onSelectSignal={(s) => {
                 setSelectedSymbol(s.symbol);
                 setSelectedSignal(s);
-                setActiveTab('terminal');
+                handleSelectTab('terminal');
               }}
               onRefreshScan={handleTriggerScan}
               isScanning={isScanning}
             />
-            <MTFHeatmap
-              selectedSymbol={selectedSymbol}
-              onSelectSymbol={handleSelectSymbol}
-            />
+            <MTFHeatmap selectedSymbol={selectedSymbol} onSelectSymbol={handleSelectSymbol} />
           </div>
         )}
 
@@ -559,26 +668,43 @@ export default function DashboardPage() {
       <OptionChainModal
         isOpen={isOptionChainModalOpen}
         onClose={() => setIsOptionChainModalOpen(false)}
-        symbol={selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY'}
-        spotPrice={tickers[selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY']?.price || currentTicker.price}
+        symbol={
+          selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY'
+        }
+        spotPrice={
+          tickers[
+            selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY' ? selectedSymbol : 'NIFTY'
+          ]?.price || currentTicker.price
+        }
       />
 
       {/* Multi-Channel Alerts Manager Modal */}
-      <AlertsManagerModal
-        isOpen={isAlertsModalOpen}
-        onClose={() => setIsAlertsModalOpen(false)}
-      />
+      <AlertsManagerModal isOpen={isAlertsModalOpen} onClose={() => setIsAlertsModalOpen(false)} />
 
-      {/* AI SMC Copilot & Daily Briefing Modal */}
-      <AICopilotModal
-        isOpen={isAICopilotModalOpen}
-        onClose={() => setIsAICopilotModalOpen(false)}
-        selectedSymbol={selectedSymbol}
-      />
+      {/* Toast Notification */}
+      {(streamToast || activeToast) && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm w-full bg-[#111827]/95 backdrop-blur-md border border-cyan-500/50 rounded-xl p-4 shadow-2xl flex items-start gap-3 animate-in slide-in-from-bottom-5 font-mono">
+          <Zap className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <h4 className="text-xs font-bold text-white uppercase">
+              {(streamToast || activeToast)?.title}
+            </h4>
+            <p className="text-xs text-slate-300 mt-0.5">{(streamToast || activeToast)?.message}</p>
+          </div>
+        </div>
+      )}
 
       <footer className="border-t border-slate-800/80 bg-[#0B0F19] px-5 py-3 text-center text-xs text-slate-500 font-mono">
         QUANT INTELLIGENCE PLATFORM • REAL-TIME MARKET STRUCTURE & SMC ENGINE • NOT FINANCIAL ADVICE
       </footer>
     </div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <MarketStreamProvider>
+      <DashboardContent />
+    </MarketStreamProvider>
   );
 }

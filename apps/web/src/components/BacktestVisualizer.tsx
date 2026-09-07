@@ -1,7 +1,15 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Play, TrendingUp, Award, BarChart3, AlertCircle, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import {
+  Play,
+  TrendingUp,
+  Award,
+  BarChart3,
+  AlertCircle,
+  ArrowUpRight,
+  ArrowDownRight,
+} from 'lucide-react';
 
 interface BacktestVisualizerProps {
   initialSymbol?: string;
@@ -66,8 +74,13 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
       <div className="w-full overflow-hidden bg-slate-900/90 border border-slate-800 rounded-lg p-3">
         <div className="flex justify-between text-[11px] text-slate-400 mb-2 font-mono">
           <span>Starting: ₹{initialCapital.toLocaleString()}</span>
-          <span className={results.netPnL >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-            Final: ₹{results.finalEquity?.toLocaleString()} ({results.netPnL >= 0 ? '+' : ''}{results.netPnL})
+          <span
+            className={
+              results.netPnL >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'
+            }
+          >
+            Final: ₹{results.finalEquity?.toLocaleString()} ({results.netPnL >= 0 ? '+' : ''}
+            {results.netPnL})
           </span>
         </div>
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-32 overflow-visible">
@@ -77,10 +90,7 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
               <stop offset="100%" stopColor="#10B981" stopOpacity="0.0" />
             </linearGradient>
           </defs>
-          <polygon
-            points={`0,${height} ${points} ${width},${height}`}
-            fill="url(#equityGrad)"
-          />
+          <polygon points={`0,${height} ${points} ${width},${height}`} fill="url(#equityGrad)" />
           <polyline
             fill="none"
             stroke="#10B981"
@@ -100,9 +110,7 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
           <BarChart3 className="w-4 h-4 text-cyan-400" />
           Quantitative Historical Backtester
         </h3>
-        <span className="text-[10px] text-slate-400 font-mono">
-          Zero Look-Ahead Simulation
-        </span>
+        <span className="text-[10px] text-slate-400 font-mono">Zero Look-Ahead Simulation</span>
       </div>
 
       {/* Inputs Bar */}
@@ -117,6 +125,7 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
             <option value="NIFTY">NIFTY 50</option>
             <option value="BANKNIFTY">BANKNIFTY</option>
             <option value="BTCUSDT">BTCUSDT</option>
+            <option value="XAUUSD">XAUUSD (Gold Spot)</option>
             <option value="RELIANCE">RELIANCE</option>
             <option value="HDFCBANK">HDFCBANK</option>
             <option value="INFY">INFY</option>
@@ -176,19 +185,27 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-center text-xs">
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Win Rate</span>
-              <span className="text-sm font-bold text-emerald-400 font-mono">{results.winRate}%</span>
-              <span className="text-[9px] text-slate-500 block">{results.winningTrades}W / {results.losingTrades}L</span>
+              <span className="text-sm font-bold text-emerald-400 font-mono">
+                {results.winRate}%
+              </span>
+              <span className="text-[9px] text-slate-500 block">
+                {results.winningTrades}W / {results.losingTrades}L
+              </span>
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Profit Factor</span>
-              <span className="text-sm font-bold text-cyan-400 font-mono">{results.profitFactor}</span>
+              <span className="text-sm font-bold text-cyan-400 font-mono">
+                {results.profitFactor}
+              </span>
               <span className="text-[9px] text-slate-500 block">Gross ratio</span>
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Net PnL</span>
-              <span className={`text-sm font-bold font-mono ${results.netPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <span
+                className={`text-sm font-bold font-mono ${results.netPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+              >
                 ₹{results.netPnL}
               </span>
               <span className="text-[9px] text-slate-500 block">{results.totalTrades} trades</span>
@@ -196,19 +213,25 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
 
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Avg R-Multiple</span>
-              <span className="text-sm font-bold text-indigo-400 font-mono">+{results.averageR}R</span>
+              <span className="text-sm font-bold text-indigo-400 font-mono">
+                +{results.averageR}R
+              </span>
               <span className="text-[9px] text-slate-500 block">per trade</span>
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Max Drawdown</span>
-              <span className="text-sm font-bold text-rose-400 font-mono">{results.maxDrawdownPercent}%</span>
+              <span className="text-sm font-bold text-rose-400 font-mono">
+                {results.maxDrawdownPercent}%
+              </span>
               <span className="text-[9px] text-slate-500 block">Peak-to-trough</span>
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-lg">
               <span className="text-[10px] text-slate-500 uppercase block">Expectancy</span>
-              <span className="text-sm font-bold text-amber-400 font-mono">{results.expectancy}</span>
+              <span className="text-sm font-bold text-amber-400 font-mono">
+                {results.expectancy}
+              </span>
               <span className="text-[9px] text-slate-500 block">Math edge</span>
             </div>
           </div>
@@ -236,17 +259,27 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-800/50">
                   {results.trades.map((tr: any) => {
-                    const margin = tr.marginRequired || Number(((tr.entryPrice * (tr.positionSize || 1)) / 5).toFixed(2));
+                    const margin =
+                      tr.marginRequired ||
+                      Number(((tr.entryPrice * (tr.positionSize || 1)) / 5).toFixed(2));
                     return (
                       <tr key={tr.id} className="hover:bg-slate-800/30">
                         <td className="py-2 text-slate-400 font-mono">{tr.id}</td>
                         <td className="py-2">
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${tr.direction === 'BULLISH' ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'}`}>
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${tr.direction === 'BULLISH' ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-400 bg-rose-500/10'}`}
+                          >
                             {tr.direction === 'BULLISH' ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="py-2 text-slate-400 text-[11px] font-mono">
-                          {new Date(tr.entryTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        <td
+                          className="py-2 text-slate-400 text-[11px] font-mono"
+                          suppressHydrationWarning
+                        >
+                          {new Date(tr.entryTime).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
                         </td>
                         <td className="py-2 font-mono text-cyan-300 font-bold">
                           {tr.positionSize || 1}
@@ -256,8 +289,12 @@ export const BacktestVisualizer: React.FC<BacktestVisualizerProps> = ({
                         </td>
                         <td className="py-2 font-mono text-white">{tr.entryPrice}</td>
                         <td className="py-2 font-mono text-white">{tr.exitPrice}</td>
-                        <td className="py-2 font-mono font-bold text-cyan-400">{tr.pnlRMultiple > 0 ? `+${tr.pnlRMultiple}R` : `${tr.pnlRMultiple}R`}</td>
-                        <td className={`py-2 text-right font-mono font-bold ${tr.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        <td className="py-2 font-mono font-bold text-cyan-400">
+                          {tr.pnlRMultiple > 0 ? `+${tr.pnlRMultiple}R` : `${tr.pnlRMultiple}R`}
+                        </td>
+                        <td
+                          className={`py-2 text-right font-mono font-bold ${tr.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                        >
                           {tr.pnl >= 0 ? `+₹${tr.pnl}` : `-₹${Math.abs(tr.pnl)}`}
                         </td>
                         <td className="py-2 text-right">

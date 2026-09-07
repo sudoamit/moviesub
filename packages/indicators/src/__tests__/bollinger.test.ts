@@ -2,10 +2,7 @@ import { calculateBollingerBands } from '../bollinger';
 
 describe('calculateBollingerBands', () => {
   it('should calculate upper, middle, and lower bands correctly', () => {
-    const prices = [
-      10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-      20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
-    ];
+    const prices = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29];
     const bb = calculateBollingerBands(prices, 20, 2);
 
     expect(bb.middle[19]).toBeCloseTo(19.5); // Average of 10..29

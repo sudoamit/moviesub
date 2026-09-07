@@ -117,18 +117,25 @@ export const AlgoStrategyBuilder: React.FC = () => {
                   REAL-TIME AUTOPILOT
                 </span>
               </h3>
-              <p className="text-[11px] text-slate-400">Build custom Smart Money Concept logic and auto-execute paper orders</p>
+              <p className="text-[11px] text-slate-400">
+                Build custom Smart Money Concept logic and auto-execute paper orders
+              </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 text-xs">
             <span className="text-slate-400">Active Bots Running:</span>
-            <strong className="text-emerald-400">{bots.filter((b) => b.isActive).length} / {bots.length}</strong>
+            <strong className="text-emerald-400">
+              {bots.filter((b) => b.isActive).length} / {bots.length}
+            </strong>
           </div>
         </div>
 
         {/* Visual Strategy Composer Form */}
-        <form onSubmit={handleCreateBot} className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl space-y-4">
+        <form
+          onSubmit={handleCreateBot}
+          className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl space-y-4"
+        >
           <div className="flex items-center gap-2 text-xs font-bold text-slate-300 border-b border-slate-800/80 pb-2">
             <Plus className="w-4 h-4 text-cyan-400" />
             <span>COMPOSE NEW ALGORITHMIC EXECUTION RULE:</span>
@@ -136,7 +143,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">STRATEGY NAME (OPTIONAL):</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                STRATEGY NAME (OPTIONAL):
+              </label>
               <input
                 type="text"
                 value={botName}
@@ -147,7 +156,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">TARGET ASSET / SYMBOL:</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                TARGET ASSET / SYMBOL:
+              </label>
               <select
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
@@ -156,6 +167,7 @@ export const AlgoStrategyBuilder: React.FC = () => {
                 <option value="NIFTY">NIFTY 50 Index</option>
                 <option value="BANKNIFTY">BANKNIFTY Index</option>
                 <option value="BTCUSDT">BTCUSDT Crypto</option>
+                <option value="XAUUSD">XAUUSD Gold Spot</option>
                 <option value="RELIANCE">RELIANCE Industries</option>
                 <option value="HDFCBANK">HDFC Bank Ltd.</option>
                 <option value="INFY">INFOSYS Ltd.</option>
@@ -163,7 +175,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">DIRECTION BIAS:</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                DIRECTION BIAS:
+              </label>
               <select
                 value={direction}
                 onChange={(e) => setDirection(e.target.value as any)}
@@ -176,7 +190,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">SMC TRIGGER REQUIREMENT:</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                SMC TRIGGER REQUIREMENT:
+              </label>
               <select
                 value={smcCondition}
                 onChange={(e) => setSmcCondition(e.target.value)}
@@ -192,7 +208,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-1">
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">MIN CONFLUENCE SCORE:</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                MIN CONFLUENCE SCORE:
+              </label>
               <select
                 value={minScore}
                 onChange={(e) => setMinScore(Number(e.target.value))}
@@ -206,15 +224,23 @@ export const AlgoStrategyBuilder: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-[10px] text-slate-400 font-bold mb-1">AUTO ORDER SIZE:</label>
+              <label className="block text-[10px] text-slate-400 font-bold mb-1">
+                AUTO ORDER SIZE:
+              </label>
               <select
                 value={lots}
                 onChange={(e) => setLots(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-cyan-500"
               >
-                <option value={1}>1 Lot ({symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : 100} Qty)</option>
-                <option value={2}>2 Lots ({symbol === 'NIFTY' ? 130 : symbol === 'BANKNIFTY' ? 30 : 200} Qty)</option>
-                <option value={5}>5 Lots ({symbol === 'NIFTY' ? 325 : symbol === 'BANKNIFTY' ? 75 : 500} Qty)</option>
+                <option value={1}>
+                  1 Lot ({symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : 100} Qty)
+                </option>
+                <option value={2}>
+                  2 Lots ({symbol === 'NIFTY' ? 130 : symbol === 'BANKNIFTY' ? 30 : 200} Qty)
+                </option>
+                <option value={5}>
+                  5 Lots ({symbol === 'NIFTY' ? 325 : symbol === 'BANKNIFTY' ? 75 : 500} Qty)
+                </option>
               </select>
             </div>
 
@@ -279,7 +305,11 @@ export const AlgoStrategyBuilder: React.FC = () => {
                     }`}
                     title={bot.isActive ? 'Pause Bot' : 'Activate Bot'}
                   >
-                    {bot.isActive ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                    {bot.isActive ? (
+                      <Pause className="w-3.5 h-3.5" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
                   </button>
                 </div>
 

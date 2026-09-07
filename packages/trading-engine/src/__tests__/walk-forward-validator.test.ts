@@ -15,7 +15,7 @@ function createTimeOrderedDataset(count: number): TrainingExample[] {
   for (let i = 0; i < count; i++) {
     const smcScore = 0.3 + (i % 6) * 0.12;
     const obStrength = 0.4 + (i % 4) * 0.15;
-    const mtfAlignment = (i % 3 === 0) ? 0.9 : 0.2;
+    const mtfAlignment = i % 3 === 0 ? 0.9 : 0.2;
 
     const features: TradeFeatureVector = {
       smcScore,
@@ -37,7 +37,7 @@ function createTimeOrderedDataset(count: number): TrainingExample[] {
       dayOfWeek: 0.3,
     };
 
-    const isWin = (smcScore + obStrength + mtfAlignment > 1.8) ? 1 : 0;
+    const isWin = smcScore + obStrength + mtfAlignment > 1.8 ? 1 : 0;
 
     const featureArray = [
       features.smcScore,
@@ -110,7 +110,7 @@ describe('PHASE 4: Walk-Forward Validation & Model Promotion', () => {
       const result = WalkForwardValidator.runWalkForward(
         dataset,
         () => new TradePredictionModel('v1.0.0', { maxEpochs: 40 }),
-        3
+        3,
       );
 
       expect(result.folds.length).toBe(3);
@@ -138,15 +138,23 @@ describe('PHASE 4: Walk-Forward Validation & Model Promotion', () => {
         outOfSampleRatio: 0.2,
       });
 
-      const baseline = new TradePredictionModel('v1.0.0-baseline', {}, new Array(17).fill(0.0), 0.0);
-      const candidate = new TradePredictionModel('v1.1.0-candidate', { learningRate: 0.1, maxEpochs: 60 });
+      const baseline = new TradePredictionModel(
+        'v1.0.0-baseline',
+        {},
+        new Array(17).fill(0.0),
+        0.0,
+      );
+      const candidate = new TradePredictionModel('v1.1.0-candidate', {
+        learningRate: 0.1,
+        maxEpochs: 60,
+      });
       candidate.train(splits.train);
 
       const decision = ModelPromotionEngine.evaluatePromotion(
         candidate,
         splits.outOfSample,
         baseline,
-        { minSampleSize: 15, maxOutOfSampleLogLoss: 0.693 }
+        { minSampleSize: 15, maxOutOfSampleLogLoss: 0.693 },
       );
 
       expect(decision.decisionStatus).toBe('PROMOTED');
@@ -158,34 +166,42 @@ describe('PHASE 4: Walk-Forward Validation & Model Promotion', () => {
       const smallData = createTimeOrderedDataset(15);
       const candidate = new TradePredictionModel('v1.1.0-candidate');
 
-      const decision = ModelPromotionEngine.evaluatePromotion(
-        candidate,
-        smallData,
-        null,
-        { minSampleSize: 30 }
-      );
+      const decision = ModelPromotionEngine.evaluatePromotion(candidate, smallData, null, {
+        minSampleSize: 30,
+      });
 
       expect(decision.decisionStatus).toBe('INSUFFICIENT_DATA');
       expect(decision.isPromoted).toBe(false);
-      expect(decision.reasons.some((r) => r.includes('Insufficient out-of-sample sample size'))).toBe(true);
+      expect(
+        decision.reasons.some((r) => r.includes('Insufficient out-of-sample sample size')),
+      ).toBe(true);
     });
 
     it('rejects candidate model when out-of-sample log loss is worse than baseline', () => {
       const fullData = createTimeOrderedDataset(80);
-      const splits = ChronologicalSplitter.split(fullData, { trainRatio: 0.6, validationRatio: 0.2, outOfSampleRatio: 0.2 });
+      const splits = ChronologicalSplitter.split(fullData, {
+        trainRatio: 0.6,
+        validationRatio: 0.2,
+        outOfSampleRatio: 0.2,
+      });
 
       // Baseline with good weights
       const baseline = new TradePredictionModel('v1.0.0-good');
       baseline.train(splits.train);
 
       // Candidate with deliberately corrupted weights
-      const badCandidate = new TradePredictionModel('v1.1.0-corrupt', {}, new Array(17).fill(-5.0), -2.0);
+      const badCandidate = new TradePredictionModel(
+        'v1.1.0-corrupt',
+        {},
+        new Array(17).fill(-5.0),
+        -2.0,
+      );
 
       const decision = ModelPromotionEngine.evaluatePromotion(
         badCandidate,
         splits.outOfSample,
         baseline,
-        { minSampleSize: 10 }
+        { minSampleSize: 10 },
       );
 
       expect(decision.decisionStatus).toBe('REJECTED');

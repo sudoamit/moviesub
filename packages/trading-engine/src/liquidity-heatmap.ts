@@ -90,20 +90,31 @@ export class LiquidityHeatmapEngine {
           densityScore,
           intensityColor: color,
           touchCount: totalTouches,
-          label: isBSL ? `🔥 BSL Cluster (${totalTouches} touches)` : `💧 SSL Cluster (${totalTouches} touches)`,
+          label: isBSL
+            ? `🔥 BSL Cluster (${totalTouches} touches)`
+            : `💧 SSL Cluster (${totalTouches} touches)`,
           minPrice: Number(bucketLow.toFixed(2)),
           maxPrice: Number(bucketHigh.toFixed(2)),
         });
       }
     }
 
-    const topBSLClusters = heatBands.filter((b) => b.type === 'BSL_HEAT').sort((a, b) => b.densityScore - a.densityScore).slice(0, 4);
-    const topSSLClusters = heatBands.filter((b) => b.type === 'SSL_HEAT').sort((a, b) => b.densityScore - a.densityScore).slice(0, 4);
+    const topBSLClusters = heatBands
+      .filter((b) => b.type === 'BSL_HEAT')
+      .sort((a, b) => b.densityScore - a.densityScore)
+      .slice(0, 4);
+    const topSSLClusters = heatBands
+      .filter((b) => b.type === 'SSL_HEAT')
+      .sort((a, b) => b.densityScore - a.densityScore)
+      .slice(0, 4);
 
     return {
       symbol: 'NIFTY',
       currentPrice,
-      totalRestingLiquidityScore: Math.min(100, heatBands.reduce((acc, h) => acc + h.densityScore, 0) / 4),
+      totalRestingLiquidityScore: Math.min(
+        100,
+        heatBands.reduce((acc, h) => acc + h.densityScore, 0) / 4,
+      ),
       topBSLClusters,
       topSSLClusters,
       heatBands,

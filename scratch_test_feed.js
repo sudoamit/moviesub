@@ -1,4 +1,6 @@
-const { RealLiveMarketDataProvider } = require('./packages/shared/dist/market-data/real-live-market-provider.js');
+const {
+  RealLiveMarketDataProvider,
+} = require('./packages/shared/dist/market-data/real-live-market-provider.js');
 
 async function testFetchRealCandles() {
   const provider = new RealLiveMarketDataProvider();
@@ -13,7 +15,9 @@ async function testFetchRealCandles() {
       console.log(`Received: ${candles.length} candles`);
       if (candles.length > 0) {
         const last = candles[candles.length - 1];
-        console.log(`Latest Candle: Time: ${last.timestamp.toISOString()}, Open: ${last.open}, High: ${last.high}, Low: ${last.low}, Close: ${last.close}`);
+        console.log(
+          `Latest Candle: Time: ${last.timestamp.toISOString()}, Open: ${last.open}, High: ${last.high}, Low: ${last.low}, Close: ${last.close}`,
+        );
       }
     } catch (e) {
       console.error(`Error for ${sym}:`, e.message);

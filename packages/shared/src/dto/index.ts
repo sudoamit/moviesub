@@ -1,12 +1,4 @@
-import {
-  IsEnum,
-  IsNumber,
-  IsOptional,
-  IsString,
-  IsDateString,
-  Min,
-  Max,
-} from 'class-validator';
+import { IsEnum, IsNumber, IsOptional, IsString, IsDateString, Min, Max } from 'class-validator';
 import { Direction, MarketRegimeType, SignalGrade, SignalState, Timeframe } from '../enums';
 
 export class FilterScannerDto {

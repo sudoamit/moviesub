@@ -11,9 +11,11 @@ async function checkSignalsTable() {
   list.forEach((s, idx) => {
     console.log('----------------------------------------------------');
     console.log(
-      `${idx + 1}. [${s.instrument?.symbol || s.instrumentId}] ${s.direction} | State: ${s.state} | Entry: ₹${s.entryPrice} | SL: ₹${s.stopLoss} | Exit: ₹${s.exitPrice} | PnL: ₹${s.pnlAmount} (${s.pnlRMultiple}R)`
+      `${idx + 1}. [${s.instrument?.symbol || s.instrumentId}] ${s.direction} | State: ${s.state} | Entry: ₹${s.entryPrice} | SL: ₹${s.stopLoss} | Exit: ₹${s.exitPrice} | PnL: ₹${s.pnlAmount} (${s.pnlRMultiple}R)`,
     );
-    console.log(`   Activated: ${s.activatedAt?.toISOString()} | Closed: ${s.closedAt?.toISOString()} | Created: ${s.createdAt?.toISOString()}`);
+    console.log(
+      `   Activated: ${s.activatedAt?.toISOString()} | Closed: ${s.closedAt?.toISOString()} | Created: ${s.createdAt?.toISOString()}`,
+    );
     console.log(`   Reasons:`, JSON.stringify(s.reasonsJson));
   });
 

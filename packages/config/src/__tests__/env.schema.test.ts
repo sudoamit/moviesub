@@ -8,7 +8,9 @@ describe('EnvSchema', () => {
     };
 
     const config = validateEnv(mockEnv);
-    expect(config.DATABASE_URL).toBe('postgresql://postgres:postgrespassword@localhost:5433/trading_platform');
+    expect(config.DATABASE_URL).toBe(
+      'postgresql://postgres:postgrespassword@localhost:5433/trading_platform',
+    );
     expect(config.REDIS_HOST).toBe('localhost');
     expect(config.REDIS_PORT).toBe(6380);
     expect(config.PORT).toBe(3001);

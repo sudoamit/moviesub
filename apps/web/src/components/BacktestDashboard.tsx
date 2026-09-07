@@ -37,7 +37,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
   const [results, setResults] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const symbols = ['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'RELIANCE', 'HDFCBANK', 'INFY'];
+  const symbols = ['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'XAUUSD', 'RELIANCE', 'HDFCBANK', 'INFY'];
   const timeframes = ['5m', '15m', '1h', '4h'];
 
   const runBacktest = async () => {
@@ -79,7 +79,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
   const pnl = results ? Number(results.netPnL || 0) : 0;
   const isProfitable = pnl >= 0;
   const roi = results && initialCapital > 0 ? ((pnl / initialCapital) * 100).toFixed(1) : '0.0';
-  const currSym = '₹';
+  const currSym = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD' ? '$' : '₹';
   const equityCurve: any[] = results?.equityCurve || results?.parametersJson?.equityCurve || [];
 
   return (
@@ -124,7 +124,10 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                     : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
                 }`}
               >
-                ₹{cap >= 100000 ? `${(cap / 100000).toFixed(cap % 100000 === 0 ? 0 : 1)}L` : `${cap / 1000}k`}
+                ₹
+                {cap >= 100000
+                  ? `${(cap / 100000).toFixed(cap % 100000 === 0 ? 0 : 1)}L`
+                  : `${cap / 1000}k`}
               </button>
             ))}
           </div>
@@ -240,7 +243,8 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                   isProfitable ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               >
-                {isProfitable ? '+' : ''}{currSym}
+                {isProfitable ? '+' : ''}
+                {currSym}
                 {pnl.toLocaleString(undefined, {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
@@ -298,9 +302,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
             <span className="text-xl font-black text-amber-300 block mt-1">
               {results.sharpeRatio ? Number(results.sharpeRatio).toFixed(2) : '2.15'}
             </span>
-            <span className="text-[10px] text-slate-400 block mt-0.5">
-              Risk-Adjusted Return
-            </span>
+            <span className="text-[10px] text-slate-400 block mt-0.5">Risk-Adjusted Return</span>
           </div>
 
           {/* 5. Max Drawdown */}
@@ -326,9 +328,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
               <TrendingUp className="w-4 h-4 text-emerald-400" />
               PORTFOLIO EQUITY GROWTH CURVE (CUMULATIVE RETURN)
             </h4>
-            <span className="text-xs font-bold text-emerald-400">
-              +{roi}% Strategy Growth
-            </span>
+            <span className="text-xs font-bold text-emerald-400">+{roi}% Strategy Growth</span>
           </div>
 
           {/* SVG Equity Curve */}
@@ -358,10 +358,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
 
                 return (
                   <>
-                    <polygon
-                      points={`0,100 ${points} 500,100`}
-                      fill="url(#equityGrad)"
-                    />
+                    <polygon points={`0,100 ${points} 500,100`} fill="url(#equityGrad)" />
                     <polyline
                       points={points}
                       fill="none"
@@ -401,7 +398,9 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                   <th className="py-2.5 px-3">Exit Price</th>
                   <th className="py-2.5 px-3 text-right">PnL ({currSym})</th>
                   <th className="py-2.5 px-3 text-right">R-Multiple</th>
-                  <th className="py-2.5 px-3 text-right text-emerald-400 font-bold">Balance ({currSym})</th>
+                  <th className="py-2.5 px-3 text-right text-emerald-400 font-bold">
+                    Balance ({currSym})
+                  </th>
                   <th className="py-2.5 px-3 text-right">Reason</th>
                 </tr>
               </thead>
@@ -433,7 +432,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                             {tr.direction}
                           </span>
                         </td>
-                        <td className="py-2 px-3 text-slate-300">
+                        <td className="py-2 px-3 text-slate-300" suppressHydrationWarning>
                           {new Date(tr.entryTime).toLocaleString('en-IN', {
                             day: '2-digit',
                             month: 'short',
@@ -442,26 +441,34 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                           })}
                         </td>
                         <td className="py-2 px-3 text-white font-bold">
-                          {currSym}{Number(tr.entryPrice).toFixed(2)}
+                          {currSym}
+                          {Number(tr.entryPrice).toFixed(2)}
                         </td>
                         <td className="py-2 px-3 text-cyan-300 font-bold">
-                          {tr.positionSize ? `${tr.positionSize} ${symbol === 'BTCUSDT' ? 'BTC' : 'Qty'}` : '1 Lot'}
+                          {tr.positionSize
+                            ? `${tr.positionSize} ${symbol === 'BTCUSDT' ? 'BTC' : symbol === 'XAUUSD' || symbol === 'GOLD' ? 'oz' : 'Qty'}`
+                            : '1 Lot'}
                         </td>
                         <td className="py-2 px-3 text-slate-300">
-                          {currSym}{marginDeployed.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          {currSym}
+                          {marginDeployed.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                         </td>
                         <td className="py-2 px-3 text-amber-400 font-bold">
-                          {currSym}{maxRiskAtSL.toFixed(2)}
+                          {currSym}
+                          {maxRiskAtSL.toFixed(2)}
                         </td>
                         <td className="py-2 px-3 text-white font-bold">
-                          {currSym}{Number(tr.exitPrice).toFixed(2)}
+                          {currSym}
+                          {Number(tr.exitPrice).toFixed(2)}
                         </td>
                         <td
                           className={`py-2 px-3 text-right font-black ${
                             isWin ? 'text-emerald-400' : 'text-rose-400'
                           }`}
                         >
-                          {isWin ? '+' : ''}{currSym}{Number(tr.pnl).toFixed(2)}
+                          {isWin ? '+' : ''}
+                          {currSym}
+                          {Number(tr.pnl).toFixed(2)}
                         </td>
                         <td
                           className={`py-2 px-3 text-right font-bold ${
@@ -471,7 +478,11 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
                           {Number(tr.pnlRMultiple).toFixed(2)}R
                         </td>
                         <td className="py-2 px-3 text-right font-black text-white">
-                          {currSym}{runningBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {currSym}
+                          {runningBalance.toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
                         </td>
                         <td className="py-2 px-3 text-right text-slate-400 text-[10px]">
                           {tr.exitReason}

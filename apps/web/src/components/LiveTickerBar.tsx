@@ -28,6 +28,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
   const assetConfig: { sym: string; name: string; tag: string }[] = [
     { sym: 'NIFTY', name: 'Nifty 50', tag: 'INDEX' },
     { sym: 'BANKNIFTY', name: 'Bank Nifty', tag: 'INDEX' },
+    { sym: 'XAUUSD', name: 'Gold Spot', tag: 'GOLD' },
     { sym: 'BTCUSDT', name: 'Bitcoin', tag: 'CRYPTO' },
     { sym: 'RELIANCE', name: 'Reliance Ind.', tag: 'EQUITY' },
     { sym: 'HDFCBANK', name: 'HDFC Bank', tag: 'EQUITY' },
@@ -64,7 +65,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
           }
 
           const isUp = item.changePercent >= 0;
-          const currency = '₹';
+          const currency = sym === 'XAUUSD' ? '$' : sym === 'BTCUSDT' ? '$' : '₹';
 
           return (
             <div
@@ -79,7 +80,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
               <div className="flex flex-col">
                 <div className="flex items-center gap-1">
                   <span className="font-black text-white">{sym}</span>
-                  <span className="text-[8px] text-slate-500 px-1 py-0.2 rounded bg-slate-950">
+                  <span className="text-[8px] text-slate-500 px-1 py-0.5 rounded bg-slate-950">
                     {tag}
                   </span>
                 </div>
@@ -88,7 +89,10 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
               <div className="flex items-baseline gap-1.5">
                 <span className="font-bold text-slate-100">
                   {currency}
-                  {item.price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {item.price?.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
                 </span>
 
                 <span

@@ -5,10 +5,14 @@ import { ISignalSetup } from '@quant/shared';
 export class WebhookDispatcher {
   private readonly logger = new Logger(WebhookDispatcher.name);
 
-  async dispatchWebhook(url: string, signal: ISignalSetup): Promise<{ success: boolean; status?: number }> {
-    const isDiscord = url.includes('discord.com/api/webhooks') || url.includes('discordapp.com/api/webhooks');
+  async dispatchWebhook(
+    url: string,
+    signal: ISignalSetup,
+  ): Promise<{ success: boolean; status?: number }> {
+    const isDiscord =
+      url.includes('discord.com/api/webhooks') || url.includes('discordapp.com/api/webhooks');
     const isBull = signal.direction === 'BULLISH';
-    const embedColor = isBull ? 0x10B981 : 0xF43F5E; // Emerald or Rose
+    const embedColor = isBull ? 0x10b981 : 0xf43f5e; // Emerald or Rose
 
     let payload: any;
 
@@ -22,18 +26,37 @@ export class WebhookDispatcher {
             description: signal.reasoning.summary,
             color: embedColor,
             fields: [
-              { name: 'Confluence Score', value: `**${signal.score}/100** (Grade ${signal.grade})`, inline: true },
+              {
+                name: 'Confluence Score',
+                value: `**${signal.score}/100** (Grade ${signal.grade})`,
+                inline: true,
+              },
               { name: 'Timeframe', value: `\`${signal.timeframe}\``, inline: true },
               { name: 'Risk/Reward', value: `**1:${signal.riskRewardRatios.rr2}**`, inline: true },
-              { name: 'Optimal Entry', value: `\`₹${signal.entryZone.optimal.toFixed(2)}\``, inline: true },
+              {
+                name: 'Optimal Entry',
+                value: `\`₹${signal.entryZone.optimal.toFixed(2)}\``,
+                inline: true,
+              },
               { name: 'Stop Loss', value: `\`₹${signal.stopLoss.toFixed(2)}\``, inline: true },
-              { name: 'Target 2 (2.5R)', value: `\`₹${signal.takeProfits.tp2.toFixed(2)}\``, inline: true },
-              { name: 'Confirmed SMC Confluences', value: (signal.reasoning.confirmedChecklist || []).slice(0, 3).map(c => `• ${c}`).join('\n') || '• Order block rejection confirmed' }
+              {
+                name: 'Target 2 (2.5R)',
+                value: `\`₹${signal.takeProfits.tp2.toFixed(2)}\``,
+                inline: true,
+              },
+              {
+                name: 'Confirmed SMC Confluences',
+                value:
+                  (signal.reasoning.confirmedChecklist || [])
+                    .slice(0, 3)
+                    .map((c) => `• ${c}`)
+                    .join('\n') || '• Order block rejection confirmed',
+              },
             ],
             footer: { text: 'Quant Intelligence Platform • Real-Time Market Structure' },
             timestamp: new Date().toISOString(),
-          }
-        ]
+          },
+        ],
       };
     } else {
       payload = {

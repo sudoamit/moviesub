@@ -28,43 +28,33 @@ interface RiskWidgetProps {
 
 export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const isCrypto = selectedSignal?.symbol === 'BTCUSDT';
-  const currencySymbol = '₹';
+  const isGold = selectedSignal?.symbol === 'XAUUSD' || selectedSignal?.symbol === 'GOLD';
+  const currencySymbol = isCrypto || isGold ? '$' : '₹';
 
   // Persistent States with localStorage fallback
-  const [accountBalance, setAccountBalance] = useState<number>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_account_balance');
-      if (saved) return Number(saved);
-    }
-    return 1000000;
-  });
+  const [accountBalance, setAccountBalance] = useState<number>(1000000);
+  const [riskPercent, setRiskPercent] = useState<number>(1.0);
+  const [leverage, setLeverage] = useState<number>(5);
+  const [tradeMode, setTradeMode] = useState<'FO' | 'CASH'>('FO');
 
-  const [riskPercent, setRiskPercent] = useState<number>(() => {
+  useEffect(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_risk_percent');
-      if (saved) return Number(saved);
-    }
-    return 1.0;
-  });
+      const savedBal = localStorage.getItem('quant_account_balance');
+      if (savedBal && !isNaN(Number(savedBal))) setAccountBalance(Number(savedBal));
 
-  const [leverage, setLeverage] = useState<number>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_risk_leverage');
-      if (saved) return Number(saved);
-    }
-    return 5;
-  });
+      const savedRisk = localStorage.getItem('quant_risk_percent');
+      if (savedRisk && !isNaN(Number(savedRisk))) setRiskPercent(Number(savedRisk));
 
-  const [tradeMode, setTradeMode] = useState<'FO' | 'CASH'>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('quant_sizing_mode');
-      if (saved === 'FO' || saved === 'CASH') return saved;
+      const savedLev = localStorage.getItem('quant_risk_leverage');
+      if (savedLev && !isNaN(Number(savedLev))) setLeverage(Number(savedLev));
+
+      const savedMode = localStorage.getItem('quant_sizing_mode');
+      if (savedMode === 'FO' || savedMode === 'CASH') setTradeMode(savedMode);
     }
-    return 'FO';
-  });
+  }, []);
 
   const [entryPrice, setEntryPrice] = useState<number>(24175.65);
-  const [stopLoss, setStopLoss] = useState<number>(24086.60);
+  const [stopLoss, setStopLoss] = useState<number>(24086.6);
   const [tp1Price, setTp1Price] = useState<number>(24302.62);
   const [tp2Price, setTp2Price] = useState<number>(24387.27);
   const [lotSize, setLotSize] = useState<number>(65);
@@ -116,9 +106,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     if (selectedSignal) {
       const isBtc = selectedSignal.symbol === 'BTCUSDT';
       const optimal = selectedSignal.entryZone?.optimal || 24175.65;
-      const sl = selectedSignal.stopLoss || (optimal * 0.995);
-      const tp1 = selectedSignal.takeProfits?.tp1 || (optimal + Math.abs(optimal - sl) * 1.5);
-      const tp2 = selectedSignal.takeProfits?.tp2 || (optimal + Math.abs(optimal - sl) * 2.5);
+      const sl = selectedSignal.stopLoss || optimal * 0.995;
+      const tp1 = selectedSignal.takeProfits?.tp1 || optimal + Math.abs(optimal - sl) * 1.5;
+      const tp2 = selectedSignal.takeProfits?.tp2 || optimal + Math.abs(optimal - sl) * 2.5;
 
       setEntryPrice(Number(optimal.toFixed(2)));
       setStopLoss(Number(sl.toFixed(2)));
@@ -127,6 +117,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
 
       if (isBtc) {
         setLotSize(0.001);
+        setTradeMode('CASH');
+      } else if (selectedSignal.symbol === 'XAUUSD' || selectedSignal.symbol === 'GOLD') {
+        setLotSize(1);
         setTradeMode('CASH');
       } else if (selectedSignal.symbol === 'NIFTY') {
         setLotSize(65);
@@ -182,11 +175,13 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const actualRiskPercent = accountBalance > 0 ? (actualMaxRisk / accountBalance) * 100 : 0;
   const expectedProfitTP1 = finalUnits * target1Distance * (isCrypto ? USD_INR_RATE : 1.0);
   const expectedProfitTP2 = finalUnits * target2Distance * (isCrypto ? USD_INR_RATE : 1.0);
-  const rewardToRiskRatio = riskPerUnit > 0 ? Number((target2Distance / riskPerUnit).toFixed(2)) : 0;
+  const rewardToRiskRatio =
+    riskPerUnit > 0 ? Number((target2Distance / riskPerUnit).toFixed(2)) : 0;
 
   const marginRequired = totalPositionValue / leverage;
   const freeMargin = Math.max(0, accountBalance - marginRequired);
-  const marginUsagePercent = accountBalance > 0 ? Math.min(100, (marginRequired / accountBalance) * 100) : 0;
+  const marginUsagePercent =
+    accountBalance > 0 ? Math.min(100, (marginRequired / accountBalance) * 100) : 0;
   const isMarginWarning = marginRequired > accountBalance;
 
   // Quick Account Balance Presets (INR)
@@ -215,7 +210,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Strict quantitative capital preservation engine guaranteeing fixed % equity risk and leverage persistence.
+              Strict quantitative capital preservation engine guaranteeing fixed % equity risk and
+              leverage persistence.
             </p>
           </div>
         </div>
@@ -250,7 +246,10 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
                   : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
               }`}
             >
-              ₹{bal >= 100000 ? `${(bal / 100000).toFixed(bal % 100000 === 0 ? 0 : 1)}L` : `${bal / 1000}k`}
+              ₹
+              {bal >= 100000
+                ? `${(bal / 100000).toFixed(bal % 100000 === 0 ? 0 : 1)}L`
+                : `${bal / 1000}k`}
             </button>
           ))}
         </div>
@@ -416,7 +415,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
               <div>
                 <span className="text-[10px] text-slate-400 block">Actual Risk at SL</span>
                 <span className="font-bold text-rose-400">
-                  -{currencySymbol}{actualMaxRisk.toFixed(2)} ({actualRiskPercent.toFixed(2)}%)
+                  -{currencySymbol}
+                  {actualMaxRisk.toFixed(2)} ({actualRiskPercent.toFixed(2)}%)
                 </span>
               </div>
               <div>
@@ -433,7 +433,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
                 <Target className="w-3 h-3" /> Target 1 (1.5R)
               </span>
               <span className="text-sm font-black text-cyan-300 mt-1 block">
-                +{currencySymbol}{expectedProfitTP1.toFixed(2)}
+                +{currencySymbol}
+                {expectedProfitTP1.toFixed(2)}
               </span>
               <span className="text-[9px] text-slate-500 block mt-0.5">
                 +{((expectedProfitTP1 / accountBalance) * 100).toFixed(1)}% ROI
@@ -445,7 +446,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
                 <TrendingUp className="w-3 h-3" /> Target 2 (2.5R)
               </span>
               <span className="text-sm font-black text-emerald-300 mt-1 block">
-                +{currencySymbol}{expectedProfitTP2.toFixed(2)}
+                +{currencySymbol}
+                {expectedProfitTP2.toFixed(2)}
               </span>
               <span className="text-[9px] text-slate-500 block mt-0.5">
                 +{((expectedProfitTP2 / accountBalance) * 100).toFixed(1)}% ROI
@@ -457,14 +459,18 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl text-xs space-y-1.5">
             <div className="flex justify-between items-center text-[10px]">
               <span className="text-slate-400">Required Margin (@ {leverage}x):</span>
-              <span className={`font-black ${isMarginWarning ? 'text-rose-400' : 'text-slate-200'}`}>
-                {currencySymbol}{marginRequired.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              <span
+                className={`font-black ${isMarginWarning ? 'text-rose-400' : 'text-slate-200'}`}
+              >
+                {currencySymbol}
+                {marginRequired.toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </span>
             </div>
             <div className="flex justify-between items-center text-[10px]">
               <span className="text-slate-400">Position Notional Value:</span>
               <span className="font-bold text-white">
-                {currencySymbol}{totalPositionValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                {currencySymbol}
+                {totalPositionValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </span>
             </div>
 
@@ -472,14 +478,21 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
             <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden flex mt-2">
               <div
                 className={`h-full transition-all ${
-                  isMarginWarning ? 'bg-rose-500' : marginUsagePercent > 70 ? 'bg-amber-500' : 'bg-cyan-500'
+                  isMarginWarning
+                    ? 'bg-rose-500'
+                    : marginUsagePercent > 70
+                      ? 'bg-amber-500'
+                      : 'bg-cyan-500'
                 }`}
                 style={{ width: `${Math.min(100, marginUsagePercent)}%` }}
               />
             </div>
             <div className="flex justify-between text-[9px] text-slate-500">
               <span>{marginUsagePercent.toFixed(1)}% Margin Used</span>
-              <span>Free Buffer: {currencySymbol}{freeMargin.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              <span>
+                Free Buffer: {currencySymbol}
+                {freeMargin.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
             </div>
           </div>
         </div>
@@ -495,7 +508,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           )}
           <div>
             <span className="text-[10px] text-slate-400 block">Risk Per Trade</span>
-            <span className={`font-bold ${actualRiskPercent <= 2.0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <span
+              className={`font-bold ${actualRiskPercent <= 2.0 ? 'text-emerald-400' : 'text-rose-400'}`}
+            >
               {actualRiskPercent <= 2.0 ? 'PASSED (<= 2%)' : 'VIOLATION (> 2%)'}
             </span>
           </div>
@@ -509,7 +524,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           )}
           <div>
             <span className="text-[10px] text-slate-400 block">Reward to Risk</span>
-            <span className={`font-bold ${rewardToRiskRatio >= 1.5 ? 'text-emerald-400' : 'text-amber-400'}`}>
+            <span
+              className={`font-bold ${rewardToRiskRatio >= 1.5 ? 'text-emerald-400' : 'text-amber-400'}`}
+            >
               {rewardToRiskRatio >= 1.5 ? 'EXCELLENT (>= 1.5R)' : 'SUB-OPTIMAL (< 1.5R)'}
             </span>
           </div>
@@ -523,7 +540,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           )}
           <div>
             <span className="text-[10px] text-slate-400 block">Margin Adequacy</span>
-            <span className={`font-bold ${!isMarginWarning ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <span
+              className={`font-bold ${!isMarginWarning ? 'text-emerald-400' : 'text-rose-400'}`}
+            >
               {!isMarginWarning ? 'ADEQUATE' : 'MARGIN SHORTFALL'}
             </span>
           </div>
@@ -533,9 +552,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
           <div>
             <span className="text-[10px] text-slate-400 block">Leverage Profile</span>
-            <span className="font-bold text-cyan-300">
-              SAVED ({leverage}x ACTIVE)
-            </span>
+            <span className="font-bold text-cyan-300">SAVED ({leverage}x ACTIVE)</span>
           </div>
         </div>
       </div>

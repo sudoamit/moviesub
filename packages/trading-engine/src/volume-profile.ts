@@ -27,7 +27,7 @@ export class VolumeProfileAnalyzer {
   public static compute(
     candles: ICandle[],
     binCount: number = 30,
-    valueAreaPercentage: number = 0.70,
+    valueAreaPercentage: number = 0.7,
   ): IVolumeProfileResult | null {
     if (!candles || candles.length < 5) return null;
 
@@ -79,7 +79,8 @@ export class VolumeProfileAnalyzer {
 
       runningCVD += barDelta;
       cvdList.push({
-        timestamp: typeof c.timestamp === 'string' ? c.timestamp : (c.timestamp as Date).toISOString(),
+        timestamp:
+          typeof c.timestamp === 'string' ? c.timestamp : (c.timestamp as Date).toISOString(),
         delta: Number(barDelta.toFixed(2)),
         cumulativeDelta: Number(runningCVD.toFixed(2)),
       });
@@ -96,7 +97,7 @@ export class VolumeProfileAnalyzer {
         bins[i].totalVolume += volPerBin;
         bins[i].buyVolume += buyPerBin;
         bins[i].sellVolume += sellPerBin;
-        bins[i].delta += (buyPerBin - sellPerBin);
+        bins[i].delta += buyPerBin - sellPerBin;
       }
     }
 

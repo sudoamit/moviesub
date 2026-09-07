@@ -13,7 +13,7 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
     totalExamples: 100,
     epochsTrained: 50,
     initialLoss: 0.693,
-    finalLoss: 0.420,
+    finalLoss: 0.42,
     accuracy: 0.78,
     precision: 0.75,
     recall: 0.82,
@@ -28,20 +28,20 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
 
   const sampleFeatures: TradeFeatureVector = {
     smcScore: 0.85,
-    obStrength: 0.80,
-    fvgSize: 0.60,
-    mtfAlignment: 0.90,
+    obStrength: 0.8,
+    fvgSize: 0.6,
+    mtfAlignment: 0.9,
     killZoneSession: 1.0,
     smtDivergence: 0.75,
-    volatilityAtr: 0.40,
+    volatilityAtr: 0.4,
     riskRewardRatio: 0.65,
     trendRegime: 1.0,
     liquiditySweep: 1.0,
-    bosStrength: 0.80,
+    bosStrength: 0.8,
     chochStrength: 0.75,
-    relativeVolume: 0.80,
+    relativeVolume: 0.8,
     distanceToHTFLevel: 0.25,
-    distanceToLiquidity: 0.20,
+    distanceToLiquidity: 0.2,
     marketSession: 0.45,
     dayOfWeek: 0.33,
   };
@@ -80,7 +80,7 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
       };
 
       expect(() => ModelPersistenceManager.deserialize(invalidState)).toThrow(
-        /feature schema mismatch/
+        /feature schema mismatch/,
       );
     });
 
@@ -93,7 +93,7 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
       };
 
       expect(() => ModelPersistenceManager.deserialize(invalidWeights)).toThrow(
-        /weights dimension mismatch/
+        /weights dimension mismatch/,
       );
     });
   });
@@ -147,7 +147,7 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
           trainingExampleCount: 50,
           validationExampleCount: 15,
           outOfSampleExampleCount: 15,
-        })
+        }),
       );
 
       registry.registerVersion(
@@ -157,7 +157,7 @@ describe('PHASE 7: Model Persistence & Version Lineage Registry', () => {
           trainingExampleCount: 80,
           validationExampleCount: 20,
           outOfSampleExampleCount: 20,
-        })
+        }),
       );
 
       expect(registry.getActiveVersionState()?.version).toBe('v1.0.0');

@@ -26,9 +26,15 @@ export class CHOCHEngine {
 
     // Determine initial trend orientation from early swings
     for (let s = 1; s < Math.min(swings.length, 5); s++) {
-      if (swings[s].type === StructureType.HIGHER_HIGH || swings[s].type === StructureType.HIGHER_LOW) {
+      if (
+        swings[s].type === StructureType.HIGHER_HIGH ||
+        swings[s].type === StructureType.HIGHER_LOW
+      ) {
         currentTrend = Direction.BULLISH;
-      } else if (swings[s].type === StructureType.LOWER_LOW || swings[s].type === StructureType.LOWER_HIGH) {
+      } else if (
+        swings[s].type === StructureType.LOWER_LOW ||
+        swings[s].type === StructureType.LOWER_HIGH
+      ) {
         currentTrend = Direction.BEARISH;
       }
     }

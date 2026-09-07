@@ -46,7 +46,10 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
 
   async unsubscribeFromMarketData(symbol: string, timeframe: Timeframe | string): Promise<void> {}
 
-  private async fetchBinanceCandles(timeframe: Timeframe | string, limit: number): Promise<ICandle[]> {
+  private async fetchBinanceCandles(
+    timeframe: Timeframe | string,
+    limit: number,
+  ): Promise<ICandle[]> {
     const interval = this.mapTimeframeToBinance(timeframe);
     const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
 
@@ -73,7 +76,11 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
     }
   }
 
-  private async fetchYahooCandles(symbol: string, timeframe: Timeframe | string, limit: number): Promise<ICandle[]> {
+  private async fetchYahooCandles(
+    symbol: string,
+    timeframe: Timeframe | string,
+    limit: number,
+  ): Promise<ICandle[]> {
     const yahooSymbol = RealLiveMarketDataProvider.SYMBOL_MAP[symbol] || symbol;
     const interval = this.mapTimeframeToYahoo(timeframe);
     const range = this.getRangeForTimeframe(timeframe, limit);
@@ -120,7 +127,9 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
 
       return candles.slice(-limit);
     } catch (err) {
-      console.error(`Error fetching Yahoo Finance candles for ${symbol}: ${(err as Error).message}`);
+      console.error(
+        `Error fetching Yahoo Finance candles for ${symbol}: ${(err as Error).message}`,
+      );
       return [];
     }
   }

@@ -1,10 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
-import {
-  BlackScholesModel,
-  IndianOptionsExpiryEngine,
-  IExpiryInfo,
-} from '@quant/trading-engine';
+import { BlackScholesModel, IndianOptionsExpiryEngine, IExpiryInfo } from '@quant/trading-engine';
 
 export interface IOptionGreekDetails {
   delta: number;
@@ -103,12 +99,15 @@ export class OptionsService {
 
     try {
       const growwSym = sym === 'NIFTY' ? 'nifty' : 'nifty-bank';
-      const res = await fetch(`https://groww.in/v1/api/option_chain_service/v1/option_chain/${growwSym}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-          Accept: 'application/json',
+      const res = await fetch(
+        `https://groww.in/v1/api/option_chain_service/v1/option_chain/${growwSym}`,
+        {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+            Accept: 'application/json',
+          },
         },
-      });
+      );
 
       if (res.ok) {
         const json = await res.json();
@@ -142,34 +141,39 @@ export class OptionsService {
         })
       : null;
 
-    const spotPrice = (spotPriceOverride && spotPriceOverride > 0)
-      ? spotPriceOverride
-      : latestCandle
-      ? Number(latestCandle.close)
-      : sym === 'BTCUSDT'
-      ? 79623.35
-      : sym === 'BANKNIFTY'
-      ? 51240.0
-      : sym === 'RELIANCE'
-      ? 3022.5
-      : sym === 'HDFCBANK'
-      ? 1648.5
-      : sym === 'INFY'
-      ? 1892.4
-      : 24007.35;
+    const spotPrice =
+      spotPriceOverride && spotPriceOverride > 0
+        ? spotPriceOverride
+        : latestCandle
+          ? Number(latestCandle.close)
+          : sym === 'BTCUSDT'
+            ? 79623.35
+            : sym === 'XAUUSD' || sym === 'GOLD'
+              ? 2885.5
+              : sym === 'BANKNIFTY'
+                ? 51240.0
+                : sym === 'RELIANCE'
+                  ? 3022.5
+                  : sym === 'HDFCBANK'
+                    ? 1648.5
+                    : sym === 'INFY'
+                      ? 1892.4
+                      : 24007.35;
 
     const step =
       sym === 'BTCUSDT'
         ? 500
-        : sym === 'BANKNIFTY'
-        ? 100
-        : sym === 'RELIANCE'
-        ? 20
-        : sym === 'HDFCBANK'
-        ? 10
-        : sym === 'INFY'
-        ? 20
-        : 50;
+        : sym === 'XAUUSD' || sym === 'GOLD'
+          ? 10
+          : sym === 'BANKNIFTY'
+            ? 100
+            : sym === 'RELIANCE'
+              ? 20
+              : sym === 'HDFCBANK'
+                ? 10
+                : sym === 'INFY'
+                  ? 20
+                  : 50;
 
     const atmStrike = Math.round(spotPrice / step) * step;
 
@@ -186,18 +190,18 @@ export class OptionsService {
       sym === 'NIFTY'
         ? 65
         : sym === 'BANKNIFTY'
-        ? 15
-        : sym === 'FINNIFTY'
-        ? 40
-        : sym === 'BTCUSDT'
-        ? 1
-        : sym === 'RELIANCE'
-        ? 250
-        : sym === 'HDFCBANK'
-        ? 550
-        : sym === 'INFY'
-        ? 400
-        : 100;
+          ? 15
+          : sym === 'FINNIFTY'
+            ? 40
+            : sym === 'BTCUSDT' || sym === 'XAUUSD' || sym === 'GOLD'
+              ? 1
+              : sym === 'RELIANCE'
+                ? 250
+                : sym === 'HDFCBANK'
+                  ? 550
+                  : sym === 'INFY'
+                    ? 400
+                    : 100;
 
     const rawExchangeChains = await this.fetchLiveNSEChain(sym);
     const strikes: IOptionStrikeData[] = [];
@@ -208,15 +212,17 @@ export class OptionsService {
     const baseIV =
       sym === 'BTCUSDT'
         ? 0.52
-        : sym === 'BANKNIFTY'
-        ? 0.125
-        : sym === 'RELIANCE'
-        ? 0.18
-        : sym === 'HDFCBANK'
-        ? 0.16
-        : sym === 'INFY'
-        ? 0.19
-        : 0.098;
+        : sym === 'XAUUSD' || sym === 'GOLD'
+          ? 0.14
+          : sym === 'BANKNIFTY'
+            ? 0.125
+            : sym === 'RELIANCE'
+              ? 0.18
+              : sym === 'HDFCBANK'
+                ? 0.16
+                : sym === 'INFY'
+                  ? 0.19
+                  : 0.098;
 
     // Generate 15 strikes: 7 below ATM, ATM, 7 above ATM
     for (let i = -7; i <= 7; i++) {
@@ -240,8 +246,8 @@ export class OptionsService {
       const putChangePerc = exchangeContract?.putOption?.dayChangePerc || 0;
 
       // Realistic Volatility Skew
-      const callIV = baseIV + Math.max(0, -i) * 0.0010 + Math.max(0, i) * 0.0022;
-      const putIV = baseIV + Math.max(0, -i) * 0.0020 + Math.max(0, i) * 0.0010;
+      const callIV = baseIV + Math.max(0, -i) * 0.001 + Math.max(0, i) * 0.0022;
+      const putIV = baseIV + Math.max(0, -i) * 0.002 + Math.max(0, i) * 0.001;
 
       // Exact Black-Scholes Greeks Calculation
       const bsCall = BlackScholesModel.calculate(
@@ -265,8 +271,10 @@ export class OptionsService {
       const finalCallLtp = callLtp && callLtp > 0 ? Number(callLtp.toFixed(2)) : bsCall.price;
       const finalPutLtp = putLtp && putLtp > 0 ? Number(putLtp.toFixed(2)) : bsPut.price;
 
-      const callEffectiveOI = callOi > 0 ? callOi : Math.round((45000 - Math.abs(i) * 3200) / lotSize) * lotSize;
-      const putEffectiveOI = putOi > 0 ? putOi : Math.round((48000 - Math.abs(i) * 3200) / lotSize) * lotSize;
+      const callEffectiveOI =
+        callOi > 0 ? callOi : Math.round((45000 - Math.abs(i) * 3200) / lotSize) * lotSize;
+      const putEffectiveOI =
+        putOi > 0 ? putOi : Math.round((48000 - Math.abs(i) * 3200) / lotSize) * lotSize;
 
       totalCallOI += callEffectiveOI;
       totalPutOI += putEffectiveOI;
@@ -275,8 +283,12 @@ export class OptionsService {
       const putIntrinsic = Math.max(0, strikePrice - spotPrice);
 
       // Strike Gamma Exposure (GEX in ₹ Cr)
-      const callGex = Number(((bsCall.greeks.gamma * callEffectiveOI * (spotPrice ** 2) * 0.01) / 10000000).toFixed(2));
-      const putGex = Number(((-bsPut.greeks.gamma * putEffectiveOI * (spotPrice ** 2) * 0.01) / 10000000).toFixed(2));
+      const callGex = Number(
+        ((bsCall.greeks.gamma * callEffectiveOI * spotPrice ** 2 * 0.01) / 10000000).toFixed(2),
+      );
+      const putGex = Number(
+        ((-bsPut.greeks.gamma * putEffectiveOI * spotPrice ** 2 * 0.01) / 10000000).toFixed(2),
+      );
       const netStrikeGex = Number((callGex + putGex).toFixed(2));
 
       strikes.push({
@@ -289,7 +301,9 @@ export class OptionsService {
           change: Number(callChange.toFixed(2)),
           changePercent: Number(callChangePerc.toFixed(2)),
           oi: callEffectiveOI,
-          oiChange: exchangeContract?.callOption?.oiChange || Math.round((callEffectiveOI * 0.08) * (i >= 0 ? 1 : -0.5)),
+          oiChange:
+            exchangeContract?.callOption?.oiChange ||
+            Math.round(callEffectiveOI * 0.08 * (i >= 0 ? 1 : -0.5)),
           volume: callVol > 0 ? callVol : Math.round(callEffectiveOI * 1.8),
           iv: bsCall.iv,
           intrinsicValue: Number(callIntrinsic.toFixed(2)),
@@ -306,7 +320,9 @@ export class OptionsService {
           change: Number(putChange.toFixed(2)),
           changePercent: Number(putChangePerc.toFixed(2)),
           oi: putEffectiveOI,
-          oiChange: exchangeContract?.putOption?.oiChange || Math.round((putEffectiveOI * 0.08) * (i <= 0 ? 1 : -0.5)),
+          oiChange:
+            exchangeContract?.putOption?.oiChange ||
+            Math.round(putEffectiveOI * 0.08 * (i <= 0 ? 1 : -0.5)),
           volume: putVol > 0 ? putVol : Math.round(putEffectiveOI * 1.8),
           iv: bsPut.iv,
           intrinsicValue: Number(putIntrinsic.toFixed(2)),
@@ -356,7 +372,9 @@ export class OptionsService {
 
     // 5. Expected Weekly Move
     const atmData = strikes.find((s) => s.isATM) || strikes[7];
-    const expectedWeeklyMovePts = atmData ? Number((atmData.call.ltp + atmData.put.ltp).toFixed(1)) : 120;
+    const expectedWeeklyMovePts = atmData
+      ? Number((atmData.call.ltp + atmData.put.ltp).toFixed(1))
+      : 120;
     const expectedRange = {
       lower: Number((spotPrice - expectedWeeklyMovePts).toFixed(2)),
       upper: Number((spotPrice + expectedWeeklyMovePts).toFixed(2)),
@@ -391,7 +409,15 @@ export class OptionsService {
     spotPriceOverride?: number,
     strikeOverride?: number,
   ): Promise<ISmartOptionRecommendation> {
-    return this.getSmartStrikeRecommendation(symbol, direction, spotTarget, spotStopLoss, targetExpiryDate, spotPriceOverride, strikeOverride);
+    return this.getSmartStrikeRecommendation(
+      symbol,
+      direction,
+      spotTarget,
+      spotStopLoss,
+      targetExpiryDate,
+      spotPriceOverride,
+      strikeOverride,
+    );
   }
 
   async getSmartStrikeRecommendation(
@@ -409,18 +435,28 @@ export class OptionsService {
 
     // Find requested strike or default to ATM
     let selectedStrike = strikeOverride
-      ? chain.strikes.find((s) => s.strikePrice === strikeOverride) || chain.strikes.find((s) => s.isATM) || chain.strikes[7]
+      ? chain.strikes.find((s) => s.strikePrice === strikeOverride) ||
+        chain.strikes.find((s) => s.isATM) ||
+        chain.strikes[7]
       : chain.strikes.find((s) => s.isATM) || chain.strikes[7];
     const contract = isBull ? selectedStrike.call : selectedStrike.put;
 
     // Spot delta distance translation
-    const spotMoveToTarget = spotTarget ? Math.abs(spotTarget - chain.spotPrice) : chain.spotPrice * 0.008;
-    const spotMoveToSL = spotStopLoss ? Math.abs(chain.spotPrice - spotStopLoss) : chain.spotPrice * 0.004;
+    const spotMoveToTarget = spotTarget
+      ? Math.abs(spotTarget - chain.spotPrice)
+      : chain.spotPrice * 0.008;
+    const spotMoveToSL = spotStopLoss
+      ? Math.abs(chain.spotPrice - spotStopLoss)
+      : chain.spotPrice * 0.004;
 
     const optDelta = Math.abs(contract.delta);
     const optionRiskMove = spotMoveToSL * optDelta;
-    const maxOptionRiskPts = chain.symbol === 'NIFTY' ? 25.0 : chain.symbol === 'BANKNIFTY' ? 60.0 : 25.0;
-    const calculatedRiskPts = Math.min(maxOptionRiskPts, Math.max(15.0, optionRiskMove > 0 ? optionRiskMove : 20.0));
+    const maxOptionRiskPts =
+      chain.symbol === 'NIFTY' ? 25.0 : chain.symbol === 'BANKNIFTY' ? 60.0 : 25.0;
+    const calculatedRiskPts = Math.min(
+      maxOptionRiskPts,
+      Math.max(15.0, optionRiskMove > 0 ? optionRiskMove : 20.0),
+    );
 
     const optionLtp = contract.ltp;
     const optionStopLoss = Math.max(1.0, Number((optionLtp - calculatedRiskPts).toFixed(2)));

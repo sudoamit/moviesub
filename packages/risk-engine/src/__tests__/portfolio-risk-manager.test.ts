@@ -35,15 +35,44 @@ describe('PortfolioRiskManager', () => {
       isValid: true,
     };
 
-    const status = PortfolioRiskManager.validateNewPosition(100000, openPositions, proposed, 'EQUITY');
+    const status = PortfolioRiskManager.validateNewPosition(
+      100000,
+      openPositions,
+      proposed,
+      'EQUITY',
+    );
     expect(status.isAllowed).toBe(true);
     expect(status.totalOpenPositions).toBe(1);
   });
 
   it('should reject new position when total open risk exceeds maximum limit', () => {
     const openPositions: IOpenPosition[] = [
-      { id: '1', symbol: 'A', assetType: 'EQUITY', direction: Direction.BULLISH, entryPrice: 100, stopLoss: 90, units: 10, riskAmount: 3000, currentPrice: 100, unrealizedPnL: 0, openTimestamp: new Date() },
-      { id: '2', symbol: 'B', assetType: 'EQUITY', direction: Direction.BULLISH, entryPrice: 100, stopLoss: 90, units: 10, riskAmount: 3000, currentPrice: 100, unrealizedPnL: 0, openTimestamp: new Date() },
+      {
+        id: '1',
+        symbol: 'A',
+        assetType: 'EQUITY',
+        direction: Direction.BULLISH,
+        entryPrice: 100,
+        stopLoss: 90,
+        units: 10,
+        riskAmount: 3000,
+        currentPrice: 100,
+        unrealizedPnL: 0,
+        openTimestamp: new Date(),
+      },
+      {
+        id: '2',
+        symbol: 'B',
+        assetType: 'EQUITY',
+        direction: Direction.BULLISH,
+        entryPrice: 100,
+        stopLoss: 90,
+        units: 10,
+        riskAmount: 3000,
+        currentPrice: 100,
+        unrealizedPnL: 0,
+        openTimestamp: new Date(),
+      },
     ]; // Current risk = 6% on $100k
 
     const proposed: IPositionSizing = {
@@ -61,7 +90,13 @@ describe('PortfolioRiskManager', () => {
       isValid: true,
     };
 
-    const status = PortfolioRiskManager.validateNewPosition(100000, openPositions, proposed, 'CRYPTO', { maxOpenRiskPercent: 6.0 });
+    const status = PortfolioRiskManager.validateNewPosition(
+      100000,
+      openPositions,
+      proposed,
+      'CRYPTO',
+      { maxOpenRiskPercent: 6.0 },
+    );
     expect(status.isAllowed).toBe(false);
     expect(status.rejectionReason).toContain('breach portfolio max open risk limit');
   });

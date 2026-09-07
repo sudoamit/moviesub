@@ -13,10 +13,7 @@ export class SMCAnalyzer {
   /**
    * Performs full deterministic Smart Money Concepts (SMC) analysis on candle series
    */
-  static analyze(
-    candles: ICandle[],
-    config: ISMCAnalysisConfig = {},
-  ): ISMCAnalysisResult {
+  static analyze(candles: ICandle[], config: ISMCAnalysisConfig = {}): ISMCAnalysisResult {
     if (!candles || candles.length === 0) {
       return {
         candlesCount: 0,
@@ -73,29 +70,28 @@ export class SMCAnalyzer {
     const changesOfCharacter = CHOCHEngine.detectCHOCH(candles, swingPoints);
 
     // 4. Detect Liquidity Pools & Sweeps
-    const { pools: liquidityPools, sweeps: liquiditySweeps } =
-      LiquidityEngine.detectLiquidity(candles, swingPoints, {
-        equalHighLowToleranceAtr: config.equalHighLowToleranceAtr,
-      });
-
-    // 5. Detect Fair Value Gaps (FVG)
-    const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(
+    const { pools: liquidityPools, sweeps: liquiditySweeps } = LiquidityEngine.detectLiquidity(
       candles,
+      swingPoints,
       {
-        minGapAtrMultiplier: config.fvgMinGapAtr,
+        equalHighLowToleranceAtr: config.equalHighLowToleranceAtr,
       },
     );
 
+    // 5. Detect Fair Value Gaps (FVG)
+    const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(candles, {
+      minGapAtrMultiplier: config.fvgMinGapAtr,
+    });
+
     // 6. Detect Order Blocks (OB)
-    const { allOrderBlocks: orderBlocks, activeOrderBlocks } =
-      OrderBlockEngine.detectOrderBlocks(
-        candles,
-        breaksOfStructure,
-        fairValueGaps,
-        {
-          displacementThresholdAtr: config.displacementThresholdAtr,
-        },
-      );
+    const { allOrderBlocks: orderBlocks, activeOrderBlocks } = OrderBlockEngine.detectOrderBlocks(
+      candles,
+      breaksOfStructure,
+      fairValueGaps,
+      {
+        displacementThresholdAtr: config.displacementThresholdAtr,
+      },
+    );
 
     // 7. Calculate Dealing Range (Premium/Discount)
     const dealingRange = DealingRangeEngine.calculateDealingRange(swingPoints);

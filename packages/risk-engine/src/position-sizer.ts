@@ -9,14 +9,19 @@ export interface ICalculatePositionOptions {
   contractSize?: number;
   maxRiskPercentage?: number;
   maxLeverage?: number;
+  regime?: string;
+  volatilityPercentile?: number;
+  expectedR?: number;
+  mlProbability?: number;
 }
 
 export class PositionSizer {
   /**
-   * Deterministically calculates institutional position size based on strict fixed percentage risk
+   * Deterministically calculates institutional position size based on strict fixed percentage risk,
+   * adjusted dynamically by regime, volatility percentile, and calibrated Expected Value.
    */
   static calculatePosition(options: ICalculatePositionOptions): IPositionSizing {
-    const {
+    let {
       accountBalance,
       riskPercentage = 1.0,
       entryPrice,
@@ -25,6 +30,10 @@ export class PositionSizer {
       contractSize = 1,
       maxRiskPercentage = 2.5,
       maxLeverage = 10,
+      regime,
+      volatilityPercentile,
+      expectedR,
+      mlProbability,
     } = options;
 
     if (accountBalance <= 0) {
@@ -41,6 +50,25 @@ export class PositionSizer {
         `Risk percentage (${riskPercentage}%) exceeds maximum allowable risk limit (${maxRiskPercentage}%)`,
       );
     }
+
+    // Dynamic Regime and Volatility adjustment
+    if (
+      regime === 'HIGH_VOLATILITY' ||
+      (volatilityPercentile !== undefined && volatilityPercentile > 80)
+    ) {
+      riskPercentage *= 0.6; // Scale down risk during high volatility shocks
+    } else if (
+      expectedR &&
+      expectedR >= 1.8 &&
+      mlProbability &&
+      mlProbability >= 0.7 &&
+      regime === 'BULLISH_TREND'
+    ) {
+      riskPercentage = Math.min(maxRiskPercentage, riskPercentage * 1.25);
+    }
+
+    // Strict cap at max allowable risk percentage
+    riskPercentage = Math.min(maxRiskPercentage, Math.max(0.1, riskPercentage));
 
     if (entryPrice <= 0 || stopLoss <= 0) {
       return this.createInvalid(options, 'Entry price and stop loss must be greater than zero');
@@ -98,7 +126,10 @@ export class PositionSizer {
       totalPositionValue: Number(totalPositionValue.toFixed(2)),
       maximumLoss: Number(maximumLoss.toFixed(2)),
       isValid: roundedUnits > 0,
-      rejectionReason: roundedUnits > 0 ? undefined : 'Calculated position size is smaller than minimum tradeable lot size',
+      rejectionReason:
+        roundedUnits > 0
+          ? undefined
+          : 'Calculated position size is smaller than minimum tradeable lot size',
     };
   }
 

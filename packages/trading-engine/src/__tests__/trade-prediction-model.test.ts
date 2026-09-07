@@ -15,8 +15,8 @@ function createSyntheticDataset(count: number, signalToNoiseRatio = 0.8): Traini
     // Synthetic ground-truth rule: High smcScore + obStrength + mtfAlignment correlates to Win
     const smcScore = 0.3 + (i % 7) * 0.1;
     const obStrength = 0.2 + (i % 5) * 0.15;
-    const mtfAlignment = (i % 3 === 0) ? 0.9 : 0.2;
-    const killZoneSession = (i % 2 === 0) ? 1.0 : 0.0;
+    const mtfAlignment = i % 3 === 0 ? 0.9 : 0.2;
+    const killZoneSession = i % 2 === 0 ? 1.0 : 0.0;
 
     const features: TradeFeatureVector = {
       smcScore,
@@ -41,7 +41,7 @@ function createSyntheticDataset(count: number, signalToNoiseRatio = 0.8): Traini
     // Ground truth probability
     const logit = 3.0 * smcScore + 2.5 * obStrength + 2.0 * mtfAlignment - 3.5;
     const trueProb = 1.0 / (1.0 + Math.exp(-logit));
-    const isWin = (i / count < trueProb) ? 1 : 0;
+    const isWin = i / count < trueProb ? 1 : 0;
 
     const featureArray = [
       features.smcScore,

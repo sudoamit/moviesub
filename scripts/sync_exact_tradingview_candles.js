@@ -37,7 +37,14 @@ const INSTRUMENTS_MAP = {
 const TIMEFRAMES = [
   { tf: 'M15', binanceInterval: '15m', yahooInterval: '15m', yahooRange: '1mo', limit: 250 },
   { tf: 'H1', binanceInterval: '1h', yahooInterval: '60m', yahooRange: '3mo', limit: 250 },
-  { tf: 'H4', binanceInterval: '4h', yahooInterval: '60m', yahooRange: '6mo', limit: 250, isH4Aggregate: true },
+  {
+    tf: 'H4',
+    binanceInterval: '4h',
+    yahooInterval: '60m',
+    yahooRange: '6mo',
+    limit: 250,
+    isH4Aggregate: true,
+  },
   { tf: 'M5', binanceInterval: '5m', yahooInterval: '5m', yahooRange: '5d', limit: 250 },
   { tf: 'M1', binanceInterval: '1m', yahooInterval: '1m', yahooRange: '5d', limit: 250 },
 ];
@@ -62,7 +69,9 @@ async function fetchBinanceCandles(binanceSymbol, interval, limit) {
 
 async function fetchYahooCandles(yahooSymbol, interval, range, limit, isH4 = false) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' } });
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
+  });
   if (!res.ok) throw new Error(`Yahoo API HTTP ${res.status}`);
   const data = await res.json();
   const result = data?.chart?.result?.[0];
@@ -81,7 +90,16 @@ async function fetchYahooCandles(yahooSymbol, interval, range, limit, isH4 = fal
     const v = quote.volume[i] || 0;
 
     // Filter out null or NaN entries
-    if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(h) && !isNaN(l) && !isNaN(c)) {
+    if (
+      o !== null &&
+      h !== null &&
+      l !== null &&
+      c !== null &&
+      !isNaN(o) &&
+      !isNaN(h) &&
+      !isNaN(l) &&
+      !isNaN(c)
+    ) {
       rawCandles.push({
         timestamp: new Date(timestamps[i] * 1000),
         open: Number(Number(o).toFixed(2)),
@@ -142,7 +160,13 @@ async function main() {
         if (config.type === 'CRYPTO') {
           candles = await fetchBinanceCandles(config.binanceSymbol, tf.binanceInterval, tf.limit);
         } else {
-          candles = await fetchYahooCandles(config.yahooSymbol, tf.yahooInterval, tf.yahooRange, tf.limit, tf.isH4Aggregate);
+          candles = await fetchYahooCandles(
+            config.yahooSymbol,
+            tf.yahooInterval,
+            tf.yahooRange,
+            tf.limit,
+            tf.isH4Aggregate,
+          );
         }
       } catch (err) {
         console.warn(`  ⚠️ Error fetching ${sym} ${tf.tf}: ${err.message}`);
@@ -180,7 +204,9 @@ async function main() {
       }
 
       const lastCandle = candles[candles.length - 1];
-      console.log(`  ✓ ${sym} [${tf.tf}]: Ingested ${candles.length} bars (Latest: ${lastCandle.close} @ ${lastCandle.timestamp.toISOString()})`);
+      console.log(
+        `  ✓ ${sym} [${tf.tf}]: Ingested ${candles.length} bars (Latest: ${lastCandle.close} @ ${lastCandle.timestamp.toISOString()})`,
+      );
     }
 
     console.log('');

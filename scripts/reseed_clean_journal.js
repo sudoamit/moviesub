@@ -156,7 +156,9 @@ async function reseedCleanJournal() {
       },
     });
 
-    console.log(`✓ Seeded chart-synchronized trade for ${t.sym} -> Entry: ₹${t.entry} @ ${t.actIST[0]}:${t.actIST[1]}, Exit: ₹${t.exit} @ ${t.closeIST[0]}:${t.closeIST[1]}`);
+    console.log(
+      `✓ Seeded chart-synchronized trade for ${t.sym} -> Entry: ₹${t.entry} @ ${t.actIST[0]}:${t.actIST[1]}, Exit: ₹${t.exit} @ ${t.closeIST[0]}:${t.closeIST[1]}`,
+    );
   }
 
   console.log('\n🎉 Successfully reseeded chart-synchronized Completed Trades Ledger.');

@@ -81,6 +81,24 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       },
     ],
     [
+      'XAUUSD',
+      {
+        symbol: 'XAUUSD',
+        price: 2885.5,
+        open: 2872.0,
+        high: 2898.0,
+        low: 2865.0,
+        close: 2885.5,
+        volume: 95000,
+        prevClose: 2875.0,
+        changePercent: 0.36,
+        changeAmount: 10.5,
+        tickSize: 0.01,
+        volatility: 1.2,
+        lastUpdated: Date.now(),
+      },
+    ],
+    [
       'RELIANCE',
       {
         symbol: 'RELIANCE',
@@ -143,7 +161,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   startRealTimeFeeds() {
-    this.logger.log('Connecting to Live Real Market Data Feeds (Binance Public API & NSE Real-Time Quotes)...');
+    this.logger.log(
+      'Connecting to Live Real Market Data Feeds (Binance Public API & NSE Real-Time Quotes)...',
+    );
 
     // 1. Fetch Real Binance Bitcoin Price every 2 seconds
     this.binanceTimer = setInterval(async () => {
@@ -202,8 +222,50 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         this.tickers.set('BTCUSDT', ticker);
         await this.broadcastTick(ticker);
       }
+
+      // Fetch Real Spot Gold Price (via PAXGUSDT 1:1 backed physical gold ounces)
+      const goldRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
+      const goldData = await goldRes.json();
+
+      if (goldData && goldData.lastPrice) {
+        const livePrice = parseFloat(goldData.lastPrice);
+        const open = parseFloat(goldData.openPrice);
+        const high = parseFloat(goldData.highPrice);
+        const low = parseFloat(goldData.lowPrice);
+        const volume = parseFloat(goldData.volume);
+        const changePercent = parseFloat(goldData.priceChangePercent);
+        const changeAmount = parseFloat(goldData.priceChange);
+
+        const ticker = this.tickers.get('XAUUSD') || {
+          symbol: 'XAUUSD',
+          price: livePrice,
+          open,
+          high,
+          low,
+          close: livePrice,
+          volume: Math.round(volume),
+          prevClose: open,
+          changePercent,
+          changeAmount,
+          tickSize: 0.01,
+          volatility: 1.2,
+          lastUpdated: Date.now(),
+        };
+
+        ticker.price = livePrice;
+        ticker.close = livePrice;
+        ticker.high = Math.max(ticker.high, high);
+        ticker.low = Math.min(ticker.low, low);
+        ticker.volume = Math.round(volume);
+        ticker.changePercent = changePercent;
+        ticker.changeAmount = changeAmount;
+        ticker.lastUpdated = Date.now();
+
+        this.tickers.set('XAUUSD', ticker);
+        await this.broadcastTick(ticker);
+      }
     } catch (err) {
-      this.logger.debug(`Binance real tick notice: ${(err as Error).message}`);
+      this.logger.debug(`Binance / Gold real tick notice: ${(err as Error).message}`);
     }
   }
 
@@ -227,7 +289,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
         if (meta && meta.regularMarketPrice) {
           const livePrice = Number(meta.regularMarketPrice.toFixed(2));
-          const prevClose = Number((meta.chartPreviousClose || meta.previousClose || livePrice).toFixed(2));
+          const prevClose = Number(
+            (meta.chartPreviousClose || meta.previousClose || livePrice).toFixed(2),
+          );
           const high = Number((meta.regularMarketDayHigh || livePrice).toFixed(2));
           const low = Number((meta.regularMarketDayLow || livePrice).toFixed(2));
           const volume = meta.regularMarketVolume || 100000;

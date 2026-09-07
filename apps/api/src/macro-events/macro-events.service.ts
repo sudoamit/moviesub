@@ -17,7 +17,11 @@ export interface IMacroEvent {
 export interface IVIXRegime {
   currentVIX: number;
   changePercent: number;
-  regime: 'LOW_VOLATILITY_TREND' | 'NORMAL_VOLATILITY_SMC' | 'HIGH_VOLATILITY_EXPANSION' | 'EXTREME_RISK_SPIKE';
+  regime:
+    | 'LOW_VOLATILITY_TREND'
+    | 'NORMAL_VOLATILITY_SMC'
+    | 'HIGH_VOLATILITY_EXPANSION'
+    | 'EXTREME_RISK_SPIKE';
   recommendedStrategy: string;
   stopLossBufferMultiplier: number;
   positionSizingMultiplier: number;
@@ -40,7 +44,8 @@ export class MacroEventsService {
       forecast: '6.50%',
       previous: '6.50%',
       affectedInstruments: ['NIFTY', 'BANKNIFTY', 'HDFCBANK'],
-      advisoryNote: 'High volatility expected in banking proxies. Tighten Stop Loss or move to Breakeven 15m prior to 10:00 AM IST.',
+      advisoryNote:
+        'High volatility expected in banking proxies. Tighten Stop Loss or move to Breakeven 15m prior to 10:00 AM IST.',
     },
     {
       id: 'event_us_cpi',
@@ -88,7 +93,8 @@ export class MacroEventsService {
       forecast: '5.25%',
       previous: '5.50%',
       affectedInstruments: ['BTCUSDT', 'NIFTY', 'BANKNIFTY'],
-      advisoryNote: 'Global macro liquidity benchmark. Wide spreads anticipated across overnight crypto pairs.',
+      advisoryNote:
+        'Global macro liquidity benchmark. Wide spreads anticipated across overnight crypto pairs.',
     },
   ];
 
@@ -109,25 +115,29 @@ export class MacroEventsService {
     const changePercent = -1.42;
 
     let regime: IVIXRegime['regime'] = 'NORMAL_VOLATILITY_SMC';
-    let recommendedStrategy = 'Ideal for 15m Order Block & Fair Value Gap scalping with standard 1.0x ATR risk.';
+    let recommendedStrategy =
+      'Ideal for 15m Order Block & Fair Value Gap scalping with standard 1.0x ATR risk.';
     let stopLossBufferMultiplier = 1.0;
     let positionSizingMultiplier = 1.0;
 
     if (currentVIX < 12.0) {
       regime = 'LOW_VOLATILITY_TREND';
-      recommendedStrategy = 'Compression regime. Hold runners towards TP3 (4.0R). Trailing SL recommended.';
+      recommendedStrategy =
+        'Compression regime. Hold runners towards TP3 (4.0R). Trailing SL recommended.';
       stopLossBufferMultiplier = 0.85;
       positionSizingMultiplier = 1.25;
     } else if (currentVIX > 18.0 && currentVIX <= 24.0) {
       regime = 'HIGH_VOLATILITY_EXPANSION';
-      recommendedStrategy = 'Wide swings expected. Reduce position sizing by 30% and expand Stop Loss buffer to 1.3x ATR.';
-      stopLossBufferMultiplier = 1.30;
-      positionSizingMultiplier = 0.70;
+      recommendedStrategy =
+        'Wide swings expected. Reduce position sizing by 30% and expand Stop Loss buffer to 1.3x ATR.';
+      stopLossBufferMultiplier = 1.3;
+      positionSizingMultiplier = 0.7;
     } else if (currentVIX > 24.0) {
       regime = 'EXTREME_RISK_SPIKE';
-      recommendedStrategy = 'Extreme volatility shock. Avoid overnight positions. Take quick 1.5R scalps only.';
-      stopLossBufferMultiplier = 1.60;
-      positionSizingMultiplier = 0.50;
+      recommendedStrategy =
+        'Extreme volatility shock. Avoid overnight positions. Take quick 1.5R scalps only.';
+      stopLossBufferMultiplier = 1.6;
+      positionSizingMultiplier = 0.5;
     }
 
     return {

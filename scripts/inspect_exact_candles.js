@@ -14,7 +14,7 @@ async function inspectExactCandles() {
     console.log(`\n================================================================`);
     console.log(`EXACT CANDLES FOR ${inst.symbol} (Latest 25 15m bars):`);
     console.log(`----------------------------------------------------------------`);
-    
+
     // Sort chronologically
     candles.reverse().forEach((c, idx) => {
       const istTime = new Date(c.timestamp).toLocaleString('en-IN', {
@@ -26,7 +26,7 @@ async function inspectExactCandles() {
         hour12: true,
       });
       console.log(
-        `[${idx.toString().padStart(2, ' ')}] Time: ${istTime} | O: ${Number(c.open).toFixed(2)} | H: ${Number(c.high).toFixed(2)} | L: ${Number(c.low).toFixed(2)} | C: ${Number(c.close).toFixed(2)} | Vol: ${c.volume}`
+        `[${idx.toString().padStart(2, ' ')}] Time: ${istTime} | O: ${Number(c.open).toFixed(2)} | H: ${Number(c.high).toFixed(2)} | L: ${Number(c.low).toFixed(2)} | C: ${Number(c.close).toFixed(2)} | Vol: ${c.volume}`,
       );
     });
   }

@@ -129,13 +129,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // Live Paper Trading Position Sync
   const [paperPosition, setPaperPosition] = useState<any | null>(null);
-  const [isLocallyCut, setIsLocallyCut] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      if (signal?.id) return localStorage.getItem(`quant_pos_cut_${signal.id}`) === 'true';
-      return localStorage.getItem(`quant_pos_cut_${symbol}`) === 'true';
-    }
-    return false;
-  });
+  const [isLocallyCut, setIsLocallyCut] = useState<boolean>(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -224,7 +218,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 5) return null;
     try {
       const cleanCandles = candles.map((c) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.time ? c.time * 1000 : c.timestamp),
+        timestamp:
+          c.timestamp instanceof Date
+            ? c.timestamp
+            : new Date(c.time ? c.time * 1000 : c.timestamp),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -244,7 +241,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 5) return null;
     try {
       const cleanCandles = candles.map((c) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp.toISOString() : typeof c.timestamp === 'string' ? c.timestamp : new Date((c.time || 0) * 1000).toISOString(),
+        timestamp:
+          c.timestamp instanceof Date
+            ? c.timestamp.toISOString()
+            : typeof c.timestamp === 'string'
+              ? c.timestamp
+              : new Date((c.time || 0) * 1000).toISOString(),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -252,7 +254,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         volume: Number(c.volume || 1),
         isClosed: true,
       }));
-      return VolumeProfileAnalyzer.compute(cleanCandles as any, 28, 0.70);
+      return VolumeProfileAnalyzer.compute(cleanCandles as any, 28, 0.7);
     } catch (e) {
       console.error('Volume profile computation error:', e);
       return null;
@@ -269,7 +271,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 10) return null;
     try {
       const cleanCandles = candles.map((c) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.time ? c.time * 1000 : c.timestamp),
+        timestamp:
+          c.timestamp instanceof Date
+            ? c.timestamp
+            : new Date(c.time ? c.time * 1000 : c.timestamp),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -288,7 +293,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 5) return null;
     try {
       const cleanCandles = candles.map((c) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.time ? c.time * 1000 : c.timestamp),
+        timestamp:
+          c.timestamp instanceof Date
+            ? c.timestamp
+            : new Date(c.time ? c.time * 1000 : c.timestamp),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -342,11 +350,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const textColor = isDark ? '#D1D4DC' : '#131722';
     const gridColor = isDark ? 'rgba(42, 46, 57, 0.55)' : 'rgba(226, 232, 240, 0.8)';
 
+    const initialWidth = chartContainerRef.current.clientWidth || 800;
+    const initialHeight = chartContainerRef.current.clientHeight || 420;
+
     const chart = createChart(chartContainerRef.current, {
+      width: initialWidth,
+      height: initialHeight,
       layout: {
         background: { type: ColorType.Solid, color: bg },
         textColor: textColor,
-        fontFamily: "'JetBrains Mono', -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif",
+        fontFamily:
+          "'JetBrains Mono', -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif",
         fontSize: 11,
       },
       grid: {
@@ -373,7 +387,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         autoScale: true,
         scaleMargins: {
           top: 0.12,
-          bottom: 0.20, // Room for volume histogram
+          bottom: 0.2, // Room for volume histogram
         },
       },
       timeScale: {
@@ -579,7 +593,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const formattedVolume: HistogramData<Time>[] = [];
     const linePrices: LineData<Time>[] = [];
 
-    const sorted = [...candles].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const sorted = [...candles].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
     const seenTimes = new Set<number>();
 
     sorted.forEach((c) => {
@@ -705,7 +721,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   }, [currentPrice, chartType, candles]);
 
   // 4. Trade Setup Calculation & Guaranteed Native Price Lines
-  const currSymbol = symbol === 'BTCUSDT' ? '$' : '₹';
+  const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
+  const currSymbol = isUsd ? '$' : '₹';
   const isSignalForThisSymbol = signal && (!signal.symbol || signal.symbol === symbol);
   const effSignal = isSignalForThisSymbol ? signal : null;
   const isActualTradeActive =
@@ -752,8 +769,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         ).toFixed(2),
       );
 
-  const rrRatio =
-    effSignal?.riskRewardRatios?.rr2 || effSignal?.riskRewardRatio || 2.5;
+  const rrRatio = effSignal?.riskRewardRatios?.rr2 || effSignal?.riskRewardRatio || 2.5;
 
   // Synchronize Native Lightweight Charts PriceLines (Guarantees Y-axis visibility & scale pills)
   useEffect(() => {
@@ -768,7 +784,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     });
     priceLinesRef.current = [];
 
-    if (!showLevels || !isActualTradeActive || !entryPrice || !slPrice || !tp1Price || !tp2Price) return;
+    if (!showLevels || !isActualTradeActive || !entryPrice || !slPrice || !tp1Price || !tp2Price)
+      return;
 
     try {
       const entryLine = series.createPriceLine({
@@ -834,7 +851,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       });
       priceLinesRef.current = [];
     };
-  }, [showLevels, isActualTradeActive, entryPrice, slPrice, tp1Price, tp2Price, tp3Price, chartType]);
+  }, [
+    showLevels,
+    isActualTradeActive,
+    entryPrice,
+    slPrice,
+    tp1Price,
+    tp2Price,
+    tp3Price,
+    chartType,
+  ]);
 
   // 5. PineScript-Style SMC Overlays Canvas Synchronization (Order Blocks, FVGs, Liquidity Pools & Sweeps, Dealing Range, BOS/CHoCH)
   const drawSMCOverlays = useCallback(() => {
@@ -951,7 +977,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               ctx.fillStyle = isBull ? '#089981' : '#F23645';
               ctx.font = 'bold 9px monospace';
               ctx.fillText(
-                isBull ? `▲ Bullish OB [${ob.low.toFixed(2)} - ${ob.high.toFixed(2)}]` : `▼ Bearish OB [${ob.low.toFixed(2)} - ${ob.high.toFixed(2)}]`,
+                isBull
+                  ? `▲ Bullish OB [${ob.low.toFixed(2)} - ${ob.high.toFixed(2)}]`
+                  : `▼ Bearish OB [${ob.low.toFixed(2)} - ${ob.high.toFixed(2)}]`,
                 startX + 6,
                 boxY + Math.min(12, boxH - 2),
               );
@@ -983,7 +1011,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
               ctx.fillStyle = isBull ? '#06B6D4' : '#F43F5E';
               ctx.font = 'bold 9px monospace';
-              ctx.fillText(isBull ? `⚡ Bullish FVG` : `⚡ Bearish FVG`, startX + 6, fvgY + Math.min(10, fvgH - 2));
+              ctx.fillText(
+                isBull ? `⚡ Bullish FVG` : `⚡ Bearish FVG`,
+                startX + 6,
+                fvgY + Math.min(10, fvgH - 2),
+              );
             }
           }
         });
@@ -997,7 +1029,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             const isBull = ch.direction === 'BULLISH';
             const timeSec = Math.floor(new Date(ch.timestamp).getTime() / 1000) as unknown as Time;
             const candleX = chart.timeScale().timeToCoordinate(timeSec);
-            
+
             // Local bounded segment (anchored to the breakout candle)
             const endX = candleX !== null ? candleX + 15 : width * 0.75;
             const startX = candleX !== null ? Math.max(10, candleX - 85) : width * 0.55;
@@ -1029,7 +1061,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             const isBull = bos.direction === 'BULLISH';
             const timeSec = Math.floor(new Date(bos.timestamp).getTime() / 1000) as unknown as Time;
             const candleX = chart.timeScale().timeToCoordinate(timeSec);
-            
+
             // Local bounded dashed segment
             const endX = candleX !== null ? candleX + 15 : width * 0.7;
             const startX = candleX !== null ? Math.max(10, candleX - 75) : width * 0.55;
@@ -1059,33 +1091,38 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       // E. LIQUIDITY POOLS (BSL / SSL) & LIQUIDITY SWEEPS - Anchored Directly On Candle Wicks
       if (showLiq && clientSMC.liquidityPools && clientSMC.liquidityPools.length > 0) {
         // Draw resting unswept pools as local bounded lines
-        clientSMC.liquidityPools.filter((lp) => !lp.isSwept).slice(0, 4).forEach((lp) => {
-          const y = priceToY(lp.priceLevel);
-          if (y !== null) {
-            const isBSL = lp.type === 'BUY_SIDE' || lp.type === 'EQUAL_HIGHS';
-            const timeSec = Math.floor(new Date(lp.firstTimestamp).getTime() / 1000) as unknown as Time;
-            const startCoord = chart.timeScale().timeToCoordinate(timeSec);
-            const startX = startCoord !== null ? Math.max(10, startCoord) : width * 0.3;
-            const endX = width - 65;
-            
-            // Liquidity Level Local Segment
-            ctx.strokeStyle = 'rgba(245, 158, 11, 0.7)';
-            ctx.lineWidth = 1.2;
-            ctx.setLineDash([3, 3]);
-            ctx.beginPath();
-            ctx.moveTo(startX, y);
-            ctx.lineTo(endX, y);
-            ctx.stroke();
-            ctx.setLineDash([]);
+        clientSMC.liquidityPools
+          .filter((lp) => !lp.isSwept)
+          .slice(0, 4)
+          .forEach((lp) => {
+            const y = priceToY(lp.priceLevel);
+            if (y !== null) {
+              const isBSL = lp.type === 'BUY_SIDE' || lp.type === 'EQUAL_HIGHS';
+              const timeSec = Math.floor(
+                new Date(lp.firstTimestamp).getTime() / 1000,
+              ) as unknown as Time;
+              const startCoord = chart.timeScale().timeToCoordinate(timeSec);
+              const startX = startCoord !== null ? Math.max(10, startCoord) : width * 0.3;
+              const endX = width - 65;
 
-            // Right Price Scale Tag
-            ctx.fillStyle = '#F59E0B';
-            ctx.fillRect(endX, y - 7, 65, 14);
-            ctx.fillStyle = '#0F172A';
-            ctx.font = 'bold 8.5px monospace';
-            ctx.fillText(isBSL ? 'BSL $$$' : 'SSL $$$', endX + 4, y + 4);
-          }
-        });
+              // Liquidity Level Local Segment
+              ctx.strokeStyle = 'rgba(245, 158, 11, 0.7)';
+              ctx.lineWidth = 1.2;
+              ctx.setLineDash([3, 3]);
+              ctx.beginPath();
+              ctx.moveTo(startX, y);
+              ctx.lineTo(endX, y);
+              ctx.stroke();
+              ctx.setLineDash([]);
+
+              // Right Price Scale Tag
+              ctx.fillStyle = '#F59E0B';
+              ctx.fillRect(endX, y - 7, 65, 14);
+              ctx.fillStyle = '#0F172A';
+              ctx.font = 'bold 8.5px monospace';
+              ctx.fillText(isBSL ? 'BSL $$$' : 'SSL $$$', endX + 4, y + 4);
+            }
+          });
       }
 
       // Render Liquidity Sweeps Directly Above/Below Candle Wicks (No Full Horizontal Lines)
@@ -1161,9 +1198,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       const rawTp2Y = priceToY(tp2Price);
 
       const entryY = rawEntryY !== null ? rawEntryY : height * 0.45;
-      const slY = rawSlY !== null ? rawSlY : (effSignal?.direction === 'BEARISH' ? entryY - 40 : entryY + 40);
-      const tp2Y = rawTp2Y !== null ? rawTp2Y : (effSignal?.direction === 'BEARISH' ? entryY + 70 : entryY - 70);
-      const tp1Y = rawTp1Y !== null ? rawTp1Y : (effSignal?.direction === 'BEARISH' ? entryY + 40 : entryY - 40);
+      const slY =
+        rawSlY !== null ? rawSlY : effSignal?.direction === 'BEARISH' ? entryY - 40 : entryY + 40;
+      const tp2Y =
+        rawTp2Y !== null ? rawTp2Y : effSignal?.direction === 'BEARISH' ? entryY + 70 : entryY - 70;
+      const tp1Y =
+        rawTp1Y !== null ? rawTp1Y : effSignal?.direction === 'BEARISH' ? entryY + 40 : entryY - 40;
 
       const endX = width - 65; // Right price axis boundary
       const startX = Math.max(10, Math.min(entryCandleX, width - 130));
@@ -1464,7 +1504,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       className={`bg-[#0B0F19] border border-slate-800 rounded-xl shadow-2xl flex flex-col transition-all duration-200 ${
         isFullscreen
           ? 'fixed inset-0 z-50 rounded-none border-none h-screen w-screen p-4 bg-[#0B0F19]'
-          : 'h-[620px] p-4'
+          : 'h-[680px] min-h-[600px] p-4'
       }`}
     >
       {/* 1. Main Professional Header Bar */}
@@ -1477,6 +1517,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 {[
                   { sym: 'NIFTY', label: 'NIFTY' },
                   { sym: 'BANKNIFTY', label: 'BANKNIFTY' },
+                  { sym: 'XAUUSD', label: 'GOLD 🥇' },
                   { sym: 'BTCUSDT', label: 'BTC ⚡' },
                   { sym: 'RELIANCE', label: 'RELIANCE' },
                   { sym: 'HDFCBANK', label: 'HDFC' },
@@ -1496,7 +1537,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 ))}
               </div>
             ) : (
-              <span className="text-xl font-black text-white font-mono tracking-tight">{symbol}</span>
+              <span className="text-xl font-black text-white font-mono tracking-tight">
+                {symbol}
+              </span>
             )}
             <span className="text-xs text-slate-400 font-mono bg-slate-800 px-2 py-1 rounded border border-slate-700">
               {timeframe}
@@ -1506,7 +1549,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           {/* Live Price Display */}
           <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
             <span className="text-2xl font-black text-white font-mono tracking-tight">
-              {currSymbol}{currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {currSymbol}
+              {currentPrice.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
             </span>
             <span
               className={`text-xs font-bold px-2 py-0.5 rounded flex items-center gap-0.5 ${
@@ -1515,7 +1562,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                   : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
               }`}
             >
-              {liveChangePercent >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+              {liveChangePercent >= 0 ? (
+                <TrendingUp className="w-3.5 h-3.5" />
+              ) : (
+                <TrendingDown className="w-3.5 h-3.5" />
+              )}
               {liveChangePercent >= 0 ? '+' : ''}
               {liveChangePercent}%
             </span>
@@ -1705,7 +1756,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
               </span>
               <span className="font-black text-cyan-300 flex items-center gap-1">
-                RUNNING {paperPosition.quantity} {symbol === 'BTCUSDT' ? 'BTC' : 'Qty'} @ {currSymbol}{Number(paperPosition.averageEntryPrice).toFixed(2)}
+                RUNNING {paperPosition.quantity}{' '}
+                {symbol === 'BTCUSDT'
+                  ? 'BTC'
+                  : symbol === 'XAUUSD' || symbol === 'GOLD'
+                    ? 'oz'
+                    : 'Qty'}{' '}
+                @ {currSymbol}
+                {Number(paperPosition.averageEntryPrice).toFixed(2)}
               </span>
               <span
                 className={`px-2.5 py-0.5 rounded font-black border flex items-center gap-1 ${
@@ -1714,7 +1772,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                     : 'bg-rose-950/80 text-rose-400 border-rose-500/50'
                 }`}
               >
-                UNREALIZED P&L: {paperPosition.unrealizedPnL >= 0 ? '+' : ''}{currSymbol}{Math.abs(paperPosition.unrealizedPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                UNREALIZED P&L: {paperPosition.unrealizedPnL >= 0 ? '+' : ''}
+                {currSymbol}
+                {Math.abs(paperPosition.unrealizedPnL).toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
               </span>
             </div>
           ) : isLocallyCut ? (
@@ -1738,7 +1801,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 🛑 TRADE CUT & CLOSED (STOP LOSS HIT)
               </span>
               <span className="text-slate-400 text-[11px]">
-                Exit: <strong className="text-rose-400">{currSymbol}{slPrice.toFixed(2)}</strong> | Realized: <strong className="text-rose-400">-1.0R</strong>
+                Exit:{' '}
+                <strong className="text-rose-400">
+                  {currSymbol}
+                  {slPrice.toFixed(2)}
+                </strong>{' '}
+                | Realized: <strong className="text-rose-400">-1.0R</strong>
               </span>
             </div>
           ) : effSignal?.state === 'TP2_HIT' || effSignal?.state === 'TP3_HIT' ? (
@@ -1750,7 +1818,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 🎯 TRADE COMPLETED (TARGET 2 HIT)
               </span>
               <span className="text-slate-400 text-[11px]">
-                Exit: <strong className="text-teal-300">{currSymbol}{tp2Price.toFixed(2)}</strong> | Realized: <strong className="text-teal-300">+2.5R</strong>
+                Exit:{' '}
+                <strong className="text-teal-300">
+                  {currSymbol}
+                  {tp2Price.toFixed(2)}
+                </strong>{' '}
+                | Realized: <strong className="text-teal-300">+2.5R</strong>
               </span>
             </div>
           ) : effSignal?.state === 'TP1_HIT' ? (
@@ -1767,7 +1840,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-slate-600" />
               <span className="text-slate-400 font-bold">
-                STANDBY: Order Block Entry ({currSymbol}{entryPrice.toFixed(2)})
+                STANDBY: Order Block Entry ({currSymbol}
+                {entryPrice.toFixed(2)})
               </span>
             </div>
           )}
@@ -1794,28 +1868,43 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         <div className="flex flex-wrap items-center gap-2 relative z-10">
           <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-800 px-2 py-1 rounded-lg">
             <span className="text-[10px] text-slate-400 font-bold uppercase">ENTRY:</span>
-            <span className="text-white font-black">{currSymbol}{entryPrice.toFixed(2)}</span>
+            <span className="text-white font-black">
+              {currSymbol}
+              {entryPrice.toFixed(2)}
+            </span>
           </div>
 
           <div className="flex items-center gap-1.5 bg-rose-950/40 border border-rose-500/40 px-2 py-1 rounded-lg">
             <span className="text-[10px] text-rose-300 font-bold uppercase">SL:</span>
-            <span className="text-rose-400 font-black">{currSymbol}{slPrice.toFixed(2)}</span>
+            <span className="text-rose-400 font-black">
+              {currSymbol}
+              {slPrice.toFixed(2)}
+            </span>
           </div>
 
           <div className="flex items-center gap-1.5 bg-emerald-950/40 border border-emerald-500/40 px-2 py-1 rounded-lg">
             <span className="text-[10px] text-emerald-300 font-bold uppercase">TP1 (2.0R):</span>
-            <span className="text-emerald-400 font-black">{currSymbol}{tp1Price.toFixed(2)}</span>
+            <span className="text-emerald-400 font-black">
+              {currSymbol}
+              {tp1Price.toFixed(2)}
+            </span>
           </div>
 
           <div className="flex items-center gap-1.5 bg-teal-950/40 border border-teal-500/40 px-2 py-1 rounded-lg">
             <span className="text-[10px] text-teal-300 font-bold uppercase">TP2 (3.5R):</span>
-            <span className="text-teal-400 font-black">{currSymbol}{tp2Price.toFixed(2)}</span>
+            <span className="text-teal-400 font-black">
+              {currSymbol}
+              {tp2Price.toFixed(2)}
+            </span>
           </div>
 
           {tp3Price && (
             <div className="hidden sm:flex items-center gap-1.5 bg-purple-950/40 border border-purple-500/40 px-2 py-1 rounded-lg">
               <span className="text-[10px] text-purple-300 font-bold uppercase">TP3 (6.0R):</span>
-              <span className="text-purple-300 font-black">{currSymbol}{tp3Price.toFixed(2)}</span>
+              <span className="text-purple-300 font-black">
+                {currSymbol}
+                {tp3Price.toFixed(2)}
+              </span>
             </div>
           )}
         </div>
@@ -1824,7 +1913,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         <div className="flex flex-wrap items-center gap-2 relative z-10">
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
             <span className="text-[10px] text-slate-400 font-bold uppercase">SMC:</span>
-            <strong className="text-cyan-300 font-black">{aiPredictionInfo?.deterministicScore || effSignal?.score || 85}/100</strong>
+            <strong className="text-cyan-300 font-black">
+              {aiPredictionInfo?.deterministicScore || effSignal?.score || 85}/100
+            </strong>
           </div>
 
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
@@ -1837,7 +1928,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
             <span className="text-[10px] text-slate-400 font-bold uppercase">EV:</span>
             <strong className="text-cyan-300 font-black">
-              {aiPredictionInfo ? `${aiPredictionInfo.expectedValueR >= 0 ? '+' : ''}${aiPredictionInfo.expectedValueR.toFixed(2)}R` : '+1.45R'}
+              {aiPredictionInfo
+                ? `${aiPredictionInfo.expectedValueR >= 0 ? '+' : ''}${aiPredictionInfo.expectedValueR.toFixed(2)}R`
+                : '+1.45R'}
             </strong>
           </div>
 
@@ -1845,9 +1938,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             className={`px-3 py-1 rounded-lg font-black border text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-sm ${
               (aiPredictionInfo?.recommendation || 'HIGH_CONFIDENCE') === 'HIGH_CONFIDENCE'
                 ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50 shadow-emerald-500/10'
-                : (aiPredictionInfo?.recommendation) === 'MODERATE_CONFIDENCE'
-                ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
-                : 'bg-slate-850 text-slate-300 border-slate-700'
+                : aiPredictionInfo?.recommendation === 'MODERATE_CONFIDENCE'
+                  ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
+                  : 'bg-slate-850 text-slate-300 border-slate-700'
             }`}
           >
             ⚡ {aiPredictionInfo?.recommendation || 'HIGH_CONFIDENCE'}
@@ -1858,18 +1951,56 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {/* 3. OHLC Dynamic Crosshair Header Bar (TradingView Style) */}
       {ohlcData && (
         <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-400 pb-2">
-          <span>Time: <strong className="text-cyan-400">{ohlcData.time}</strong></span>
-          <span>O: <strong className="text-slate-200">{ohlcData.open.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-          <span>H: <strong className="text-slate-200">{ohlcData.high.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-          <span>L: <strong className="text-slate-200">{ohlcData.low.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-          <span>C: <strong className={ohlcData.close >= ohlcData.open ? 'text-[#089981]' : 'text-[#F23645]'}>{ohlcData.close.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+          <span>
+            Time: <strong className="text-cyan-400">{ohlcData.time}</strong>
+          </span>
+          <span>
+            O:{' '}
+            <strong className="text-slate-200">
+              {ohlcData.open.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </strong>
+          </span>
+          <span>
+            H:{' '}
+            <strong className="text-slate-200">
+              {ohlcData.high.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </strong>
+          </span>
+          <span>
+            L:{' '}
+            <strong className="text-slate-200">
+              {ohlcData.low.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </strong>
+          </span>
+          <span>
+            C:{' '}
+            <strong
+              className={ohlcData.close >= ohlcData.open ? 'text-[#089981]' : 'text-[#F23645]'}
+            >
+              {ohlcData.close.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </strong>
+          </span>
           {(() => {
             const diff = ohlcData.close - ohlcData.open;
             const pct = ohlcData.open > 0 ? (diff / ohlcData.open) * 100 : 0;
             const isUp = diff >= 0;
             return (
               <span className={`font-bold ${isUp ? 'text-[#089981]' : 'text-[#F23645]'}`}>
-                {isUp ? '+' : ''}{diff.toFixed(2)} ({isUp ? '+' : ''}{pct.toFixed(2)}%)
+                {isUp ? '+' : ''}
+                {diff.toFixed(2)} ({isUp ? '+' : ''}
+                {pct.toFixed(2)}%)
               </span>
             );
           })()}
@@ -1880,27 +2011,51 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {showIndicatorsModal && (
         <div className="bg-slate-900/95 border border-slate-800 rounded-lg p-3 mb-2 grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs font-mono animate-in fade-in">
           <label className="flex items-center gap-2 cursor-pointer text-amber-400">
-            <input type="checkbox" checked={showEMA20} onChange={(e) => setShowEMA20(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showEMA20}
+              onChange={(e) => setShowEMA20(e.target.checked)}
+            />
             <span>EMA 20</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-cyan-400">
-            <input type="checkbox" checked={showEMA50} onChange={(e) => setShowEMA50(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showEMA50}
+              onChange={(e) => setShowEMA50(e.target.checked)}
+            />
             <span>EMA 50</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-purple-400">
-            <input type="checkbox" checked={showEMA200} onChange={(e) => setShowEMA200(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showEMA200}
+              onChange={(e) => setShowEMA200(e.target.checked)}
+            />
             <span>EMA 200</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-orange-400">
-            <input type="checkbox" checked={showVWAP} onChange={(e) => setShowVWAP(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showVWAP}
+              onChange={(e) => setShowVWAP(e.target.checked)}
+            />
             <span>VWAP</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-blue-400">
-            <input type="checkbox" checked={showSMA20} onChange={(e) => setShowSMA20(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showSMA20}
+              onChange={(e) => setShowSMA20(e.target.checked)}
+            />
             <span>SMA 20</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-slate-300">
-            <input type="checkbox" checked={showVolume} onChange={(e) => setShowVolume(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showVolume}
+              onChange={(e) => setShowVolume(e.target.checked)}
+            />
             <span>Volume</span>
           </label>
         </div>
@@ -1914,44 +2069,74 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             <span>Order Blocks</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-cyan-400">
-            <input type="checkbox" checked={showFVG} onChange={(e) => setShowFVG(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showFVG}
+              onChange={(e) => setShowFVG(e.target.checked)}
+            />
             <span>Fair Value Gaps</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-teal-400">
-            <input type="checkbox" checked={showBOS} onChange={(e) => setShowBOS(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showBOS}
+              onChange={(e) => setShowBOS(e.target.checked)}
+            />
             <span>BOS Lines</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-indigo-400">
-            <input type="checkbox" checked={showCHoCH} onChange={(e) => setShowCHoCH(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showCHoCH}
+              onChange={(e) => setShowCHoCH(e.target.checked)}
+            />
             <span>CHoCH Lines</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-amber-400">
-            <input type="checkbox" checked={showLiq} onChange={(e) => setShowLiq(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showLiq}
+              onChange={(e) => setShowLiq(e.target.checked)}
+            />
             <span>Liquidity Pools</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-rose-400">
-            <input type="checkbox" checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showLevels}
+              onChange={(e) => setShowLevels(e.target.checked)}
+            />
             <span>SL / TP Levels</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-purple-400">
-            <input type="checkbox" checked={showRange} onChange={(e) => setShowRange(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showRange}
+              onChange={(e) => setShowRange(e.target.checked)}
+            />
             <span>50% Dealing Range</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer text-yellow-400">
-            <input type="checkbox" checked={showSMCDash} onChange={(e) => setShowSMCDash(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showSMCDash}
+              onChange={(e) => setShowSMCDash(e.target.checked)}
+            />
             <span>SMC Dashboard</span>
           </label>
         </div>
       )}
 
       {/* 6. Chart Viewport Container (Lightweight Charts + Canvas Overlay + SMC HUD + MTF Permission) */}
-      <div className="relative flex-1 w-full min-h-0">
-        <div ref={chartContainerRef} className="w-full h-full" />
+      <div className="relative flex-1 w-full min-h-[420px] h-full overflow-hidden">
+        <div ref={chartContainerRef} className="w-full h-full min-h-[420px]" />
         <canvas
           ref={overlayCanvasRef}
           onClick={handleCanvasClick}
           className={`absolute inset-0 w-full h-full z-10 ${
-            activeDrawingTool ? 'cursor-crosshair pointer-events-auto' : 'cursor-default pointer-events-none'
+            activeDrawingTool
+              ? 'cursor-crosshair pointer-events-auto'
+              : 'cursor-default pointer-events-none'
           }`}
         />
 
@@ -1963,8 +2148,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 clientMTF.overallBias === 'STRONG_BULLISH'
                   ? 'bg-emerald-400'
                   : clientMTF.overallBias === 'STRONG_BEARISH'
-                  ? 'bg-rose-400'
-                  : 'bg-amber-400'
+                    ? 'bg-rose-400'
+                    : 'bg-amber-400'
               }`}
             />
             <span className="text-slate-400 font-bold">RADAR:</span>
@@ -1973,8 +2158,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 clientMTF.overallBias === 'STRONG_BULLISH'
                   ? 'text-emerald-400'
                   : clientMTF.overallBias === 'STRONG_BEARISH'
-                  ? 'text-rose-400'
-                  : 'text-amber-400'
+                    ? 'text-rose-400'
+                    : 'text-amber-400'
               }`}
             >
               {clientMTF.tradePermission.replace(/_/g, ' ')}
@@ -2001,24 +2186,34 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                   isBullish ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               >
-                {isBullish ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                {isBullish ? (
+                  <ArrowUpRight className="w-3 h-3" />
+                ) : (
+                  <ArrowDownRight className="w-3 h-3" />
+                )}
                 {isBullish ? 'BULLISH ▲' : 'BEARISH ▼'}
               </span>
             </div>
 
             <div className="flex items-center justify-between gap-4">
               <span className="text-slate-300">Active OBs</span>
-              <span className="text-yellow-400 font-bold">{clientSMC?.orderBlocks?.length || 0}</span>
+              <span className="text-yellow-400 font-bold">
+                {clientSMC?.orderBlocks?.length || 0}
+              </span>
             </div>
 
             <div className="flex items-center justify-between gap-4">
               <span className="text-slate-300">Active FVGs</span>
-              <span className="text-cyan-400 font-bold">{clientSMC?.fairValueGaps?.length || 0}</span>
+              <span className="text-cyan-400 font-bold">
+                {clientSMC?.fairValueGaps?.length || 0}
+              </span>
             </div>
 
             <div className="flex items-center justify-between gap-4">
               <span className="text-slate-300">Liq Pools (BSL/SSL)</span>
-              <span className="text-amber-400 font-bold">{clientSMC?.liquidityPools?.length || 0}</span>
+              <span className="text-amber-400 font-bold">
+                {clientSMC?.liquidityPools?.length || 0}
+              </span>
             </div>
 
             <div className="flex items-center justify-between gap-4">

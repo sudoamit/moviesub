@@ -24,8 +24,8 @@ export class AISummaryService {
     const executiveSummary = isBull
       ? `${sym} is demonstrating clear structural strength on the ${timeframe} timeframe with institutional accumulation in the 50% Discount zone. The quantitative setup score is ${signal.score}/100 (Grade ${signal.grade}).`
       : isBear
-      ? `${sym} exhibits institutional distribution on the ${timeframe} timeframe following buy-side liquidity sweeps in the 50% Premium zone. The quantitative setup score is ${signal.score}/100 (Grade ${signal.grade}).`
-      : `${sym} is currently consolidating in a neutral dealing range without high-conviction institutional displacement. No active trade trigger is confirmed.`;
+        ? `${sym} exhibits institutional distribution on the ${timeframe} timeframe following buy-side liquidity sweeps in the 50% Premium zone. The quantitative setup score is ${signal.score}/100 (Grade ${signal.grade}).`
+        : `${sym} is currently consolidating in a neutral dealing range without high-conviction institutional displacement. No active trade trigger is confirmed.`;
 
     const marketStructureNarrative = [
       `Market Regime: ${smc.marketRegime.regime.replace('_', ' ')} with ATR volatility at ${smc.marketRegime.atr.toFixed(2)} pts.`,
@@ -64,7 +64,8 @@ export class AISummaryService {
       riskParameters,
       confirmedChecklist: signal.reasoning.confirmedChecklist,
       generatedAt: new Date().toISOString(),
-      disclaimer: 'Deterministic quantitative market intelligence. Generated strictly from mathematical structural engines with zero LLM hallucination.',
+      disclaimer:
+        'Deterministic quantitative market intelligence. Generated strictly from mathematical structural engines with zero LLM hallucination.',
     };
   }
 

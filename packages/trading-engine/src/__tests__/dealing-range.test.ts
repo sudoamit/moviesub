@@ -4,8 +4,22 @@ import { ISwingPoint, StructureType } from '@quant/shared';
 describe('DealingRangeEngine', () => {
   it('should calculate 50% equilibrium and classify premium / discount zones', () => {
     const swings: ISwingPoint[] = [
-      { index: 2, type: StructureType.SWING_HIGH, price: 200, timestamp: new Date(), confirmedAtIndex: 4, confirmedAtTimestamp: new Date() },
-      { index: 8, type: StructureType.SWING_LOW, price: 100, timestamp: new Date(), confirmedAtIndex: 10, confirmedAtTimestamp: new Date() },
+      {
+        index: 2,
+        type: StructureType.SWING_HIGH,
+        price: 200,
+        timestamp: new Date(),
+        confirmedAtIndex: 4,
+        confirmedAtTimestamp: new Date(),
+      },
+      {
+        index: 8,
+        type: StructureType.SWING_LOW,
+        price: 100,
+        timestamp: new Date(),
+        confirmedAtIndex: 10,
+        confirmedAtTimestamp: new Date(),
+      },
     ];
 
     const range = DealingRangeEngine.calculateDealingRange(swings);

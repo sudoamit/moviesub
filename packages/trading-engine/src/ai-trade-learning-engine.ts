@@ -1,9 +1,4 @@
-import {
-  ICandle,
-  ISignalSetup,
-  Direction,
-  MarketRegimeType,
-} from '@quant/shared';
+import { ICandle, ISignalSetup, Direction, MarketRegimeType } from '@quant/shared';
 import { ISMCAnalysisResult } from './types';
 import { SessionFilter } from './session-filter';
 
@@ -111,7 +106,8 @@ export class FeatureVectorExtractor {
 
     const lastCandle = validCandles.length > 0 ? validCandles[validCandles.length - 1] : null;
     const currentPrice = lastCandle ? lastCandle.close : signal.entryZone?.optimal || 1.0;
-    const isBullish = signal.direction === 'BULLISH' || (signal.direction as any) === Direction.BULLISH;
+    const isBullish =
+      signal.direction === 'BULLISH' || (signal.direction as any) === Direction.BULLISH;
 
     // 1. smcScore: Normalized 0 to 100 -> [0.0, 1.0]
     const smcScore = clamp((signal.score || 0) / 100.0);
@@ -119,9 +115,14 @@ export class FeatureVectorExtractor {
     // 2. obStrength: Extracted from active order block quality and displacement ratio
     let obStrength = 0.5; // neutral fallback
     if (smcAnalysis?.orderBlocks && smcAnalysis.orderBlocks.length > 0) {
-      const activeOB = smcAnalysis.orderBlocks.find(
-        (ob) => (isBullish ? ob.direction === 'BULLISH' || (ob.direction as any) === Direction.BULLISH : ob.direction === 'BEARISH' || (ob.direction as any) === Direction.BEARISH) && !ob.isMitigated
-      ) || smcAnalysis.orderBlocks[0];
+      const activeOB =
+        smcAnalysis.orderBlocks.find(
+          (ob) =>
+            (isBullish
+              ? ob.direction === 'BULLISH' || (ob.direction as any) === Direction.BULLISH
+              : ob.direction === 'BEARISH' || (ob.direction as any) === Direction.BEARISH) &&
+            !ob.isMitigated,
+        ) || smcAnalysis.orderBlocks[0];
       obStrength = clamp((activeOB.strength || 50) / 100.0);
     } else if (signal.scoreBreakdown?.orderBlock !== undefined) {
       // 25 max points in scoreBreakdown
@@ -132,7 +133,8 @@ export class FeatureVectorExtractor {
     let fvgSize = 0.5;
     const recentAtr = this.calculateAtr(validCandles, 14);
     if (smcAnalysis?.fairValueGaps && smcAnalysis.fairValueGaps.length > 0 && recentAtr > 0) {
-      const activeFVG = smcAnalysis.fairValueGaps.find((f) => !f.isFilled) || smcAnalysis.fairValueGaps[0];
+      const activeFVG =
+        smcAnalysis.fairValueGaps.find((f) => !f.isFilled) || smcAnalysis.fairValueGaps[0];
       const gapWidth = Math.abs(activeFVG.upperBound - activeFVG.lowerBound);
       // Gap size / ATR: typical ratio 0.5 to 2.0 ATR -> normalized to [0, 1]
       fvgSize = clamp(gapWidth / (recentAtr * 2.5));
@@ -145,7 +147,8 @@ export class FeatureVectorExtractor {
     if (signal.scoreBreakdown?.htfBias !== undefined) {
       mtfAlignment = clamp(signal.scoreBreakdown.htfBias / 25.0);
     } else if (signal.htfBias) {
-      const htfMatches = (isBullish && signal.htfBias === 'BULLISH') || (!isBullish && signal.htfBias === 'BEARISH');
+      const htfMatches =
+        (isBullish && signal.htfBias === 'BULLISH') || (!isBullish && signal.htfBias === 'BEARISH');
       mtfAlignment = htfMatches ? 1.0 : signal.htfBias === 'NEUTRAL' ? 0.5 : 0.0;
     }
 
@@ -183,7 +186,11 @@ export class FeatureVectorExtractor {
     // 9. trendRegime: 0.0 = RANGING / CHOP, 0.5 = TRANSITIONAL, 1.0 = STRONG TREND
     let trendRegime = 0.5;
     const regime = smcAnalysis?.marketRegime?.regime;
-    if (regime === MarketRegimeType.BULLISH_TREND || regime === MarketRegimeType.BEARISH_TREND || regime === ('TRENDING' as any)) {
+    if (
+      regime === MarketRegimeType.BULLISH_TREND ||
+      regime === MarketRegimeType.BEARISH_TREND ||
+      regime === ('TRENDING' as any)
+    ) {
       trendRegime = 1.0;
     } else if (regime === MarketRegimeType.RANGE || regime === ('RANGING' as any)) {
       trendRegime = 0.0;
@@ -225,7 +232,7 @@ export class FeatureVectorExtractor {
       const currentVol = lastCandle ? lastCandle.volume || 1 : avgVol;
       if (avgVol > 0) {
         // Ratio 0.0 to 3.0 mapped to [0.0, 1.0]
-        relativeVolume = clamp((currentVol / avgVol) / 3.0);
+        relativeVolume = clamp(currentVol / avgVol / 3.0);
       }
     }
 
@@ -245,7 +252,9 @@ export class FeatureVectorExtractor {
     if (smcAnalysis?.liquidityPools && smcAnalysis.liquidityPools.length > 0 && currentPrice > 0) {
       const activePools = smcAnalysis.liquidityPools.filter((p) => !p.isSwept);
       if (activePools.length > 0) {
-        const minDistance = Math.min(...activePools.map((p) => Math.abs(p.priceLevel - currentPrice)));
+        const minDistance = Math.min(
+          ...activePools.map((p) => Math.abs(p.priceLevel - currentPrice)),
+        );
         const distPct = minDistance / currentPrice;
         distanceToLiquidity = clamp(distPct / 0.03); // 0 to 3% mapped to [0.0, 1.0]
       }
@@ -293,7 +302,7 @@ export class FeatureVectorExtractor {
   public static fromArray(arr: number[]): TradeFeatureVector {
     if (!arr || arr.length !== FEATURE_VECTOR_DIMENSION) {
       throw new Error(
-        `FeatureVectorExtractor.fromArray: expected array of dimension ${FEATURE_VECTOR_DIMENSION}, received ${arr ? arr.length : 0}`
+        `FeatureVectorExtractor.fromArray: expected array of dimension ${FEATURE_VECTOR_DIMENSION}, received ${arr ? arr.length : 0}`,
       );
     }
 
@@ -308,7 +317,10 @@ export class FeatureVectorExtractor {
   /**
    * Validates that all features in the vector are finite numbers strictly bounded in [0.0, 1.0].
    */
-  public static validateVector(features: TradeFeatureVector): { isValid: boolean; errors: string[] } {
+  public static validateVector(features: TradeFeatureVector): {
+    isValid: boolean;
+    errors: string[];
+  } {
     const errors: string[] = [];
 
     FEATURE_NAMES.forEach((name) => {
@@ -339,7 +351,7 @@ export class FeatureVectorExtractor {
       const tr = Math.max(
         current.high - current.low,
         Math.abs(current.high - prev.close),
-        Math.abs(current.low - prev.close)
+        Math.abs(current.low - prev.close),
       );
       trs.push(tr);
     }
@@ -408,7 +420,9 @@ export class TradeLabelGenerator {
     const isBullish = direction === Direction.BULLISH || (direction as string) === 'BULLISH';
     const riskPerUnit = Math.abs(entryPrice - stopLoss);
     if (riskPerUnit <= 0) {
-      throw new Error(`TradeLabelGenerator: invalid zero riskPerUnit (entry=${entryPrice}, sl=${stopLoss})`);
+      throw new Error(
+        `TradeLabelGenerator: invalid zero riskPerUnit (entry=${entryPrice}, sl=${stopLoss})`,
+      );
     }
 
     const targetDistance = Math.abs(targetPrice - entryPrice);
@@ -614,8 +628,8 @@ export class TrainingDatasetBuilder {
       targetSelection === 'TP1'
         ? signal.takeProfits.tp1
         : targetSelection === 'TP3'
-        ? signal.takeProfits.tp3
-        : signal.takeProfits.tp2;
+          ? signal.takeProfits.tp3
+          : signal.takeProfits.tp2;
 
     // 1. Point-in-time feature extraction (strictly at entryTimestamp)
     const features = FeatureVectorExtractor.extract({
@@ -629,7 +643,9 @@ export class TrainingDatasetBuilder {
 
     const validation = FeatureVectorExtractor.validateVector(features);
     if (!validation.isValid) {
-      throw new Error(`TrainingDatasetBuilder: invalid feature vector: ${validation.errors.join(', ')}`);
+      throw new Error(
+        `TrainingDatasetBuilder: invalid feature vector: ${validation.errors.join(', ')}`,
+      );
     }
 
     // 2. Evaluate authentic outcome on subsequent candles
@@ -651,7 +667,7 @@ export class TrainingDatasetBuilder {
     const exitTimestamp = outcome.exitTimestamp;
     if (exitTimestamp.getTime() <= entryTimestamp.getTime()) {
       throw new Error(
-        `TrainingDatasetBuilder: causality violation: exitTimestamp (${exitTimestamp.toISOString()}) <= entryTimestamp (${entryTimestamp.toISOString()})`
+        `TrainingDatasetBuilder: causality violation: exitTimestamp (${exitTimestamp.toISOString()}) <= entryTimestamp (${entryTimestamp.toISOString()})`,
       );
     }
 
@@ -675,14 +691,18 @@ export class TrainingDatasetBuilder {
    */
   public static sortChronologically(examples: TrainingExample[]): TrainingExample[] {
     return [...examples].sort(
-      (a, b) => new Date(a.predictionTimestamp).getTime() - new Date(b.predictionTimestamp).getTime()
+      (a, b) =>
+        new Date(a.predictionTimestamp).getTime() - new Date(b.predictionTimestamp).getTime(),
     );
   }
 
   /**
    * Validates a complete dataset for temporal causality, label validity, and feature schema integrity.
    */
-  public static validateDataset(examples: TrainingExample[]): { isValid: boolean; errors: string[] } {
+  public static validateDataset(examples: TrainingExample[]): {
+    isValid: boolean;
+    errors: string[];
+  } {
     const errors: string[] = [];
 
     if (!examples || examples.length === 0) {
@@ -698,12 +718,16 @@ export class TrainingDatasetBuilder {
 
       // Check schema version
       if (ex.featureSchemaVersion !== FEATURE_SCHEMA_VERSION) {
-        errors.push(`Example [${idx}] schema version mismatch: expected ${FEATURE_SCHEMA_VERSION}, got ${ex.featureSchemaVersion}`);
+        errors.push(
+          `Example [${idx}] schema version mismatch: expected ${FEATURE_SCHEMA_VERSION}, got ${ex.featureSchemaVersion}`,
+        );
       }
 
       // Check feature dimension
       if (!ex.featureArray || ex.featureArray.length !== FEATURE_VECTOR_DIMENSION) {
-        errors.push(`Example [${idx}] feature array dimension invalid: expected ${FEATURE_VECTOR_DIMENSION}, got ${ex.featureArray?.length}`);
+        errors.push(
+          `Example [${idx}] feature array dimension invalid: expected ${FEATURE_VECTOR_DIMENSION}, got ${ex.featureArray?.length}`,
+        );
       }
 
       // Check label
@@ -714,13 +738,15 @@ export class TrainingDatasetBuilder {
       // Check look-ahead violation within example
       if (availTime <= predTime) {
         errors.push(
-          `Example [${idx}] causality leak: availableForTrainingAt (${ex.availableForTrainingAt}) <= predictionTimestamp (${ex.predictionTimestamp})`
+          `Example [${idx}] causality leak: availableForTrainingAt (${ex.availableForTrainingAt}) <= predictionTimestamp (${ex.predictionTimestamp})`,
         );
       }
 
       // Check chronological ordering
       if (idx > 0 && predTime < prevPredictionTime) {
-        errors.push(`Example [${idx}] is out of chronological order: ${ex.predictionTimestamp} < previous timestamp`);
+        errors.push(
+          `Example [${idx}] is out of chronological order: ${ex.predictionTimestamp} < previous timestamp`,
+        );
       }
 
       prevPredictionTime = predTime;
@@ -806,7 +832,10 @@ export class ModelEvaluationEngine {
   /**
    * Computes full quantitative metrics on a dataset given a prediction model.
    */
-  public static calculateMetrics(examples: TrainingExample[], model: PredictionModel): EvaluationMetrics {
+  public static calculateMetrics(
+    examples: TrainingExample[],
+    model: PredictionModel,
+  ): EvaluationMetrics {
     const N = examples.length;
     if (N === 0) {
       return {
@@ -866,7 +895,10 @@ export class ModelEvaluationEngine {
     const accuracy = Number(((tp + tn) / N).toFixed(4));
     const precision = tp + fp > 0 ? Number((tp / (tp + fp)).toFixed(4)) : 0;
     const recall = tp + fn > 0 ? Number((tp / (tp + fn)).toFixed(4)) : 0;
-    const f1Score = precision + recall > 0 ? Number(((2 * precision * recall) / (precision + recall)).toFixed(4)) : 0;
+    const f1Score =
+      precision + recall > 0
+        ? Number(((2 * precision * recall) / (precision + recall)).toFixed(4))
+        : 0;
     const logLoss = Number((totalLogLoss / N).toFixed(4));
     const brierScore = Number((totalBrier / N).toFixed(4));
 
@@ -979,7 +1011,7 @@ export class TradePredictionModel implements PredictionModel {
     modelVersion = 'v1.0.0',
     hyperparameters: Partial<IModelHyperparameters> = {},
     initialWeights?: number[],
-    initialBias = 0.0
+    initialBias = 0.0,
   ) {
     this.modelVersion = modelVersion;
     this.hyperparameters = { ...DEFAULT_HYPERPARAMETERS, ...hyperparameters };
@@ -1174,7 +1206,9 @@ export class TradePredictionModel implements PredictionModel {
 
   public setWeights(weights: number[], bias: number): void {
     if (weights.length !== FEATURE_VECTOR_DIMENSION) {
-      throw new Error(`Invalid weights dimension: expected ${FEATURE_VECTOR_DIMENSION}, got ${weights.length}`);
+      throw new Error(
+        `Invalid weights dimension: expected ${FEATURE_VECTOR_DIMENSION}, got ${weights.length}`,
+      );
     }
     this.weights = [...weights];
     this.bias = bias;
@@ -1183,7 +1217,11 @@ export class TradePredictionModel implements PredictionModel {
   /**
    * Returns feature importance ranked by absolute weight magnitude.
    */
-  public getFeatureImportance(): { feature: FeatureName; weight: number; absoluteWeight: number }[] {
+  public getFeatureImportance(): {
+    feature: FeatureName;
+    weight: number;
+    absoluteWeight: number;
+  }[] {
     return FEATURE_NAMES.map((name, idx) => ({
       feature: name,
       weight: Number(this.weights[idx].toFixed(4)),
@@ -1236,7 +1274,7 @@ export interface IChronologicalDatasetSplits {
 export class ChronologicalSplitter {
   public static split(
     dataset: TrainingExample[],
-    config: Partial<IChronologicalSplitConfig> = {}
+    config: Partial<IChronologicalSplitConfig> = {},
   ): IChronologicalDatasetSplits {
     const cfg = { ...DEFAULT_SPLIT_CONFIG, ...config };
     const sorted = TrainingDatasetBuilder.sortChronologically(dataset);
@@ -1244,7 +1282,9 @@ export class ChronologicalSplitter {
 
     const minTrain = cfg.minTrainExamples || 10;
     if (N < minTrain) {
-      throw new Error(`ChronologicalSplitter.split: insufficient dataset size (${N} < minimum ${minTrain})`);
+      throw new Error(
+        `ChronologicalSplitter.split: insufficient dataset size (${N} < minimum ${minTrain})`,
+      );
     }
 
     const nTrain = Math.max(1, Math.floor(N * cfg.trainRatio));
@@ -1252,7 +1292,9 @@ export class ChronologicalSplitter {
     const nOos = N - (nTrain + nVal);
 
     if (nOos < 1) {
-      throw new Error(`ChronologicalSplitter.split: insufficient dataset to form out-of-sample partition (${N} examples)`);
+      throw new Error(
+        `ChronologicalSplitter.split: insufficient dataset to form out-of-sample partition (${N} examples)`,
+      );
     }
 
     const train = sorted.slice(0, nTrain);
@@ -1266,10 +1308,14 @@ export class ChronologicalSplitter {
     const minOosTime = new Date(outOfSample[0].predictionTimestamp).getTime();
 
     if (maxTrainTime > minValTime) {
-      throw new Error(`ChronologicalSplitter: temporal leak between Train and Validation partitions`);
+      throw new Error(
+        `ChronologicalSplitter: temporal leak between Train and Validation partitions`,
+      );
     }
     if (maxValTime > minOosTime) {
-      throw new Error(`ChronologicalSplitter: temporal leak between Validation and Out-of-Sample partitions`);
+      throw new Error(
+        `ChronologicalSplitter: temporal leak between Validation and Out-of-Sample partitions`,
+      );
     }
 
     return {
@@ -1328,13 +1374,15 @@ export class WalkForwardValidator {
   public static runWalkForward(
     dataset: TrainingExample[],
     modelFactory: () => PredictionModel,
-    numFolds = 3
+    numFolds = 3,
   ): IWalkForwardValidationResult {
     const sorted = TrainingDatasetBuilder.sortChronologically(dataset);
     const N = sorted.length;
 
     if (N < numFolds * 10) {
-      throw new Error(`WalkForwardValidator: insufficient dataset size (${N}) for ${numFolds} folds`);
+      throw new Error(
+        `WalkForwardValidator: insufficient dataset size (${N}) for ${numFolds} folds`,
+      );
     }
 
     const folds: IWalkForwardFold[] = [];
@@ -1389,9 +1437,13 @@ export class WalkForwardValidator {
     const meanTestBrierScore = Number(mean(foldTestBriers).toFixed(4));
 
     // Calculate variance in test log loss to evaluate temporal stability
-    const variance = foldTestLosses.reduce((acc, l) => acc + Math.pow(l - meanTestLogLoss, 2), 0) / foldTestLosses.length;
-    const stabilityScore = Number(Math.max(0, Math.min(1, 1 - Math.sqrt(variance) * 2.0)).toFixed(4));
-    const isStable = stabilityScore >= 0.70 && meanTestRocAuc >= 0.50;
+    const variance =
+      foldTestLosses.reduce((acc, l) => acc + Math.pow(l - meanTestLogLoss, 2), 0) /
+      foldTestLosses.length;
+    const stabilityScore = Number(
+      Math.max(0, Math.min(1, 1 - Math.sqrt(variance) * 2.0)).toFixed(4),
+    );
+    const isStable = stabilityScore >= 0.7 && meanTestRocAuc >= 0.5;
 
     return {
       folds,
@@ -1444,7 +1496,7 @@ export class ModelPromotionEngine {
     candidateModel: PredictionModel,
     outOfSampleDataset: TrainingExample[],
     baselineModel?: PredictionModel | null,
-    criteria: Partial<IModelPromotionCriteria> = {}
+    criteria: Partial<IModelPromotionCriteria> = {},
   ): IModelPromotionDecision {
     const cfg = { ...DEFAULT_PROMOTION_CRITERIA, ...criteria };
     const reasons: string[] = [];
@@ -1456,7 +1508,7 @@ export class ModelPromotionEngine {
     // 1. Sample Size Check
     if (N < cfg.minSampleSize) {
       reasons.push(
-        `Insufficient out-of-sample sample size (${N} observations < required minimum ${cfg.minSampleSize})`
+        `Insufficient out-of-sample sample size (${N} observations < required minimum ${cfg.minSampleSize})`,
       );
       return {
         isPromoted: false,
@@ -1470,21 +1522,21 @@ export class ModelPromotionEngine {
     // 2. Absolute Log Loss Barrier
     if (candidateMetrics.logLoss > cfg.maxOutOfSampleLogLoss) {
       reasons.push(
-        `Candidate out-of-sample Log Loss (${candidateMetrics.logLoss}) exceeds maximum tolerance (${cfg.maxOutOfSampleLogLoss})`
+        `Candidate out-of-sample Log Loss (${candidateMetrics.logLoss}) exceeds maximum tolerance (${cfg.maxOutOfSampleLogLoss})`,
       );
     }
 
     // 3. ROC-AUC Barrier
     if (candidateMetrics.rocAuc < cfg.minOutOfSampleRocAuc) {
       reasons.push(
-        `Candidate out-of-sample ROC-AUC (${candidateMetrics.rocAuc}) is below minimum threshold (${cfg.minOutOfSampleRocAuc})`
+        `Candidate out-of-sample ROC-AUC (${candidateMetrics.rocAuc}) is below minimum threshold (${cfg.minOutOfSampleRocAuc})`,
       );
     }
 
     // 4. Maximum Drawdown Barrier
     if (candidateMetrics.maxDrawdownR > cfg.maxDrawdownToleranceR) {
       reasons.push(
-        `Candidate out-of-sample Max Drawdown (${candidateMetrics.maxDrawdownR}R) exceeds tolerance (${cfg.maxDrawdownToleranceR}R)`
+        `Candidate out-of-sample Max Drawdown (${candidateMetrics.maxDrawdownR}R) exceeds tolerance (${cfg.maxDrawdownToleranceR}R)`,
       );
     }
 
@@ -1492,12 +1544,12 @@ export class ModelPromotionEngine {
     if (cfg.mustBeatBaseline && baselineMetrics) {
       if (candidateMetrics.logLoss > baselineMetrics.logLoss) {
         reasons.push(
-          `Candidate Log Loss (${candidateMetrics.logLoss}) does not improve over baseline (${baselineMetrics.logLoss})`
+          `Candidate Log Loss (${candidateMetrics.logLoss}) does not improve over baseline (${baselineMetrics.logLoss})`,
         );
       }
       if (candidateMetrics.rocAuc < baselineMetrics.rocAuc) {
         reasons.push(
-          `Candidate ROC-AUC (${candidateMetrics.rocAuc}) is inferior to baseline (${baselineMetrics.rocAuc})`
+          `Candidate ROC-AUC (${candidateMetrics.rocAuc}) is inferior to baseline (${baselineMetrics.rocAuc})`,
         );
       }
     }
@@ -1506,7 +1558,7 @@ export class ModelPromotionEngine {
 
     if (isPromoted) {
       reasons.push(
-        `Candidate model passed all out-of-sample validation tests (LogLoss: ${candidateMetrics.logLoss}, ROC-AUC: ${candidateMetrics.rocAuc}, Accuracy: ${candidateMetrics.accuracy})`
+        `Candidate model passed all out-of-sample validation tests (LogLoss: ${candidateMetrics.logLoss}, ROC-AUC: ${candidateMetrics.rocAuc}, Accuracy: ${candidateMetrics.accuracy})`,
       );
     }
 
@@ -1574,7 +1626,7 @@ export class ProbabilityCalibrationEngine {
    */
   public static generateCalibrationReport(
     items: { predictedProb: number; actualLabel: number }[],
-    numBins = 10
+    numBins = 10,
   ): ICalibrationReport {
     const N = items.length;
 
@@ -1667,7 +1719,7 @@ export class ProbabilityCalibrationEngine {
     } else if (expectedCalibrationError <= 0.12) {
       status = 'GOOD';
       description = `Good probability calibration (ECE: ${(expectedCalibrationError * 100).toFixed(1)}%). Observed win rates align within standard confidence bands.`;
-    } else if (expectedCalibrationError <= 0.20) {
+    } else if (expectedCalibrationError <= 0.2) {
       status = 'FAIR';
       description = `Fair calibration (ECE: ${(expectedCalibrationError * 100).toFixed(1)}%). Slight probability miscalibration in extreme deciles.`;
     } else {
@@ -1694,7 +1746,7 @@ export class ProbabilityCalibrationEngine {
     probability: number,
     supportingSampleSize: number,
     minSampleSize = 15,
-    confidenceLevel = 0.95
+    confidenceLevel = 0.95,
   ): IConfidenceInterval | null {
     if (supportingSampleSize < minSampleSize) {
       return null;
@@ -1815,10 +1867,7 @@ export interface IExpectedValueResult {
  * Strictly respects risk engine separation of concerns (never outputs position sizes).
  */
 export type AIRecommendationStatus =
-  | 'HIGH_CONFIDENCE'
-  | 'MODERATE_CONFIDENCE'
-  | 'LOW_CONFIDENCE'
-  | 'WAIT';
+  'HIGH_CONFIDENCE' | 'MODERATE_CONFIDENCE' | 'LOW_CONFIDENCE' | 'WAIT';
 
 export interface IAIRecommendationResult {
   recommendation: AIRecommendationStatus;
@@ -1853,7 +1902,7 @@ export class ExpectedValueEngine {
    */
   public static calculateExpectedValue(
     winProbability: number,
-    payoff: ITradePayoffStructure
+    payoff: ITradePayoffStructure,
   ): IExpectedValueResult {
     const p = Math.max(0.0, Math.min(1.0, winProbability));
     const q = 1.0 - p;
@@ -1892,7 +1941,7 @@ export class ExpectedValueEngine {
    * Evaluates AI recommendation with strict sample-size gating and calibration checks.
    */
   public static evaluateRecommendation(
-    params: IEvaluateRecommendationParams
+    params: IEvaluateRecommendationParams,
   ): IAIRecommendationResult {
     const {
       probability,
@@ -1907,7 +1956,7 @@ export class ExpectedValueEngine {
     const confidenceInterval = ProbabilityCalibrationEngine.calculateConfidenceInterval(
       probability,
       supportingSampleSize,
-      minSampleSize
+      minSampleSize,
     );
 
     const reasons: string[] = [];
@@ -1915,7 +1964,7 @@ export class ExpectedValueEngine {
     // 1. Sample Size Barrier
     if (supportingSampleSize < minSampleSize) {
       reasons.push(
-        `INSUFFICIENT_DATA: Supporting sample size (${supportingSampleSize}) is below minimum threshold (${minSampleSize}) required for statistical conviction.`
+        `INSUFFICIENT_DATA: Supporting sample size (${supportingSampleSize}) is below minimum threshold (${minSampleSize}) required for statistical conviction.`,
       );
       return {
         recommendation: 'WAIT',
@@ -1935,7 +1984,7 @@ export class ExpectedValueEngine {
     // 2. Negative or Zero Expectancy
     if (evResult.expectedValueR <= 0.0) {
       reasons.push(
-        `NEGATIVE_EXPECTANCY: Expected value (${evResult.expectedValueR}R) is non-positive despite setup score.`
+        `NEGATIVE_EXPECTANCY: Expected value (${evResult.expectedValueR}R) is non-positive despite setup score.`,
       );
       return {
         recommendation: 'WAIT',
@@ -1955,7 +2004,7 @@ export class ExpectedValueEngine {
     // 3. Calibration Barrier (Poor calibration downgrades confidence)
     if (calibrationStatus === 'POOR') {
       reasons.push(
-        'POOR_CALIBRATION: Probability reliability error is elevated. Model recommendation downgraded to WAIT.'
+        'POOR_CALIBRATION: Probability reliability error is elevated. Model recommendation downgraded to WAIT.',
       );
       return {
         recommendation: 'WAIT',
@@ -1973,15 +2022,16 @@ export class ExpectedValueEngine {
     }
 
     // 4. High Confidence Criteria
-    const isStandardHigh = evResult.winProbability >= 0.70 && evResult.expectedValueR >= 0.50;
-    const isAsymmetricHigh = (payoff.targetR >= 2.5) && evResult.winProbability >= 0.50 && evResult.expectedValueR >= 0.80;
+    const isStandardHigh = evResult.winProbability >= 0.7 && evResult.expectedValueR >= 0.5;
+    const isAsymmetricHigh =
+      payoff.targetR >= 2.5 && evResult.winProbability >= 0.5 && evResult.expectedValueR >= 0.8;
 
     if (
       (isStandardHigh || isAsymmetricHigh) &&
       (calibrationStatus === 'EXCELLENT' || calibrationStatus === 'GOOD')
     ) {
       reasons.push(
-        `High conviction setup (${(evResult.winProbability * 100).toFixed(1)}% win rate, strong +${evResult.expectedValueR}R positive expectancy) across ${supportingSampleSize} validated observations.`
+        `High conviction setup (${(evResult.winProbability * 100).toFixed(1)}% win rate, strong +${evResult.expectedValueR}R positive expectancy) across ${supportingSampleSize} validated observations.`,
       );
       return {
         recommendation: 'HIGH_CONFIDENCE',
@@ -1999,12 +2049,13 @@ export class ExpectedValueEngine {
     }
 
     // 5. Moderate Confidence Criteria
-    const isStandardModerate = evResult.winProbability >= 0.55 && evResult.expectedValueR >= 0.20;
-    const isAsymmetricModerate = (payoff.targetR >= 2.0) && evResult.winProbability >= 0.38 && evResult.expectedValueR >= 0.35;
+    const isStandardModerate = evResult.winProbability >= 0.55 && evResult.expectedValueR >= 0.2;
+    const isAsymmetricModerate =
+      payoff.targetR >= 2.0 && evResult.winProbability >= 0.38 && evResult.expectedValueR >= 0.35;
 
     if (isStandardModerate || isAsymmetricModerate) {
       reasons.push(
-        `Favorable statistical edge (${(evResult.winProbability * 100).toFixed(1)}% win rate, +${evResult.expectedValueR}R expectancy) backed by ${supportingSampleSize} observations.`
+        `Favorable statistical edge (${(evResult.winProbability * 100).toFixed(1)}% win rate, +${evResult.expectedValueR}R expectancy) backed by ${supportingSampleSize} observations.`,
       );
       return {
         recommendation: 'MODERATE_CONFIDENCE',
@@ -2023,11 +2074,12 @@ export class ExpectedValueEngine {
 
     // 6. Low Confidence Criteria
     const isStandardLow = evResult.winProbability >= 0.45 && evResult.expectedValueR > 0.0;
-    const isAsymmetricLow = (payoff.targetR >= 2.0) && evResult.winProbability >= 0.25 && evResult.expectedValueR > 0.0;
+    const isAsymmetricLow =
+      payoff.targetR >= 2.0 && evResult.winProbability >= 0.25 && evResult.expectedValueR > 0.0;
 
     if (isStandardLow || isAsymmetricLow) {
       reasons.push(
-        `Positive mathematical expectation (+${evResult.expectedValueR}R) with ${(evResult.winProbability * 100).toFixed(1)}% win probability.`
+        `Positive mathematical expectation (+${evResult.expectedValueR}R) with ${(evResult.winProbability * 100).toFixed(1)}% win probability.`,
       );
       return {
         recommendation: 'LOW_CONFIDENCE',
@@ -2109,7 +2161,7 @@ export class ModelPersistenceManager {
       validationPeriod?: { start: Date; end: Date };
       outOfSamplePeriod?: { start: Date; end: Date };
       hyperparameters?: Partial<IModelHyperparameters>;
-    }
+    },
   ): IPersistedModelState {
     const now = new Date();
 
@@ -2147,13 +2199,13 @@ export class ModelPersistenceManager {
 
     if (state.featureSchemaVersion !== FEATURE_SCHEMA_VERSION) {
       throw new Error(
-        `ModelPersistenceManager.deserialize: feature schema mismatch: expected ${FEATURE_SCHEMA_VERSION}, received ${state.featureSchemaVersion}`
+        `ModelPersistenceManager.deserialize: feature schema mismatch: expected ${FEATURE_SCHEMA_VERSION}, received ${state.featureSchemaVersion}`,
       );
     }
 
     if (!state.weights || state.weights.length !== FEATURE_VECTOR_DIMENSION) {
       throw new Error(
-        `ModelPersistenceManager.deserialize: weights dimension mismatch: expected ${FEATURE_VECTOR_DIMENSION}, received ${state.weights?.length}`
+        `ModelPersistenceManager.deserialize: weights dimension mismatch: expected ${FEATURE_VECTOR_DIMENSION}, received ${state.weights?.length}`,
       );
     }
 
@@ -2161,7 +2213,7 @@ export class ModelPersistenceManager {
       state.version,
       state.hyperparameters,
       state.weights,
-      state.bias !== undefined ? state.bias : 0.0
+      state.bias !== undefined ? state.bias : 0.0,
     );
   }
 }
@@ -2180,7 +2232,7 @@ export class ModelRegistry {
   public registerVersion(state: IPersistedModelState, asset?: string): void {
     if (this.versions.has(state.version)) {
       throw new Error(
-        `ModelRegistry: model version '${state.version}' already exists in registry. Overwriting immutable versions is prohibited.`
+        `ModelRegistry: model version '${state.version}' already exists in registry. Overwriting immutable versions is prohibited.`,
       );
     }
 
@@ -2250,7 +2302,7 @@ export class ModelRegistry {
 
   public getAllVersions(): IPersistedModelState[] {
     return Array.from(this.versions.values()).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
   }
 
@@ -2334,7 +2386,9 @@ export class PostMortemAnalyticsEngine {
 
     const riskDistance = Math.abs(entryPrice - stopLoss);
     if (riskDistance <= 0) {
-      throw new Error('PostMortemAnalyticsEngine: Invalid risk distance (entryPrice equals stopLoss).');
+      throw new Error(
+        'PostMortemAnalyticsEngine: Invalid risk distance (entryPrice equals stopLoss).',
+      );
     }
 
     const isBull = direction === 'BULLISH';
@@ -2344,9 +2398,10 @@ export class PostMortemAnalyticsEngine {
     let outcome: 'TP1_HIT' | 'TP2_HIT' | 'TP3_HIT' | 'SL_HIT' | 'EXPIRED' = 'EXPIRED';
     let realizedRMultiple = 0.0;
     let exitIndex = subsequentCandles.length - 1;
-    let exitTimestamp = subsequentCandles.length > 0
-      ? new Date(subsequentCandles[subsequentCandles.length - 1].timestamp)
-      : entryTimestamp;
+    let exitTimestamp =
+      subsequentCandles.length > 0
+        ? new Date(subsequentCandles[subsequentCandles.length - 1].timestamp)
+        : entryTimestamp;
 
     // Track intra-trade candles up to resolution
     let hitSlIndex = -1;
@@ -2371,7 +2426,8 @@ export class PostMortemAnalyticsEngine {
       // Check SL hit
       const isSlHit = isBull ? c.low <= stopLoss : c.high >= stopLoss;
       // Check TP hits
-      const isTp3Hit = targets.tp3 !== undefined && (isBull ? c.high >= targets.tp3 : c.low <= targets.tp3);
+      const isTp3Hit =
+        targets.tp3 !== undefined && (isBull ? c.high >= targets.tp3 : c.low <= targets.tp3);
       const isTp2Hit = isBull ? c.high >= targets.tp2 : c.low <= targets.tp2;
       const isTp1Hit = isBull ? c.high >= targets.tp1 : c.low <= targets.tp1;
 
@@ -2386,7 +2442,7 @@ export class PostMortemAnalyticsEngine {
 
       if (isTp3Hit) {
         outcome = 'TP3_HIT';
-        realizedRMultiple = targets.tp3 ? (Math.abs(targets.tp3 - entryPrice) / riskDistance) : 3.0;
+        realizedRMultiple = targets.tp3 ? Math.abs(targets.tp3 - entryPrice) / riskDistance : 3.0;
         exitIndex = i;
         exitTimestamp = candleTime;
         break;
@@ -2412,7 +2468,7 @@ export class PostMortemAnalyticsEngine {
     const maeR = Number((maxAdverseExcursion / riskDistance).toFixed(2));
     const timeToResolutionMinutes = Math.max(
       1,
-      Math.round((exitTimestamp.getTime() - entryTimestamp.getTime()) / 60000)
+      Math.round((exitTimestamp.getTime() - entryTimestamp.getTime()) / 60000),
     );
 
     // Deterministic Failure Classification
@@ -2463,7 +2519,11 @@ export class PostMortemAnalyticsEngine {
     entrySignalConfirmed: boolean;
     hasNewsEventDuringTrade: boolean;
     atrAtEntry: number;
-  }): { classification: PostMortemClassification; rationale: string; factors: { factor: string; impact: string }[] } {
+  }): {
+    classification: PostMortemClassification;
+    rationale: string;
+    factors: { factor: string; impact: string }[];
+  } {
     const {
       outcome,
       direction,
@@ -2485,7 +2545,12 @@ export class PostMortemAnalyticsEngine {
       return {
         classification: 'TARGET_ACHIEVED',
         rationale: `Target achieved (${outcome}) cleanly with favorable structural flow.`,
-        factors: [{ factor: 'Market Alignment', impact: 'Price reached target without breaching invalidation zone.' }],
+        factors: [
+          {
+            factor: 'Market Alignment',
+            impact: 'Price reached target without breaching invalidation zone.',
+          },
+        ],
       };
     }
 
@@ -2493,7 +2558,9 @@ export class PostMortemAnalyticsEngine {
       return {
         classification: 'TRADE_EXPIRED',
         rationale: 'Trade timed out before either stop-loss or take-profit was reached.',
-        factors: [{ factor: 'Time Decay / Low Volatility', impact: 'Insufficient expansion momentum.' }],
+        factors: [
+          { factor: 'Time Decay / Low Volatility', impact: 'Insufficient expansion momentum.' },
+        ],
       };
     }
 
@@ -2501,10 +2568,14 @@ export class PostMortemAnalyticsEngine {
 
     // Rule A: News Spike
     if (hasNewsEventDuringTrade) {
-      factors.push({ factor: 'Scheduled Macro Event', impact: 'Exogenous volatility spike breached stop-loss level.' });
+      factors.push({
+        factor: 'Scheduled Macro Event',
+        impact: 'Exogenous volatility spike breached stop-loss level.',
+      });
       return {
         classification: 'NEWS_SPIKE',
-        rationale: 'Trade invalidated by high-impact macro event volatility spike during holding period.',
+        rationale:
+          'Trade invalidated by high-impact macro event volatility spike during holding period.',
         factors,
       };
     }
@@ -2513,16 +2584,20 @@ export class PostMortemAnalyticsEngine {
     if (hitSlIndex >= 0 && hitSlIndex < subsequentCandles.length - 1) {
       const isBull = direction === 'BULLISH';
       const postStopCandles = subsequentCandles.slice(hitSlIndex + 1, hitSlIndex + 11);
-      const reversedToTp = postStopCandles.some((c) => (isBull ? c.high >= targets.tp1 : c.low <= targets.tp1));
+      const reversedToTp = postStopCandles.some((c) =>
+        isBull ? c.high >= targets.tp1 : c.low <= targets.tp1,
+      );
 
       if (reversedToTp) {
         factors.push({
           factor: 'Liquidity Sweep Beyond Stop',
-          impact: 'Price swept stop-loss liquidity before aggressive reversal toward initial target.',
+          impact:
+            'Price swept stop-loss liquidity before aggressive reversal toward initial target.',
         });
         return {
           classification: 'LIQUIDITY_SWEEP_FAILURE',
-          rationale: 'Stop-loss was swept for resting retail liquidity before price immediately reversed to target.',
+          rationale:
+            'Stop-loss was swept for resting retail liquidity before price immediately reversed to target.',
           factors,
         };
       }
@@ -2530,17 +2605,24 @@ export class PostMortemAnalyticsEngine {
 
     // Rule C: HTF Countertrend
     if (!htfTrendAligned) {
-      factors.push({ factor: 'HTF Structure Inversion', impact: 'Trade executed against higher timeframe order flow bias.' });
+      factors.push({
+        factor: 'HTF Structure Inversion',
+        impact: 'Trade executed against higher timeframe order flow bias.',
+      });
       return {
         classification: 'HTF_COUNTERTREND',
-        rationale: 'Failure caused by higher-timeframe order flow dominance over lower-timeframe setup.',
+        rationale:
+          'Failure caused by higher-timeframe order flow dominance over lower-timeframe setup.',
         factors,
       };
     }
 
     // Rule D: Early Entry Before Confirmation
     if (!entrySignalConfirmed) {
-      factors.push({ factor: 'Unconfirmed Trigger', impact: 'Entry executed prior to candle close or BOS confirmation.' });
+      factors.push({
+        factor: 'Unconfirmed Trigger',
+        impact: 'Entry executed prior to candle close or BOS confirmation.',
+      });
       return {
         classification: 'EARLY_ENTRY_BEFORE_CONFIRMATION',
         rationale: 'Premature execution without complete structural confirmation.',
@@ -2553,7 +2635,10 @@ export class PostMortemAnalyticsEngine {
       const slCandle = subsequentCandles[hitSlIndex];
       const candleRange = Math.abs(slCandle.high - slCandle.low);
       if (candleRange > 2.5 * atrAtEntry) {
-        factors.push({ factor: 'Volatility Expansion', impact: `Stop candle range (${candleRange.toFixed(1)}) exceeded 2.5x entry ATR (${atrAtEntry.toFixed(1)}).` });
+        factors.push({
+          factor: 'Volatility Expansion',
+          impact: `Stop candle range (${candleRange.toFixed(1)}) exceeded 2.5x entry ATR (${atrAtEntry.toFixed(1)}).`,
+        });
         return {
           classification: 'VOLATILITY_EXPANSION_STOP',
           rationale: 'Unexpected market volatility expansion exceeded standard ATR distribution.',
@@ -2568,8 +2653,15 @@ export class PostMortemAnalyticsEngine {
       const hours = slCandleTime.getUTCHours();
       const minutes = slCandleTime.getUTCMinutes();
       // Near Indian market close (15:15 - 15:30 IST / 09:45 - 10:00 UTC) or NY close (20:45 - 21:00 UTC)
-      if ((hours === 9 && minutes >= 45) || (hours === 10 && minutes === 0) || (hours === 20 && minutes >= 45)) {
-        factors.push({ factor: 'Session End Rebalancing', impact: 'Institutional end-of-session square-off triggered stop.' });
+      if (
+        (hours === 9 && minutes >= 45) ||
+        (hours === 10 && minutes === 0) ||
+        (hours === 20 && minutes >= 45)
+      ) {
+        factors.push({
+          factor: 'Session End Rebalancing',
+          impact: 'Institutional end-of-session square-off triggered stop.',
+        });
         return {
           classification: 'SESSION_CLOSE_REVERSAL',
           rationale: 'Trade stopped out during institutional session settlement rebalancing.',
@@ -2579,7 +2671,10 @@ export class PostMortemAnalyticsEngine {
     }
 
     // Default Fallback
-    factors.push({ factor: 'Normal Variance', impact: 'Standard statistical invalidation within risk boundary.' });
+    factors.push({
+      factor: 'Normal Variance',
+      impact: 'Standard statistical invalidation within risk boundary.',
+    });
     return {
       classification: 'STANDARD_STOP_OUT',
       rationale: 'Normal statistical stop-out adhering to system risk boundary.',
@@ -2654,7 +2749,7 @@ export class OnlineLearningEngine {
       features: TradeFeatureVector;
       featureSchemaVersion?: string;
       actualLabel: 0 | 1;
-    }
+    },
   ): IOnlineUpdateResult {
     const { tradeId, symbol, features, featureSchemaVersion, actualLabel } = tradeOutcome;
 
@@ -2847,7 +2942,7 @@ export class ModelDriftDetector {
   public evaluateDrift(
     asset = 'GLOBAL',
     modelVersion = '1.0.0',
-    baselineMetrics?: { brierScore?: number; ece?: number; winRate?: number }
+    baselineMetrics?: { brierScore?: number; ece?: number; winRate?: number },
   ) {
     if (this.samples.length < 10) {
       return {
@@ -2872,7 +2967,7 @@ export class ModelDriftDetector {
     const wins = this.samples.filter((s) => s.actualOutcome === 1).length;
     const rollingWinRate = Number(((wins / n) * 100).toFixed(1));
     const rollingExpectancyR = Number(
-      (this.samples.reduce((acc, s) => acc + s.realizedR, 0) / n).toFixed(2)
+      (this.samples.reduce((acc, s) => acc + s.realizedR, 0) / n).toFixed(2),
     );
 
     // 1. Calculate Brier Score: 1/N * sum((p - y)^2)
@@ -2880,16 +2975,16 @@ export class ModelDriftDetector {
       (
         this.samples.reduce(
           (acc, s) => acc + Math.pow(s.predictionProbability - s.actualOutcome, 2),
-          0
+          0,
         ) / n
-      ).toFixed(4)
+      ).toFixed(4),
     );
 
     // 2. Calculate ECE & MCE across 10 decile probability bins
     const numBins = 10;
     const bins: { count: number; sumProb: number; sumActual: number }[] = Array.from(
       { length: numBins },
-      () => ({ count: 0, sumProb: 0, sumActual: 0 })
+      () => ({ count: 0, sumProb: 0, sumActual: 0 }),
     );
 
     for (const s of this.samples) {
@@ -2916,22 +3011,29 @@ export class ModelDriftDetector {
     const maximumCalibrationError = Number(mce.toFixed(4));
 
     // 3. Drift Flags Evaluation
-    const baseBrier = baselineMetrics?.brierScore ?? 0.20;
+    const baseBrier = baselineMetrics?.brierScore ?? 0.2;
     const baseECE = baselineMetrics?.ece ?? 0.06;
 
-    const calibrationDriftDetected = expectedCalibrationError > baseECE * 1.6 || brierScore > baseBrier * 1.4;
-    const predictionDriftDetected = Math.abs(rollingWinRate - (baselineMetrics?.winRate ?? 65.0)) > 20.0;
+    const calibrationDriftDetected =
+      expectedCalibrationError > baseECE * 1.6 || brierScore > baseBrier * 1.4;
+    const predictionDriftDetected =
+      Math.abs(rollingWinRate - (baselineMetrics?.winRate ?? 65.0)) > 20.0;
     const featureDriftDetected = brierScore > 0.28 || expectedCalibrationError > 0.18;
 
     const reasons: string[] = [];
-    let recommendedAction: 'CONTINUE_LIVE' | 'REDUCE_RISK' | 'SWITCH_TO_PAPER' | 'DISABLE_MODEL' = 'CONTINUE_LIVE';
+    let recommendedAction: 'CONTINUE_LIVE' | 'REDUCE_RISK' | 'SWITCH_TO_PAPER' | 'DISABLE_MODEL' =
+      'CONTINUE_LIVE';
 
     if (featureDriftDetected || brierScore > 0.27) {
       recommendedAction = 'DISABLE_MODEL';
-      reasons.push(`Severe model degradation: Brier Score (${brierScore}) exceeded critical limit 0.27`);
+      reasons.push(
+        `Severe model degradation: Brier Score (${brierScore}) exceeded critical limit 0.27`,
+      );
     } else if (calibrationDriftDetected || expectedCalibrationError > 0.12) {
       recommendedAction = 'SWITCH_TO_PAPER';
-      reasons.push(`Calibration drift detected: ECE (${expectedCalibrationError}) exceeded limit 0.12`);
+      reasons.push(
+        `Calibration drift detected: ECE (${expectedCalibrationError}) exceeded limit 0.12`,
+      );
     } else if (predictionDriftDetected || rollingExpectancyR < 0.1) {
       recommendedAction = 'REDUCE_RISK';
       reasons.push(`Expectancy decay: Rolling expectancy dropped to ${rollingExpectancyR}R`);
@@ -2959,11 +3061,3 @@ export class ModelDriftDetector {
     this.samples = [];
   }
 }
-
-
-
-
-
-
-
-

@@ -79,7 +79,8 @@ export class BacktestSimulator {
           });
 
           activeTradeUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : 1;
-          activeTradeRiskAmount = sizing.riskAmount > 0 ? sizing.riskAmount : currentEquity * (riskPercent / 100);
+          activeTradeRiskAmount =
+            sizing.riskAmount > 0 ? sizing.riskAmount : currentEquity * (riskPercent / 100);
         } else if (update.isClosed) {
           activeSignal.state = update.newState;
 
@@ -87,12 +88,13 @@ export class BacktestSimulator {
             const isLong = activeSignal.direction === Direction.BULLISH;
             const exitPrice = update.currentPrice;
             const priceDiff = isLong
-              ? (exitPrice - activeTradeEntryPrice)
-              : (activeTradeEntryPrice - exitPrice);
-            
+              ? exitPrice - activeTradeEntryPrice
+              : activeTradeEntryPrice - exitPrice;
+
             const realizedPnL = Number((priceDiff * activeTradeUnits).toFixed(2));
             const riskPerUnit = Math.abs(activeTradeEntryPrice - activeSignal.stopLoss);
-            const pnlRMultiple = riskPerUnit > 0 ? Number((priceDiff / riskPerUnit).toFixed(2)) : update.pnlRMultiple;
+            const pnlRMultiple =
+              riskPerUnit > 0 ? Number((priceDiff / riskPerUnit).toFixed(2)) : update.pnlRMultiple;
 
             currentEquity = Number((currentEquity + realizedPnL).toFixed(2));
 

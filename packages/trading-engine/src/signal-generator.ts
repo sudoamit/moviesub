@@ -15,6 +15,7 @@ import { ReasoningGenerator } from './reasoning-generator';
 import { calculateEMA, calculateRSI } from '@quant/indicators';
 import { SessionFilter } from './session-filter';
 import { SaiyanOCCEngine } from './saiyan-occ-engine';
+import { SnapshotBuilder } from './quant/snapshot-builder';
 
 export interface IGenerateSignalOptions {
   symbol: string;
@@ -41,7 +42,11 @@ export class SignalGenerator {
 
     const execCandles = options.executionCandles;
     if (!execCandles || execCandles.length < 20) {
-      return SignalGenerator.createNoTradeSignal(symbol, executionTf, 'Insufficient historical candle data');
+      return SignalGenerator.createNoTradeSignal(
+        symbol,
+        executionTf,
+        'Insufficient historical candle data',
+      );
     }
 
     // 1. Direct Routing if Saiyan OCC Strategy is Selected
@@ -53,13 +58,22 @@ export class SignalGenerator {
     const execAnalysis = SMCAnalyzer.analyze(execCandles);
 
     // 2. Run Multi-Timeframe Alignment
-    const execTfData: IMTFTimeframeData = { timeframe: executionTf, candles: execCandles, analysis: execAnalysis };
+    const execTfData: IMTFTimeframeData = {
+      timeframe: executionTf,
+      candles: execCandles,
+      analysis: execAnalysis,
+    };
     const htf1Data: IMTFTimeframeData = { timeframe: htf1Tf, candles: options.htf1Candles };
     const htf2Data: IMTFTimeframeData | undefined = options.htf2Candles
       ? { timeframe: htf2Tf, candles: options.htf2Candles }
       : undefined;
 
-    const mtf = MultiTimeframeAnalyzer.analyzeMTF(execTfData, htf1Data, htf2Data, options.mtfMode ?? MTFMode.BALANCED);
+    const mtf = MultiTimeframeAnalyzer.analyzeMTF(
+      execTfData,
+      htf1Data,
+      htf2Data,
+      options.mtfMode ?? MTFMode.BALANCED,
+    );
 
     const lastCandle = execCandles[execCandles.length - 1];
     const currentPrice = lastCandle.close;
@@ -92,7 +106,9 @@ export class SignalGenerator {
     const hasSweep =
       recentSweeps.length > 0 &&
       recentSweeps.some((s) =>
-        candidateDir === Direction.BULLISH ? s.priceLevel <= currentPrice * 1.005 : s.priceLevel >= currentPrice * 0.995,
+        candidateDir === Direction.BULLISH
+          ? s.priceLevel <= currentPrice * 1.005
+          : s.priceLevel >= currentPrice * 0.995,
       );
 
     const recentBOS = execAnalysis.breaksOfStructure.slice(-3);
@@ -105,7 +121,8 @@ export class SignalGenerator {
       execAnalysis.activeFVGs.filter((f) => f.direction === candidateDir).slice(-1)[0] || null;
 
     const activeOB =
-      execAnalysis.activeOrderBlocks.filter((ob) => ob.direction === candidateDir).slice(-1)[0] || null;
+      execAnalysis.activeOrderBlocks.filter((ob) => ob.direction === candidateDir).slice(-1)[0] ||
+      null;
 
     // High-Accuracy Hard Filter 2: Strict Dealing Range Equilibrium Check (Premium vs Discount)
     const dealingRange = execAnalysis.dealingRange;
@@ -113,7 +130,10 @@ export class SignalGenerator {
     if (dealingRange) {
       if (candidateDir === Direction.BULLISH && currentPrice > dealingRange.equilibrium * 1.01) {
         inCorrectZone = false; // Buying at range highs is low probability
-      } else if (candidateDir === Direction.BEARISH && currentPrice < dealingRange.equilibrium * 0.99) {
+      } else if (
+        candidateDir === Direction.BEARISH &&
+        currentPrice < dealingRange.equilibrium * 0.99
+      ) {
         inCorrectZone = false; // Selling at range lows is low probability
       }
     }
@@ -126,9 +146,19 @@ export class SignalGenerator {
     const lastRsi = rsi14[closes.length - 1] ?? 50;
 
     let indicatorsAligned = false;
-    if (candidateDir === Direction.BULLISH && currentPrice >= lastEma20 && lastRsi >= 42 && lastRsi <= 72) {
+    if (
+      candidateDir === Direction.BULLISH &&
+      currentPrice >= lastEma20 &&
+      lastRsi >= 42 &&
+      lastRsi <= 72
+    ) {
       indicatorsAligned = true;
-    } else if (candidateDir === Direction.BEARISH && currentPrice <= lastEma20 && lastRsi <= 58 && lastRsi >= 28) {
+    } else if (
+      candidateDir === Direction.BEARISH &&
+      currentPrice <= lastEma20 &&
+      lastRsi <= 58 &&
+      lastRsi >= 28
+    ) {
       indicatorsAligned = true;
     }
 
@@ -211,14 +241,19 @@ export class SignalGenerator {
     // 8. Hybrid Strategy Confluence Check
     if (strategyMode === 'HYBRID') {
       const saiyanAnalysis = SaiyanOCCEngine.analyze(execCandles);
-      if (saiyanAnalysis.direction !== candidateDir && saiyanAnalysis.direction !== Direction.NEUTRAL) {
+      if (
+        saiyanAnalysis.direction !== candidateDir &&
+        saiyanAnalysis.direction !== Direction.NEUTRAL
+      ) {
         return SignalGenerator.createNoTradeSignal(
           symbol,
           executionTf,
           `Hybrid Filter: SMC ${candidateDir} bias conflicts with Saiyan OCC ${saiyanAnalysis.direction} momentum`,
         );
       }
-      reasoning.confirmedChecklist.push(`🛡️ Hybrid Confluence: SMC ${candidateDir} confirmed by Saiyan ALMA OCC Momentum Crossover`);
+      reasoning.confirmedChecklist.push(
+        `🛡️ Hybrid Confluence: SMC ${candidateDir} confirmed by Saiyan ALMA OCC Momentum Crossover`,
+      );
       totalScore = Math.min(100, totalScore + 5);
       if (totalScore >= 90) grade = SignalGrade.A_PLUS;
     }
@@ -232,8 +267,25 @@ export class SignalGenerator {
     }
 
     const finalDirection = grade === SignalGrade.NO_TRADE ? Direction.NEUTRAL : candidateDir;
-    const anchorTime = activeOB ? activeOB.timestamp : activeFVG ? activeFVG.timestamp : anchorSwing ? anchorSwing.timestamp : (execCandles.length >= 2 ? execCandles[execCandles.length - 2].timestamp : lastCandle.timestamp);
+    const anchorTime = activeOB
+      ? activeOB.timestamp
+      : activeFVG
+        ? activeFVG.timestamp
+        : anchorSwing
+          ? anchorSwing.timestamp
+          : execCandles.length >= 2
+            ? execCandles[execCandles.length - 2].timestamp
+            : lastCandle.timestamp;
     const signalTimestamp = new Date(anchorTime);
+
+    // Build Canonical Point-In-Time Market Snapshot & Quant Intelligence State
+    const snapshot = SnapshotBuilder.buildSnapshot({
+      symbol,
+      executionCandles: execCandles,
+      executionTimeframe: executionTf,
+      htf1Candles: options.htf1Candles,
+      htf2Candles: options.htf2Candles,
+    });
 
     return {
       id: `smc_${symbol}_${executionTf}_${signalTimestamp.getTime()}`,
@@ -251,6 +303,14 @@ export class SignalGenerator {
       reasoning,
       state: SignalState.PENDING,
       timestamp: signalTimestamp,
+      quantSnapshot: snapshot,
+      quantScore: snapshot.score,
+      regime: snapshot.regime.regime,
+      volatilityPercentile: snapshot.volatility.volatilityPercentile,
+      forecastVolatility: snapshot.volatility.forecastVolatility,
+      mlProbability: snapshot.ml?.probabilityWin ?? 0.75,
+      expectedR: snapshot.ml?.expectedR ?? 1.25,
+      decisionTrace: snapshot.trace,
     };
   }
 

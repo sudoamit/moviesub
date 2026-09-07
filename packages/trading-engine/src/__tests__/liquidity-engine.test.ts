@@ -4,8 +4,22 @@ import { ICandle, ISwingPoint, LiquidityType, StructureType } from '@quant/share
 describe('LiquidityEngine', () => {
   it('should detect Equal Highs and sweeps of buy-side liquidity', () => {
     const swings: ISwingPoint[] = [
-      { index: 2, type: StructureType.SWING_HIGH, price: 100.0, timestamp: new Date(2000), confirmedAtIndex: 4, confirmedAtTimestamp: new Date(4000) },
-      { index: 6, type: StructureType.SWING_HIGH, price: 100.1, timestamp: new Date(6000), confirmedAtIndex: 8, confirmedAtTimestamp: new Date(8000) }, // Near equal high
+      {
+        index: 2,
+        type: StructureType.SWING_HIGH,
+        price: 100.0,
+        timestamp: new Date(2000),
+        confirmedAtIndex: 4,
+        confirmedAtTimestamp: new Date(4000),
+      },
+      {
+        index: 6,
+        type: StructureType.SWING_HIGH,
+        price: 100.1,
+        timestamp: new Date(6000),
+        confirmedAtIndex: 8,
+        confirmedAtTimestamp: new Date(8000),
+      }, // Near equal high
     ];
 
     const candles: ICandle[] = [
@@ -20,7 +34,9 @@ describe('LiquidityEngine', () => {
       { timestamp: new Date(9000), open: 93, high: 102.5, low: 92, close: 98.0, volume: 500 }, // Sweep: pierces 100.05 but closes at 98.0
     ];
 
-    const { pools, sweeps } = LiquidityEngine.detectLiquidity(candles, swings, { equalHighLowToleranceAtr: 0.2 });
+    const { pools, sweeps } = LiquidityEngine.detectLiquidity(candles, swings, {
+      equalHighLowToleranceAtr: 0.2,
+    });
 
     expect(pools.length).toBeGreaterThanOrEqual(1);
     expect(sweeps).toHaveLength(1);

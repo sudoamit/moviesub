@@ -85,7 +85,9 @@ export class AlertsService {
       });
 
       if (!rateLimit.allowed) {
-        this.logger.debug(`Suppressed alert for ${signal.symbol} on ${rule.channel}: ${rateLimit.reason}`);
+        this.logger.debug(
+          `Suppressed alert for ${signal.symbol} on ${rule.channel}: ${rateLimit.reason}`,
+        );
         continue;
       }
 

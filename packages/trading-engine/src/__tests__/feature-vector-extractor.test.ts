@@ -7,7 +7,11 @@ import {
 } from '../ai-trade-learning-engine';
 import { ICandle, ISignalSetup, Direction, SignalState, SignalGrade } from '@quant/shared';
 
-function createDeterministicCandles(count: number, startPrice = 24000, intervalSec = 900): ICandle[] {
+function createDeterministicCandles(
+  count: number,
+  startPrice = 24000,
+  intervalSec = 900,
+): ICandle[] {
   const candles: ICandle[] = [];
   const baseTime = new Date('2026-08-20T04:00:00.000Z').getTime();
 

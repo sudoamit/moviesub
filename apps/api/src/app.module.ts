@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RedisModule } from './common/redis/redis.module';
 import { HealthModule } from './health/health.module';
@@ -20,6 +22,8 @@ import { AlgoBotsModule } from './algo-bots/algo-bots.module';
 import { MacroEventsModule } from './macro-events/macro-events.module';
 import { AccuracyModule } from './accuracy/accuracy.module';
 import { AILearningModule } from './ai-learning/ai-learning.module';
+import { LearningModule } from './learning/learning.module';
+import { ResearchModule } from './research/research.module';
 
 @Module({
   imports: [
@@ -27,6 +31,12 @@ import { AILearningModule } from './ai-learning/ai-learning.module';
       isGlobal: true,
       envFilePath: ['.env', '../../.env'],
     }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60000,
+        limit: 180,
+      },
+    ]),
     PrismaModule,
     RedisModule,
     HealthModule,
@@ -47,6 +57,14 @@ import { AILearningModule } from './ai-learning/ai-learning.module';
     MacroEventsModule,
     AccuracyModule,
     AILearningModule,
+    LearningModule,
+    ResearchModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
   ],
 })
 export class AppModule {}

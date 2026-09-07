@@ -22,6 +22,8 @@ export class MockMarketDataProvider implements IMarketDataProvider {
     NIFTY: { basePrice: 24175, volatility: 0.0035, baseVolume: 250000, decimals: 2 },
     BANKNIFTY: { basePrice: 51200, volatility: 0.0055, baseVolume: 180000, decimals: 2 },
     BTCUSDT: { basePrice: 92500, volatility: 0.0085, baseVolume: 1500, decimals: 2 },
+    XAUUSD: { basePrice: 2885.5, volatility: 0.0055, baseVolume: 65000, decimals: 2 },
+    GOLD: { basePrice: 2885.5, volatility: 0.0055, baseVolume: 65000, decimals: 2 },
     RELIANCE: { basePrice: 3020, volatility: 0.004, baseVolume: 80000, decimals: 2 },
     HDFCBANK: { basePrice: 1650, volatility: 0.0035, baseVolume: 120000, decimals: 2 },
     INFY: { basePrice: 1890, volatility: 0.0045, baseVolume: 95000, decimals: 2 },
@@ -81,9 +83,7 @@ export class MockMarketDataProvider implements IMarketDataProvider {
       const returnPct = trendWave * 0.2 + noise;
 
       const open = Number(currentPrice.toFixed(profile.decimals));
-      const close = Number(
-        Math.max(1, open * (1 + returnPct)).toFixed(profile.decimals),
-      );
+      const close = Number(Math.max(1, open * (1 + returnPct)).toFixed(profile.decimals));
 
       const maxBody = Math.max(open, close);
       const minBody = Math.min(open, close);

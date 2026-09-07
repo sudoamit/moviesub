@@ -21,7 +21,7 @@ async function showNiftyBank() {
         hour12: true,
       });
       console.log(
-        `${idx.toString().padStart(2, ' ')} Time: ${istTime} | O: ${Number(c.open).toFixed(2)} | H: ${Number(c.high).toFixed(2)} | L: ${Number(c.low).toFixed(2)} | C: ${Number(c.close).toFixed(2)}`
+        `${idx.toString().padStart(2, ' ')} Time: ${istTime} | O: ${Number(c.open).toFixed(2)} | H: ${Number(c.high).toFixed(2)} | L: ${Number(c.low).toFixed(2)} | C: ${Number(c.close).toFixed(2)}`,
       );
     });
   }

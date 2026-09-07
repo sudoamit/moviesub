@@ -4,15 +4,13 @@ import { extractPrices } from './types';
 /**
  * Calculates Relative Strength Index (RSI) using Wilder's smoothed averages
  */
-export function calculateRSI(
-  data: ICandle[] | number[],
-  period = 14,
-): (number | null)[] {
+export function calculateRSI(data: ICandle[] | number[], period = 14): (number | null)[] {
   if (!data || data.length === 0 || period <= 0) {
     return [];
   }
 
-  const prices = typeof data[0] === 'number' ? (data as number[]) : extractPrices(data as ICandle[], 'close');
+  const prices =
+    typeof data[0] === 'number' ? (data as number[]) : extractPrices(data as ICandle[], 'close');
   const result: (number | null)[] = new Array(prices.length).fill(null);
 
   if (prices.length <= period) {

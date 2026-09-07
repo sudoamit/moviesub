@@ -32,7 +32,8 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
           Quantitative Trade Rationale & Institutional Footprint
         </h3>
         <p className="text-xs text-slate-500">
-          Select an asset to view its multi-confluence SMC footprint, institutional liquidity sweep mechanics, and structural checklist.
+          Select an asset to view its multi-confluence SMC footprint, institutional liquidity sweep
+          mechanics, and structural checklist.
         </p>
       </div>
     );
@@ -51,8 +52,8 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
     riskRewardRatios,
   } = signal;
 
-  const isCrypto = symbol === 'BTCUSDT';
-  const currencySymbol = '₹';
+  const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
+  const currencySymbol = isUsd ? '$' : '₹';
   const riskPts = Math.abs(entryZone.optimal - stopLoss).toFixed(2);
   const rewardPts = Math.abs(takeProfits.tp2 - entryZone.optimal).toFixed(2);
   const isBull = direction === 'BULLISH';
@@ -82,12 +83,17 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
                     : 'bg-rose-950/80 text-rose-400 border border-rose-500/40 shadow-sm shadow-rose-950'
                 }`}
               >
-                {isBull ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                {isBull ? (
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                ) : (
+                  <ArrowDownRight className="w-3.5 h-3.5" />
+                )}
                 {direction} {isBull ? 'LONG' : 'SHORT'}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              High-expectancy institutional setup scored across multi-timeframe liquidity sweeps and order blocks.
+              High-expectancy institutional setup scored across multi-timeframe liquidity sweeps and
+              order blocks.
             </p>
           </div>
         </div>
@@ -96,7 +102,7 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
           <div className="bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-xl flex items-center gap-2">
             <span className="text-[11px] text-slate-400">Setup Quality:</span>
             <strong className="text-cyan-400 text-sm font-black">{score}/100</strong>
-            <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-1.5 py-0.2 rounded font-bold">
+            <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-1.5 py-0.5 rounded font-bold">
               {grade}
             </span>
           </div>
@@ -187,31 +193,41 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
         <div className="bg-cyan-950/30 border border-cyan-500/40 p-3 rounded-xl">
           <span className="text-[10px] text-cyan-400 uppercase font-bold block">Optimal Entry</span>
           <span className="text-base font-black text-cyan-200 block mt-0.5">
-            {currencySymbol}{entryZone.optimal.toFixed(2)}
+            {currencySymbol}
+            {entryZone.optimal.toFixed(2)}
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">Limit Execution</span>
         </div>
 
         <div className="bg-rose-950/30 border border-rose-500/40 p-3 rounded-xl">
-          <span className="text-[10px] text-rose-400 uppercase font-bold block">Stop Loss (SL)</span>
+          <span className="text-[10px] text-rose-400 uppercase font-bold block">
+            Stop Loss (SL)
+          </span>
           <span className="text-base font-black text-rose-300 block mt-0.5">
-            {currencySymbol}{stopLoss.toFixed(2)}
+            {currencySymbol}
+            {stopLoss.toFixed(2)}
           </span>
           <span className="text-[9px] text-rose-400/80 block mt-0.5">-{riskPts} pts risk</span>
         </div>
 
         <div className="bg-emerald-950/30 border border-emerald-500/40 p-3 rounded-xl">
-          <span className="text-[10px] text-emerald-400 uppercase font-bold block">Target 1 (1.5R)</span>
+          <span className="text-[10px] text-emerald-400 uppercase font-bold block">
+            Target 1 (1.5R)
+          </span>
           <span className="text-base font-black text-emerald-300 block mt-0.5">
-            {currencySymbol}{takeProfits.tp1.toFixed(2)}
+            {currencySymbol}
+            {takeProfits.tp1.toFixed(2)}
           </span>
           <span className="text-[9px] text-emerald-400/80 block mt-0.5">Scale-Out 50%</span>
         </div>
 
         <div className="bg-teal-950/30 border border-teal-500/40 p-3 rounded-xl">
-          <span className="text-[10px] text-teal-400 uppercase font-bold block">Target 2 (2.5R)</span>
+          <span className="text-[10px] text-teal-400 uppercase font-bold block">
+            Target 2 (2.5R)
+          </span>
           <span className="text-base font-black text-teal-300 block mt-0.5">
-            {currencySymbol}{takeProfits.tp2.toFixed(2)}
+            {currencySymbol}
+            {takeProfits.tp2.toFixed(2)}
           </span>
           <span className="text-[9px] text-teal-400/80 block mt-0.5">+{rewardPts} pts gain</span>
         </div>

@@ -23,4 +23,5 @@ export * from './black-scholes';
 export * from './indian-options-expiry';
 export * from './ai-trade-learning-engine';
 export * from './saiyan-occ-engine';
-export const TRADING_ENGINE_VERSION = '1.0.0';
+export * from './quant';
+export const TRADING_ENGINE_VERSION = '2.0.0';

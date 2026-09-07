@@ -20,12 +20,25 @@ export class ReasoningGenerator {
    * Generates a transparent, deterministic "Why This Trade?" structured explanation
    */
   static generateReasoning(inputs: IReasoningInputs): ISignalReasoning {
-    const { symbol, timeframe, direction, grade, totalScore, mtf, scoring, levels, triggerDescription } = inputs;
+    const {
+      symbol,
+      timeframe,
+      direction,
+      grade,
+      totalScore,
+      mtf,
+      scoring,
+      levels,
+      triggerDescription,
+    } = inputs;
 
     if (direction === Direction.NEUTRAL || grade === SignalGrade.NO_TRADE) {
       return {
-        htfStructure: mtf.reason || 'HTF structure shows mixed signals with no clear directional bias',
-        liquidityReason: scoring.hasLiquiditySweep ? 'Liquidity sweep observed but lacked institutional confluence' : 'No confirmed liquidity sweep detected',
+        htfStructure:
+          mtf.reason || 'HTF structure shows mixed signals with no clear directional bias',
+        liquidityReason: scoring.hasLiquiditySweep
+          ? 'Liquidity sweep observed but lacked institutional confluence'
+          : 'No confirmed liquidity sweep detected',
         triggerReason: 'No high-probability trigger met minimum quality threshold',
         invalidationReason: 'Market is in neutral consolidation or conflicting HTF structure',
         confirmedChecklist: ['Conditions insufficient for high-conviction entry'],
@@ -50,21 +63,34 @@ export class ReasoningGenerator {
         ? `Buy-side liquidity (BSL) was swept above recent key swing highs, trapping retail breakout buyers before rapid reversal.`
         : `Price trading inside clean 50% premium zone with unmitigated sell-side liquidity pools (SSL) resting below as targets.`;
     }
-    if (scoring.hasLiquiditySweep) checklist.push(direction === Direction.BULLISH ? 'SSL swept below swing lows' : 'BSL swept above swing highs');
+    if (scoring.hasLiquiditySweep)
+      checklist.push(
+        direction === Direction.BULLISH
+          ? 'SSL swept below swing lows'
+          : 'BSL swept above swing highs',
+      );
 
     // 3. Trigger Reason
     const triggerReason = `${triggerDescription}. Displacement intensity measured at ${scoring.displacementRatio.toFixed(2)}x ATR with ${scoring.hasVolumeExpansion ? 'confirmed volume surge' : 'healthy execution volume'}.`;
     if (scoring.hasBOSOrCHOCH) checklist.push(`${timeframe} Execution Structure Break (BOS/CHoCH)`);
     if (scoring.hasOBOrFVG) checklist.push('Institutional Order Block / FVG footprint confluence');
-    if (scoring.inCorrectZone) checklist.push(direction === Direction.BULLISH ? 'Favorable 50% Discount entry zone' : 'Favorable 50% Premium entry zone');
-    if (scoring.indicatorsAligned) checklist.push('Momentum & Trend Indicator confluence (EMA/RSI)');
+    if (scoring.inCorrectZone)
+      checklist.push(
+        direction === Direction.BULLISH
+          ? 'Favorable 50% Discount entry zone'
+          : 'Favorable 50% Premium entry zone',
+      );
+    if (scoring.indicatorsAligned)
+      checklist.push('Momentum & Trend Indicator confluence (EMA/RSI)');
 
     // 4. Invalidation Reason
     let invalidationReason = 'Invalidation placed beyond structural swing extreme.';
     if (levels) {
       const riskPercent = ((levels.stopLossDistance / levels.entryZone.optimal) * 100).toFixed(2);
       invalidationReason = `Trade invalidation is set at ${levels.stopLoss} (${levels.stopLossDistance} pts / ${riskPercent}% risk) anchored strictly beyond the structural pivot and institutional imbalance floor.`;
-      checklist.push(`Favorable R:R 1:${levels.riskRewardRatios.rr2.toFixed(1)} to TP2 (${levels.takeProfits.tp2})`);
+      checklist.push(
+        `Favorable R:R 1:${levels.riskRewardRatios.rr2.toFixed(1)} to TP2 (${levels.takeProfits.tp2})`,
+      );
     }
 
     // 5. Unified Summary

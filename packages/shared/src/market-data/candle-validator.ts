@@ -18,7 +18,11 @@ export class CandleValidator {
     }
 
     // 1. Timestamp validation
-    if (!candle.timestamp || !(candle.timestamp instanceof Date) || isNaN(candle.timestamp.getTime())) {
+    if (
+      !candle.timestamp ||
+      !(candle.timestamp instanceof Date) ||
+      isNaN(candle.timestamp.getTime())
+    ) {
       errors.push('Invalid timestamp');
     }
 
@@ -131,7 +135,9 @@ export class CandleValidator {
         abnormalPriceJumpsCount: 0,
         zeroVolumeCount: 0,
         feedDisconnected: true,
-        reasons: [`Insufficient candle data: received ${candles?.length || 0} candles (minimum required: 5)`],
+        reasons: [
+          `Insufficient candle data: received ${candles?.length || 0} candles (minimum required: 5)`,
+        ],
       };
     }
 
@@ -141,7 +147,9 @@ export class CandleValidator {
     const latestCandle = validCandles[validCandles.length - 1];
     const ageMs = now - latestCandle.timestamp.getTime();
     const isCrypto = symbol.toUpperCase() === 'BTCUSDT';
-    const effectiveMaxAge = isCrypto ? Math.max(3 * tfMs, maxAllowedStalenessMs) : 18 * 60 * 60 * 1000; // Crypto 24/7 vs NSE overnight
+    const effectiveMaxAge = isCrypto
+      ? Math.max(3 * tfMs, maxAllowedStalenessMs)
+      : 18 * 60 * 60 * 1000; // Crypto 24/7 vs NSE overnight
     const staleData = ageMs > effectiveMaxAge;
     if (staleData) {
       reasons.push(`Stale market feed: latest candle is ${Math.round(ageMs / 60000)} minutes old`);
@@ -173,7 +181,9 @@ export class CandleValidator {
       }
     }
     if (abnormalJumps > 0) {
-      reasons.push(`Abnormal price spike detected: ${abnormalJumps} candles exceeded 15% single-step variance`);
+      reasons.push(
+        `Abnormal price spike detected: ${abnormalJumps} candles exceeded 15% single-step variance`,
+      );
     }
 
     // 4. Zero Volume Detection

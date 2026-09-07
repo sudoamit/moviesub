@@ -2,7 +2,15 @@
 
 import React from 'react';
 import { IScoreBreakdown, SignalGrade } from '@quant/shared';
-import { ShieldCheck, Zap, Sparkles, CheckCircle2, TrendingUp, Compass, Target } from 'lucide-react';
+import {
+  ShieldCheck,
+  Zap,
+  Sparkles,
+  CheckCircle2,
+  TrendingUp,
+  Compass,
+  Target,
+} from 'lucide-react';
 
 interface ScoreGaugeProps {
   score: number;
@@ -10,11 +18,7 @@ interface ScoreGaugeProps {
   breakdown?: IScoreBreakdown;
 }
 
-export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
-  score,
-  grade,
-  breakdown,
-}) => {
+export const ScoreGauge: React.FC<ScoreGaugeProps> = ({ score, grade, breakdown }) => {
   const getGradeColor = (g: SignalGrade) => {
     switch (g) {
       case SignalGrade.A_PLUS:
@@ -84,13 +88,7 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               className="transition-all duration-1000 ease-out"
             />
             <defs>
-              <linearGradient
-                id="gauge-gradient"
-                x1="0%"
-                y1="0%"
-                x2="100%"
-                y2="100%"
-              >
+              <linearGradient id="gauge-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
                 <stop offset="0%" stopColor="#06B6D4" />
                 <stop offset="50%" stopColor="#10B981" />
                 <stop offset="100%" stopColor="#3B82F6" />
@@ -99,7 +97,9 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
           </svg>
           <div className="absolute flex flex-col items-center justify-center text-center">
             <span className="text-3xl font-black text-white tracking-tight">{score}</span>
-            <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">/ 100 PTS</span>
+            <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">
+              / 100 PTS
+            </span>
           </div>
         </div>
 
@@ -123,7 +123,9 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               <div>
                 <div className="flex justify-between text-[10px] mb-0.5 font-bold">
                   <span className="text-slate-400">Liquidity Sweep Quality</span>
-                  <span className="text-emerald-400 font-bold">{breakdown.liquiditySweep || 0}/15</span>
+                  <span className="text-emerald-400 font-bold">
+                    {breakdown.liquiditySweep || 0}/15
+                  </span>
                 </div>
                 <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
                   <div
@@ -149,12 +151,16 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               <div>
                 <div className="flex justify-between text-[10px] mb-0.5 font-bold">
                   <span className="text-slate-400">Order Block / FVG Zone</span>
-                  <span className="text-amber-400 font-bold">{(breakdown.orderBlock || 0) + (breakdown.fvg || 0)}/15</span>
+                  <span className="text-amber-400 font-bold">
+                    {(breakdown.orderBlock || 0) + (breakdown.fvg || 0)}/15
+                  </span>
                 </div>
                 <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
                   <div
                     className="bg-amber-500 h-full rounded-full transition-all duration-700 shadow-sm shadow-amber-500/50"
-                    style={{ width: `${(Math.min(15, (breakdown.orderBlock || 0) + (breakdown.fvg || 0)) / 15) * 100}%` }}
+                    style={{
+                      width: `${(Math.min(15, (breakdown.orderBlock || 0) + (breakdown.fvg || 0)) / 15) * 100}%`,
+                    }}
                   />
                 </div>
               </div>
@@ -162,7 +168,9 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               <div>
                 <div className="flex justify-between text-[10px] mb-0.5 font-bold">
                   <span className="text-slate-400">Displacement & Momentum</span>
-                  <span className="text-indigo-400 font-bold">{breakdown.displacement || 0}/10</span>
+                  <span className="text-indigo-400 font-bold">
+                    {breakdown.displacement || 0}/10
+                  </span>
                 </div>
                 <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
                   <div
@@ -175,7 +183,9 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               <div>
                 <div className="flex justify-between text-[10px] mb-0.5 font-bold">
                   <span className="text-slate-400">50% Premium / Discount Zone</span>
-                  <span className="text-teal-400 font-bold">{breakdown.premiumDiscount || 0}/10</span>
+                  <span className="text-teal-400 font-bold">
+                    {breakdown.premiumDiscount || 0}/10
+                  </span>
                 </div>
                 <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
                   <div
@@ -188,12 +198,19 @@ export const ScoreGauge: React.FC<ScoreGaugeProps> = ({
               <div>
                 <div className="flex justify-between text-[10px] mb-0.5 font-bold">
                   <span className="text-slate-400">Volume & R:R Confirmation</span>
-                  <span className="text-sky-400 font-bold">{(breakdown.volumeConfirmation || 0) + (breakdown.riskReward || 0) + (breakdown.indicatorAlignment || 0)}/15</span>
+                  <span className="text-sky-400 font-bold">
+                    {(breakdown.volumeConfirmation || 0) +
+                      (breakdown.riskReward || 0) +
+                      (breakdown.indicatorAlignment || 0)}
+                    /15
+                  </span>
                 </div>
                 <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
                   <div
                     className="bg-sky-500 h-full rounded-full transition-all duration-700 shadow-sm shadow-sky-500/50"
-                    style={{ width: `${(Math.min(15, (breakdown.volumeConfirmation || 0) + (breakdown.riskReward || 0) + (breakdown.indicatorAlignment || 0)) / 15) * 100}%` }}
+                    style={{
+                      width: `${(Math.min(15, (breakdown.volumeConfirmation || 0) + (breakdown.riskReward || 0) + (breakdown.indicatorAlignment || 0)) / 15) * 100}%`,
+                    }}
                   />
                 </div>
               </div>

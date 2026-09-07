@@ -7,23 +7,23 @@ import {
 
 describe('PHASE 11: Online Learning Engine with Strict Safety Bounds', () => {
   const sampleFeatures: TradeFeatureVector = {
-    smcScore: 0.90,
+    smcScore: 0.9,
     obStrength: 0.85,
-    fvgSize: 0.70,
+    fvgSize: 0.7,
     mtfAlignment: 0.95,
     killZoneSession: 1.0,
-    smtDivergence: 0.80,
+    smtDivergence: 0.8,
     volatilityAtr: 0.35,
     riskRewardRatio: 0.75,
     trendRegime: 1.0,
     liquiditySweep: 1.0,
     bosStrength: 0.85,
-    chochStrength: 0.80,
+    chochStrength: 0.8,
     relativeVolume: 0.85,
-    distanceToHTFLevel: 0.20,
+    distanceToHTFLevel: 0.2,
     distanceToLiquidity: 0.15,
-    marketSession: 0.50,
-    dayOfWeek: 0.40,
+    marketSession: 0.5,
+    dayOfWeek: 0.4,
   };
 
   describe('1. Single-Step Online SGD Update with Weight Delta Norm Guard', () => {

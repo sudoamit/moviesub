@@ -8,8 +8,18 @@ export interface ISMTDivergenceResult {
   assetB: string;
   divergenceType: SMTType;
   convictionScore: number; // 0 - 100
-  assetASwing: { type: 'HIGH' | 'LOW'; price1: number; price2: number; trend: 'HH' | 'LH' | 'LL' | 'HL' };
-  assetBSwing: { type: 'HIGH' | 'LOW'; price1: number; price2: number; trend: 'HH' | 'LH' | 'LL' | 'HL' };
+  assetASwing: {
+    type: 'HIGH' | 'LOW';
+    price1: number;
+    price2: number;
+    trend: 'HH' | 'LH' | 'LL' | 'HL';
+  };
+  assetBSwing: {
+    type: 'HIGH' | 'LOW';
+    price1: number;
+    price2: number;
+    trend: 'HH' | 'LH' | 'LL' | 'HL';
+  };
   narrative: string;
   actionableSignal: 'STRONG_BUY' | 'STRONG_SELL' | 'NO_DIVERGENCE';
   timestamp: string;
@@ -46,10 +56,30 @@ export class SMTDivergenceEngine {
     const swingsA = SwingDetector.detectSwings(recentA, { leftBars: 3, rightBars: 3 });
     const swingsB = SwingDetector.detectSwings(recentB, { leftBars: 3, rightBars: 3 });
 
-    const highsA: ISwingPoint[] = swingsA.filter((s: ISwingPoint) => s.type === StructureType.SWING_HIGH || s.type === StructureType.HIGHER_HIGH || s.type === StructureType.LOWER_HIGH);
-    const lowsA: ISwingPoint[] = swingsA.filter((s: ISwingPoint) => s.type === StructureType.SWING_LOW || s.type === StructureType.HIGHER_LOW || s.type === StructureType.LOWER_LOW);
-    const highsB: ISwingPoint[] = swingsB.filter((s: ISwingPoint) => s.type === StructureType.SWING_HIGH || s.type === StructureType.HIGHER_HIGH || s.type === StructureType.LOWER_HIGH);
-    const lowsB: ISwingPoint[] = swingsB.filter((s: ISwingPoint) => s.type === StructureType.SWING_LOW || s.type === StructureType.HIGHER_LOW || s.type === StructureType.LOWER_LOW);
+    const highsA: ISwingPoint[] = swingsA.filter(
+      (s: ISwingPoint) =>
+        s.type === StructureType.SWING_HIGH ||
+        s.type === StructureType.HIGHER_HIGH ||
+        s.type === StructureType.LOWER_HIGH,
+    );
+    const lowsA: ISwingPoint[] = swingsA.filter(
+      (s: ISwingPoint) =>
+        s.type === StructureType.SWING_LOW ||
+        s.type === StructureType.HIGHER_LOW ||
+        s.type === StructureType.LOWER_LOW,
+    );
+    const highsB: ISwingPoint[] = swingsB.filter(
+      (s: ISwingPoint) =>
+        s.type === StructureType.SWING_HIGH ||
+        s.type === StructureType.HIGHER_HIGH ||
+        s.type === StructureType.LOWER_HIGH,
+    );
+    const lowsB: ISwingPoint[] = swingsB.filter(
+      (s: ISwingPoint) =>
+        s.type === StructureType.SWING_LOW ||
+        s.type === StructureType.HIGHER_LOW ||
+        s.type === StructureType.LOWER_LOW,
+    );
 
     // 1. Check for Bearish SMT (Distribution) on recent 2 swing highs
     if (highsA.length >= 2 && highsB.length >= 2) {

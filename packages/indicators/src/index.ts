@@ -6,5 +6,6 @@ export * from './rsi';
 export * from './adx';
 export * from './bollinger';
 export * from './vwap';
+export * from './macd';
 export * from './indicator-summary';
 export const INDICATORS_VERSION = '1.0.0';

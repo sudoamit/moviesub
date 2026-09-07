@@ -2,12 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import { MarketDataService } from '../market-data/market-data.service';
-import {
-  ICandle,
-  REDIS_KEYS,
-  Timeframe,
-  toPrismaTimeframe,
-} from '@quant/shared';
+import { ICandle, REDIS_KEYS, Timeframe, toPrismaTimeframe } from '@quant/shared';
 import {
   calculateEMA,
   calculateSMA,
@@ -82,7 +77,11 @@ export class CandlesService {
   /**
    * Fetches real live exchange candlestick history (Yahoo Finance for NSE, Binance for Crypto)
    */
-  private async fetchRealExchangeCandles(symbol: string, timeframe: string, limit = 200): Promise<ICandle[]> {
+  private async fetchRealExchangeCandles(
+    symbol: string,
+    timeframe: string,
+    limit = 200,
+  ): Promise<ICandle[]> {
     const sym = symbol.toUpperCase();
     const cacheKey = `${sym}_${timeframe}`;
     const cached = this.candleCache.get(cacheKey);
@@ -98,10 +97,23 @@ export class CandlesService {
       const is1h = normTf === 'H1' || normTf === '1H' || normTf === '60M' || normTf === '60';
       const is4h = normTf === 'H4' || normTf === '4H' || normTf === '240M' || normTf === '240';
 
-      if (sym === 'BTCUSDT') {
-        const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
-        
-        const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${binanceInterval}&limit=${limit}`);
+      if (sym === 'BTCUSDT' || sym === 'XAUUSD' || sym === 'GOLD' || sym === 'PAXGUSDT') {
+        const binanceInterval = is1m
+          ? '1m'
+          : is5m
+            ? '5m'
+            : is15m
+              ? '15m'
+              : is1h
+                ? '1h'
+                : is4h
+                  ? '4h'
+                  : '1d';
+        const binancePair = sym === 'XAUUSD' || sym === 'GOLD' ? 'PAXGUSDT' : 'BTCUSDT';
+
+        const res = await fetch(
+          `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=${limit}`,
+        );
         if (res.ok) {
           const data = await res.json();
           const candles: ICandle[] = data.map((d: any, idx: number) => ({
@@ -120,6 +132,8 @@ export class CandlesService {
         const symbolMap: Record<string, string> = {
           NIFTY: '^NSEI',
           BANKNIFTY: '^NSEBANK',
+          XAUUSD: 'GC=F',
+          GOLD: 'GC=F',
           RELIANCE: 'RELIANCE.NS',
           HDFCBANK: 'HDFCBANK.NS',
           INFY: 'INFY.NS',
@@ -251,7 +265,11 @@ export class CandlesService {
     }
 
     // Always fetch live candles for full structural context
-    const candlesResp = await this.getCandles({ symbol: sym, timeframe, limit: Math.max(limit, 200) });
+    const candlesResp = await this.getCandles({
+      symbol: sym,
+      timeframe,
+      limit: Math.max(limit, 200),
+    });
     const candles = candlesResp.candles;
 
     if (candles.length === 0) {
@@ -311,7 +329,10 @@ export class CandlesService {
           lower: Number(low.toFixed(2)),
         };
       })
-      .filter((item): item is { time: number; upper: number; middle: number; lower: number } => item !== null);
+      .filter(
+        (item): item is { time: number; upper: number; middle: number; lower: number } =>
+          item !== null,
+      );
 
     // 2. Pure SMC Analysis from trading-engine
     const smcAnalysis = SMCAnalyzer.analyze(candles);
@@ -320,8 +341,12 @@ export class CandlesService {
     let activeSignal: any = null;
     try {
       const [htf1, htf2] = await Promise.all([
-        this.getCandles({ symbol: sym, timeframe: Timeframe.H1, limit: 150 }).catch(() => ({ candles: [] })),
-        this.getCandles({ symbol: sym, timeframe: Timeframe.H4, limit: 100 }).catch(() => ({ candles: [] })),
+        this.getCandles({ symbol: sym, timeframe: Timeframe.H1, limit: 150 }).catch(() => ({
+          candles: [],
+        })),
+        this.getCandles({ symbol: sym, timeframe: Timeframe.H4, limit: 100 }).catch(() => ({
+          candles: [],
+        })),
       ]);
 
       activeSignal = SignalGenerator.generateSignal({
@@ -415,9 +440,7 @@ export class CandlesService {
     });
 
     if (!candle) {
-      throw new NotFoundException(
-        `No candles found for '${sym}' on timeframe '${timeframe}'`,
-      );
+      throw new NotFoundException(`No candles found for '${sym}' on timeframe '${timeframe}'`);
     }
 
     return {
@@ -432,10 +455,6 @@ export class CandlesService {
   }
 
   async ingestCandles(dto: IngestCandlesDto) {
-    return this.marketDataService.backfillHistoricalCandles(
-      dto.symbol,
-      dto.timeframe,
-      dto.limit,
-    );
+    return this.marketDataService.backfillHistoricalCandles(dto.symbol, dto.timeframe, dto.limit);
   }
 }

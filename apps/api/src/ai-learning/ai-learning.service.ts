@@ -100,7 +100,7 @@ export class AILearningService implements OnModuleInit {
           v.version,
           (v.hyperparametersJson as any) || {},
           weights,
-          v.bias
+          v.bias,
         );
 
         this.registry.registerVersion(
@@ -110,7 +110,7 @@ export class AILearningService implements OnModuleInit {
             trainingExampleCount: v.trainingExampleCount,
             validationExampleCount: v.validationExampleCount,
             outOfSampleExampleCount: v.outOfSampleExampleCount,
-          })
+          }),
         );
 
         this.logger.log(`Hydrated active AI model version '${v.version}' from database.`);
@@ -120,7 +120,9 @@ export class AILearningService implements OnModuleInit {
       // Initial Bootstrap: Seed Baseline v1.0.0
       await this.bootstrapBaselineModel();
     } catch (e) {
-      this.logger.warn(`Database model initialization deferred, starting with in-memory baseline: ${e}`);
+      this.logger.warn(
+        `Database model initialization deferred, starting with in-memory baseline: ${e}`,
+      );
       this.bootstrapBaselineModelInMemory();
     }
   }
@@ -191,7 +193,8 @@ export class AILearningService implements OnModuleInit {
         where: { name: 'Institutional SMC Trade Predictor' },
         create: {
           name: 'Institutional SMC Trade Predictor',
-          description: 'Supervised Logistic Regression predicting TP vs SL probability from SMC feature vectors.',
+          description:
+            'Supervised Logistic Regression predicting TP vs SL probability from SMC feature vectors.',
           algorithm: 'LOGISTIC_REGRESSION',
         },
         update: {},
@@ -266,7 +269,8 @@ export class AILearningService implements OnModuleInit {
         expectedCalibrationError: 0.042,
         maximumCalibrationError: 0.078,
         totalSamples: 120,
-        description: 'Excellent probability calibration (ECE: 4.2%). Predicted probabilities closely mirror realized win rates.',
+        description:
+          'Excellent probability calibration (ECE: 4.2%). Predicted probabilities closely mirror realized win rates.',
       },
       featureImportance,
       allVersions: this.registry.getAllVersions().map((v) => ({
@@ -310,7 +314,8 @@ export class AILearningService implements OnModuleInit {
     return {
       jobId,
       status: 'PENDING',
-      message: 'Walk-forward training job initiated in background. Poll /api/ai-learning/retrain/:jobId for status.',
+      message:
+        'Walk-forward training job initiated in background. Poll /api/ai-learning/retrain/:jobId for status.',
     };
   }
 
@@ -346,7 +351,9 @@ export class AILearningService implements OnModuleInit {
     // 1. Generate multi-asset chronological training examples
     const dataset = await this.buildTrainingDataset();
     if (dataset.length < 30) {
-      throw new Error(`Insufficient historical observations (${dataset.length} < 30) to train model safely.`);
+      throw new Error(
+        `Insufficient historical observations (${dataset.length} < 30) to train model safely.`,
+      );
     }
 
     job.progressPercent = 35;
@@ -385,7 +392,7 @@ export class AILearningService implements OnModuleInit {
       candidateModel,
       splits.outOfSample,
       baselineModel,
-      { minSampleSize: 15 }
+      { minSampleSize: 15 },
     );
 
     // Compute calibration on validation + out of sample
@@ -394,7 +401,10 @@ export class AILearningService implements OnModuleInit {
       predictedProb: candidateModel.predictProbability(d.features),
       actualLabel: d.label,
     }));
-    const calibrationReport = ProbabilityCalibrationEngine.generateCalibrationReport(calibrationItems, 10);
+    const calibrationReport = ProbabilityCalibrationEngine.generateCalibrationReport(
+      calibrationItems,
+      10,
+    );
 
     const serializedState = ModelPersistenceManager.serialize(candidateModel, {
       status: promotionDecision.isPromoted ? 'ACTIVE' : 'REJECTED',
@@ -403,9 +413,15 @@ export class AILearningService implements OnModuleInit {
       trainingExampleCount: splits.counts.train,
       validationExampleCount: splits.counts.validation,
       outOfSampleExampleCount: splits.counts.outOfSample,
-      trainingPeriod: splits.periods ? { start: splits.periods.trainStart, end: splits.periods.trainEnd } : undefined,
-      validationPeriod: splits.periods ? { start: splits.periods.validationStart, end: splits.periods.validationEnd } : undefined,
-      outOfSamplePeriod: splits.periods ? { start: splits.periods.outOfSampleStart, end: splits.periods.outOfSampleEnd } : undefined,
+      trainingPeriod: splits.periods
+        ? { start: splits.periods.trainStart, end: splits.periods.trainEnd }
+        : undefined,
+      validationPeriod: splits.periods
+        ? { start: splits.periods.validationStart, end: splits.periods.validationEnd }
+        : undefined,
+      outOfSamplePeriod: splits.periods
+        ? { start: splits.periods.outOfSampleStart, end: splits.periods.outOfSampleEnd }
+        : undefined,
     });
 
     this.registry.registerVersion(serializedState);
@@ -414,7 +430,9 @@ export class AILearningService implements OnModuleInit {
       this.registry.promoteVersion(candidateVersion);
       this.logger.log(`PROMOTED AI Model Version '${candidateVersion}' to Production!`);
     } else {
-      this.logger.warn(`Candidate AI Model '${candidateVersion}' rejected: ${promotionDecision.reasons.join('; ')}`);
+      this.logger.warn(
+        `Candidate AI Model '${candidateVersion}' rejected: ${promotionDecision.reasons.join('; ')}`,
+      );
     }
 
     job.progressPercent = 100;
@@ -599,7 +617,8 @@ export class AILearningService implements OnModuleInit {
       },
       featureVector: features,
       generatedAt: new Date().toISOString(),
-      disclaimer: 'Decision-support ML probability model. Does not determine position sizing or replace deterministic SMC invalidation levels.',
+      disclaimer:
+        'Decision-support ML probability model. Does not determine position sizing or replace deterministic SMC invalidation levels.',
     };
   }
 
@@ -685,9 +704,12 @@ export class AILearningService implements OnModuleInit {
           timeToResolutionMinutes: 45,
           exitTimestamp: new Date(Date.now() - 3600000),
           classification: 'TARGET_ACHIEVED',
-          classificationRationale: 'Target achieved (TP2_HIT) cleanly with favorable structural flow.',
+          classificationRationale:
+            'Target achieved (TP2_HIT) cleanly with favorable structural flow.',
           marketRegime: 'BULLISH_TREND',
-          keyContributingFactors: [{ factor: 'Market Alignment', impact: 'Clean expansion to +2.5R target.' }],
+          keyContributingFactors: [
+            { factor: 'Market Alignment', impact: 'Clean expansion to +2.5R target.' },
+          ],
         },
         {
           symbol: 'NIFTY',
@@ -701,9 +723,15 @@ export class AILearningService implements OnModuleInit {
           timeToResolutionMinutes: 28,
           exitTimestamp: new Date(Date.now() - 7200000),
           classification: 'LIQUIDITY_SWEEP_FAILURE',
-          classificationRationale: 'Stop-loss was swept for resting retail liquidity before price immediately reversed to target.',
+          classificationRationale:
+            'Stop-loss was swept for resting retail liquidity before price immediately reversed to target.',
           marketRegime: 'RANGE',
-          keyContributingFactors: [{ factor: 'Liquidity Sweep Beyond Stop', impact: 'Wick swept SL by 4 pts before reversing 80 pts.' }],
+          keyContributingFactors: [
+            {
+              factor: 'Liquidity Sweep Beyond Stop',
+              impact: 'Wick swept SL by 4 pts before reversing 80 pts.',
+            },
+          ],
         },
         {
           symbol: 'BANKNIFTY',
@@ -717,9 +745,12 @@ export class AILearningService implements OnModuleInit {
           timeToResolutionMinutes: 15,
           exitTimestamp: new Date(Date.now() - 14400000),
           classification: 'HTF_COUNTERTREND',
-          classificationRationale: 'Failure caused by higher-timeframe order flow dominance over lower-timeframe setup.',
+          classificationRationale:
+            'Failure caused by higher-timeframe order flow dominance over lower-timeframe setup.',
           marketRegime: 'BEARISH_TREND',
-          keyContributingFactors: [{ factor: 'HTF Structure Inversion', impact: 'Trade executed against 1H supply zone.' }],
+          keyContributingFactors: [
+            { factor: 'HTF Structure Inversion', impact: 'Trade executed against 1H supply zone.' },
+          ],
         },
         {
           symbol: 'RELIANCE',
@@ -733,9 +764,15 @@ export class AILearningService implements OnModuleInit {
           timeToResolutionMinutes: 65,
           exitTimestamp: new Date(Date.now() - 28800000),
           classification: 'TARGET_ACHIEVED',
-          classificationRationale: 'Target achieved (TP1_HIT) cleanly with favorable structural flow.',
+          classificationRationale:
+            'Target achieved (TP1_HIT) cleanly with favorable structural flow.',
           marketRegime: 'BULLISH_TREND',
-          keyContributingFactors: [{ factor: 'Volume Expansion', impact: 'Displacement supported by institutional volume.' }],
+          keyContributingFactors: [
+            {
+              factor: 'Volume Expansion',
+              impact: 'Displacement supported by institutional volume.',
+            },
+          ],
         },
       ];
     }
@@ -809,7 +846,11 @@ export class AILearningService implements OnModuleInit {
       takeProfits: { tp1: tp, tp2: tp, tp3: tp },
       riskRewardRatios: { rr1: 1.5, rr2: 2.0, rr3: 3.0 },
       scoreBreakdown: { orderBlock: 20, fvg: 15, htfBias: 15, liquiditySweep: 15, totalScore: 80 },
-      reasoning: { liquidityReason: 'Swept', triggerReason: 'BOS confirmed', summary: 'Live trade' },
+      reasoning: {
+        liquidityReason: 'Swept',
+        triggerReason: 'BOS confirmed',
+        summary: 'Live trade',
+      },
       timestamp: trade.entryTimestamp,
     };
 
@@ -819,7 +860,8 @@ export class AILearningService implements OnModuleInit {
       asOfTimestamp: trade.entryTimestamp,
     });
 
-    const isWin = (trade.realizedR !== undefined ? trade.realizedR > 0 : postMortem.realizedRMultiple > 0);
+    const isWin =
+      trade.realizedR !== undefined ? trade.realizedR > 0 : postMortem.realizedRMultiple > 0;
     const updateResult = this.onlineLearningEngine.updateModel(activeModel, {
       symbol: sym,
       features,
@@ -835,7 +877,9 @@ export class AILearningService implements OnModuleInit {
       currentActiveState.updatedAt = new Date();
     }
 
-    this.logger.log(`Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) - Delta Norm: ${updateResult.weightDeltaNorm}`);
+    this.logger.log(
+      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) - Delta Norm: ${updateResult.weightDeltaNorm}`,
+    );
 
     return { updateResult, postMortem };
   }

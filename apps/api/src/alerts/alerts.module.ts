@@ -9,12 +9,7 @@ import { SignalsModule } from '../signals/signals.module';
 @Module({
   imports: [SignalsModule],
   controllers: [AlertsController],
-  providers: [
-    AlertsService,
-    TelegramDispatcher,
-    WebhookDispatcher,
-    AlertRateLimiter,
-  ],
+  providers: [AlertsService, TelegramDispatcher, WebhookDispatcher, AlertRateLimiter],
   exports: [AlertsService],
 })
 export class AlertsModule {}

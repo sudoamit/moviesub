@@ -16,7 +16,16 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "skipLibCheck": true,
-    "baseUrl": "."
+    "baseUrl": ".",
+    "paths": {
+      "@quant/shared": ["packages/shared/src"],
+      "@quant/config": ["packages/config/src"],
+      "@quant/indicators": ["packages/indicators/src"],
+      "@quant/trading-engine": ["packages/trading-engine/src"],
+      "@quant/risk-engine": ["packages/risk-engine/src"],
+      "@quant/backtesting": ["packages/backtesting/src"],
+      "@quant/learning-engine": ["packages/learning-engine/src"]
+    }
   },
   "exclude": ["node_modules", "dist", ".next", "coverage"]
 }

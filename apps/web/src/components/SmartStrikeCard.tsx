@@ -1,7 +1,16 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Layers, ArrowUpRight, ArrowDownRight, Target, Shield, Zap, TrendingUp } from 'lucide-react';
+import {
+  Sparkles,
+  Layers,
+  ArrowUpRight,
+  ArrowDownRight,
+  Target,
+  Shield,
+  Zap,
+  TrendingUp,
+} from 'lucide-react';
 
 interface SmartStrikeCardProps {
   symbol: string;
@@ -26,27 +35,30 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
   const isBull = direction === 'BULLISH';
   const optType = isBull ? 'CE' : 'PE';
 
-  const fetchSmartStrike = React.useCallback(async (silent = false) => {
-    if (!isIndex) return;
-    try {
-      if (!silent && !data) setLoading(true);
-      const url = `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotPrice || 24080}${selectedStrike ? `&strike=${selectedStrike}` : ''}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json && json.optionLtp) {
-        if (data && json.optionLtp !== data.optionLtp) {
-          setPriceFlash(json.optionLtp > data.optionLtp ? 'up' : 'down');
-          setTimeout(() => setPriceFlash(null), 800);
+  const fetchSmartStrike = React.useCallback(
+    async (silent = false) => {
+      if (!isIndex) return;
+      try {
+        if (!silent && !data) setLoading(true);
+        const url = `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotPrice || 24080}${selectedStrike ? `&strike=${selectedStrike}` : ''}`;
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json && json.optionLtp) {
+          if (data && json.optionLtp !== data.optionLtp) {
+            setPriceFlash(json.optionLtp > data.optionLtp ? 'up' : 'down');
+            setTimeout(() => setPriceFlash(null), 800);
+          }
+          setData(json);
+          setLastLtp(json.optionLtp);
         }
-        setData(json);
-        setLastLtp(json.optionLtp);
+      } catch {
+        // ignore network error
+      } finally {
+        setLoading(false);
       }
-    } catch {
-      // ignore network error
-    } finally {
-      setLoading(false);
-    }
-  }, [symbol, direction, spotPrice, isIndex, data, selectedStrike]);
+    },
+    [symbol, direction, spotPrice, isIndex, data, selectedStrike],
+  );
 
   useEffect(() => {
     fetchSmartStrike(false);
@@ -61,9 +73,10 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
   // Available strikes for fast selection
   const step = symbol === 'NIFTY' ? 50 : 100;
   const atm = Math.round((spotPrice || 24080) / step) * step;
-  const strikeOptions = symbol === 'NIFTY' 
-    ? [23950, 24000, 24050, 24100, 24150, 24200]
-    : [atm - 200, atm - 100, atm, atm + 100, atm + 200];
+  const strikeOptions =
+    symbol === 'NIFTY'
+      ? [23950, 24000, 24050, 24100, 24150, 24200]
+      : [atm - 200, atm - 100, atm, atm + 100, atm + 200];
 
   return (
     <div className="bg-[#111827]/95 border border-cyan-500/40 rounded-xl p-4 shadow-xl font-mono relative overflow-hidden">
@@ -85,7 +98,8 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
               SMART OPTION STRIKE SELECTOR
             </h4>
             <span className="text-[10px] text-slate-400">
-              Delta-Adjusted {symbol} {data?.optionType || (isBull ? 'CE' : 'PE')} Derivative • Expiry: Tuesday
+              Delta-Adjusted {symbol} {data?.optionType || (isBull ? 'CE' : 'PE')} Derivative •
+              Expiry: Tuesday
             </span>
           </div>
         </div>
@@ -103,7 +117,8 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
       <div className="flex items-center gap-1.5 pt-2.5 overflow-x-auto">
         <span className="text-[10px] text-slate-500 uppercase font-bold pr-1">Strike:</span>
         {strikeOptions.map((s) => {
-          const isSelected = (selectedStrike === s) || (!selectedStrike && data?.recommendedStrike === s);
+          const isSelected =
+            selectedStrike === s || (!selectedStrike && data?.recommendedStrike === s);
           return (
             <button
               key={s}
@@ -130,7 +145,9 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
           {/* Recommended Contract & Premium */}
           <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-lg">
             <div>
-              <span className="text-[10px] text-slate-400 uppercase block">RECOMMENDED CONTRACT</span>
+              <span className="text-[10px] text-slate-400 uppercase block">
+                RECOMMENDED CONTRACT
+              </span>
               <span className="text-sm sm:text-base font-black text-white flex items-center gap-1.5 mt-0.5">
                 {data.contractName}
                 <span
@@ -140,7 +157,17 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
                       : 'bg-rose-950 text-rose-300 border border-rose-700'
                   }`}
                 >
-                  {data.recommendedStrike === atm ? (isBull ? 'CALL (ATM)' : 'PUT (ATM)') : data.recommendedStrike < atm ? (isBull ? 'CALL (ITM)' : 'PUT (OTM)') : (isBull ? 'CALL (OTM)' : 'PUT (ITM)')}
+                  {data.recommendedStrike === atm
+                    ? isBull
+                      ? 'CALL (ATM)'
+                      : 'PUT (ATM)'
+                    : data.recommendedStrike < atm
+                      ? isBull
+                        ? 'CALL (ITM)'
+                        : 'PUT (OTM)'
+                      : isBull
+                        ? 'CALL (OTM)'
+                        : 'PUT (ITM)'}
                 </span>
               </span>
             </div>
@@ -155,8 +182,8 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
                   priceFlash === 'up'
                     ? 'text-emerald-400 scale-105'
                     : priceFlash === 'down'
-                    ? 'text-rose-400 scale-105'
-                    : 'text-cyan-300'
+                      ? 'text-rose-400 scale-105'
+                      : 'text-cyan-300'
                 }`}
               >
                 ₹{data.optionLtp.toFixed(2)}
@@ -213,19 +240,27 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px] text-slate-400 bg-slate-950/60 p-2 rounded border border-slate-800 font-mono">
             <div>
               <span className="text-slate-500 block">Expiry:</span>
-              <strong className="text-cyan-400 block truncate">{data.expiryLabel || `${data.daysToExpiry}D Left`}</strong>
+              <strong className="text-cyan-400 block truncate">
+                {data.expiryLabel || `${data.daysToExpiry}D Left`}
+              </strong>
             </div>
             <div>
               <span className="text-slate-500 block">Delta (Δ) / Theta (Θ):</span>
-              <strong className="text-white block">{data.delta} | ₹{data.theta}/d</strong>
+              <strong className="text-white block">
+                {data.delta} | ₹{data.theta}/d
+              </strong>
             </div>
             <div>
               <span className="text-slate-500 block">IV % / Lot Size:</span>
-              <strong className="text-white block">{data.iv}% | {data.lotSize} Qty</strong>
+              <strong className="text-white block">
+                {data.iv}% | {data.lotSize} Qty
+              </strong>
             </div>
             <div>
               <span className="text-slate-500 block">Max Expected Profit:</span>
-              <strong className="text-emerald-400 block">+₹{data.expectedProfitPerLot.toFixed(0)}/lot</strong>
+              <strong className="text-emerald-400 block">
+                +₹{data.expectedProfitPerLot.toFixed(0)}/lot
+              </strong>
             </div>
           </div>
         </div>

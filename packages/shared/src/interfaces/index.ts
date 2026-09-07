@@ -180,6 +180,14 @@ export interface ISignalSetup {
   pnlRMultiple?: number;
   timestamp?: Date;
   createdAt?: Date;
+  quantSnapshot?: any;
+  quantScore?: any;
+  regime?: string;
+  volatilityPercentile?: number;
+  forecastVolatility?: number;
+  mlProbability?: number;
+  expectedR?: number;
+  decisionTrace?: any;
 }
 
 export interface IPositionSizing {
@@ -200,9 +208,18 @@ export interface IPositionSizing {
 
 export interface IMarketDataProvider {
   readonly providerName: string;
-  getHistoricalCandles(symbol: string, timeframe: Timeframe, limit: number, endTime?: Date): Promise<ICandle[]>;
+  getHistoricalCandles(
+    symbol: string,
+    timeframe: Timeframe,
+    limit: number,
+    endTime?: Date,
+  ): Promise<ICandle[]>;
   getLatestCandle(symbol: string, timeframe: Timeframe): Promise<ICandle>;
-  subscribeToMarketData(symbol: string, timeframe: Timeframe, onCandle: (candle: ICandle) => void): Promise<void>;
+  subscribeToMarketData(
+    symbol: string,
+    timeframe: Timeframe,
+    onCandle: (candle: ICandle) => void,
+  ): Promise<void>;
   unsubscribeFromMarketData(symbol: string, timeframe: Timeframe): Promise<void>;
 }
 
@@ -289,24 +306,24 @@ export interface ISMCConfluenceSetup {
  * 17-Dimensional Normalized Quantitative Feature Vector with Full Audit Trail
  */
 export interface IFeatureVector17D {
-  htfTrendAlignment: number;       // 1. HTF trend confluence (4H & 1H) [-1, 1]
-  trend4H: number;                 // 2. 4H macro trend [-1, 1]
-  trend1H: number;                 // 3. 1H intermediate trend [-1, 1]
-  structure15M: number;            // 4. 15M micro structure state [-1, 1]
-  bosChochQuality: number;         // 5. BOS / CHoCH structural break strength [0, 1]
-  orderBlockStrength: number;      // 6. Order Block mitigation freshness & volume [0, 1]
-  fvgSize: number;                 // 7. FVG gap magnitude relative to ATR [0, 1]
-  fvgFillPct: number;              // 8. FVG tap fill percentage [0, 1]
-  liquiditySweepDepth: number;     // 9. BSL / SSL sweep depth [0, 1]
-  displacementIntensity: number;   // 10. Displacement ATR multiple [0, 1]
-  atrVolatility: number;           // 11. Normalized ATR volatility index [0, 1]
-  volumeImbalance: number;         // 12. Volume delta / imbalance ratio [-1, 1]
-  cvd: number;                     // 13. Cumulative Volume Delta momentum [-1, 1]
+  htfTrendAlignment: number; // 1. HTF trend confluence (4H & 1H) [-1, 1]
+  trend4H: number; // 2. 4H macro trend [-1, 1]
+  trend1H: number; // 3. 1H intermediate trend [-1, 1]
+  structure15M: number; // 4. 15M micro structure state [-1, 1]
+  bosChochQuality: number; // 5. BOS / CHoCH structural break strength [0, 1]
+  orderBlockStrength: number; // 6. Order Block mitigation freshness & volume [0, 1]
+  fvgSize: number; // 7. FVG gap magnitude relative to ATR [0, 1]
+  fvgFillPct: number; // 8. FVG tap fill percentage [0, 1]
+  liquiditySweepDepth: number; // 9. BSL / SSL sweep depth [0, 1]
+  displacementIntensity: number; // 10. Displacement ATR multiple [0, 1]
+  atrVolatility: number; // 11. Normalized ATR volatility index [0, 1]
+  volumeImbalance: number; // 12. Volume delta / imbalance ratio [-1, 1]
+  cvd: number; // 13. Cumulative Volume Delta momentum [-1, 1]
   volumeProfilePocProximity: number; // 14. Proximity to Volume Profile POC / VAH / VAL [0, 1]
-  sessionKillZone: number;         // 15. ICT Kill Zone / Active Market Session [0, 1]
-  marketRegime: number;            // 16. Quant Market Regime [-1, 1]
-  smtDivergence: number;           // 17. SMT correlation divergence score [-1, 1]
-  
+  sessionKillZone: number; // 15. ICT Kill Zone / Active Market Session [0, 1]
+  marketRegime: number; // 16. Quant Market Regime [-1, 1]
+  smtDivergence: number; // 17. SMT correlation divergence score [-1, 1]
+
   // Auditable Timestamps
   feature_timestamp: string;
   source_candle_timestamp: string;
@@ -357,7 +374,13 @@ export interface IPostTradeAuditRecord {
     realizedPnL: number;
     mfe: number;
     mae: number;
-    classification: 'CORRECT_WIN' | 'CORRECT_LOSS' | 'MODEL_ERROR' | 'EXECUTION_ERROR' | 'DATA_ERROR' | 'STRATEGY_ERROR';
+    classification:
+      | 'CORRECT_WIN'
+      | 'CORRECT_LOSS'
+      | 'MODEL_ERROR'
+      | 'EXECUTION_ERROR'
+      | 'DATA_ERROR'
+      | 'STRATEGY_ERROR';
     notes: string;
   };
 }

@@ -60,20 +60,28 @@ export const MacroCalendarWidget: React.FC = () => {
                   MACRO SHIELD
                 </span>
               </h3>
-              <p className="text-[11px] text-slate-400">RBI Policy, US Fed FOMC, Inflation & Nifty Heavyweight Earnings Catalysts</p>
+              <p className="text-[11px] text-slate-400">
+                RBI Policy, US Fed FOMC, Inflation & Nifty Heavyweight Earnings Catalysts
+              </p>
             </div>
           </div>
 
           {vixData && (
             <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 px-3.5 py-1.5 rounded-xl text-xs">
               <div>
-                <span className="text-[10px] text-slate-400 block font-bold">INDIA VIX REGIME:</span>
-                <span className="text-sm font-black text-emerald-400">{vixData.currentVIX} pts ({vixData.changePercent}%)</span>
+                <span className="text-[10px] text-slate-400 block font-bold">
+                  INDIA VIX REGIME:
+                </span>
+                <span className="text-sm font-black text-emerald-400">
+                  {vixData.currentVIX} pts ({vixData.changePercent}%)
+                </span>
               </div>
               <div className="h-6 w-px bg-slate-800" />
               <div>
                 <span className="text-[9px] text-slate-500 block uppercase">SL BUFFER</span>
-                <span className="text-xs font-bold text-cyan-300">{vixData.stopLossBufferMultiplier}x ATR</span>
+                <span className="text-xs font-bold text-cyan-300">
+                  {vixData.stopLossBufferMultiplier}x ATR
+                </span>
               </div>
             </div>
           )}
@@ -140,23 +148,34 @@ export const MacroCalendarWidget: React.FC = () => {
                         <span className="text-xs font-black text-white">{ev.title}</span>
                       </div>
                       <span className="text-[10px] text-slate-400 mt-1 block">
-                        Category: <strong className="text-slate-200">{ev.category}</strong> • Country: <strong className="text-slate-200">{ev.country}</strong>
+                        Category: <strong className="text-slate-200">{ev.category}</strong> •
+                        Country: <strong className="text-slate-200">{ev.country}</strong>
                       </span>
                     </div>
 
-                    <div className="text-right text-xs">
-                      <span className="text-cyan-300 font-bold block">
-                        {eventDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    <div className="text-right text-xs" suppressHydrationWarning>
+                      <span className="text-cyan-300 font-bold block" suppressHydrationWarning>
+                        {eventDate.toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
                       </span>
-                      <span className="text-[10px] text-slate-500 block">
-                        {eventDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} IST
+                      <span className="text-[10px] text-slate-500 block" suppressHydrationWarning>
+                        {eventDate.toLocaleTimeString('en-US', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}{' '}
+                        IST
                       </span>
                     </div>
                   </div>
 
                   <div className="py-2.5 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">FORECAST / CONSENSUS:</span>
+                      <span className="text-[10px] text-slate-500 block">
+                        FORECAST / CONSENSUS:
+                      </span>
                       <strong className="text-white text-xs">{ev.forecast || 'N/A'}</strong>
                     </div>
                     <div>
@@ -180,7 +199,10 @@ export const MacroCalendarWidget: React.FC = () => {
 
                   <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300 font-sans flex items-start gap-2">
                     <Info className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
-                    <span><strong className="text-cyan-400 font-mono">Institutional Advisory:</strong> {ev.advisoryNote}</span>
+                    <span>
+                      <strong className="text-cyan-400 font-mono">Institutional Advisory:</strong>{' '}
+                      {ev.advisoryNote}
+                    </span>
                   </div>
                 </div>
               );

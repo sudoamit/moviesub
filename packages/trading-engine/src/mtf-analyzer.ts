@@ -31,16 +31,26 @@ export class MultiTimeframeAnalyzer {
     mode: MTFMode = MTFMode.BALANCED,
   ): IMTFAnalysisResult {
     const htf1Analysis = htf1.analysis || SMCAnalyzer.analyze(htf1.candles);
-    const htf1Trend = htf1Analysis.currentTrend !== Direction.NEUTRAL
-      ? htf1Analysis.currentTrend
-      : (htf1Analysis.marketRegime.regime === 'BULLISH_TREND' ? Direction.BULLISH : (htf1Analysis.marketRegime.regime === 'BEARISH_TREND' ? Direction.BEARISH : Direction.NEUTRAL));
+    const htf1Trend =
+      htf1Analysis.currentTrend !== Direction.NEUTRAL
+        ? htf1Analysis.currentTrend
+        : htf1Analysis.marketRegime.regime === 'BULLISH_TREND'
+          ? Direction.BULLISH
+          : htf1Analysis.marketRegime.regime === 'BEARISH_TREND'
+            ? Direction.BEARISH
+            : Direction.NEUTRAL;
 
     let htf2Trend: Direction | undefined = undefined;
     if (htf2 && htf2.candles.length > 0) {
       const htf2Analysis = htf2.analysis || SMCAnalyzer.analyze(htf2.candles);
-      htf2Trend = htf2Analysis.currentTrend !== Direction.NEUTRAL
-        ? htf2Analysis.currentTrend
-        : (htf2Analysis.marketRegime.regime === 'BULLISH_TREND' ? Direction.BULLISH : (htf2Analysis.marketRegime.regime === 'BEARISH_TREND' ? Direction.BEARISH : Direction.NEUTRAL));
+      htf2Trend =
+        htf2Analysis.currentTrend !== Direction.NEUTRAL
+          ? htf2Analysis.currentTrend
+          : htf2Analysis.marketRegime.regime === 'BULLISH_TREND'
+            ? Direction.BULLISH
+            : htf2Analysis.marketRegime.regime === 'BEARISH_TREND'
+              ? Direction.BEARISH
+              : Direction.NEUTRAL;
     }
 
     // Determine overall HTF bias

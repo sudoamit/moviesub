@@ -15,6 +15,58 @@ export const EnvSchema = z.object({
   JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug', 'verbose']).default('info'),
+  ENABLE_QUANT_FEATURES: z.preprocess(
+    (val) => val === 'true' || val === true || val === undefined,
+    z.boolean().default(true),
+  ),
+  ENABLE_REGIME_MODEL: z.preprocess(
+    (val) => val === 'true' || val === true || val === undefined,
+    z.boolean().default(true),
+  ),
+  ENABLE_VOLATILITY_FORECAST: z.preprocess(
+    (val) => val === 'true' || val === true || val === undefined,
+    z.boolean().default(true),
+  ),
+  ENABLE_LLM_CONTEXT: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_ALTERNATIVE_DATA: z.preprocess(
+    (val) => val === 'true' || val === true || val === undefined,
+    z.boolean().default(true),
+  ),
+  ENABLE_LEARNING_ENGINE: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_PATTERN_DISCOVERY: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_CANDIDATE_GENERATION: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_SHADOW_TRADING: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_AUTO_PROMOTION: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_LLM_LEARNING: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_REGIME_LEARNING: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
+  ENABLE_VOLATILITY_LEARNING: z.preprocess(
+    (val) => val === 'true' || val === true,
+    z.boolean().default(false),
+  ),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

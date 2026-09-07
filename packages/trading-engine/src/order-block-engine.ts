@@ -41,10 +41,12 @@ export class OrderBlockEngine {
 
         // Check if a BOS or FVG was created in this subsequent window
         const createdBOS = bosList.some(
-          (b) => b.direction === Direction.BULLISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
+          (b) =>
+            b.direction === Direction.BULLISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
         );
         const createdFVG = fvgList.some(
-          (f) => f.direction === Direction.BULLISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
+          (f) =>
+            f.direction === Direction.BULLISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
         );
 
         if (hasDisplacement && (createdBOS || createdFVG || maxUpMove >= candleAtr * 1.5)) {
@@ -68,10 +70,12 @@ export class OrderBlockEngine {
         const hasDisplacement = maxDownMove >= candleAtr * displacementThreshold;
 
         const createdBOS = bosList.some(
-          (b) => b.direction === Direction.BEARISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
+          (b) =>
+            b.direction === Direction.BEARISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
         );
         const createdFVG = fvgList.some(
-          (f) => f.direction === Direction.BEARISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
+          (f) =>
+            f.direction === Direction.BEARISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
         );
 
         if (hasDisplacement && (createdBOS || createdFVG || maxDownMove >= candleAtr * 1.5)) {

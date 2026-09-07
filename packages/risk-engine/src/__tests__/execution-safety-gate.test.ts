@@ -107,7 +107,7 @@ describe('ExecutionSafetyGate', () => {
   it('should reject trade if mathematical expectancy is below threshold', () => {
     const params = getValidParams();
     params.prediction.expectedR = 0.05; // Below 0.20R
-    params.minExpectancyR = 0.20;
+    params.minExpectancyR = 0.2;
 
     const result = ExecutionSafetyGate.evaluate(params);
     expect(result.isApproved).toBe(false);

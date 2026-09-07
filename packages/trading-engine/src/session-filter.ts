@@ -5,17 +5,26 @@ export interface ISessionInfo {
   badge: string;
   description: string;
   timeRange: string;
-  activeSession: 'NSE_MORNING' | 'NSE_LUNCH_CHOP' | 'NSE_AFTERNOON' | 'LONDON_OPEN' | 'NY_OPEN' | 'ASIA_RANGE' | 'MARKET_CLOSED';
+  activeSession:
+    | 'NSE_MORNING'
+    | 'NSE_LUNCH_CHOP'
+    | 'NSE_AFTERNOON'
+    | 'LONDON_OPEN'
+    | 'NY_OPEN'
+    | 'ASIA_RANGE'
+    | 'MARKET_CLOSED';
 }
 
 export class SessionFilter {
   /**
    * Evaluates active market session and returns ICT Kill Zone quality multiplier
    * @param date Date to evaluate (defaults to current date)
-   * @param symbol Symbol to check ('BTCUSDT' or Indian assets)
+   * @param symbol Symbol to check ('BTCUSDT', 'XAUUSD', or Indian assets)
    */
-  static getSessionInfo(date: Date = new Date(), symbol: string = 'NIFTY'): ISessionInfo {
+  public static getSessionInfo(date: Date = new Date(), symbol: string = 'NIFTY'): ISessionInfo {
     const isCrypto = symbol.toUpperCase() === 'BTCUSDT';
+    const isGold = symbol.toUpperCase() === 'XAUUSD' || symbol.toUpperCase() === 'GOLD';
+    const isGlobalAsset = isCrypto || isGold;
     const utcHours = date.getUTCHours();
     const utcMinutes = date.getUTCMinutes();
     const utcTimeVal = utcHours * 60 + utcMinutes;
@@ -23,16 +32,18 @@ export class SessionFilter {
     // IST is UTC + 5:30 (330 minutes)
     const istTimeVal = (utcTimeVal + 330) % 1440;
 
-    // 1. Crypto Specific Kill Zones (24/7 Global Order Flow)
-    if (isCrypto) {
+    // 1. Global Assets (Crypto & Spot Gold 24/5 Continuous Order Flow)
+    if (isGlobalAsset) {
       // London Open: 07:00 - 10:00 UTC
       if (utcTimeVal >= 420 && utcTimeVal < 600) {
         return {
-          sessionName: 'London Open Kill Zone',
+          sessionName: isGold ? 'London Gold Fix & London Open' : 'London Open Kill Zone',
           isKillZone: true,
           qualityMultiplier: 1.25,
-          badge: '⚡ LONDON KILL ZONE',
-          description: 'High institutional expansion and Judas swing displacement window',
+          badge: isGold ? '🥇 LONDON GOLD FIX' : '⚡ LONDON KILL ZONE',
+          description: isGold
+            ? 'London Bullion Market peak institutional liquidity & manipulation Judas swing window'
+            : 'High institutional expansion and Judas swing displacement window',
           timeRange: '07:00 - 10:00 UTC (12:30 - 15:30 IST)',
           activeSession: 'LONDON_OPEN',
         };
@@ -40,11 +51,13 @@ export class SessionFilter {
       // NY Open: 12:00 - 15:00 UTC
       if (utcTimeVal >= 720 && utcTimeVal < 900) {
         return {
-          sessionName: 'New York Open Kill Zone',
+          sessionName: isGold ? 'COMEX Gold New York Open' : 'New York Open Kill Zone',
           isKillZone: true,
-          qualityMultiplier: 1.30,
-          badge: '🔥 NY OPEN KILL ZONE',
-          description: 'Peak crypto and macro volume institutional entry window',
+          qualityMultiplier: 1.35,
+          badge: isGold ? '🔥 COMEX NY GOLD OPEN' : '🔥 NY OPEN KILL ZONE',
+          description: isGold
+            ? 'Peak COMEX Gold futures institutional order flow, US economic data & high-conviction displacement'
+            : 'Peak crypto and macro volume institutional entry window',
           timeRange: '12:00 - 15:00 UTC (17:30 - 20:30 IST)',
           activeSession: 'NY_OPEN',
         };
@@ -54,7 +67,7 @@ export class SessionFilter {
         return {
           sessionName: 'Asia Accumulation Range',
           isKillZone: false,
-          qualityMultiplier: 0.90,
+          qualityMultiplier: 0.9,
           badge: '🌙 ASIA ACCUMULATION',
           description: 'Range-bound accumulation setting high/low of day targets',
           timeRange: '00:00 - 06:00 UTC (05:30 - 11:30 IST)',
@@ -94,7 +107,7 @@ export class SessionFilter {
       return {
         sessionName: 'NSE Morning Opening Drive',
         isKillZone: true,
-        qualityMultiplier: 1.30,
+        qualityMultiplier: 1.3,
         badge: '🚀 NSE OPENING POWER HOUR',
         description: 'Peak volume, Initial Balance (IB) sweep & high-conviction displacement',
         timeRange: '09:15 AM - 10:45 AM IST',
@@ -120,7 +133,7 @@ export class SessionFilter {
       return {
         sessionName: 'NSE Afternoon Expansion',
         isKillZone: true,
-        qualityMultiplier: 1.20,
+        qualityMultiplier: 1.2,
         badge: '⚡ NSE AFTERNOON EXPANSION',
         description: 'Institutional closing balance, trend continuation & gamma spikes',
         timeRange: '01:30 PM - 03:15 PM IST',

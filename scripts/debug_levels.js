@@ -1,8 +1,12 @@
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const { SMCAnalyzer } = require(path.join(__dirname, '../packages/trading-engine/dist/smc-analyzer.js'));
-const { TradeLevelsCalculator } = require(path.join(__dirname, '../packages/trading-engine/dist/trade-levels.js'));
+const { SMCAnalyzer } = require(
+  path.join(__dirname, '../packages/trading-engine/dist/smc-analyzer.js'),
+);
+const { TradeLevelsCalculator } = require(
+  path.join(__dirname, '../packages/trading-engine/dist/trade-levels.js'),
+);
 
 async function debugLevels() {
   const inst = await prisma.instrument.findUnique({ where: { symbol: 'NIFTY' } });
@@ -23,8 +27,10 @@ async function debugLevels() {
   });
 
   const anchorSwing = analysis.confirmedSwingHighs.slice(-1)[0] || null;
-  const activeOB = analysis.activeOrderBlocks.filter(ob => ob.direction === 'BEARISH').slice(-1)[0] || null;
-  const activeFVG = analysis.activeFVGs.filter(f => f.direction === 'BEARISH').slice(-1)[0] || null;
+  const activeOB =
+    analysis.activeOrderBlocks.filter((ob) => ob.direction === 'BEARISH').slice(-1)[0] || null;
+  const activeFVG =
+    analysis.activeFVGs.filter((f) => f.direction === 'BEARISH').slice(-1)[0] || null;
 
   console.log('anchorSwing:', anchorSwing);
   console.log('activeOB:', activeOB);
@@ -35,7 +41,7 @@ async function debugLevels() {
     candles,
     anchorSwing,
     activeOB,
-    activeFVG
+    activeFVG,
   );
 
   console.log('\nFinal Calculated levels:', levels);

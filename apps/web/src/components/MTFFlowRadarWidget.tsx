@@ -16,9 +16,7 @@ interface MTFFlowRadarWidgetProps {
   symbol?: string;
 }
 
-export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
-  symbol = 'NIFTY',
-}) => {
+export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({ symbol = 'NIFTY' }) => {
   const [selectedSym, setSelectedSym] = useState<string>(symbol);
   const [radarData, setRadarData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -50,7 +48,10 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <Radar className="w-5 h-5 text-cyan-400 animate-spin" style={{ animationDuration: '6s' }} />
+            <Radar
+              className="w-5 h-5 text-cyan-400 animate-spin"
+              style={{ animationDuration: '6s' }}
+            />
             <h2 className="text-base font-black text-white tracking-tight">
               4-TIER MULTI-TIMEFRAME ORDER FLOW RADAR
             </h2>
@@ -59,26 +60,29 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            4-Tier institutional matrix validating 4h Macro Trend + 1h Structure + 15m SMC Footprint + 5m Entry Trigger before authorizing execution.
+            4-Tier institutional matrix validating 4h Macro Trend + 1h Structure + 15m SMC Footprint
+            + 5m Entry Trigger before authorizing execution.
           </p>
         </div>
 
         {/* Asset Switcher */}
         <div className="flex items-center gap-2">
           <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs">
-            {['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'RELIANCE', 'HDFCBANK', 'INFY'].map((s) => (
-              <button
-                key={s}
-                onClick={() => setSelectedSym(s)}
-                className={`px-2.5 py-1 rounded transition-all font-bold ${
-                  selectedSym === s
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                {s}
-              </button>
-            ))}
+            {['NIFTY', 'BANKNIFTY', 'XAUUSD', 'BTCUSDT', 'RELIANCE', 'HDFCBANK', 'INFY'].map(
+              (s) => (
+                <button
+                  key={s}
+                  onClick={() => setSelectedSym(s)}
+                  className={`px-2.5 py-1 rounded transition-all font-bold ${
+                    selectedSym === s
+                      ? 'bg-cyan-500 text-slate-950 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {s}
+                </button>
+              ),
+            )}
           </div>
 
           <button
@@ -98,8 +102,8 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
             isBuy
               ? 'bg-emerald-950/25 border-emerald-500/50 shadow-lg shadow-emerald-950/20'
               : isSell
-              ? 'bg-rose-950/25 border-rose-500/50 shadow-lg shadow-rose-950/20'
-              : 'bg-amber-950/20 border-amber-500/40'
+                ? 'bg-rose-950/25 border-rose-500/50 shadow-lg shadow-rose-950/20'
+                : 'bg-amber-950/20 border-amber-500/40'
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -109,8 +113,8 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
                   isBuy
                     ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
                     : isSell
-                    ? 'bg-rose-500/20 text-rose-400 border-rose-500/50'
-                    : 'bg-amber-500/20 text-amber-400 border-amber-500/50'
+                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/50'
+                      : 'bg-amber-500/20 text-amber-400 border-amber-500/50'
                 }`}
               >
                 {isBuy ? (
@@ -134,8 +138,8 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
                   {radarData.tradePermission === 'STRONG_BUY_AUTHORIZED'
                     ? '🟢 STRONG BUY ORDERS AUTHORIZED (FULL HTF ALIGNMENT)'
                     : radarData.tradePermission === 'STRONG_SELL_AUTHORIZED'
-                    ? '🔴 STRONG SELL ORDERS AUTHORIZED (FULL HTF ALIGNMENT)'
-                    : '⚠️ TRADE PROHIBITED: MIXED MULTI-TIMEFRAME ORDER FLOW'}
+                      ? '🔴 STRONG SELL ORDERS AUTHORIZED (FULL HTF ALIGNMENT)'
+                      : '⚠️ TRADE PROHIBITED: MIXED MULTI-TIMEFRAME ORDER FLOW'}
                 </h3>
               </div>
             </div>
@@ -149,9 +153,7 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
               </div>
               <div className="bg-slate-900/90 border border-slate-800 px-4 py-2 rounded-lg text-right">
                 <span className="text-[10px] text-slate-400 block">CONFLUENCE INDEX</span>
-                <span className="text-lg font-black text-white">
-                  {radarData.totalScore}%
-                </span>
+                <span className="text-lg font-black text-white">{radarData.totalScore}%</span>
               </div>
             </div>
           </div>
@@ -180,9 +182,7 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
                   }`}
                 >
                   <div className="flex justify-between items-center mb-2">
-                    <span className="text-xs font-bold text-slate-300 uppercase">
-                      {t.name}
-                    </span>
+                    <span className="text-xs font-bold text-slate-300 uppercase">{t.name}</span>
                     <span
                       className={`text-[10px] font-black px-2 py-0.5 rounded flex items-center gap-1 ${
                         isTierBull
@@ -190,14 +190,16 @@ export const MTFFlowRadarWidget: React.FC<MTFFlowRadarWidgetProps> = ({
                           : 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
                       }`}
                     >
-                      {isTierBull ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                      {isTierBull ? (
+                        <ArrowUpRight className="w-3 h-3" />
+                      ) : (
+                        <ArrowDownRight className="w-3 h-3" />
+                      )}
                       {t.direction}
                     </span>
                   </div>
 
-                  <p className="text-[11px] text-slate-400 leading-snug font-sans">
-                    {t.keyFactor}
-                  </p>
+                  <p className="text-[11px] text-slate-400 leading-snug font-sans">{t.keyFactor}</p>
 
                   <div className="mt-3 pt-2 border-t border-slate-800/60 flex justify-between items-center text-[10px]">
                     <span className="text-slate-500">Weight:</span>

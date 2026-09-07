@@ -4,6 +4,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { BULLMQ_QUEUES } from '@quant/shared';
 import { CandleProcessor } from './processors/candle.processor';
 import { ScannerProcessor } from './processors/scanner.processor';
+import { LearningProcessor } from './processors/learning.processor';
 import { PrismaService } from './prisma.service';
 import { RedisService } from './redis.service';
 
@@ -32,12 +33,10 @@ import { RedisService } from './redis.service';
     BullModule.registerQueue({
       name: BULLMQ_QUEUES.ALERT_PROCESSING,
     }),
+    BullModule.registerQueue({
+      name: BULLMQ_QUEUES.LEARNING_TASKS,
+    }),
   ],
-  providers: [
-    PrismaService,
-    RedisService,
-    CandleProcessor,
-    ScannerProcessor,
-  ],
+  providers: [PrismaService, RedisService, CandleProcessor, ScannerProcessor, LearningProcessor],
 })
 export class WorkerModule {}

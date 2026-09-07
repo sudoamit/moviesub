@@ -4,14 +4,21 @@ const prisma = new PrismaClient();
 const SYMBOLS_MAP = {
   BTCUSDT: { source: 'BINANCE', binanceSymbol: 'BTCUSDT' },
   NIFTY: { source: 'YAHOO', yahooSymbol: '^NSEI', fallbackSpot: 24175.65 },
-  BANKNIFTY: { source: 'YAHOO', yahooSymbol: '^NSEBANK', fallbackSpot: 51350.00 },
-  RELIANCE: { source: 'YAHOO', yahooSymbol: 'RELIANCE.NS', fallbackSpot: 1285.00 },
-  HDFCBANK: { source: 'YAHOO', yahooSymbol: 'HDFCBANK.NS', fallbackSpot: 1620.00 },
-  INFY: { source: 'YAHOO', yahooSymbol: 'INFY.NS', fallbackSpot: 1870.00 },
+  BANKNIFTY: { source: 'YAHOO', yahooSymbol: '^NSEBANK', fallbackSpot: 51350.0 },
+  RELIANCE: { source: 'YAHOO', yahooSymbol: 'RELIANCE.NS', fallbackSpot: 1285.0 },
+  HDFCBANK: { source: 'YAHOO', yahooSymbol: 'HDFCBANK.NS', fallbackSpot: 1620.0 },
+  INFY: { source: 'YAHOO', yahooSymbol: 'INFY.NS', fallbackSpot: 1870.0 },
 };
 
 const TIMEFRAMES = [
-  { tf: 'M15', binanceInterval: '15m', yahooInterval: '15m', range: '1mo', limit: 200, stepMin: 15 },
+  {
+    tf: 'M15',
+    binanceInterval: '15m',
+    yahooInterval: '15m',
+    range: '1mo',
+    limit: 200,
+    stepMin: 15,
+  },
   { tf: 'H1', binanceInterval: '1h', yahooInterval: '60m', range: '3mo', limit: 200, stepMin: 60 },
   { tf: 'H4', binanceInterval: '4h', yahooInterval: '60m', range: '6mo', limit: 200, stepMin: 240 },
   { tf: 'M5', binanceInterval: '5m', yahooInterval: '5m', range: '5d', limit: 200, stepMin: 5 },
@@ -125,9 +132,18 @@ async function syncAllRealTradingViewCandles() {
 
       try {
         if (meta.source === 'BINANCE') {
-          candles = await fetchBinanceCandles(meta.binanceSymbol, tfConfig.binanceInterval, tfConfig.limit);
+          candles = await fetchBinanceCandles(
+            meta.binanceSymbol,
+            tfConfig.binanceInterval,
+            tfConfig.limit,
+          );
         } else if (meta.source === 'YAHOO') {
-          candles = await fetchYahooCandles(meta.yahooSymbol, tfConfig.yahooInterval, tfConfig.range, tfConfig.limit);
+          candles = await fetchYahooCandles(
+            meta.yahooSymbol,
+            tfConfig.yahooInterval,
+            tfConfig.range,
+            tfConfig.limit,
+          );
         }
       } catch (e) {
         console.warn(`  Fetch failed for ${sym} (${tfConfig.tf}):`, e.message);
@@ -135,8 +151,14 @@ async function syncAllRealTradingViewCandles() {
 
       // If exchange was closed/limited, use realistic spot-anchored market candles
       if (!candles || candles.length < 50) {
-        console.log(`  Using real spot anchor (₹${meta.fallbackSpot || inst.price}) for ${sym} [${tfConfig.tf}]`);
-        candles = generateRealisticExchangeCandles(meta.fallbackSpot || Number(inst.price) || 1000, 200, tfConfig.stepMin);
+        console.log(
+          `  Using real spot anchor (₹${meta.fallbackSpot || inst.price}) for ${sym} [${tfConfig.tf}]`,
+        );
+        candles = generateRealisticExchangeCandles(
+          meta.fallbackSpot || Number(inst.price) || 1000,
+          200,
+          tfConfig.stepMin,
+        );
       }
 
       console.log(`  -> Processing ${candles.length} candles for ${sym} [${tfConfig.tf}]`);
@@ -172,8 +194,6 @@ async function syncAllRealTradingViewCandles() {
           },
         });
       }
-
-
     }
 
     console.log(`✓ ${sym} synchronized successfully.\n`);

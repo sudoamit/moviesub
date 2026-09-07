@@ -112,7 +112,9 @@ export function ScannerTableSkeleton({
                   key={row.symbol}
                   onClick={() => onSelectSymbol(row.symbol)}
                   className={`cursor-pointer transition-colors ${
-                    isSelected ? 'bg-indigo-950/40 border-l-2 border-indigo-500' : 'hover:bg-surface-hover'
+                    isSelected
+                      ? 'bg-indigo-950/40 border-l-2 border-indigo-500'
+                      : 'hover:bg-surface-hover'
                   }`}
                 >
                   <td className="p-3">
@@ -125,8 +127,8 @@ export function ScannerTableSkeleton({
                         row.direction === 'LONG'
                           ? 'bg-bullish/10 text-bullish border border-bullish/20'
                           : row.direction === 'SHORT'
-                          ? 'bg-bearish/10 text-bearish border border-bearish/20'
-                          : 'bg-slate-800 text-slate-400'
+                            ? 'bg-bearish/10 text-bearish border border-bearish/20'
+                            : 'bg-slate-800 text-slate-400'
                       }`}
                     >
                       {row.direction === 'LONG' && <ArrowUpRight className="w-3 h-3" />}
@@ -139,7 +141,11 @@ export function ScannerTableSkeleton({
                     <div className="w-16 bg-slate-800 h-1.5 rounded-full overflow-hidden mt-1">
                       <div
                         className={`h-full ${
-                          row.score >= 80 ? 'bg-indigo-500' : row.score >= 70 ? 'bg-emerald-500' : 'bg-amber-500'
+                          row.score >= 80
+                            ? 'bg-indigo-500'
+                            : row.score >= 70
+                              ? 'bg-emerald-500'
+                              : 'bg-amber-500'
                         }`}
                         style={{ width: `${row.score}%` }}
                       ></div>
@@ -151,10 +157,10 @@ export function ScannerTableSkeleton({
                         row.grade === 'A+'
                           ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
                           : row.grade === 'A'
-                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                          : row.grade === 'B'
-                          ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
-                          : 'bg-slate-800 text-slate-400'
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : row.grade === 'B'
+                              ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                              : 'bg-slate-800 text-slate-400'
                       }`}
                     >
                       {row.grade}
@@ -162,7 +168,11 @@ export function ScannerTableSkeleton({
                   </td>
                   <td className="p-3 text-right">
                     <div className="font-semibold text-slate-200">{row.price}</div>
-                    <div className={row.isPositive ? 'text-bullish text-[10px]' : 'text-bearish text-[10px]'}>
+                    <div
+                      className={
+                        row.isPositive ? 'text-bullish text-[10px]' : 'text-bearish text-[10px]'
+                      }
+                    >
                       {row.change}
                     </div>
                   </td>

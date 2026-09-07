@@ -6,10 +6,7 @@ export class TradeLifecycleManager {
    * Evaluates latest candle against signal levels and transitions trade lifecycle state.
    * Ensures 100% mathematical consistency between entry price, exit price, and realized R-multiple.
    */
-  static evaluateTick(
-    signal: ISignalSetup,
-    candle: ICandle,
-  ): ITradeStateUpdate {
+  static evaluateTick(signal: ISignalSetup, candle: ICandle): ITradeStateUpdate {
     const { direction, state, entryZone, stopLoss, takeProfits, riskRewardRatios, symbol } = signal;
     const isLong = direction === Direction.BULLISH;
     const currentPrice = candle.close;
@@ -185,7 +182,11 @@ export class TradeLifecycleManager {
       newState: state,
       currentPrice,
       pnlRMultiple: 0,
-      isClosed: state === SignalState.SL_HIT || state === SignalState.TP2_HIT || state === SignalState.TP3_HIT || state === SignalState.INVALIDATED,
+      isClosed:
+        state === SignalState.SL_HIT ||
+        state === SignalState.TP2_HIT ||
+        state === SignalState.TP3_HIT ||
+        state === SignalState.INVALIDATED,
       notes: 'Trade running within expected boundaries',
     };
   }

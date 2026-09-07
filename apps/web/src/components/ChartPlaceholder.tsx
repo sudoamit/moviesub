@@ -75,7 +75,8 @@ export function ChartPlaceholder({ symbol }: { symbol: string }) {
                 TradingView Lightweight Candlestick Chart
               </h3>
               <p className="text-xs text-slate-500 mt-1 max-w-sm">
-                Interactive real-time candlestick visualizer with BOS, CHoCH, Liquidity, FVG, and Order Block overlays.
+                Interactive real-time candlestick visualizer with BOS, CHoCH, Liquidity, FVG, and
+                Order Block overlays.
               </p>
             </div>
           </div>

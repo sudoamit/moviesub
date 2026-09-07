@@ -5,8 +5,6 @@ import {
   BULLMQ_QUEUES,
   Direction,
   ICandle,
-  REDIS_KEYS,
-  SignalGrade,
   Timeframe,
   toPrismaTimeframe,
   WS_EVENTS,
@@ -122,27 +120,63 @@ export class ScannerProcessor extends WorkerHost {
       return null;
     }
 
-    // Persist signal to PostgreSQL
-    const savedSignal = await this.prisma.signal.create({
-      data: {
+    const tfPrisma = toPrismaTimeframe(signal.timeframe);
+    const fortyFiveMinutesAgo = new Date(Date.now() - 45 * 60 * 1000);
+
+    // Deduplication check: check if an identical active/pending signal was recorded in the last 45 minutes
+    const existing = await this.prisma.signal.findFirst({
+      where: {
         instrumentId,
+        timeframe: tfPrisma,
         direction: signal.direction as any,
-        state: signal.state as any,
-        grade: signal.grade as any,
-        score: signal.score,
-        timeframe: toPrismaTimeframe(signal.timeframe),
-        entryPrice: new Decimal(signal.entryZone.optimal),
-        stopLoss: new Decimal(signal.stopLoss),
-        target1: new Decimal(signal.takeProfits.tp1),
-        target2: new Decimal(signal.takeProfits.tp2),
-        target3: new Decimal(signal.takeProfits.tp3),
-        riskRewardRatio: new Decimal(signal.riskRewardRatios.rr2),
-        reasonsJson: signal.reasoning.confirmedChecklist as any,
-        risksJson: [signal.reasoning.invalidationReason] as any,
+        state: { in: ['PENDING', 'ACTIVE'] as any },
+        createdAt: { gte: fortyFiveMinutesAgo },
       },
+      orderBy: { createdAt: 'desc' },
     });
 
-    signal.id = savedSignal.id;
+    let savedSignalId: string;
+
+    if (existing) {
+      // Update existing active setup score & targets instead of duplicating rows
+      await this.prisma.signal.update({
+        where: { id: existing.id },
+        data: {
+          score: signal.score,
+          grade: signal.grade as any,
+          entryPrice: new Decimal(signal.entryZone.optimal),
+          stopLoss: new Decimal(signal.stopLoss),
+          target1: new Decimal(signal.takeProfits.tp1),
+          target2: new Decimal(signal.takeProfits.tp2),
+          target3: new Decimal(signal.takeProfits.tp3),
+          reasonsJson: signal.reasoning.confirmedChecklist as any,
+        },
+      });
+      savedSignalId = existing.id;
+    } else {
+      // Persist new signal to PostgreSQL
+      const savedSignal = await this.prisma.signal.create({
+        data: {
+          instrumentId,
+          direction: signal.direction as any,
+          state: signal.state as any,
+          grade: signal.grade as any,
+          score: signal.score,
+          timeframe: tfPrisma,
+          entryPrice: new Decimal(signal.entryZone.optimal),
+          stopLoss: new Decimal(signal.stopLoss),
+          target1: new Decimal(signal.takeProfits.tp1),
+          target2: new Decimal(signal.takeProfits.tp2),
+          target3: new Decimal(signal.takeProfits.tp3),
+          riskRewardRatio: new Decimal(signal.riskRewardRatios.rr2),
+          reasonsJson: signal.reasoning.confirmedChecklist as any,
+          risksJson: [signal.reasoning.invalidationReason] as any,
+        },
+      });
+      savedSignalId = savedSignal.id;
+    }
+
+    signal.id = savedSignalId;
     signal.instrumentId = instrumentId;
 
     // Publish event over Redis PubSub

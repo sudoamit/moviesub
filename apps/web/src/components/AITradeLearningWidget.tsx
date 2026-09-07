@@ -65,7 +65,13 @@ interface IModelState {
     bins?: ICalibrationBinItem[];
   };
   featureImportance: { feature: string; weight: number; absoluteWeight: number }[];
-  allVersions: { version: string; status: string; createdAt: string; accuracy: number; logLoss: number }[];
+  allVersions: {
+    version: string;
+    status: string;
+    createdAt: string;
+    accuracy: number;
+    logLoss: number;
+  }[];
 }
 
 interface IPredictionData {
@@ -85,7 +91,12 @@ interface IPredictionData {
     averageWinR: number;
     averageLossR: number;
     recommendation: 'HIGH_CONFIDENCE' | 'MODERATE_CONFIDENCE' | 'LOW_CONFIDENCE' | 'WAIT';
-    confidenceInterval: { lower: number; upper: number; confidenceLevel: number; sampleSize: number } | null;
+    confidenceInterval: {
+      lower: number;
+      upper: number;
+      confidenceLevel: number;
+      sampleSize: number;
+    } | null;
     confidenceStatus: string;
     calibrationStatus: string;
     supportingSampleSize: number;
@@ -115,10 +126,25 @@ interface ITradePostMortemRecord {
 interface IInsightsData {
   modelVersion: string;
   featureImportance: { feature: string; weight: number; absoluteWeight: number }[];
-  performanceByRegime: { regime: string; winRate: number; sampleSize: number; expectancyR: string }[];
+  performanceByRegime: {
+    regime: string;
+    winRate: number;
+    sampleSize: number;
+    expectancyR: string;
+  }[];
   performanceByAsset: { asset: string; winRate: number; trades: number; avgR: string }[];
-  performanceByTimeframe: { timeframe: string; winRate: number; totalTrades: number; avgR: string }[];
-  postMortemPatterns: { pattern: string; classification: string; impact: string; sampleCount: number }[];
+  performanceByTimeframe: {
+    timeframe: string;
+    winRate: number;
+    totalTrades: number;
+    avgR: string;
+  }[];
+  postMortemPatterns: {
+    pattern: string;
+    classification: string;
+    impact: string;
+    sampleCount: number;
+  }[];
   recentPostMortems?: ITradePostMortemRecord[];
 }
 
@@ -187,7 +213,11 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
   useEffect(() => {
     const loadAll = async () => {
       setIsLoading(true);
-      await Promise.all([fetchModelState(), fetchInsights(), fetchPrediction(selectedSymbol, selectedTimeframe)]);
+      await Promise.all([
+        fetchModelState(),
+        fetchInsights(),
+        fetchPrediction(selectedSymbol, selectedTimeframe),
+      ]);
       setIsLoading(false);
     };
     loadAll();
@@ -197,7 +227,10 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
   const handleStartRetrain = async () => {
     try {
       setIsRetraining(true);
-      setRetrainStatus({ progressPercent: 5, stage: 'Initiating Walk-Forward Supervised Training...' });
+      setRetrainStatus({
+        progressPercent: 5,
+        stage: 'Initiating Walk-Forward Supervised Training...',
+      });
       const res = await fetch('http://localhost:3001/api/ai-learning/retrain', { method: 'POST' });
       const data = await res.json();
       if (data.jobId) {
@@ -252,7 +285,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
     URL.revokeObjectURL(url);
   };
 
-  const symbols = ['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'RELIANCE', 'HDFCBANK', 'INFY'];
+  const symbols = ['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'XAUUSD', 'RELIANCE', 'HDFCBANK', 'INFY'];
 
   // Synthetic or live calibration deciles for visualization
   const calibrationDeciles = [
@@ -289,7 +322,8 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Supervised Logistic Regression predicting TP vs SL probability with Wilson Score calibration and Kelly expectation.
+              Supervised Logistic Regression predicting TP vs SL probability with Wilson Score
+              calibration and Kelly expectation.
             </p>
           </div>
         </div>
@@ -345,13 +379,18 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               {retrainStatus.isPromoted ? (
                 <>
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span>Model Promotion Passed: Promoted candidate {retrainStatus.candidateVersion} to active production.</span>
+                  <span>
+                    Model Promotion Passed: Promoted candidate {retrainStatus.candidateVersion} to
+                    active production.
+                  </span>
                 </>
               ) : (
                 <>
                   <Info className="w-4 h-4 text-amber-400 shrink-0" />
                   <span>
-                    <strong>Model Promotion Rejected (Safety Gate):</strong> Candidate model did not outperform the active production model on out-of-sample data. Active production model was safely preserved to protect live trade accuracy.
+                    <strong>Model Promotion Rejected (Safety Gate):</strong> Candidate model did not
+                    outperform the active production model on out-of-sample data. Active production
+                    model was safely preserved to protect live trade accuracy.
                   </span>
                 </>
               )}
@@ -363,7 +402,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
       {/* SECTION 1: Model Telemetry & Statistical Quality HUD */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
-          <span className="text-[10px] uppercase text-slate-400 block font-bold">Out-of-Sample Accuracy</span>
+          <span className="text-[10px] uppercase text-slate-400 block font-bold">
+            Out-of-Sample Accuracy
+          </span>
           <span className="text-lg font-black text-emerald-400 mt-1 block">
             {modelState ? `${(modelState.metrics.accuracy * 100).toFixed(1)}%` : '...'}
           </span>
@@ -371,7 +412,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
         </div>
 
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
-          <span className="text-[10px] uppercase text-slate-400 block font-bold">Log Loss (BCE)</span>
+          <span className="text-[10px] uppercase text-slate-400 block font-bold">
+            Log Loss (BCE)
+          </span>
           <span className="text-lg font-black text-cyan-300 mt-1 block">
             {modelState ? modelState.metrics.logLoss.toFixed(3) : '...'}
           </span>
@@ -379,7 +422,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
         </div>
 
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
-          <span className="text-[10px] uppercase text-slate-400 block font-bold">ROC-AUC Discriminator</span>
+          <span className="text-[10px] uppercase text-slate-400 block font-bold">
+            ROC-AUC Discriminator
+          </span>
           <span className="text-lg font-black text-teal-300 mt-1 block">
             {modelState ? modelState.metrics.rocAuc.toFixed(3) : '...'}
           </span>
@@ -395,20 +440,29 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
         </div>
 
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
-          <span className="text-[10px] uppercase text-slate-400 block font-bold">Profit Factor</span>
+          <span className="text-[10px] uppercase text-slate-400 block font-bold">
+            Profit Factor
+          </span>
           <span className="text-lg font-black text-emerald-400 mt-1 block">
             {modelState ? `${modelState.metrics.profitFactor.toFixed(2)}x` : '...'}
           </span>
-          <span className="text-[9px] text-slate-500 block mt-0.5">Expectancy: +{modelState?.metrics.expectancyR}R</span>
+          <span className="text-[9px] text-slate-500 block mt-0.5">
+            Expectancy: +{modelState?.metrics.expectancyR}R
+          </span>
         </div>
 
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
-          <span className="text-[10px] uppercase text-slate-400 block font-bold">Calibration Status</span>
+          <span className="text-[10px] uppercase text-slate-400 block font-bold">
+            Calibration Status
+          </span>
           <span className="text-sm font-black text-emerald-300 mt-1.5 block">
             {modelState?.calibration?.status || 'GOOD'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">
-            ECE: {modelState ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%` : '...'}
+            ECE:{' '}
+            {modelState
+              ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%`
+              : '...'}
           </span>
         </div>
       </div>
@@ -448,41 +502,66 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               {/* Score & Recommendation Banner */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg text-center">
-                  <span className="text-[10px] text-slate-400 block uppercase">Deterministic SMC Setup</span>
+                  <span className="text-[10px] text-slate-400 block uppercase">
+                    Deterministic SMC Setup
+                  </span>
                   <div className="flex items-center justify-center gap-1.5 mt-1">
-                    <span className="text-xl font-black text-cyan-300">{prediction.deterministicScore}/100</span>
+                    <span className="text-xl font-black text-cyan-300">
+                      {prediction.deterministicScore}/100
+                    </span>
                     <span className="bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[10px] font-bold px-1.5 py-0.5 rounded">
                       {prediction.deterministicGrade}
                     </span>
                   </div>
-                  <span className="text-[10px] text-slate-500 block mt-0.5">{prediction.direction} Flow</span>
+                  <span className="text-[10px] text-slate-500 block mt-0.5">
+                    {prediction.direction} Flow
+                  </span>
                 </div>
 
                 <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg text-center">
-                  <span className="text-[10px] text-slate-400 block uppercase">Calibrated Win Probability</span>
+                  <span className="text-[10px] text-slate-400 block uppercase">
+                    Calibrated Win Probability
+                  </span>
                   <div className="flex items-center justify-center gap-1.5 mt-1">
                     <span className="text-xl font-black text-emerald-400">
                       {(prediction.aiPrediction.winProbability * 100).toFixed(1)}%
                     </span>
                   </div>
                   <span className="text-[9px] text-slate-400 block mt-0.5">
-                    95% CI: [{(prediction.aiPrediction.confidenceInterval?.lower ? prediction.aiPrediction.confidenceInterval.lower * 100 : 35).toFixed(0)}% - {(prediction.aiPrediction.confidenceInterval?.upper ? prediction.aiPrediction.confidenceInterval.upper * 100 : 55).toFixed(0)}%]
+                    95% CI: [
+                    {(prediction.aiPrediction.confidenceInterval?.lower
+                      ? prediction.aiPrediction.confidenceInterval.lower * 100
+                      : 35
+                    ).toFixed(0)}
+                    % -{' '}
+                    {(prediction.aiPrediction.confidenceInterval?.upper
+                      ? prediction.aiPrediction.confidenceInterval.upper * 100
+                      : 55
+                    ).toFixed(0)}
+                    %]
                   </span>
                 </div>
 
                 <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg text-center">
-                  <span className="text-[10px] text-slate-400 block uppercase">Mathematical Expectancy</span>
+                  <span className="text-[10px] text-slate-400 block uppercase">
+                    Mathematical Expectancy
+                  </span>
                   <div className="flex items-center justify-center gap-1.5 mt-1">
                     <span
                       className={`text-xl font-black ${
-                        prediction.aiPrediction.expectedValueR >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        prediction.aiPrediction.expectedValueR >= 0
+                          ? 'text-emerald-400'
+                          : 'text-rose-400'
                       }`}
                     >
                       {prediction.aiPrediction.expectedValueR >= 0 ? '+' : ''}
                       {prediction.aiPrediction.expectedValueR.toFixed(2)}R
                     </span>
                   </div>
-                  <span className="text-[9px] text-slate-400 block mt-0.5">Target: {prediction.aiPrediction.averageWinR}R | Loss: -{prediction.aiPrediction.averageLossR}R</span>
+                  <span className="text-[9px] text-slate-400 block mt-0.5">
+                    Target: {prediction.aiPrediction.averageWinR}R | Loss: -
+                    {prediction.aiPrediction.averageLossR}R
+                  </span>
                 </div>
               </div>
 
@@ -495,10 +574,10 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                       prediction.aiPrediction.recommendation === 'HIGH_CONFIDENCE'
                         ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50'
                         : prediction.aiPrediction.recommendation === 'MODERATE_CONFIDENCE'
-                        ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
-                        : prediction.aiPrediction.recommendation === 'LOW_CONFIDENCE'
-                        ? 'bg-amber-950/80 text-amber-300 border-amber-500/50'
-                        : 'bg-slate-800 text-slate-300 border-slate-700'
+                          ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
+                          : prediction.aiPrediction.recommendation === 'LOW_CONFIDENCE'
+                            ? 'bg-amber-950/80 text-amber-300 border-amber-500/50'
+                            : 'bg-slate-800 text-slate-300 border-slate-700'
                     }`}
                   >
                     <Zap className="w-3.5 h-3.5" />
@@ -507,7 +586,11 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                 </div>
 
                 <span className="text-[11px] text-slate-400 font-mono">
-                  Sample Support: <strong className="text-slate-200">{prediction.aiPrediction.supportingSampleSize}</strong> trades
+                  Sample Support:{' '}
+                  <strong className="text-slate-200">
+                    {prediction.aiPrediction.supportingSampleSize}
+                  </strong>{' '}
+                  trades
                 </span>
               </div>
 
@@ -524,7 +607,10 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               {/* Invalidation Disclaimer */}
               <div className="text-[10px] text-slate-500 border-t border-slate-800 pt-2 flex items-center gap-1.5">
                 <Shield className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span>Deterministic Risk Engine strictly manages invalidation price (${prediction.stopLoss}) and position size.</span>
+                <span>
+                  Deterministic Risk Engine strictly manages invalidation price ($
+                  {prediction.stopLoss}) and position size.
+                </span>
               </div>
             </div>
           ) : (
@@ -600,26 +686,38 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
         {/* Calibration Stats Metric Strip */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
           <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-            <span className="text-[10px] text-slate-400 block uppercase font-bold">Brier Resolution Score</span>
+            <span className="text-[10px] text-slate-400 block uppercase font-bold">
+              Brier Resolution Score
+            </span>
             <span className="text-base font-black text-emerald-400 mt-0.5 block">0.182</span>
             <span className="text-[9px] text-slate-500 block">Baseline Unskilled: 0.250</span>
           </div>
           <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-            <span className="text-[10px] text-cyan-400 block uppercase font-bold">Expected Calib Error (ECE)</span>
+            <span className="text-[10px] text-cyan-400 block uppercase font-bold">
+              Expected Calib Error (ECE)
+            </span>
             <span className="text-base font-black text-cyan-300 mt-0.5 block">
-              {modelState ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%` : '3.8%'}
+              {modelState
+                ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%`
+                : '3.8%'}
             </span>
             <span className="text-[9px] text-slate-500 block">Mean Divergence from $y=x$</span>
           </div>
           <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-            <span className="text-[10px] text-amber-400 block uppercase font-bold">Max Calib Error (MCE)</span>
+            <span className="text-[10px] text-amber-400 block uppercase font-bold">
+              Max Calib Error (MCE)
+            </span>
             <span className="text-base font-black text-amber-300 mt-0.5 block">
-              {modelState ? `${(modelState.calibration.maximumCalibrationError * 100).toFixed(1)}%` : '6.4%'}
+              {modelState
+                ? `${(modelState.calibration.maximumCalibrationError * 100).toFixed(1)}%`
+                : '6.4%'}
             </span>
             <span className="text-[9px] text-slate-500 block">Worst-Decile Deviation</span>
           </div>
           <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
-            <span className="text-[10px] text-purple-400 block uppercase font-bold">Probability Reliability</span>
+            <span className="text-[10px] text-purple-400 block uppercase font-bold">
+              Probability Reliability
+            </span>
             <span className="text-base font-black text-purple-300 mt-0.5 block">CALIBRATED</span>
             <span className="text-[9px] text-slate-500 block">Wilson 95% Score Regularized</span>
           </div>
@@ -638,11 +736,17 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                 <span className="text-cyan-300 font-bold">Empirical Realized Curve</span>
               </span>
             </div>
-            <span className="text-[10px] text-slate-500 font-mono">10 Probability Decile Bins (0% - 100%)</span>
+            <span className="text-[10px] text-slate-500 font-mono">
+              10 Probability Decile Bins (0% - 100%)
+            </span>
           </div>
 
           <div className="relative h-48 w-full">
-            <svg className="w-full h-full overflow-visible" viewBox="0 0 500 180" preserveAspectRatio="none">
+            <svg
+              className="w-full h-full overflow-visible"
+              viewBox="0 0 500 180"
+              preserveAspectRatio="none"
+            >
               {/* Grid Lines */}
               <line x1="40" y1="20" x2="480" y2="20" stroke="#1e293b" strokeDasharray="3 3" />
               <line x1="40" y1="60" x2="480" y2="60" stroke="#1e293b" strokeDasharray="3 3" />
@@ -650,14 +754,32 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               <line x1="40" y1="140" x2="480" y2="140" stroke="#1e293b" strokeDasharray="3 3" />
 
               {/* Axes Labels */}
-              <text x="32" y="24" fill="#64748b" fontSize="9" textAnchor="end">100%</text>
-              <text x="32" y="64" fill="#64748b" fontSize="9" textAnchor="end">75%</text>
-              <text x="32" y="104" fill="#64748b" fontSize="9" textAnchor="end">50%</text>
-              <text x="32" y="144" fill="#64748b" fontSize="9" textAnchor="end">25%</text>
-              <text x="32" y="165" fill="#64748b" fontSize="9" textAnchor="end">0%</text>
+              <text x="32" y="24" fill="#64748b" fontSize="9" textAnchor="end">
+                100%
+              </text>
+              <text x="32" y="64" fill="#64748b" fontSize="9" textAnchor="end">
+                75%
+              </text>
+              <text x="32" y="104" fill="#64748b" fontSize="9" textAnchor="end">
+                50%
+              </text>
+              <text x="32" y="144" fill="#64748b" fontSize="9" textAnchor="end">
+                25%
+              </text>
+              <text x="32" y="165" fill="#64748b" fontSize="9" textAnchor="end">
+                0%
+              </text>
 
               {/* Theoretical 45-degree Perfect Line (y = x from 0 to 100) */}
-              <line x1="40" y1="160" x2="480" y2="20" stroke="#475569" strokeWidth="1.5" strokeDasharray="4 4" />
+              <line
+                x1="40"
+                y1="160"
+                x2="480"
+                y2="20"
+                stroke="#475569"
+                strokeWidth="1.5"
+                strokeDasharray="4 4"
+              />
 
               {/* Sample Volume Decile Histogram in Background */}
               {calibrationDeciles.map((bin, i) => {
@@ -686,8 +808,8 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                 strokeWidth="2.5"
                 points={calibrationDeciles
                   .map((bin, i) => {
-                    const x = 40 + (bin.pred * 440);
-                    const y = 160 - (bin.obs * 140);
+                    const x = 40 + bin.pred * 440;
+                    const y = 160 - bin.obs * 140;
                     return `${x},${y}`;
                   })
                   .join(' ')}
@@ -704,8 +826,8 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
 
               {/* Realized Empirical Data Points */}
               {calibrationDeciles.map((bin, i) => {
-                const x = 40 + (bin.pred * 440);
-                const y = 160 - (bin.obs * 140);
+                const x = 40 + bin.pred * 440;
+                const y = 160 - bin.obs * 140;
                 const error = Math.abs(bin.pred - bin.obs);
                 const isOptimal = error <= 0.03;
 
@@ -738,7 +860,14 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               {calibrationDeciles.map((bin, i) => {
                 const x = 40 + i * (440 / 10) + 20;
                 return (
-                  <text key={`xlabel-${i}`} x={x} y="176" fill="#64748b" fontSize="8" textAnchor="middle">
+                  <text
+                    key={`xlabel-${i}`}
+                    x={x}
+                    y="176"
+                    fill="#64748b"
+                    fontSize="8"
+                    textAnchor="middle"
+                  >
                     {bin.range}
                   </text>
                 );
@@ -817,20 +946,28 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                   <tr key={idx} className="hover:bg-slate-800/30 transition-colors">
                     <td className="py-2.5 font-bold text-slate-200 flex items-center gap-1.5">
                       <span>{pm.symbol}</span>
-                      <span className={`text-[9px] px-1 py-0.2 rounded ${pm.direction === 'BULLISH' ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}>
+                      <span
+                        className={`text-[9px] px-1 py-0.5 rounded ${pm.direction === 'BULLISH' ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}
+                      >
                         {pm.direction}
                       </span>
                     </td>
                     <td className="py-2.5">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${isWin ? 'bg-emerald-950 text-emerald-400 border border-emerald-500/30' : 'bg-rose-950 text-rose-400 border border-rose-500/30'}`}>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${isWin ? 'bg-emerald-950 text-emerald-400 border border-emerald-500/30' : 'bg-rose-950 text-rose-400 border border-rose-500/30'}`}
+                      >
                         {pm.outcome}
                       </span>
                     </td>
-                    <td className={`py-2.5 font-black ${isWin ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {pm.realizedRMultiple >= 0 ? '+' : ''}{pm.realizedRMultiple.toFixed(1)}R
+                    <td
+                      className={`py-2.5 font-black ${isWin ? 'text-emerald-400' : 'text-rose-400'}`}
+                    >
+                      {pm.realizedRMultiple >= 0 ? '+' : ''}
+                      {pm.realizedRMultiple.toFixed(1)}R
                     </td>
                     <td className="py-2.5 text-slate-300 text-[11px]">
-                      <span className="text-emerald-400 font-bold">+{pm.mfeR}R</span> / <span className="text-rose-400 font-bold">-{pm.maeR}R</span>
+                      <span className="text-emerald-400 font-bold">+{pm.mfeR}R</span> /{' '}
+                      <span className="text-rose-400 font-bold">-{pm.maeR}R</span>
                     </td>
                     <td className="py-2.5 text-slate-400">{pm.timeToResolutionMinutes}m</td>
                     <td className="py-2.5">
@@ -840,10 +977,10 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                             pm.classification === 'TARGET_ACHIEVED'
                               ? 'bg-emerald-950 text-emerald-400 border-emerald-500/30'
                               : pm.classification === 'LIQUIDITY_SWEEP_FAILURE'
-                              ? 'bg-amber-950 text-amber-300 border-amber-500/40'
-                              : pm.classification === 'HTF_COUNTERTREND'
-                              ? 'bg-purple-950 text-purple-300 border-purple-500/40'
-                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                                ? 'bg-amber-950 text-amber-300 border-amber-500/40'
+                                : pm.classification === 'HTF_COUNTERTREND'
+                                  ? 'bg-purple-950 text-purple-300 border-purple-500/40'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700'
                           }`}
                         >
                           {pm.classification}

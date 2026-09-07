@@ -1,19 +1,25 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { TradingChart } from './TradingChart';
+import dynamic from 'next/dynamic';
 import { Grid2X2, Columns, RefreshCw, Layers, Zap } from 'lucide-react';
 import { ISignalSetup } from '@quant/shared';
+
+const TradingChart = dynamic(() => import('./TradingChart').then((mod) => mod.TradingChart), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-[320px] bg-[#0c121e] rounded-lg flex items-center justify-center text-slate-500 border border-slate-800 animate-pulse">
+      <span className="text-[11px] font-mono">Loading Chart...</span>
+    </div>
+  ),
+});
 
 interface MultiChartGridProps {
   signals: ISignalSetup[];
   tickers: Record<string, any>;
 }
 
-export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
-  signals,
-  tickers,
-}) => {
+export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers }) => {
   const [layout, setLayout] = useState<'dual' | 'quad'>('dual');
   const [pane1Symbol, setPane1Symbol] = useState<string>('NIFTY');
   const [pane1Tf, setPane1Tf] = useState<string>('15m');
@@ -31,15 +37,25 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
   const [pane4Tf, setPane4Tf] = useState<string>('15m');
   const [pane4Candles, setPane4Candles] = useState<any[]>([]);
 
-  const availableSymbols = ['NIFTY', 'BANKNIFTY', 'BTCUSDT', 'RELIANCE', 'HDFCBANK', 'INFY'];
+  const availableSymbols = [
+    'NIFTY',
+    'BANKNIFTY',
+    'XAUUSD',
+    'BTCUSDT',
+    'RELIANCE',
+    'HDFCBANK',
+    'INFY',
+  ];
   const timeframes = ['5m', '15m', '1h', '4h', '1d'];
 
   // Fetch candles helper
   const loadCandles = async (symbol: string, tf: string, setter: (c: any[]) => void) => {
     try {
-      const res = await fetch(`http://localhost:3001/api/candles/chart-data?symbol=${symbol}&timeframe=${tf}&limit=200`);
+      const res = await fetch(
+        `http://localhost:3001/api/candles/chart-data?symbol=${symbol}&timeframe=${tf}&limit=200`,
+      );
       const data = await res.json();
-      const candleList = Array.isArray(data) ? data : (data?.candles || []);
+      const candleList = Array.isArray(data) ? data : data?.candles || [];
       const parsedCandles = candleList.map((c: any) => ({
         timestamp: c.timestamp ? new Date(c.timestamp) : new Date((c.time || 0) * 1000),
         open: Number(c.open),
@@ -114,7 +130,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
       </div>
 
       {/* Charts Grid */}
-      <div className={`grid gap-4 ${layout === 'dual' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1 md:grid-cols-2'}`}>
+      <div
+        className={`grid gap-4 ${layout === 'dual' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1 md:grid-cols-2'}`}
+      >
         {/* Pane 1 */}
         <div className="space-y-2 bg-[#111827]/90 border border-slate-800 p-3 rounded-xl">
           <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-2 text-xs">
@@ -125,7 +143,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                 className="bg-slate-900 border border-slate-700 text-white font-bold px-2.5 py-1 rounded"
               >
                 {availableSymbols.map((s) => (
-                  <option key={s} value={s}>{s}</option>
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
                 ))}
               </select>
               <select
@@ -134,7 +154,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                 className="bg-slate-900 border border-slate-700 text-cyan-300 font-bold px-2 py-1 rounded"
               >
                 {timeframes.map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
                 ))}
               </select>
             </div>
@@ -162,7 +184,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                 className="bg-slate-900 border border-slate-700 text-white font-bold px-2.5 py-1 rounded"
               >
                 {availableSymbols.map((s) => (
-                  <option key={s} value={s}>{s}</option>
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
                 ))}
               </select>
               <select
@@ -171,7 +195,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                 className="bg-slate-900 border border-slate-700 text-cyan-300 font-bold px-2 py-1 rounded"
               >
                 {timeframes.map((t) => (
-                  <option key={t} value={t}>{t}</option>
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
                 ))}
               </select>
             </div>
@@ -200,7 +226,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                   className="bg-slate-900 border border-slate-700 text-white font-bold px-2.5 py-1 rounded"
                 >
                   {availableSymbols.map((s) => (
-                    <option key={s} value={s}>{s}</option>
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
                   ))}
                 </select>
                 <select
@@ -209,7 +237,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                   className="bg-slate-900 border border-slate-700 text-cyan-300 font-bold px-2 py-1 rounded"
                 >
                   {timeframes.map((t) => (
-                    <option key={t} value={t}>{t}</option>
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -239,7 +269,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                   className="bg-slate-900 border border-slate-700 text-white font-bold px-2.5 py-1 rounded"
                 >
                   {availableSymbols.map((s) => (
-                    <option key={s} value={s}>{s}</option>
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
                   ))}
                 </select>
                 <select
@@ -248,7 +280,9 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({
                   className="bg-slate-900 border border-slate-700 text-cyan-300 font-bold px-2 py-1 rounded"
                 >
                   {timeframes.map((t) => (
-                    <option key={t} value={t}>{t}</option>
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
                   ))}
                 </select>
               </div>

@@ -26,7 +26,7 @@ async function testStepByStep() {
   const fvg = {
     upperBound: 24360.8,
     lowerBound: 24348.3,
-    direction: 'BEARISH'
+    direction: 'BEARISH',
   };
 
   let entryOptimal = currentPrice;

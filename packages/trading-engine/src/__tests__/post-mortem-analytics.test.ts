@@ -1,7 +1,4 @@
-import {
-  PostMortemAnalyticsEngine,
-  ITradePostMortemInput,
-} from '../ai-trade-learning-engine';
+import { PostMortemAnalyticsEngine, ITradePostMortemInput } from '../ai-trade-learning-engine';
 import { ICandle } from '@quant/shared';
 
 describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () => {
@@ -12,7 +9,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
     open: number,
     high: number,
     low: number,
-    close: number
+    close: number,
   ): ICandle => ({
     timestamp: new Date(baseTimestamp.getTime() + offsetMinutes * 60000),
     open,
@@ -29,10 +26,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
       // Subsequent candles:
       // C1: 100 -> 95 (MAE = 5 = 0.5R) -> 115 (MFE = 15 = 1.5R)
       // C2: 115 -> 125 (TP1 reached, MFE = 25 = 2.5R) -> 122
-      const candles = [
-        createCandle(15, 100, 115, 95, 110),
-        createCandle(30, 110, 125, 108, 122),
-      ];
+      const candles = [createCandle(15, 100, 115, 95, 110), createCandle(30, 110, 125, 108, 122)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'NIFTY',
@@ -55,10 +49,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
       // Short entry: 200, SL: 210 (Risk = 10), TP1: 180 (2R)
       // C1: 200 -> 204 (MAE = 4 = 0.4R) -> 185 (MFE = 15 = 1.5R)
       // C2: 185 -> 175 (TP1 reached, MFE = 25 = 2.5R)
-      const candles = [
-        createCandle(15, 200, 204, 185, 190),
-        createCandle(30, 190, 192, 175, 178),
-      ];
+      const candles = [createCandle(15, 200, 204, 185, 190), createCandle(30, 190, 192, 175, 178)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'BTCUSDT',
@@ -82,10 +73,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
       // Entry: 100, SL: 95 (Risk = 5), TP1: 110 (3R)
       // C1: Sweeps SL to 94 (Stop hit!)
       // C2: Reverses aggressively and reaches 112 (TP1 target reached post-stop out)
-      const candles = [
-        createCandle(15, 100, 101, 94, 98),
-        createCandle(30, 98, 112, 97, 110),
-      ];
+      const candles = [createCandle(15, 100, 101, 94, 98), createCandle(30, 98, 112, 97, 110)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'NIFTY',
@@ -123,9 +111,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
     });
 
     it('classifies NEWS_SPIKE when high-impact macro event coincides with stop out', () => {
-      const candles = [
-        createCandle(15, 100, 101, 88, 90),
-      ];
+      const candles = [createCandle(15, 100, 101, 88, 90)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'BTCUSDT',
@@ -144,9 +130,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
 
     it('classifies VOLATILITY_EXPANSION_STOP when candle range sharply exceeds entry ATR', () => {
       // Entry ATR = 2.0. Stop candle range = 100 - 90 = 10.0 (> 2.5 * 2.0 = 5.0)
-      const candles = [
-        createCandle(15, 100, 100, 90, 92),
-      ];
+      const candles = [createCandle(15, 100, 100, 90, 92)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'RELIANCE',
@@ -164,9 +148,7 @@ describe('PHASE 10: Deterministic Post-Mortem Failure & Success Analytics', () =
     });
 
     it('classifies EARLY_ENTRY_BEFORE_CONFIRMATION when entered without structural confirmation', () => {
-      const candles = [
-        createCandle(15, 100, 101, 93, 94),
-      ];
+      const candles = [createCandle(15, 100, 101, 93, 94)];
 
       const report = PostMortemAnalyticsEngine.analyzeTrade({
         symbol: 'HDFCBANK',

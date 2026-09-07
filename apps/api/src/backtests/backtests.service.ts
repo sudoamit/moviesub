@@ -40,7 +40,7 @@ export class BacktestsService {
       initialCapital: dto.initialCapital || 100000,
       riskPerTradePercent: dto.riskPerTradePercent || 1.0,
       minScore: dto.minScore || 65,
-      lotSize: sym === 'BTCUSDT' ? 0.01 : (inst.lotSize || 1),
+      lotSize: sym === 'BTCUSDT' ? 0.01 : inst.lotSize || 1,
     });
 
     const startDate = candlesRes.candles[0]?.timestamp || new Date();

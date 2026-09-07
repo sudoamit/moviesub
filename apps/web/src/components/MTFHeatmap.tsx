@@ -1,7 +1,14 @@
 'use client';
 
 import React from 'react';
-import { Layers, ArrowUpRight, ArrowDownRight, Minus, CheckCircle2, AlertCircle } from 'lucide-react';
+import {
+  Layers,
+  ArrowUpRight,
+  ArrowDownRight,
+  Minus,
+  CheckCircle2,
+  AlertCircle,
+} from 'lucide-react';
 import { ISignalSetup } from '@quant/shared';
 
 interface MTFHeatmapProps {
@@ -18,6 +25,7 @@ export const MTFHeatmap: React.FC<MTFHeatmapProps> = ({
   const baseAssets = [
     { symbol: 'NIFTY', name: 'NIFTY 50', type: 'INDEX' },
     { symbol: 'BANKNIFTY', name: 'Bank NIFTY', type: 'INDEX' },
+    { symbol: 'XAUUSD', name: 'Gold Spot (XAU/USD)', type: 'COMMODITY' },
     { symbol: 'BTCUSDT', name: 'Bitcoin 24/7', type: 'CRYPTO' },
     { symbol: 'RELIANCE', name: 'Reliance Ind.', type: 'EQUITY' },
     { symbol: 'HDFCBANK', name: 'HDFC Bank', type: 'EQUITY' },
@@ -27,7 +35,7 @@ export const MTFHeatmap: React.FC<MTFHeatmapProps> = ({
   const computedMatrix = React.useMemo(() => {
     return baseAssets.map((asset) => {
       const sig = signals.find((s) => s.symbol === asset.symbol);
-      
+
       let m5 = 'BEARISH';
       let m15 = 'BEARISH';
       let h1 = 'BEARISH';
@@ -140,7 +148,7 @@ export const MTFHeatmap: React.FC<MTFHeatmapProps> = ({
                       <span className={isSelected ? 'text-cyan-300' : 'text-slate-200'}>
                         {item.symbol}
                       </span>
-                      <span className="text-[8px] text-slate-500 font-bold px-1 py-0.2 bg-slate-900 rounded border border-slate-800">
+                      <span className="text-[8px] text-slate-500 font-bold px-1 py-0.5 bg-slate-900 rounded border border-slate-800">
                         {item.type}
                       </span>
                     </div>

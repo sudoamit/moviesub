@@ -13,10 +13,7 @@ export class MarketRegimeEngine {
    * Deterministically classifies the market regime using ADX, ATR, EMAs, and Price Structure.
    * NO LLM / AI hallucination used.
    */
-  static classifyRegime(
-    candles: ICandle[],
-    swings: ISwingPoint[] = [],
-  ): IMarketRegime {
+  static classifyRegime(candles: ICandle[], swings: ISwingPoint[] = []): IMarketRegime {
     if (!candles || candles.length === 0) {
       return {
         regime: MarketRegimeType.RANGE,
@@ -37,7 +34,7 @@ export class MarketRegimeEngine {
     const ema50Series = calculateEMA(closes, 50);
     const ema200Series = calculateEMA(closes, 200);
 
-    const currentAtr = atrSeries[lastIdx] ?? (lastCandle.high - lastCandle.low);
+    const currentAtr = atrSeries[lastIdx] ?? lastCandle.high - lastCandle.low;
     const currentAdx = adxResult.adx[lastIdx] ?? 15;
     const plusDI = adxResult.plusDI[lastIdx] ?? 20;
     const minusDI = adxResult.minusDI[lastIdx] ?? 20;

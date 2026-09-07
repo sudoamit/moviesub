@@ -56,9 +56,7 @@ export class TradeLevelsCalculator {
     const maxRiskPoints = isBtc
       ? Math.min(220, Math.max(120, currentAtr * 0.35))
       : Math.max(currentAtr * 0.35, currentAtr * 0.45);
-    const minRiskPoints = isBtc
-      ? 100.0
-      : Math.max(currentAtr * 0.18, currentPrice * 0.0005);
+    const minRiskPoints = isBtc ? 100.0 : Math.max(currentAtr * 0.18, currentPrice * 0.0005);
 
     if (direction === Direction.BULLISH) {
       // 1. Long Entry Zone (Anchored strictly to Order Block, FVG, or Closed Trigger Structure)

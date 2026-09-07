@@ -68,7 +68,9 @@ export class TradingWebsocketGateway
 
   handleConnection(client: Socket) {
     this.connectedClientsCount++;
-    this.logger.log(`Client connected: ${client.id}. Total connected: ${this.connectedClientsCount}`);
+    this.logger.log(
+      `Client connected: ${client.id}. Total connected: ${this.connectedClientsCount}`,
+    );
     client.emit('connected', {
       status: 'CONNECTED',
       timestamp: new Date().toISOString(),

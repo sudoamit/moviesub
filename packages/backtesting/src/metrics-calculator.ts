@@ -62,7 +62,9 @@ export class MetricsCalculator {
     const winRate = Number(((winningTrades / totalTrades) * 100).toFixed(2));
     const profitFactor =
       grossLoss === 0
-        ? (grossProfit > 0 ? 99.99 : 1.0)
+        ? grossProfit > 0
+          ? 99.99
+          : 1.0
         : Number((grossProfit / grossLoss).toFixed(2));
 
     const netPnL = Number((grossProfit - grossLoss).toFixed(2));
@@ -102,8 +104,7 @@ export class MetricsCalculator {
     if (returns.length > 1) {
       const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
       const variance =
-        returns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) /
-        (returns.length - 1);
+        returns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / (returns.length - 1);
       const stdDev = Math.sqrt(variance);
       if (stdDev > 0) {
         sharpeRatio = Number(((meanReturn / stdDev) * Math.sqrt(252)).toFixed(2));

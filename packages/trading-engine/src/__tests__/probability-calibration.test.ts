@@ -1,7 +1,4 @@
-import {
-  ProbabilityCalibrationEngine,
-  PlattScaler,
-} from '../ai-trade-learning-engine';
+import { ProbabilityCalibrationEngine, PlattScaler } from '../ai-trade-learning-engine';
 
 describe('PHASE 5: Probability Calibration & Statistical Confidence Intervals', () => {
   describe('1. ProbabilityCalibrationEngine — Reliability Diagram & ECE', () => {
@@ -60,7 +57,7 @@ describe('PHASE 5: Probability Calibration & Statistical Confidence Intervals', 
       }
 
       const report = ProbabilityCalibrationEngine.generateCalibrationReport(miscalibrated, 10);
-      expect(report.expectedCalibrationError).toBeGreaterThan(0.40);
+      expect(report.expectedCalibrationError).toBeGreaterThan(0.4);
       expect(report.status).toBe('POOR');
     });
 
@@ -88,15 +85,15 @@ describe('PHASE 5: Probability Calibration & Statistical Confidence Intervals', 
       expect(interval).not.toBeNull();
       expect(interval!.confidenceLevel).toBe(0.95);
       expect(interval!.sampleSize).toBe(50);
-      expect(interval!.lower).toBeGreaterThan(0.70);
+      expect(interval!.lower).toBeGreaterThan(0.7);
       expect(interval!.lower).toBeLessThan(0.84);
       expect(interval!.upper).toBeGreaterThan(0.84);
       expect(interval!.upper).toBeLessThan(0.95);
     });
 
     it('narrows the confidence interval as sample size increases', () => {
-      const smallN = ProbabilityCalibrationEngine.calculateConfidenceInterval(0.80, 20)!;
-      const largeN = ProbabilityCalibrationEngine.calculateConfidenceInterval(0.80, 200)!;
+      const smallN = ProbabilityCalibrationEngine.calculateConfidenceInterval(0.8, 20)!;
+      const largeN = ProbabilityCalibrationEngine.calculateConfidenceInterval(0.8, 200)!;
 
       const smallSpread = smallN.upper - smallN.lower;
       const largeSpread = largeN.upper - largeN.lower;
@@ -107,7 +104,9 @@ describe('PHASE 5: Probability Calibration & Statistical Confidence Intervals', 
 
   describe('3. PlattScaler — Univariate Logistic Recalibration', () => {
     it('fits parameters and recalibrates uncalibrated predictions toward true empirical win rates', () => {
-      const rawProbs = [0.90, 0.85, 0.88, 0.82, 0.89, 0.20, 0.18, 0.22, 0.15, 0.19, 0.87, 0.84, 0.21, 0.17];
+      const rawProbs = [
+        0.9, 0.85, 0.88, 0.82, 0.89, 0.2, 0.18, 0.22, 0.15, 0.19, 0.87, 0.84, 0.21, 0.17,
+      ];
       const labels: (0 | 1)[] = [1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0];
 
       const scaler = new PlattScaler();
@@ -119,8 +118,8 @@ describe('PHASE 5: Probability Calibration & Statistical Confidence Intervals', 
       const highProbCalibrated = scaler.calibrate(0.88);
       const lowProbCalibrated = scaler.calibrate(0.18);
 
-      expect(highProbCalibrated).toBeGreaterThan(0.70);
-      expect(lowProbCalibrated).toBeLessThan(0.30);
+      expect(highProbCalibrated).toBeGreaterThan(0.7);
+      expect(lowProbCalibrated).toBeLessThan(0.3);
     });
   });
 });

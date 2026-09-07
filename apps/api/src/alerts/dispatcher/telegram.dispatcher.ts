@@ -6,7 +6,10 @@ export class TelegramDispatcher {
   private readonly logger = new Logger(TelegramDispatcher.name);
   private readonly botToken = process.env.TELEGRAM_BOT_TOKEN;
 
-  async dispatchAlert(chatId: string, signal: ISignalSetup): Promise<{ success: boolean; messageId?: string }> {
+  async dispatchAlert(
+    chatId: string,
+    signal: ISignalSetup,
+  ): Promise<{ success: boolean; messageId?: string }> {
     const isBull = signal.direction === 'BULLISH';
     const dirEmoji = isBull ? '🟢 LONG' : '🔴 SHORT';
     const gradeEmoji = signal.grade === 'A+' ? '🌟' : '⭐';
@@ -34,7 +37,9 @@ export class TelegramDispatcher {
     ].join('\n');
 
     if (!this.botToken) {
-      this.logger.log(`[TELEGRAM MOCK DISPATCH] -> Chat: ${chatId} | Alert: ${signal.symbol} (${signal.direction} Grade ${signal.grade})`);
+      this.logger.log(
+        `[TELEGRAM MOCK DISPATCH] -> Chat: ${chatId} | Alert: ${signal.symbol} (${signal.direction} Grade ${signal.grade})`,
+      );
       return { success: true, messageId: `mock-tg-${Date.now()}` };
     }
 

@@ -15,9 +15,7 @@ export class AISummaryController {
   }
 
   @Get('daily-briefing')
-  async getDailyBriefing(
-    @Query('timeframe') timeframe: Timeframe = Timeframe.M15,
-  ) {
+  async getDailyBriefing(@Query('timeframe') timeframe: Timeframe = Timeframe.M15) {
     return this.aiSummaryService.generateDailyBriefing(timeframe);
   }
 }

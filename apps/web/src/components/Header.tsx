@@ -22,11 +22,15 @@ import {
   Clock,
   Compass,
   Cpu,
+  BrainCircuit,
+  FlaskConical,
 } from 'lucide-react';
 
 export type NavTab =
   | 'terminal'
+  | 'quant'
   | 'learning'
+  | 'research'
   | 'options'
   | 'multichart'
   | 'radar'
@@ -86,10 +90,37 @@ export const Header: React.FC<HeaderProps> = ({
 
   const navItems: { id: NavTab; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'terminal', label: 'Terminal', icon: <Activity className="w-3.5 h-3.5" /> },
-    { id: 'learning', label: 'AI Learning', icon: <Brain className="w-3.5 h-3.5 text-cyan-400" />, badge: 'ML' },
-    { id: 'options', label: 'Options Suite', icon: <Layers className="w-3.5 h-3.5" />, badge: 'BSM' },
+    {
+      id: 'quant',
+      label: 'Quant Intelligence',
+      icon: <BrainCircuit className="w-3.5 h-3.5 text-cyan-400" />,
+      badge: 'v2.0',
+    },
+    {
+      id: 'learning',
+      label: 'AI Learning',
+      icon: <Brain className="w-3.5 h-3.5 text-cyan-400" />,
+      badge: 'ML',
+    },
+    {
+      id: 'research',
+      label: 'Research Lab',
+      icon: <FlaskConical className="w-3.5 h-3.5 text-emerald-400" />,
+      badge: 'OOS',
+    },
+    {
+      id: 'options',
+      label: 'Options Suite',
+      icon: <Layers className="w-3.5 h-3.5" />,
+      badge: 'BSM',
+    },
     { id: 'multichart', label: 'Multi-Chart', icon: <Grid2X2 className="w-3.5 h-3.5" /> },
-    { id: 'radar', label: 'Flow Radar', icon: <Compass className="w-3.5 h-3.5" />, badge: '4-Tier' },
+    {
+      id: 'radar',
+      label: 'Flow Radar',
+      icon: <Compass className="w-3.5 h-3.5" />,
+      badge: '4-Tier',
+    },
     { id: 'smt', label: 'SMT Divergence', icon: <Sliders className="w-3.5 h-3.5" /> },
     { id: 'correlation', label: 'Correlation', icon: <PieChart className="w-3.5 h-3.5" /> },
     { id: 'paper', label: 'Paper Trading', icon: <Wallet className="w-3.5 h-3.5" /> },
@@ -117,16 +148,21 @@ export const Header: React.FC<HeaderProps> = ({
             <div>
               <div className="flex items-center gap-1.5">
                 <h1 className="text-sm sm:text-base font-black tracking-wider text-white uppercase font-mono">
-                  QUANT INTELLIGENCE <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-emerald-400">PRO</span>
+                  QUANT INTELLIGENCE{' '}
+                  <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-emerald-400">
+                    PRO
+                  </span>
                 </h1>
-                <span className="text-[9px] font-bold bg-cyan-950/80 text-cyan-300 border border-cyan-500/30 px-1.5 py-0.2 rounded">
+                <span className="text-[9px] font-bold bg-cyan-950/80 text-cyan-300 border border-cyan-500/30 px-1.5 py-0.5 rounded">
                   v2.8
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 font-mono tracking-tight flex items-center gap-1">
                 <span>Institutional SMC & Volatility Terminal</span>
                 <span className="text-slate-600">•</span>
-                <span className="text-emerald-400 font-bold">{timeString ? `${timeString} IST` : '09:15-15:30'}</span>
+                <span className="text-emerald-400 font-bold" suppressHydrationWarning>
+                  {timeString ? `${timeString} IST` : '09:15-15:30'}
+                </span>
               </p>
             </div>
           </div>
@@ -136,6 +172,7 @@ export const Header: React.FC<HeaderProps> = ({
             {onSelectStrategy && (
               <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-[10px] font-mono font-bold shadow-inner">
                 <button
+                  type="button"
                   onClick={() => onSelectStrategy('SMC')}
                   className={`px-2 py-1 rounded-md transition-all flex items-center gap-1 ${
                     selectedStrategy === 'SMC'
@@ -147,6 +184,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <Sparkles className="w-3 h-3" /> SMC
                 </button>
                 <button
+                  type="button"
                   onClick={() => onSelectStrategy('SAIYAN_OCC')}
                   className={`px-2 py-1 rounded-md transition-all flex items-center gap-1 ${
                     selectedStrategy === 'SAIYAN_OCC'
@@ -158,6 +196,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <Zap className="w-3 h-3 text-amber-900" /> SAIYAN OCC
                 </button>
                 <button
+                  type="button"
                   onClick={() => onSelectStrategy('HYBRID')}
                   className={`px-2 py-1 rounded-md transition-all flex items-center gap-1 ${
                     selectedStrategy === 'HYBRID'
@@ -199,8 +238,13 @@ export const Header: React.FC<HeaderProps> = ({
               const isActive = activeTab === item.id;
               return (
                 <button
+                  type="button"
                   key={item.id}
-                  onClick={() => onSelectTab(item.id)}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onSelectTab(item.id);
+                  }}
                   className={`px-2.5 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 relative whitespace-nowrap ${
                     isActive
                       ? 'bg-gradient-to-r from-cyan-500 to-teal-400 text-slate-950 shadow-md shadow-cyan-500/25 scale-[1.02]'
@@ -211,7 +255,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <span>{item.label}</span>
                   {item.badge && (
                     <span
-                      className={`text-[8px] px-1 py-0.2 rounded font-black ${
+                      className={`text-[8px] px-1 py-0.5 rounded font-black ${
                         isActive
                           ? 'bg-slate-950 text-cyan-300'
                           : 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/60'
@@ -231,12 +275,13 @@ export const Header: React.FC<HeaderProps> = ({
           {/* AI Copilot Button */}
           {onOpenAICopilotModal && (
             <button
+              type="button"
               onClick={onOpenAICopilotModal}
               className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-violet-600/20 via-purple-600/20 to-indigo-600/20 hover:from-violet-600/30 hover:to-indigo-600/30 text-purple-300 border border-purple-500/40 hover:border-purple-400 text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-sm hover:shadow-purple-500/20"
             >
               <Brain className="w-3.5 h-3.5 text-purple-400" />
               <span>AI Copilot</span>
-              <span className="text-[9px] bg-purple-950 text-purple-300 px-1 py-0.2 rounded border border-purple-800">
+              <span className="text-[9px] bg-purple-950 text-purple-300 px-1 py-0.5 rounded border border-purple-800">
                 ⌘K
               </span>
             </button>
@@ -245,6 +290,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Alerts Button */}
           {onOpenAlertsModal && (
             <button
+              type="button"
               onClick={onOpenAlertsModal}
               className="p-2 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 transition-all text-xs relative"
               title="Manage Trading Alerts"
@@ -256,6 +302,7 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* 1-Click Scan Button */}
           <button
+            type="button"
             onClick={onTriggerScan}
             disabled={isScanning}
             className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 text-slate-950 font-black text-xs font-mono flex items-center gap-1.5 transition-all shadow-lg shadow-cyan-500/20 active:scale-95 disabled:opacity-50"
@@ -269,6 +316,7 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Mobile Actions Bar */}
       <div className="flex xl:hidden items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800/60">
         <button
+          type="button"
           onClick={onTriggerScan}
           disabled={isScanning}
           className="flex-1 py-1 px-3 rounded-lg bg-gradient-to-r from-cyan-500 to-emerald-500 text-slate-950 font-black text-xs font-mono flex items-center justify-center gap-1.5 shadow-sm"
@@ -279,6 +327,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {onOpenAICopilotModal && (
           <button
+            type="button"
             onClick={onOpenAICopilotModal}
             className="py-1 px-3 rounded-lg bg-purple-950/80 border border-purple-500/40 text-purple-300 font-bold text-xs font-mono flex items-center gap-1.5"
           >
@@ -289,6 +338,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {onOpenAlertsModal && (
           <button
+            type="button"
             onClick={onOpenAlertsModal}
             className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300"
             title="Manage Alerts"

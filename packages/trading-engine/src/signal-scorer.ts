@@ -59,7 +59,8 @@ export class SignalScorer {
     const fvgScore = inputs.hasOBOrFVG ? 7 : 0;
 
     // 5. Displacement Quality (10 points max)
-    const displacementScore = inputs.displacementRatio >= 1.5 ? 10 : (inputs.displacementRatio >= 1.0 ? 6 : 0);
+    const displacementScore =
+      inputs.displacementRatio >= 1.5 ? 10 : inputs.displacementRatio >= 1.0 ? 6 : 0;
 
     // 6. Premium / Discount Zone (10 points max)
     const zoneScore = inputs.inCorrectZone ? 10 : 0;
@@ -68,7 +69,7 @@ export class SignalScorer {
     const volumeScore = inputs.hasVolumeExpansion ? 5 : 0;
 
     // 8. Risk-to-Reward >= 2.0 (5 points max)
-    const rrScore = inputs.riskRewardRatio >= 2.0 ? 5 : (inputs.riskRewardRatio >= 1.5 ? 3 : 0);
+    const rrScore = inputs.riskRewardRatio >= 2.0 ? 5 : inputs.riskRewardRatio >= 1.5 ? 3 : 0;
 
     // 9. Indicator Alignment (5 points max)
     const indicatorScore = inputs.indicatorsAligned ? 5 : 0;

@@ -13,7 +13,11 @@ describe('SwingDetector', () => {
       { timestamp: new Date(5000), open: 105, high: 108, low: 98, close: 100, volume: 100 }, // Confirmation bar (index 4)
     ];
 
-    const swings = SwingDetector.detectSwings(candles, { leftBars: 2, rightBars: 2, minDistanceAtrMultiplier: 0.1 });
+    const swings = SwingDetector.detectSwings(candles, {
+      leftBars: 2,
+      rightBars: 2,
+      minDistanceAtrMultiplier: 0.1,
+    });
 
     expect(swings).toHaveLength(1);
     expect(swings[0].index).toBe(2);
@@ -27,11 +31,25 @@ describe('SwingDetector', () => {
     // Construct sequence: Low (80) -> High (120) -> Higher Low (90) -> Higher High (140)
     const candles: ICandle[] = [];
     const prices = [
-      100, 90, 80, 95, 105, // Swing Low at index 2 (80)
-      115, 120, 110, 100,    // Swing High at index 6 (120)
-      90, 100, 110,          // Higher Low at index 9 (90 > 80)
-      130, 140, 125, 115,    // Higher High at index 13 (140 > 120)
-      100, 90, 80            // Trailing bars for rightBars confirmation
+      100,
+      90,
+      80,
+      95,
+      105, // Swing Low at index 2 (80)
+      115,
+      120,
+      110,
+      100, // Swing High at index 6 (120)
+      90,
+      100,
+      110, // Higher Low at index 9 (90 > 80)
+      130,
+      140,
+      125,
+      115, // Higher High at index 13 (140 > 120)
+      100,
+      90,
+      80, // Trailing bars for rightBars confirmation
     ];
 
     for (let i = 0; i < prices.length; i++) {
@@ -45,11 +63,19 @@ describe('SwingDetector', () => {
       });
     }
 
-    const swings = SwingDetector.detectSwings(candles, { leftBars: 2, rightBars: 2, minDistanceAtrMultiplier: 0.1 });
+    const swings = SwingDetector.detectSwings(candles, {
+      leftBars: 2,
+      rightBars: 2,
+      minDistanceAtrMultiplier: 0.1,
+    });
     expect(swings.length).toBeGreaterThanOrEqual(2);
 
-    const hasSwingHigh = swings.some(s => s.type === StructureType.SWING_HIGH || s.type === StructureType.HIGHER_HIGH);
-    const hasSwingLow = swings.some(s => s.type === StructureType.SWING_LOW || s.type === StructureType.HIGHER_LOW);
+    const hasSwingHigh = swings.some(
+      (s) => s.type === StructureType.SWING_HIGH || s.type === StructureType.HIGHER_HIGH,
+    );
+    const hasSwingLow = swings.some(
+      (s) => s.type === StructureType.SWING_LOW || s.type === StructureType.HIGHER_LOW,
+    );
 
     expect(hasSwingHigh).toBe(true);
     expect(hasSwingLow).toBe(true);

@@ -6,10 +6,6 @@
     "composite": true,
     "declaration": true
   },
-  "references": [
-    { "path": "../shared" },
-    { "path": "../config" },
-    { "path": "../indicators" }
-  ],
+  "references": [{ "path": "../shared" }, { "path": "../config" }, { "path": "../indicators" }],
   "include": ["src/**/*"]
 }

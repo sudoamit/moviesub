@@ -7,7 +7,10 @@ import {
 } from '../ai-trade-learning-engine';
 import { ICandle, ISignalSetup, Direction, SignalState, SignalGrade } from '@quant/shared';
 
-function createMockSignal(direction = Direction.BULLISH, entryTime = new Date('2026-08-20T04:00:00.000Z')): ISignalSetup {
+function createMockSignal(
+  direction = Direction.BULLISH,
+  entryTime = new Date('2026-08-20T04:00:00.000Z'),
+): ISignalSetup {
   const isBull = direction === Direction.BULLISH;
   return {
     symbol: 'NIFTY',

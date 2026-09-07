@@ -17,15 +17,23 @@ interface CorrelationMatrixProps {
   tickers: Record<string, any>;
 }
 
-export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
-  tickers,
-}) => {
+export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({ tickers }) => {
   // Constituents with authentic Nifty 50 Index weights
   const constituents = [
     { symbol: 'HDFCBANK', name: 'HDFC Bank Ltd.', weight: 11.52, sector: 'Banking & Financials' },
-    { symbol: 'RELIANCE', name: 'Reliance Industries Ltd.', weight: 10.18, sector: 'Energy & Petrochemicals' },
+    {
+      symbol: 'RELIANCE',
+      name: 'Reliance Industries Ltd.',
+      weight: 10.18,
+      sector: 'Energy & Petrochemicals',
+    },
     { symbol: 'INFY', name: 'Infosys Ltd.', weight: 5.75, sector: 'Information Technology' },
-    { symbol: 'BANKNIFTY', name: 'Nifty Bank Index', weight: 35.40, sector: 'Financial Sector Proxy' },
+    {
+      symbol: 'BANKNIFTY',
+      name: 'Nifty Bank Index',
+      weight: 35.4,
+      sector: 'Financial Sector Proxy',
+    },
   ];
 
   const niftyTicker = tickers['NIFTY'] || { price: 24175.65, changePercent: -0.15 };
@@ -37,7 +45,14 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
     const itemChg = itemTicker.changePercent || 0;
 
     // Simulated Pearson correlation with slight live dynamic variance
-    let baseCorrelation = item.symbol === 'BANKNIFTY' ? 0.94 : item.symbol === 'HDFCBANK' ? 0.88 : item.symbol === 'RELIANCE' ? 0.82 : 0.68;
+    let baseCorrelation =
+      item.symbol === 'BANKNIFTY'
+        ? 0.94
+        : item.symbol === 'HDFCBANK'
+          ? 0.88
+          : item.symbol === 'RELIANCE'
+            ? 0.82
+            : 0.68;
     const isDirectionAligned = (niftyChg >= 0 && itemChg >= 0) || (niftyChg < 0 && itemChg < 0);
     const divergence = !isDirectionAligned && Math.abs(niftyChg - itemChg) > 0.3;
 
@@ -48,7 +63,11 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
       correlation: baseCorrelation,
       isAligned: isDirectionAligned,
       isDivergent: divergence,
-      divergenceType: divergence ? (niftyChg > itemChg ? 'BEARISH_DIVERGENCE' : 'BULLISH_DIVERGENCE') : 'ALIGNED',
+      divergenceType: divergence
+        ? niftyChg > itemChg
+          ? 'BEARISH_DIVERGENCE'
+          : 'BULLISH_DIVERGENCE'
+        : 'ALIGNED',
       impactFactor: Number((Math.abs(itemChg) * (item.weight / 100) * 100).toFixed(2)),
     };
   });
@@ -74,14 +93,21 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
                 REAL-TIME ALIGNMENT
               </span>
             </h3>
-            <p className="text-[11px] text-slate-400">Measure NIFTY 50 institutional alignment vs. top index heavyweight drivers</p>
+            <p className="text-[11px] text-slate-400">
+              Measure NIFTY 50 institutional alignment vs. top index heavyweight drivers
+            </p>
           </div>
         </div>
 
         <div className="flex items-center gap-3 text-xs">
-          <span className="text-slate-400">NIFTY 50 CMP: <strong className="text-white">₹{niftyTicker.price?.toFixed(2)}</strong></span>
-          <span className={`font-bold px-2 py-0.5 rounded ${niftyTicker.changePercent >= 0 ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}>
-            {niftyTicker.changePercent >= 0 ? '+' : ''}{niftyTicker.changePercent?.toFixed(2)}%
+          <span className="text-slate-400">
+            NIFTY 50 CMP: <strong className="text-white">₹{niftyTicker.price?.toFixed(2)}</strong>
+          </span>
+          <span
+            className={`font-bold px-2 py-0.5 rounded ${niftyTicker.changePercent >= 0 ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'}`}
+          >
+            {niftyTicker.changePercent >= 0 ? '+' : ''}
+            {niftyTicker.changePercent?.toFixed(2)}%
           </span>
         </div>
       </div>
@@ -89,18 +115,26 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
       {/* Summary KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-          <span className="text-[10px] text-slate-400 block uppercase">HEAVYWEIGHT ALIGNMENT BREADTH</span>
+          <span className="text-[10px] text-slate-400 block uppercase">
+            HEAVYWEIGHT ALIGNMENT BREADTH
+          </span>
           <div className="flex items-baseline gap-2 mt-1">
             <span className="text-2xl font-black text-cyan-300">{marketBreadthScore}%</span>
-            <span className="text-xs text-slate-400">({totalAlignedWeight.toFixed(1)}% weight aligned)</span>
+            <span className="text-xs text-slate-400">
+              ({totalAlignedWeight.toFixed(1)}% weight aligned)
+            </span>
           </div>
           <span className="text-[9px] text-slate-500 block mt-1">
-            {marketBreadthScore >= 70 ? '🟢 Strong Institutional Momentum' : '⚠️ Mixed Divergent Sector Flow'}
+            {marketBreadthScore >= 70
+              ? '🟢 Strong Institutional Momentum'
+              : '⚠️ Mixed Divergent Sector Flow'}
           </span>
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-          <span className="text-[10px] text-slate-400 block uppercase">PEARSON INDEX CORRELATION</span>
+          <span className="text-[10px] text-slate-400 block uppercase">
+            PEARSON INDEX CORRELATION
+          </span>
           <div className="flex items-baseline gap-2 mt-1">
             <span className="text-2xl font-black text-emerald-400">+0.88</span>
             <span className="text-xs text-emerald-400/90">HIGH CONVERGENCE</span>
@@ -111,7 +145,9 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
         </div>
 
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
-          <span className="text-[10px] text-slate-400 block uppercase">INSTITUTIONAL DIVERGENCE RADAR</span>
+          <span className="text-[10px] text-slate-400 block uppercase">
+            INSTITUTIONAL DIVERGENCE RADAR
+          </span>
           <div className="flex items-baseline gap-2 mt-1">
             <span className="text-2xl font-black text-white">
               {correlationData.filter((c) => c.isDivergent).length > 0 ? (
@@ -153,7 +189,9 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
                 <td className="p-3 font-bold text-white">
                   <div>
                     <span>{item.symbol}</span>
-                    <span className="text-[10px] text-slate-500 block font-normal">{item.name}</span>
+                    <span className="text-[10px] text-slate-500 block font-normal">
+                      {item.name}
+                    </span>
                   </div>
                 </td>
                 <td className="p-3 text-slate-400">{item.sector}</td>
@@ -165,7 +203,8 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({
                 <td className="p-3 text-white font-bold">₹{item.cmp.toFixed(2)}</td>
                 <td className="p-3 font-bold">
                   <span className={item.changePercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                    {item.changePercent >= 0 ? '+' : ''}{item.changePercent.toFixed(2)}%
+                    {item.changePercent >= 0 ? '+' : ''}
+                    {item.changePercent.toFixed(2)}%
                   </span>
                 </td>
                 <td className="p-3 text-cyan-300 font-bold">+{item.correlation}</td>

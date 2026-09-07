@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Res } from '@nestjs/common';
+import { Response } from 'express';
 import { SignalsService, IRecordTradeDto } from './signals.service';
 import { Timeframe } from '@quant/shared';
 import { IsNumber, IsOptional, IsPositive, Min, IsString } from 'class-validator';
@@ -61,6 +62,16 @@ export class SignalsController {
   @Get('completed-trades')
   async getCompletedTrades(@Query('limit') limit = 50) {
     return this.signalsService.getCompletedTrades(Number(limit) || 50);
+  }
+
+  @Get('export-csv')
+  async exportTradesCsv(@Query('limit') limit: string, @Res() res: Response) {
+    const { filename, csvContent } = await this.signalsService.exportTradesToCsv(
+      Number(limit) || 200,
+    );
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csvContent);
   }
 
   @Post('sync-trades')

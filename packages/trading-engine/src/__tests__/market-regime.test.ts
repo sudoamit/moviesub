@@ -18,7 +18,9 @@ describe('MarketRegimeEngine', () => {
     }
 
     const regime = MarketRegimeEngine.classifyRegime(candles);
-    expect([MarketRegimeType.BULLISH_TREND, MarketRegimeType.HIGH_VOLATILITY]).toContain(regime.regime);
+    expect([MarketRegimeType.BULLISH_TREND, MarketRegimeType.HIGH_VOLATILITY]).toContain(
+      regime.regime,
+    );
     expect(regime.atr).toBeGreaterThan(0);
     expect(regime.adx).toBeGreaterThan(0);
   });

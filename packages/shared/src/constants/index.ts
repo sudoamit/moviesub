@@ -50,4 +50,5 @@ export const BULLMQ_QUEUES = {
   SMC_ANALYSIS: 'smc-analysis',
   SIGNAL_GENERATION: 'signal-generation',
   ALERT_PROCESSING: 'alert-processing',
+  LEARNING_TASKS: 'learning-tasks',
 };

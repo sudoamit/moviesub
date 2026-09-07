@@ -1,4 +1,11 @@
-import { Direction, ICandle, ISignalSetup, SignalGrade, SignalState, Timeframe } from '@quant/shared';
+import {
+  Direction,
+  ICandle,
+  ISignalSetup,
+  SignalGrade,
+  SignalState,
+  Timeframe,
+} from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
 
 export interface ISaiyanOCCConfig {
@@ -77,7 +84,12 @@ export class SaiyanOCCEngine {
    * s = len / offsetSigma
    * w_i = exp(-((i - m)^2) / (2 * s^2))
    */
-  public static calculateALMA(src: number[], len: number, offset: number = 0.85, sigma: number = 5): number[] {
+  public static calculateALMA(
+    src: number[],
+    len: number,
+    offset: number = 0.85,
+    sigma: number = 5,
+  ): number[] {
     const result: number[] = new Array(src.length).fill(0);
     const m = Math.floor(offset * (len - 1));
     const s = len / sigma;
@@ -189,7 +201,10 @@ export class SaiyanOCCEngine {
   /**
    * Full PineScript Strategy Execution Engine
    */
-  public static analyze(candles: ICandle[], config: Partial<ISaiyanOCCConfig> = {}): ISaiyanOCCResult {
+  public static analyze(
+    candles: ICandle[],
+    config: Partial<ISaiyanOCCConfig> = {},
+  ): ISaiyanOCCResult {
     const cfg: ISaiyanOCCConfig = { ...this.DEFAULT_CONFIG, ...config };
     const n = candles.length;
 
@@ -223,8 +238,20 @@ export class SaiyanOCCEngine {
     const lows = candles.map((c) => c.low);
 
     // 1. Calculate Base Open/Close MA Variants
-    const closeSeries = this.calculateVariant(cfg.basisType, closes, cfg.basisLen, cfg.offsetSigma, cfg.offsetALMA);
-    const openSeries = this.calculateVariant(cfg.basisType, opens, cfg.basisLen, cfg.offsetSigma, cfg.offsetALMA);
+    const closeSeries = this.calculateVariant(
+      cfg.basisType,
+      closes,
+      cfg.basisLen,
+      cfg.offsetSigma,
+      cfg.offsetALMA,
+    );
+    const openSeries = this.calculateVariant(
+      cfg.basisType,
+      opens,
+      cfg.basisLen,
+      cfg.offsetSigma,
+      cfg.offsetALMA,
+    );
 
     // 2. Apply Alternate Resolution Smoothing (intRes = 8)
     const closeSeriesAlt = this.smoothAlternateResolution(closeSeries, cfg.intRes);
@@ -345,8 +372,10 @@ export class SaiyanOCCEngine {
     let lockedCrossoverPrice = currentPrice;
     let lockedCrossoverTime = candles[n - 1] ? new Date(candles[n - 1].timestamp) : new Date();
     for (let i = 1; i < n; i++) {
-      const isCrossUp = closeSeriesAlt[i - 1] <= openSeriesAlt[i - 1] && closeSeriesAlt[i] > openSeriesAlt[i];
-      const isCrossDn = closeSeriesAlt[i - 1] >= openSeriesAlt[i - 1] && closeSeriesAlt[i] < openSeriesAlt[i];
+      const isCrossUp =
+        closeSeriesAlt[i - 1] <= openSeriesAlt[i - 1] && closeSeriesAlt[i] > openSeriesAlt[i];
+      const isCrossDn =
+        closeSeriesAlt[i - 1] >= openSeriesAlt[i - 1] && closeSeriesAlt[i] < openSeriesAlt[i];
       if (isCrossUp && isBull) {
         lockedCrossoverPrice = closes[i];
         lockedCrossoverTime = new Date(candles[i].timestamp);
@@ -402,10 +431,10 @@ export class SaiyanOCCEngine {
       signalScore >= 90
         ? SignalGrade.A_PLUS
         : signalScore >= 80
-        ? SignalGrade.A
-        : signalScore >= 70
-        ? SignalGrade.B
-        : SignalGrade.NO_TRADE;
+          ? SignalGrade.A
+          : signalScore >= 70
+            ? SignalGrade.B
+            : SignalGrade.NO_TRADE;
 
     return {
       direction,
@@ -432,10 +461,15 @@ export class SaiyanOCCEngine {
   /**
    * Convert Saiyan OCC analysis into a unified ISignalSetup
    */
-  public static generateSignal(symbol: string, candles: ICandle[], timeframe: string = '15m'): ISignalSetup {
+  public static generateSignal(
+    symbol: string,
+    candles: ICandle[],
+    timeframe: string = '15m',
+  ): ISignalSetup {
     const analysis = this.analyze(candles);
     const lastCandle = candles[candles.length - 1];
-    const timestamp = analysis.triggerTimestamp || (lastCandle ? new Date(lastCandle.timestamp) : new Date());
+    const timestamp =
+      analysis.triggerTimestamp || (lastCandle ? new Date(lastCandle.timestamp) : new Date());
 
     const isBull = analysis.direction === Direction.BULLISH;
     const entry = analysis.entryPrice;

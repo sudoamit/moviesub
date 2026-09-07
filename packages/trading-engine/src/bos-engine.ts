@@ -26,8 +26,7 @@ export class BOSEngine {
       return [];
     }
 
-    const confType =
-      options.confirmationType ?? BOSConfirmationType.CANDLE_CLOSE_AND_DISPLACEMENT;
+    const confType = options.confirmationType ?? BOSConfirmationType.CANDLE_CLOSE_AND_DISPLACEMENT;
     const displacementThreshold = options.displacementThresholdAtr ?? 1.0;
     const atr = calculateATR(candles, 14);
     const bosEvents: IBreakOfStructure[] = [];

@@ -1,7 +1,4 @@
-import {
-  ExpectedValueEngine,
-  ITradePayoffStructure,
-} from '../ai-trade-learning-engine';
+import { ExpectedValueEngine, ITradePayoffStructure } from '../ai-trade-learning-engine';
 
 describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
   describe('1. ExpectedValueEngine — Mathematical Calculations', () => {
@@ -12,14 +9,14 @@ describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
         lossR: 1.0,
       };
 
-      const evResult = ExpectedValueEngine.calculateExpectedValue(0.80, payoff);
+      const evResult = ExpectedValueEngine.calculateExpectedValue(0.8, payoff);
 
-      expect(evResult.winProbability).toBe(0.80);
-      expect(evResult.lossProbability).toBe(0.20);
-      expect(evResult.averageWinR).toBe(2.50);
-      expect(evResult.averageLossR).toBe(1.00);
+      expect(evResult.winProbability).toBe(0.8);
+      expect(evResult.lossProbability).toBe(0.2);
+      expect(evResult.averageWinR).toBe(2.5);
+      expect(evResult.averageLossR).toBe(1.0);
       // EV = 0.8 * 2.5 - 0.2 * 1.0 = 2.0 - 0.2 = +1.80R
-      expect(evResult.expectedValueR).toBe(1.80);
+      expect(evResult.expectedValueR).toBe(1.8);
       expect(evResult.isPositiveExpectancy).toBe(true);
       expect(evResult.kellyCriterionFraction).toBeGreaterThan(0.5);
     });
@@ -37,17 +34,17 @@ describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
       };
 
       // Average Win R = 0.5*1.5 + 0.5*2.5 = 2.0R
-      const evResult = ExpectedValueEngine.calculateExpectedValue(0.60, payoff);
+      const evResult = ExpectedValueEngine.calculateExpectedValue(0.6, payoff);
 
-      expect(evResult.averageWinR).toBe(2.00);
+      expect(evResult.averageWinR).toBe(2.0);
       // EV = 0.6 * 2.0 - 0.4 * 1.0 = 1.2 - 0.4 = +0.80R
-      expect(evResult.expectedValueR).toBe(0.80);
+      expect(evResult.expectedValueR).toBe(0.8);
       expect(evResult.isPositiveExpectancy).toBe(true);
     });
 
     it('identifies negative expectancy trade setups', () => {
       const payoff: ITradePayoffStructure = { targetR: 1.5, lossR: 1.0 };
-      const evResult = ExpectedValueEngine.calculateExpectedValue(0.30, payoff);
+      const evResult = ExpectedValueEngine.calculateExpectedValue(0.3, payoff);
 
       // EV = 0.3 * 1.5 - 0.7 * 1.0 = 0.45 - 0.70 = -0.25R
       expect(evResult.expectedValueR).toBe(-0.25);
@@ -91,7 +88,7 @@ describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
       expect(rec.recommendation).toBe('HIGH_CONFIDENCE');
       expect(rec.confidenceStatus).toBe('CALIBRATED');
       expect(rec.confidenceInterval).not.toBeNull();
-      expect(rec.expectedValueR).toBeGreaterThan(0.50);
+      expect(rec.expectedValueR).toBeGreaterThan(0.5);
       expect(rec.modelVersion).toBe('v1.0.0');
     });
 
@@ -99,7 +96,7 @@ describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
       const payoff: ITradePayoffStructure = { targetR: 2.0, lossR: 1.0 };
 
       const rec = ExpectedValueEngine.evaluateRecommendation({
-        probability: 0.60,
+        probability: 0.6,
         payoff,
         supportingSampleSize: 80,
         calibrationStatus: 'GOOD',
@@ -126,7 +123,7 @@ describe('PHASE 6: Expected Value & AI Recommendation Decision Tree', () => {
       const payoff: ITradePayoffStructure = { targetR: 1.0, lossR: 1.0 };
 
       const rec = ExpectedValueEngine.evaluateRecommendation({
-        probability: 0.40,
+        probability: 0.4,
         payoff,
         supportingSampleSize: 100,
       });

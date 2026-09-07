@@ -19,8 +19,18 @@ interface SMTTimeframeResult {
   timeframe: string;
   divergenceType: 'BEARISH_SMT' | 'BULLISH_SMT' | 'NEUTRAL';
   convictionScore: number;
-  assetASwing: { type: 'HIGH' | 'LOW'; price1: number; price2: number; trend: 'HH' | 'LH' | 'LL' | 'HL' };
-  assetBSwing: { type: 'HIGH' | 'LOW'; price1: number; price2: number; trend: 'HH' | 'LH' | 'LL' | 'HL' };
+  assetASwing: {
+    type: 'HIGH' | 'LOW';
+    price1: number;
+    price2: number;
+    trend: 'HH' | 'LH' | 'LL' | 'HL';
+  };
+  assetBSwing: {
+    type: 'HIGH' | 'LOW';
+    price1: number;
+    price2: number;
+    trend: 'HH' | 'LH' | 'LL' | 'HL';
+  };
   narrative: string;
   actionableSignal: string;
 }
@@ -79,7 +89,9 @@ export const SMTDivergenceWidget: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Detects institutional accumulation & distribution when one benchmark makes a <strong className="text-emerald-400">Higher High (HH)</strong> while correlated benchmark makes a <strong className="text-rose-400">Lower High (LH)</strong>.
+            Detects institutional accumulation & distribution when one benchmark makes a{' '}
+            <strong className="text-emerald-400">Higher High (HH)</strong> while correlated
+            benchmark makes a <strong className="text-rose-400">Lower High (LH)</strong>.
           </p>
         </div>
 
@@ -108,6 +120,16 @@ export const SMTDivergenceWidget: React.FC = () => {
               BTC / ETH
             </button>
             <button
+              onClick={() => selectPreset('XAUUSD', 'BTCUSDT')}
+              className={`px-2 py-1 rounded text-[11px] font-black transition-all ${
+                assetA === 'XAUUSD' && assetB === 'BTCUSDT'
+                  ? 'bg-amber-400 text-slate-950 shadow'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              🥇 GOLD / BTC
+            </button>
+            <button
               onClick={() => selectPreset('RELIANCE', 'HDFCBANK')}
               className={`px-2 py-1 rounded text-[11px] font-black transition-all ${
                 assetA === 'RELIANCE' && assetB === 'HDFCBANK'
@@ -126,9 +148,18 @@ export const SMTDivergenceWidget: React.FC = () => {
               onChange={(e) => setAssetA(e.target.value)}
               className="bg-transparent text-cyan-400 font-bold outline-none px-2 cursor-pointer"
             >
-              <option value="NIFTY" className="bg-slate-900 text-white">NIFTY</option>
-              <option value="BTCUSDT" className="bg-slate-900 text-white">BTCUSDT</option>
-              <option value="RELIANCE" className="bg-slate-900 text-white">RELIANCE</option>
+              <option value="XAUUSD" className="bg-slate-900 text-amber-400">
+                XAUUSD (Gold)
+              </option>
+              <option value="NIFTY" className="bg-slate-900 text-white">
+                NIFTY
+              </option>
+              <option value="BTCUSDT" className="bg-slate-900 text-white">
+                BTCUSDT
+              </option>
+              <option value="RELIANCE" className="bg-slate-900 text-white">
+                RELIANCE
+              </option>
             </select>
             <ArrowRightLeft className="w-3.5 h-3.5 text-slate-500 mx-1" />
             <select
@@ -136,10 +167,24 @@ export const SMTDivergenceWidget: React.FC = () => {
               onChange={(e) => setAssetB(e.target.value)}
               className="bg-transparent text-indigo-400 font-bold outline-none px-2 cursor-pointer"
             >
-              <option value="BANKNIFTY" className="bg-slate-900 text-white">BANKNIFTY</option>
-              <option value="ETHUSDT" className="bg-slate-900 text-white">ETHUSDT</option>
-              <option value="HDFCBANK" className="bg-slate-900 text-white">HDFCBANK</option>
-              <option value="INFY" className="bg-slate-900 text-white">INFY</option>
+              <option value="BANKNIFTY" className="bg-slate-900 text-white">
+                BANKNIFTY
+              </option>
+              <option value="BTCUSDT" className="bg-slate-900 text-white">
+                BTCUSDT
+              </option>
+              <option value="ETHUSDT" className="bg-slate-900 text-white">
+                ETHUSDT
+              </option>
+              <option value="XAUUSD" className="bg-slate-900 text-amber-400">
+                XAUUSD (Gold)
+              </option>
+              <option value="HDFCBANK" className="bg-slate-900 text-white">
+                HDFCBANK
+              </option>
+              <option value="INFY" className="bg-slate-900 text-white">
+                INFY
+              </option>
             </select>
           </div>
 
@@ -160,8 +205,8 @@ export const SMTDivergenceWidget: React.FC = () => {
             isBearish
               ? 'bg-rose-950/20 border-rose-500/50 shadow-lg shadow-rose-950/30'
               : isBullish
-              ? 'bg-emerald-950/20 border-emerald-500/50 shadow-lg shadow-emerald-950/30'
-              : 'bg-slate-900/40 border-slate-800'
+                ? 'bg-emerald-950/20 border-emerald-500/50 shadow-lg shadow-emerald-950/30'
+                : 'bg-slate-900/40 border-slate-800'
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -171,8 +216,8 @@ export const SMTDivergenceWidget: React.FC = () => {
                   isBearish
                     ? 'bg-rose-500/20 text-rose-400 border-rose-500/50'
                     : isBullish
-                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
-                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                      ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
                 }`}
               >
                 {isBearish ? (
@@ -189,24 +234,20 @@ export const SMTDivergenceWidget: React.FC = () => {
                   <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">
                     15M PRIMARY SMT STATUS
                   </span>
-                  <span className="bg-slate-800 text-slate-300 px-1.5 py-0.2 text-[9px] font-bold rounded border border-slate-700">
+                  <span className="bg-slate-800 text-slate-300 px-1.5 py-0.5 text-[9px] font-bold rounded border border-slate-700">
                     {assetA} vs {assetB}
                   </span>
                 </div>
                 <h3
                   className={`text-base sm:text-lg font-black tracking-tight mt-0.5 ${
-                    isBearish
-                      ? 'text-rose-400'
-                      : isBullish
-                      ? 'text-emerald-400'
-                      : 'text-slate-300'
+                    isBearish ? 'text-rose-400' : isBullish ? 'text-emerald-400' : 'text-slate-300'
                   }`}
                 >
                   {primary.divergenceType === 'BEARISH_SMT'
                     ? `🔥 BEARISH SMT DISTRIBUTION (${assetA} ${primary.assetASwing.trend} vs ${assetB} ${primary.assetBSwing.trend})`
                     : primary.divergenceType === 'BULLISH_SMT'
-                    ? `🔥 BULLISH SMT ACCUMULATION (${assetA} ${primary.assetASwing.trend} vs ${assetB} ${primary.assetBSwing.trend})`
-                    : 'SYNCHRONIZED BENCHMARK CORRELATION (NO SMT DIVERGENCE)'}
+                      ? `🔥 BULLISH SMT ACCUMULATION (${assetA} ${primary.assetASwing.trend} vs ${assetB} ${primary.assetBSwing.trend})`
+                      : 'SYNCHRONIZED BENCHMARK CORRELATION (NO SMT DIVERGENCE)'}
                 </h3>
               </div>
             </div>
@@ -226,8 +267,8 @@ export const SMTDivergenceWidget: React.FC = () => {
                     primary.actionableSignal === 'STRONG_SELL'
                       ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
                       : primary.actionableSignal === 'STRONG_BUY'
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                      : 'bg-slate-800 text-slate-400'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-400'
                   }`}
                 >
                   {primary.actionableSignal}
@@ -238,9 +279,7 @@ export const SMTDivergenceWidget: React.FC = () => {
 
           {/* Narrative description */}
           <div className="mt-3 pt-3 border-t border-slate-800/60 bg-slate-950/50 p-2.5 rounded-lg">
-            <p className="text-xs text-slate-300 leading-relaxed font-sans">
-              {primary.narrative}
-            </p>
+            <p className="text-xs text-slate-300 leading-relaxed font-sans">{primary.narrative}</p>
           </div>
         </div>
       )}
@@ -257,7 +296,10 @@ export const SMTDivergenceWidget: React.FC = () => {
           {mtfData && (
             <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
-              Confluence: <strong className="text-cyan-300">{mtfData.divergenceConfluenceCount || 0} / 6 Timeframes Diverging</strong>
+              Confluence:{' '}
+              <strong className="text-cyan-300">
+                {mtfData.divergenceConfluenceCount || 0} / 6 Timeframes Diverging
+              </strong>
             </span>
           )}
         </div>
@@ -285,14 +327,16 @@ export const SMTDivergenceWidget: React.FC = () => {
                   isTFBearish
                     ? 'bg-rose-950/30 border-rose-500/60 text-rose-300 shadow-md shadow-rose-950/20'
                     : isTFBullish
-                    ? 'bg-emerald-950/30 border-emerald-500/60 text-emerald-300 shadow-md shadow-emerald-950/20'
-                    : 'bg-slate-950/60 border-slate-800 text-slate-400'
+                      ? 'bg-emerald-950/30 border-emerald-500/60 text-emerald-300 shadow-md shadow-emerald-950/20'
+                      : 'bg-slate-950/60 border-slate-800 text-slate-400'
                 }`}
               >
                 <div className="flex items-center justify-between text-[10px] mb-1 font-bold">
-                  <span className="text-white font-mono">{labelMap[tfItem.timeframe] || tfItem.timeframe}</span>
+                  <span className="text-white font-mono">
+                    {labelMap[tfItem.timeframe] || tfItem.timeframe}
+                  </span>
                   {isTFActive ? (
-                    <span className="px-1 py-0.2 rounded text-[8px] bg-cyan-950 text-cyan-300 border border-cyan-700">
+                    <span className="px-1 py-0.5 rounded text-[8px] bg-cyan-950 text-cyan-300 border border-cyan-700">
                       {tfItem.convictionScore}%
                     </span>
                   ) : (
@@ -303,7 +347,11 @@ export const SMTDivergenceWidget: React.FC = () => {
                 <div className="mt-1">
                   <span
                     className={`text-xs font-black block tracking-tight ${
-                      isTFBearish ? 'text-rose-400' : isTFBullish ? 'text-emerald-400' : 'text-slate-500'
+                      isTFBearish
+                        ? 'text-rose-400'
+                        : isTFBullish
+                          ? 'text-emerald-400'
+                          : 'text-slate-500'
                     }`}
                   >
                     {isTFBearish ? 'BEARISH SMT' : isTFBullish ? 'BULLISH SMT' : 'SYNCHRONIZED'}
@@ -337,17 +385,22 @@ export const SMTDivergenceWidget: React.FC = () => {
             <div className="flex justify-between items-center text-xs">
               <span className="text-cyan-400 font-bold">{assetA} Swing Footprint</span>
               <span className="bg-cyan-950 text-cyan-400 px-2 py-0.5 rounded text-[10px] font-bold border border-cyan-800">
-                Pattern: {primary.assetASwing.trend} ({primary.assetASwing.type === 'HIGH' ? 'Highs' : 'Lows'})
+                Pattern: {primary.assetASwing.trend} (
+                {primary.assetASwing.type === 'HIGH' ? 'Highs' : 'Lows'})
               </span>
             </div>
             <div className="text-xs space-y-1 text-slate-300">
               <div className="flex justify-between">
                 <span className="text-slate-400">Previous Swing:</span>
-                <span className="font-bold text-white">₹{primary.assetASwing.price1.toFixed(2)}</span>
+                <span className="font-bold text-white">
+                  ₹{primary.assetASwing.price1.toFixed(2)}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Current Swing:</span>
-                <span className="font-bold text-cyan-300">₹{primary.assetASwing.price2.toFixed(2)}</span>
+                <span className="font-bold text-cyan-300">
+                  ₹{primary.assetASwing.price2.toFixed(2)}
+                </span>
               </div>
             </div>
           </div>
@@ -356,17 +409,22 @@ export const SMTDivergenceWidget: React.FC = () => {
             <div className="flex justify-between items-center text-xs">
               <span className="text-indigo-400 font-bold">{assetB} Swing Footprint</span>
               <span className="bg-indigo-950 text-indigo-400 px-2 py-0.5 rounded text-[10px] font-bold border border-indigo-800">
-                Pattern: {primary.assetBSwing.trend} ({primary.assetBSwing.type === 'HIGH' ? 'Highs' : 'Lows'})
+                Pattern: {primary.assetBSwing.trend} (
+                {primary.assetBSwing.type === 'HIGH' ? 'Highs' : 'Lows'})
               </span>
             </div>
             <div className="text-xs space-y-1 text-slate-300">
               <div className="flex justify-between">
                 <span className="text-slate-400">Previous Swing:</span>
-                <span className="font-bold text-white">₹{primary.assetBSwing.price1.toFixed(2)}</span>
+                <span className="font-bold text-white">
+                  ₹{primary.assetBSwing.price1.toFixed(2)}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Current Swing:</span>
-                <span className="font-bold text-indigo-300">₹{primary.assetBSwing.price2.toFixed(2)}</span>
+                <span className="font-bold text-indigo-300">
+                  ₹{primary.assetBSwing.price2.toFixed(2)}
+                </span>
               </div>
             </div>
           </div>

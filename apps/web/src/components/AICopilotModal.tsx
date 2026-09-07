@@ -77,7 +77,9 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
                   DETERMINISTIC AI
                 </span>
               </h3>
-              <p className="text-[11px] text-slate-400">Mathematical Smart Money Concept Reasoning & Institutional Briefing</p>
+              <p className="text-[11px] text-slate-400">
+                Mathematical Smart Money Concept Reasoning & Institutional Briefing
+              </p>
             </div>
           </div>
 
@@ -137,7 +139,9 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
               {/* Executive Summary Card */}
               <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400 uppercase font-bold">INSTITUTIONAL STRUCTURAL BIAS</span>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold">
+                    INSTITUTIONAL STRUCTURAL BIAS
+                  </span>
                   <span
                     className={`px-2.5 py-0.5 rounded text-xs font-black border ${
                       symbolData.bias === 'BULLISH'
@@ -185,19 +189,27 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div className="bg-slate-950 p-2 rounded border border-slate-800">
                       <span className="text-[9px] text-slate-500 block">OPTIMAL ENTRY</span>
-                      <strong className="text-cyan-300">₹{symbolData.riskParameters.optimalEntry?.toFixed(2)}</strong>
+                      <strong className="text-cyan-300">
+                        ₹{symbolData.riskParameters.optimalEntry?.toFixed(2)}
+                      </strong>
                     </div>
                     <div className="bg-slate-950 p-2 rounded border border-slate-800">
                       <span className="text-[9px] text-slate-500 block">INVALIDATION SL</span>
-                      <strong className="text-rose-400">₹{symbolData.riskParameters.invalidationStopLoss?.toFixed(2)}</strong>
+                      <strong className="text-rose-400">
+                        ₹{symbolData.riskParameters.invalidationStopLoss?.toFixed(2)}
+                      </strong>
                     </div>
                     <div className="bg-slate-950 p-2 rounded border border-slate-800">
                       <span className="text-[9px] text-slate-500 block">TARGET 2 (2.5R)</span>
-                      <strong className="text-emerald-400">₹{symbolData.riskParameters.targets?.tp2?.toFixed(2)}</strong>
+                      <strong className="text-emerald-400">
+                        ₹{symbolData.riskParameters.targets?.tp2?.toFixed(2)}
+                      </strong>
                     </div>
                     <div className="bg-slate-950 p-2 rounded border border-slate-800">
                       <span className="text-[9px] text-slate-500 block">RISK:REWARD</span>
-                      <strong className="text-white">{symbolData.riskParameters.riskRewardRatio}</strong>
+                      <strong className="text-white">
+                        {symbolData.riskParameters.riskRewardRatio}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -206,7 +218,8 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
               {/* Confirmed Checklist */}
               <div className="bg-slate-900/60 border border-slate-800 p-3.5 rounded-xl space-y-2">
                 <span className="text-[10px] text-slate-400 uppercase font-bold block">
-                  CONFIRMED INSTITUTIONAL CONFLUENCE CRITERIA ({symbolData.confirmedChecklist?.length || 0})
+                  CONFIRMED INSTITUTIONAL CONFLUENCE CRITERIA (
+                  {symbolData.confirmedChecklist?.length || 0})
                 </span>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                   {symbolData.confirmedChecklist?.map((item: string, idx: number) => (
@@ -224,16 +237,28 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
               {briefingData?.marketBreadth && (
                 <div className="grid grid-cols-3 gap-3">
                   <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl text-center">
-                    <span className="text-[10px] text-slate-400 block uppercase">ASSETS ANALYZED</span>
-                    <strong className="text-xl text-white block mt-0.5">{briefingData.marketBreadth.totalAnalyzed}</strong>
+                    <span className="text-[10px] text-slate-400 block uppercase">
+                      ASSETS ANALYZED
+                    </span>
+                    <strong className="text-xl text-white block mt-0.5">
+                      {briefingData.marketBreadth.totalAnalyzed}
+                    </strong>
                   </div>
                   <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl text-center">
-                    <span className="text-[10px] text-slate-400 block uppercase">BULLISH ASSETS</span>
-                    <strong className="text-xl text-emerald-400 block mt-0.5">{briefingData.marketBreadth.bullishAssets}</strong>
+                    <span className="text-[10px] text-slate-400 block uppercase">
+                      BULLISH ASSETS
+                    </span>
+                    <strong className="text-xl text-emerald-400 block mt-0.5">
+                      {briefingData.marketBreadth.bullishAssets}
+                    </strong>
                   </div>
                   <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl text-center">
-                    <span className="text-[10px] text-slate-400 block uppercase">BEARISH ASSETS</span>
-                    <strong className="text-xl text-rose-400 block mt-0.5">{briefingData.marketBreadth.bearishAssets}</strong>
+                    <span className="text-[10px] text-slate-400 block uppercase">
+                      BEARISH ASSETS
+                    </span>
+                    <strong className="text-xl text-rose-400 block mt-0.5">
+                      {briefingData.marketBreadth.bearishAssets}
+                    </strong>
                   </div>
                 </div>
               )}
@@ -262,16 +287,27 @@ export const AICopilotModal: React.FC<AICopilotModalProps> = ({
                           {opp.direction}
                         </span>
                       </div>
-                      <span className="text-cyan-300 font-bold">Score: {opp.score}/100 (Grade {opp.grade})</span>
+                      <span className="text-cyan-300 font-bold">
+                        Score: {opp.score}/100 (Grade {opp.grade})
+                      </span>
                     </div>
 
                     <p className="text-[11px] text-slate-300 font-sans">{opp.summary}</p>
 
                     <div className="flex flex-wrap items-center gap-3 text-[10px] text-slate-400 pt-1 border-t border-slate-800">
-                      <span>Entry: <strong className="text-white">₹{opp.optimalEntry?.toFixed(2)}</strong></span>
-                      <span>SL: <strong className="text-rose-400">₹{opp.stopLoss?.toFixed(2)}</strong></span>
-                      <span>TP2: <strong className="text-emerald-400">₹{opp.tp2?.toFixed(2)}</strong></span>
-                      <span>R:R: <strong className="text-white">{opp.rr}</strong></span>
+                      <span>
+                        Entry:{' '}
+                        <strong className="text-white">₹{opp.optimalEntry?.toFixed(2)}</strong>
+                      </span>
+                      <span>
+                        SL: <strong className="text-rose-400">₹{opp.stopLoss?.toFixed(2)}</strong>
+                      </span>
+                      <span>
+                        TP2: <strong className="text-emerald-400">₹{opp.tp2?.toFixed(2)}</strong>
+                      </span>
+                      <span>
+                        R:R: <strong className="text-white">{opp.rr}</strong>
+                      </span>
                     </div>
                   </div>
                 ))}

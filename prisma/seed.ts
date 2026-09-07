@@ -51,6 +51,18 @@ async function main() {
       isActive: true,
     },
     {
+      symbol: 'XAUUSD',
+      name: 'Gold Spot / US Dollar',
+      exchange: 'COMEX',
+      assetType: AssetType.COMMODITY,
+      tickSize: 0.01,
+      lotSize: 1,
+      contractSize: 1,
+      currency: 'USD',
+      tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
+      isActive: true,
+    },
+    {
       symbol: 'RELIANCE',
       name: 'Reliance Industries Ltd.',
       exchange: 'NSE',
@@ -157,8 +169,18 @@ async function main() {
       // Seed Redis latest candle and buffer
       if (validCandles.length > 0 && redis.status === 'ready') {
         const latest = validCandles[validCandles.length - 1];
-        await redis.set(REDIS_KEYS.LATEST_CANDLE(inst.symbol, tfStr), JSON.stringify(latest), 'EX', 86400);
-        await redis.set(REDIS_KEYS.CANDLE_BUFFER(inst.symbol, tfStr), JSON.stringify(validCandles), 'EX', 86400);
+        await redis.set(
+          REDIS_KEYS.LATEST_CANDLE(inst.symbol, tfStr),
+          JSON.stringify(latest),
+          'EX',
+          86400,
+        );
+        await redis.set(
+          REDIS_KEYS.CANDLE_BUFFER(inst.symbol, tfStr),
+          JSON.stringify(validCandles),
+          'EX',
+          86400,
+        );
       }
 
       console.log(`Ingested ${validCandles.length} candles for ${inst.symbol} [${tfStr}]`);

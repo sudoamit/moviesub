@@ -3,10 +3,10 @@ const prisma = new PrismaClient();
 
 const TARGET_PRICES = {
   NIFTY: 24175.65,
-  BANKNIFTY: 51350.00,
-  RELIANCE: 1285.00,
-  HDFCBANK: 1620.00,
-  INFY: 1870.00,
+  BANKNIFTY: 51350.0,
+  RELIANCE: 1285.0,
+  HDFCBANK: 1620.0,
+  INFY: 1870.0,
 };
 
 const TIMEFRAMES = [

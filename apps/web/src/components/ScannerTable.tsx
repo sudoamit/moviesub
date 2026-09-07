@@ -172,8 +172,8 @@ export const ScannerTable: React.FC<ScannerTableProps> = ({
                             signal.score >= 85
                               ? 'bg-emerald-400'
                               : signal.score >= 75
-                              ? 'bg-cyan-400'
-                              : 'bg-amber-400'
+                                ? 'bg-cyan-400'
+                                : 'bg-amber-400'
                           }`}
                           style={{ width: `${signal.score}%` }}
                         />
@@ -194,17 +194,13 @@ export const ScannerTable: React.FC<ScannerTableProps> = ({
                     </span>
                   </td>
 
-                  <td className="py-3 text-slate-400 font-mono text-[11px]">
-                    {signal.timeframe}
-                  </td>
+                  <td className="py-3 text-slate-400 font-mono text-[11px]">{signal.timeframe}</td>
 
                   <td className="py-3 font-mono text-white text-[11px]">
                     {signal.entryZone.optimal}
                   </td>
 
-                  <td className="py-3 font-mono text-rose-400 text-[11px]">
-                    {signal.stopLoss}
-                  </td>
+                  <td className="py-3 font-mono text-rose-400 text-[11px]">{signal.stopLoss}</td>
 
                   <td className="py-3 font-mono text-emerald-400 text-[11px]">
                     {signal.takeProfits.tp2}

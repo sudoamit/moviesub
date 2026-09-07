@@ -84,7 +84,11 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
                 className="bg-slate-800 border border-slate-700 text-cyan-300 text-xs px-2.5 py-1.5 rounded-lg font-bold outline-none cursor-pointer"
               >
                 {data.availableExpiries.map((exp: any) => (
-                  <option key={exp.dateString} value={exp.dateString} className="bg-slate-900 text-white">
+                  <option
+                    key={exp.dateString}
+                    value={exp.dateString}
+                    className="bg-slate-900 text-white"
+                  >
                     {exp.formattedLabel}
                   </option>
                 ))}
@@ -112,7 +116,9 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 p-3 bg-slate-950/80 border-b border-slate-800 text-xs">
             <div className="bg-slate-900/90 p-2 rounded-lg border border-slate-800">
               <span className="text-[10px] text-slate-400 block uppercase">UNDERLYING SPOT</span>
-              <span className="text-sm font-black text-white mt-0.5 block">₹{Number(data.spotPrice).toFixed(2)}</span>
+              <span className="text-sm font-black text-white mt-0.5 block">
+                ₹{Number(data.spotPrice).toFixed(2)}
+              </span>
               <span className="text-[9px] text-slate-500 block">ATM: ₹{data.atmStrike}</span>
             </div>
 
@@ -120,7 +126,9 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
               <span className="text-[10px] text-amber-400 block uppercase font-bold flex items-center gap-1">
                 <Target className="w-3 h-3 text-amber-400" /> MAX PAIN STRIKE
               </span>
-              <span className="text-sm font-black text-amber-300 mt-0.5 block">₹{data.maxPain}</span>
+              <span className="text-sm font-black text-amber-300 mt-0.5 block">
+                ₹{data.maxPain}
+              </span>
               <span className="text-[9px] text-amber-500/90 block">MM Minimum Payout Level</span>
             </div>
 
@@ -128,22 +136,32 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
               <span className="text-[10px] text-purple-400 block uppercase font-bold flex items-center gap-1">
                 <Zap className="w-3 h-3 text-purple-400" /> GAMMA FLIP LEVEL
               </span>
-              <span className="text-sm font-black text-purple-300 mt-0.5 block">₹{data.gammaFlipLevel || data.atmStrike}</span>
+              <span className="text-sm font-black text-purple-300 mt-0.5 block">
+                ₹{data.gammaFlipLevel || data.atmStrike}
+              </span>
               <span className="text-[9px] text-purple-400/90 block">Zero-Gamma Threshold</span>
             </div>
 
             <div className="bg-slate-900/90 p-2 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-cyan-400 block uppercase font-bold">NET GAMMA (GEX)</span>
-              <span className={`text-sm font-black mt-0.5 block ${(data.netGammaExposure || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <span className="text-[10px] text-cyan-400 block uppercase font-bold">
+                NET GAMMA (GEX)
+              </span>
+              <span
+                className={`text-sm font-black mt-0.5 block ${(data.netGammaExposure || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+              >
                 {(data.netGammaExposure || 0) >= 0 ? '+' : ''}₹{data.netGammaExposure || 0} Cr
               </span>
               <span className="text-[9px] text-slate-500 block">
-                {(data.netGammaExposure || 0) >= 0 ? 'Dampening (Long γ)' : 'Accelerating (Short γ)'}
+                {(data.netGammaExposure || 0) >= 0
+                  ? 'Dampening (Long γ)'
+                  : 'Accelerating (Short γ)'}
               </span>
             </div>
 
             <div className="bg-slate-900/90 p-2 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-slate-400 block uppercase">PUT-CALL RATIO (PCR)</span>
+              <span className="text-[10px] text-slate-400 block uppercase">
+                PUT-CALL RATIO (PCR)
+              </span>
               <span
                 className={`text-sm font-black mt-0.5 block ${
                   data.pcr > 1 ? 'text-emerald-400' : 'text-rose-400'
@@ -155,10 +173,16 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
             </div>
 
             <div className="bg-slate-900/90 p-2 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-slate-400 block uppercase">TOTAL OPEN INTEREST</span>
+              <span className="text-[10px] text-slate-400 block uppercase">
+                TOTAL OPEN INTEREST
+              </span>
               <div className="flex items-center justify-between text-[11px] mt-0.5">
-                <span className="text-emerald-400 font-bold font-mono">C: {(data.totalCallOI / 100000).toFixed(1)}L</span>
-                <span className="text-rose-400 font-bold font-mono">P: {(data.totalPutOI / 100000).toFixed(1)}L</span>
+                <span className="text-emerald-400 font-bold font-mono">
+                  C: {(data.totalCallOI / 100000).toFixed(1)}L
+                </span>
+                <span className="text-rose-400 font-bold font-mono">
+                  P: {(data.totalPutOI / 100000).toFixed(1)}L
+                </span>
               </div>
               <span className="text-[9px] text-slate-500 block">Weekly Expiry Open Contracts</span>
             </div>
@@ -176,17 +200,26 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
               <thead>
                 <tr className="bg-slate-900 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800 sticky top-0 z-10">
                   {/* CALLS HEADER */}
-                  <th className="py-2 px-2 text-center bg-emerald-950/40 text-emerald-300 font-bold border-r border-slate-800" colSpan={5}>
+                  <th
+                    className="py-2 px-2 text-center bg-emerald-950/40 text-emerald-300 font-bold border-r border-slate-800"
+                    colSpan={5}
+                  >
                     CALL OPTIONS (CE) — RESISTANCE
                   </th>
 
                   {/* STRIKE & GEX HEADER */}
-                  <th className="py-2 px-3 text-center bg-slate-950 font-black text-white border-r border-slate-800" colSpan={1}>
+                  <th
+                    className="py-2 px-3 text-center bg-slate-950 font-black text-white border-r border-slate-800"
+                    colSpan={1}
+                  >
                     STRIKE & GEX
                   </th>
 
                   {/* PUTS HEADER */}
-                  <th className="py-2 px-2 text-center bg-rose-950/40 text-rose-300 font-bold" colSpan={5}>
+                  <th
+                    className="py-2 px-2 text-center bg-rose-950/40 text-rose-300 font-bold"
+                    colSpan={5}
+                  >
                     PUT OPTIONS (PE) — SUPPORT
                   </th>
                 </tr>
@@ -195,11 +228,15 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
                   <th className="py-1.5 px-2 text-left">OI (Qty)</th>
                   <th className="py-1.5 px-2 text-left">IV %</th>
                   <th className="py-1.5 px-2 text-right">Delta</th>
-                  <th className="py-1.5 px-2 text-right text-emerald-400 border-r border-slate-800">Call LTP (₹)</th>
+                  <th className="py-1.5 px-2 text-right text-emerald-400 border-r border-slate-800">
+                    Call LTP (₹)
+                  </th>
 
                   <th className="py-1.5 px-3 text-center text-white bg-slate-900">STRIKE</th>
 
-                  <th className="py-1.5 px-2 text-left text-rose-400 border-l border-slate-800">Put LTP (₹)</th>
+                  <th className="py-1.5 px-2 text-left text-rose-400 border-l border-slate-800">
+                    Put LTP (₹)
+                  </th>
                   <th className="py-1.5 px-2 text-left">Delta</th>
                   <th className="py-1.5 px-2 text-right">IV %</th>
                   <th className="py-1.5 px-2 text-right">OI (Qty)</th>
@@ -215,7 +252,9 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
                   const isPutITM = data.spotPrice < s.strikePrice;
 
                   // Visual OI Bar Percent relative to max
-                  const maxOI = Math.max(...data.strikes.map((x: any) => Math.max(x.call.oi, x.put.oi))) || 100000;
+                  const maxOI =
+                    Math.max(...data.strikes.map((x: any) => Math.max(x.call.oi, x.put.oi))) ||
+                    100000;
                   const callBarPct = Math.min(100, Math.max(5, (s.call.oi / maxOI) * 100));
                   const putBarPct = Math.min(100, Math.max(5, (s.put.oi / maxOI) * 100));
 
@@ -226,14 +265,16 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
                         isATM
                           ? 'bg-cyan-950/40 ring-1 ring-cyan-500/50'
                           : isMaxPain
-                          ? 'bg-amber-950/20'
-                          : isGammaFlip
-                          ? 'bg-purple-950/20'
-                          : ''
+                            ? 'bg-amber-950/20'
+                            : isGammaFlip
+                              ? 'bg-purple-950/20'
+                              : ''
                       }`}
                     >
                       {/* CALL OI VISUAL BAR */}
-                      <td className={`py-2 px-2 text-[10px] w-24 ${isCallITM ? 'bg-emerald-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] w-24 ${isCallITM ? 'bg-emerald-950/20' : ''}`}
+                      >
                         <div className="w-full bg-slate-900 rounded h-2 overflow-hidden flex items-center justify-end">
                           <div
                             className="bg-gradient-to-l from-emerald-400 to-teal-600 h-2 rounded"
@@ -244,75 +285,117 @@ export const OptionChainModal: React.FC<OptionChainModalProps> = ({
                       </td>
 
                       {/* CALL OI & OI CHANGE */}
-                      <td className={`py-2 px-2 text-[10px] ${isCallITM ? 'bg-emerald-950/20' : ''}`}>
-                        <span className="text-slate-200 font-bold">{(s.call.oi / 1000).toFixed(1)}k</span>
+                      <td
+                        className={`py-2 px-2 text-[10px] ${isCallITM ? 'bg-emerald-950/20' : ''}`}
+                      >
+                        <span className="text-slate-200 font-bold">
+                          {(s.call.oi / 1000).toFixed(1)}k
+                        </span>
                         {s.call.oiChange !== 0 && (
-                          <span className={`block text-[8px] ${s.call.oiChange > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {s.call.oiChange > 0 ? '+' : ''}{(s.call.oiChange / 1000).toFixed(1)}k
+                          <span
+                            className={`block text-[8px] ${s.call.oiChange > 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                          >
+                            {s.call.oiChange > 0 ? '+' : ''}
+                            {(s.call.oiChange / 1000).toFixed(1)}k
                           </span>
                         )}
                       </td>
 
                       {/* CALL IV */}
-                      <td className={`py-2 px-2 text-[10px] text-slate-400 ${isCallITM ? 'bg-emerald-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] text-slate-400 ${isCallITM ? 'bg-emerald-950/20' : ''}`}
+                      >
                         {s.call.iv}%
                       </td>
 
                       {/* CALL Delta */}
-                      <td className={`py-2 px-2 text-[10px] text-right text-slate-300 ${isCallITM ? 'bg-emerald-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] text-right text-slate-300 ${isCallITM ? 'bg-emerald-950/20' : ''}`}
+                      >
                         {s.call.delta.toFixed(2)}
                       </td>
 
                       {/* CALL LTP */}
-                      <td className={`py-2 px-2 text-right font-bold text-emerald-400 border-r border-slate-800 ${isCallITM ? 'bg-emerald-950/30' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-right font-bold text-emerald-400 border-r border-slate-800 ${isCallITM ? 'bg-emerald-950/30' : ''}`}
+                      >
                         ₹{s.call.ltp.toFixed(2)}
                       </td>
 
                       {/* STRIKE PRICE & KEY HEDGING LEVELS (Center) */}
-                      <td className={`py-2 px-3 text-center ${
-                        isATM
-                          ? 'bg-cyan-500 text-slate-950 font-black'
-                          : isMaxPain
-                          ? 'bg-amber-950 text-amber-300 font-black border-y border-amber-500/50'
-                          : isGammaFlip
-                          ? 'bg-purple-950 text-purple-300 font-black border-y border-purple-500/50'
-                          : 'bg-slate-900/90 text-white font-bold'
-                      }`}>
+                      <td
+                        className={`py-2 px-3 text-center ${
+                          isATM
+                            ? 'bg-cyan-500 text-slate-950 font-black'
+                            : isMaxPain
+                              ? 'bg-amber-950 text-amber-300 font-black border-y border-amber-500/50'
+                              : isGammaFlip
+                                ? 'bg-purple-950 text-purple-300 font-black border-y border-purple-500/50'
+                                : 'bg-slate-900/90 text-white font-bold'
+                        }`}
+                      >
                         <div className="flex flex-col items-center">
                           <span className="text-xs">{s.strikePrice}</span>
-                          {isATM && <span className="text-[8px] bg-slate-950 text-cyan-300 px-1 rounded uppercase font-black">ATM</span>}
-                          {isMaxPain && !isATM && <span className="text-[8px] bg-amber-500 text-slate-950 px-1 rounded uppercase font-black">MAX PAIN</span>}
-                          {isGammaFlip && !isATM && <span className="text-[8px] bg-purple-500 text-white px-1 rounded uppercase font-black">γ FLIP</span>}
+                          {isATM && (
+                            <span className="text-[8px] bg-slate-950 text-cyan-300 px-1 rounded uppercase font-black">
+                              ATM
+                            </span>
+                          )}
+                          {isMaxPain && !isATM && (
+                            <span className="text-[8px] bg-amber-500 text-slate-950 px-1 rounded uppercase font-black">
+                              MAX PAIN
+                            </span>
+                          )}
+                          {isGammaFlip && !isATM && (
+                            <span className="text-[8px] bg-purple-500 text-white px-1 rounded uppercase font-black">
+                              γ FLIP
+                            </span>
+                          )}
                         </div>
                       </td>
 
                       {/* PUT LTP */}
-                      <td className={`py-2 px-2 text-left font-bold text-rose-400 border-l border-slate-800 ${isPutITM ? 'bg-rose-950/30' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-left font-bold text-rose-400 border-l border-slate-800 ${isPutITM ? 'bg-rose-950/30' : ''}`}
+                      >
                         ₹{s.put.ltp.toFixed(2)}
                       </td>
 
                       {/* PUT Delta */}
-                      <td className={`py-2 px-2 text-[10px] text-slate-300 ${isPutITM ? 'bg-rose-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] text-slate-300 ${isPutITM ? 'bg-rose-950/20' : ''}`}
+                      >
                         {s.put.delta.toFixed(2)}
                       </td>
 
                       {/* PUT IV */}
-                      <td className={`py-2 px-2 text-[10px] text-right text-slate-400 ${isPutITM ? 'bg-rose-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] text-right text-slate-400 ${isPutITM ? 'bg-rose-950/20' : ''}`}
+                      >
                         {s.put.iv}%
                       </td>
 
                       {/* PUT OI & OI CHANGE */}
-                      <td className={`py-2 px-2 text-[10px] text-right ${isPutITM ? 'bg-rose-950/20' : ''}`}>
-                        <span className="text-slate-200 font-bold">{(s.put.oi / 1000).toFixed(1)}k</span>
+                      <td
+                        className={`py-2 px-2 text-[10px] text-right ${isPutITM ? 'bg-rose-950/20' : ''}`}
+                      >
+                        <span className="text-slate-200 font-bold">
+                          {(s.put.oi / 1000).toFixed(1)}k
+                        </span>
                         {s.put.oiChange !== 0 && (
-                          <span className={`block text-[8px] ${s.put.oiChange > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {s.put.oiChange > 0 ? '+' : ''}{(s.put.oiChange / 1000).toFixed(1)}k
+                          <span
+                            className={`block text-[8px] ${s.put.oiChange > 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                          >
+                            {s.put.oiChange > 0 ? '+' : ''}
+                            {(s.put.oiChange / 1000).toFixed(1)}k
                           </span>
                         )}
                       </td>
 
                       {/* PUT OI VISUAL BAR */}
-                      <td className={`py-2 px-2 text-[10px] w-24 ${isPutITM ? 'bg-rose-950/20' : ''}`}>
+                      <td
+                        className={`py-2 px-2 text-[10px] w-24 ${isPutITM ? 'bg-rose-950/20' : ''}`}
+                      >
                         <div className="w-full bg-slate-900 rounded h-2 overflow-hidden flex items-center justify-start">
                           <div
                             className="bg-gradient-to-r from-rose-400 to-amber-600 h-2 rounded"

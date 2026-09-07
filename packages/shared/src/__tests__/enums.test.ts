@@ -1,4 +1,11 @@
-import { AssetType, Timeframe, Direction, SignalState, SignalGrade, MarketRegimeType } from '../enums';
+import {
+  AssetType,
+  Timeframe,
+  Direction,
+  SignalState,
+  SignalGrade,
+  MarketRegimeType,
+} from '../enums';
 
 describe('Shared Enums', () => {
   it('should verify supported AssetTypes', () => {

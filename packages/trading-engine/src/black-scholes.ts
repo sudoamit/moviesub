@@ -29,7 +29,7 @@ export class BlackScholesModel {
     const sign = x < 0 ? -1 : 1;
     const absX = Math.abs(x) / Math.sqrt(2.0);
     const t = 1.0 / (1.0 + p * absX);
-    const erf = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX);
+    const erf = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX);
     return 0.5 * (1.0 + sign * erf);
   }
 
@@ -87,7 +87,9 @@ export class BlackScholesModel {
       intrinsicValue = Math.max(0, S - K);
       delta = Number(nd1.toFixed(3));
       // Daily theta in rupees
-      theta = Number(((-(S * nPdfD1 * sigma) / (2.0 * sqrtT) - r * K * expDiscount * nd2) / 365.0).toFixed(2));
+      theta = Number(
+        ((-(S * nPdfD1 * sigma) / (2.0 * sqrtT) - r * K * expDiscount * nd2) / 365.0).toFixed(2),
+      );
       rho = Number(((K * T * expDiscount * nd2) / 100.0).toFixed(3));
     } else {
       const nMinusD1 = this.normalCDF(-d1);
@@ -96,7 +98,11 @@ export class BlackScholesModel {
       intrinsicValue = Math.max(0, K - S);
       delta = Number((nd1 - 1.0).toFixed(3));
       // Daily theta in rupees
-      theta = Number(((-(S * nPdfD1 * sigma) / (2.0 * sqrtT) + r * K * expDiscount * nMinusD2) / 365.0).toFixed(2));
+      theta = Number(
+        ((-(S * nPdfD1 * sigma) / (2.0 * sqrtT) + r * K * expDiscount * nMinusD2) / 365.0).toFixed(
+          2,
+        ),
+      );
       rho = Number(((-K * T * expDiscount * nMinusD2) / 100.0).toFixed(3));
     }
 

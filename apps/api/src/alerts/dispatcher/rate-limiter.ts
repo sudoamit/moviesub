@@ -6,7 +6,7 @@ export interface IRateLimitOptions {
   channel: string;
   cooldownSeconds?: number;
   quietHoursStart?: number; // 0-23 hour e.g. 23 (11 PM)
-  quietHoursEnd?: number;   // 0-23 hour e.g. 7 (7 AM)
+  quietHoursEnd?: number; // 0-23 hour e.g. 7 (7 AM)
 }
 
 @Injectable()
@@ -31,7 +31,10 @@ export class AlertRateLimiter {
 
       if (inQuietHours) {
         this.logger.debug(`Alert for ${symbol} suppressed: Quiet hours active (${currentHour}:00)`);
-        return { allowed: false, reason: `Quiet hours active (${quietHoursStart}:00 - ${quietHoursEnd}:00)` };
+        return {
+          allowed: false,
+          reason: `Quiet hours active (${quietHoursStart}:00 - ${quietHoursEnd}:00)`,
+        };
       }
     }
 
@@ -50,7 +53,11 @@ export class AlertRateLimiter {
   /**
    * Records a successful dispatch and sets the cooldown lock
    */
-  async recordDispatch(symbol: string, channel: string, cooldownSeconds: number = 900): Promise<void> {
+  async recordDispatch(
+    symbol: string,
+    channel: string,
+    cooldownSeconds: number = 900,
+  ): Promise<void> {
     const key = `alert:cooldown:${symbol.toUpperCase()}:${channel.toLowerCase()}`;
     await this.redis.set(key, new Date().toISOString(), cooldownSeconds);
   }

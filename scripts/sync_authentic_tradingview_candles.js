@@ -117,7 +117,12 @@ async function syncAllAuthenticExchangeCandles() {
         if (config.type === 'CRYPTO') {
           candles = await fetchBinanceCandles(config.binanceSymbol, tf.binanceInterval, tf.limit);
         } else {
-          candles = await fetchYahooCandles(config.yahooSymbol, tf.yahooInterval, tf.yahooRange, tf.limit);
+          candles = await fetchYahooCandles(
+            config.yahooSymbol,
+            tf.yahooInterval,
+            tf.yahooRange,
+            tf.limit,
+          );
         }
       } catch (err) {
         console.warn(`  Failed fetching ${sym} ${tf.tf}: ${err.message}`);
@@ -159,7 +164,9 @@ async function syncAllAuthenticExchangeCandles() {
         skipDuplicates: true,
       });
 
-      console.log(`  ✓ ${sym} [${tf.tf}]: Saved ${candles.length} authentic candles. (Latest Close: ${candles[candles.length - 1].close})`);
+      console.log(
+        `  ✓ ${sym} [${tf.tf}]: Saved ${candles.length} authentic candles. (Latest Close: ${candles[candles.length - 1].close})`,
+      );
     }
 
     if (latestSpotPrice) {

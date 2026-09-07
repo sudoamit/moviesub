@@ -30,8 +30,14 @@ export class AccuracyService {
   /**
    * Helper to fetch parsed candles for an instrument
    */
-  private async getCandlesForInstrument(symbol: string, timeframe: string, limit: number = 60): Promise<ICandle[]> {
-    const inst = await this.prisma.instrument.findUnique({ where: { symbol: symbol.toUpperCase() } });
+  private async getCandlesForInstrument(
+    symbol: string,
+    timeframe: string,
+    limit: number = 60,
+  ): Promise<ICandle[]> {
+    const inst = await this.prisma.instrument.findUnique({
+      where: { symbol: symbol.toUpperCase() },
+    });
     if (!inst) return [];
 
     const rows = await this.prisma.candle.findMany({
@@ -54,7 +60,11 @@ export class AccuracyService {
   /**
    * 2. SMT (Smart Money Technique) Correlation Divergence Engine
    */
-  async getSMTDivergence(assetA: string = 'NIFTY', assetB: string = 'BANKNIFTY', timeframe: string = 'M15'): Promise<ISMTDivergenceResult> {
+  async getSMTDivergence(
+    assetA: string = 'NIFTY',
+    assetB: string = 'BANKNIFTY',
+    timeframe: string = 'M15',
+  ): Promise<ISMTDivergenceResult> {
     const [candlesA, candlesB] = await Promise.all([
       this.getCandlesForInstrument(assetA, timeframe, 50),
       this.getCandlesForInstrument(assetB, timeframe, 50),
@@ -83,7 +93,8 @@ export class AccuracyService {
     );
 
     const activeDivergences = results.filter((r) => r.divergenceType !== 'NEUTRAL');
-    const primaryDivergence = results.find((r) => r.timeframe === 'M15') || results[2] || results[0];
+    const primaryDivergence =
+      results.find((r) => r.timeframe === 'M15') || results[2] || results[0];
 
     return {
       assetA,

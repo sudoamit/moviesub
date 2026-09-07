@@ -1,10 +1,4 @@
-import {
-  ICandle,
-  ILiquidityPool,
-  ISwingPoint,
-  LiquidityType,
-  StructureType,
-} from '@quant/shared';
+import { ICandle, ILiquidityPool, ISwingPoint, LiquidityType, StructureType } from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
 
 export interface ILiquidityEngineOptions {

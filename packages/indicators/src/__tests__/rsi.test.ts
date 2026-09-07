@@ -19,8 +19,8 @@ describe('calculateRSI', () => {
 
   it('should return oscillating values between 0 and 100 for normal price series', () => {
     const prices = [
-      100, 102, 101, 103, 105, 104, 106, 108, 107, 109,
-      111, 110, 112, 114, 113, 115, 114, 116, 118, 117,
+      100, 102, 101, 103, 105, 104, 106, 108, 107, 109, 111, 110, 112, 114, 113, 115, 114, 116, 118,
+      117,
     ];
     const rsi14 = calculateRSI(prices, 14);
 

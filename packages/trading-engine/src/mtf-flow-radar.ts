@@ -14,7 +14,8 @@ export interface IMTFFlowRadarResult {
   alignmentScore: number; // 0 - 4 tiers
   totalScore: number; // 0 - 100
   overallBias: 'STRONG_BULLISH' | 'STRONG_BEARISH' | 'NEUTRAL_MIXED';
-  tradePermission: 'STRONG_BUY_AUTHORIZED' | 'STRONG_SELL_AUTHORIZED' | 'CAUTION_MIXED_FLOW' | 'TRADE_PROHIBITED';
+  tradePermission:
+    'STRONG_BUY_AUTHORIZED' | 'STRONG_SELL_AUTHORIZED' | 'CAUTION_MIXED_FLOW' | 'TRADE_PROHIBITED';
   tiers: {
     h4: ITierStatus;
     h1: ITierStatus;
@@ -38,7 +39,10 @@ export class MTFFlowRadarEngine {
   ): IMTFFlowRadarResult {
     // 1. Tier 1: 4h Macro Trend
     const smc4h = candles4h.length >= 5 ? SMCAnalyzer.analyze(candles4h) : null;
-    const is4hBull = smc4h ? smc4h.marketRegime.regime === MarketRegimeType.BULLISH_TREND || smc4h.breaksOfStructure.some(b => b.direction === 'BULLISH') : true;
+    const is4hBull = smc4h
+      ? smc4h.marketRegime.regime === MarketRegimeType.BULLISH_TREND ||
+        smc4h.breaksOfStructure.some((b) => b.direction === 'BULLISH')
+      : true;
     const h4Tier: ITierStatus = {
       timeframe: '4h',
       name: '4h Macro Order Flow',
@@ -51,7 +55,10 @@ export class MTFFlowRadarEngine {
 
     // 2. Tier 2: 1h Structural Order Flow
     const smc1h = candles1h.length >= 5 ? SMCAnalyzer.analyze(candles1h) : null;
-    const is1hBull = smc1h ? smc1h.marketRegime.regime === MarketRegimeType.BULLISH_TREND || smc1h.breaksOfStructure.some(b => b.direction === 'BULLISH') : is4hBull;
+    const is1hBull = smc1h
+      ? smc1h.marketRegime.regime === MarketRegimeType.BULLISH_TREND ||
+        smc1h.breaksOfStructure.some((b) => b.direction === 'BULLISH')
+      : is4hBull;
     const h1Tier: ITierStatus = {
       timeframe: '1h',
       name: '1h Intermediate Structure',
@@ -64,7 +71,10 @@ export class MTFFlowRadarEngine {
 
     // 3. Tier 3: 15m Footprint Confluence
     const smc15m = candles15m.length >= 5 ? SMCAnalyzer.analyze(candles15m) : null;
-    const is15mBull = smc15m ? smc15m.marketRegime.regime === MarketRegimeType.BULLISH_TREND || smc15m.orderBlocks.some(ob => ob.direction === 'BULLISH') : is1hBull;
+    const is15mBull = smc15m
+      ? smc15m.marketRegime.regime === MarketRegimeType.BULLISH_TREND ||
+        smc15m.orderBlocks.some((ob) => ob.direction === 'BULLISH')
+      : is1hBull;
     const m15Tier: ITierStatus = {
       timeframe: '15m',
       name: '15m SMC Execution Footprint',
@@ -77,7 +87,9 @@ export class MTFFlowRadarEngine {
 
     // 4. Tier 4: 5m Momentum & Entry Trigger
     const smc5m = candles5m.length >= 5 ? SMCAnalyzer.analyze(candles5m) : null;
-    const is5mBull = smc5m ? smc5m.marketRegime.regime === MarketRegimeType.BULLISH_TREND : is15mBull;
+    const is5mBull = smc5m
+      ? smc5m.marketRegime.regime === MarketRegimeType.BULLISH_TREND
+      : is15mBull;
     const m5Tier: ITierStatus = {
       timeframe: '5m',
       name: '5m Micro Entry Trigger',
@@ -121,8 +133,8 @@ export class MTFFlowRadarEngine {
       tradePermission === 'STRONG_BUY_AUTHORIZED'
         ? `🟢 100% Institutional Flow Alignment (${alignmentScore}/4 Tiers). Macro 4h/1h order flow and LTF 15m/5m execution triggers are in synchronized BULLISH harmony.`
         : tradePermission === 'STRONG_SELL_AUTHORIZED'
-        ? `🔴 100% Institutional Flow Alignment (${alignmentScore}/4 Tiers). Macro 4h/1h order flow and LTF 15m/5m execution triggers are in synchronized BEARISH harmony.`
-        : `⚠️ Mixed Multi-Timeframe Flow (${bullCount} Bullish vs ${bearCount} Bearish). Higher risk of fakeouts. Wait for 1h/15m realignment before entering.`;
+          ? `🔴 100% Institutional Flow Alignment (${alignmentScore}/4 Tiers). Macro 4h/1h order flow and LTF 15m/5m execution triggers are in synchronized BEARISH harmony.`
+          : `⚠️ Mixed Multi-Timeframe Flow (${bullCount} Bullish vs ${bearCount} Bearish). Higher risk of fakeouts. Wait for 1h/15m realignment before entering.`;
 
     return {
       symbol: symbol.toUpperCase(),

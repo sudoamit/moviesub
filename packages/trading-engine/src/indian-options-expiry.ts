@@ -13,7 +13,15 @@ export class IndianOptionsExpiryEngine {
    */
   static getUpcomingExpiries(symbol: string = 'NIFTY', baseDate: Date = new Date()): IExpiryInfo[] {
     const sym = symbol.toUpperCase();
-    const isEquity = ['RELIANCE', 'HDFCBANK', 'INFY', 'TCS', 'ICICIBANK', 'SBIN', 'TATAMOTORS'].includes(sym);
+    const isEquity = [
+      'RELIANCE',
+      'HDFCBANK',
+      'INFY',
+      'TCS',
+      'ICICIBANK',
+      'SBIN',
+      'TATAMOTORS',
+    ].includes(sym);
     const isCrypto = sym.startsWith('BTC') || sym.startsWith('ETH') || sym === 'BTCUSDT';
 
     // NSE Exchange Specific Weekly Expiry Days:
@@ -27,23 +35,27 @@ export class IndianOptionsExpiryEngine {
     const targetDay = isCrypto
       ? 5
       : sym === 'NIFTY'
-      ? 2 // Tuesday
-      : sym === 'BANKNIFTY'
-      ? 3 // Wednesday
-      : sym === 'FINNIFTY'
-      ? 2 // Tuesday
-      : sym === 'MIDCPNIFTY'
-      ? 1 // Monday
-      : sym === 'SENSEX'
-      ? 5 // Friday
-      : 4; // 4 = Thursday (Equities)
+        ? 2 // Tuesday
+        : sym === 'BANKNIFTY'
+          ? 3 // Wednesday
+          : sym === 'FINNIFTY'
+            ? 2 // Tuesday
+            : sym === 'MIDCPNIFTY'
+              ? 1 // Monday
+              : sym === 'SENSEX'
+                ? 5 // Friday
+                : 4; // 4 = Thursday (Equities)
 
     const results: IExpiryInfo[] = [];
 
     if (isEquity) {
       // Single-stock equities only trade monthly series on NSE
       // 1. Current Month Expiry
-      const currentMonth = this.getLastWeekdayOfMonth(baseDate.getFullYear(), baseDate.getMonth(), targetDay);
+      const currentMonth = this.getLastWeekdayOfMonth(
+        baseDate.getFullYear(),
+        baseDate.getMonth(),
+        targetDay,
+      );
       if (currentMonth.getTime() > baseDate.getTime()) {
         results.push(this.formatExpiryInfo(currentMonth, baseDate, true));
       }
@@ -77,8 +89,15 @@ export class IndianOptionsExpiryEngine {
     results.push(this.formatExpiryInfo(nextWeekly, baseDate, false));
 
     // 3. Near Monthly Expiry (Last Target Day of Month)
-    const monthlyExpiry = this.getLastWeekdayOfMonth(baseDate.getFullYear(), baseDate.getMonth(), targetDay);
-    if (monthlyExpiry.getTime() <= baseDate.getTime() || monthlyExpiry.toDateString() === currentWeekly.toDateString()) {
+    const monthlyExpiry = this.getLastWeekdayOfMonth(
+      baseDate.getFullYear(),
+      baseDate.getMonth(),
+      targetDay,
+    );
+    if (
+      monthlyExpiry.getTime() <= baseDate.getTime() ||
+      monthlyExpiry.toDateString() === currentWeekly.toDateString()
+    ) {
       const nextMonthExpiry = this.getLastWeekdayOfMonth(
         baseDate.getMonth() === 11 ? baseDate.getFullYear() + 1 : baseDate.getFullYear(),
         (baseDate.getMonth() + 1) % 12,
@@ -118,12 +137,29 @@ export class IndianOptionsExpiryEngine {
     return lastDay;
   }
 
-  private static formatExpiryInfo(expiryDate: Date, baseDate: Date, isMonthly: boolean): IExpiryInfo {
+  private static formatExpiryInfo(
+    expiryDate: Date,
+    baseDate: Date,
+    isMonthly: boolean,
+  ): IExpiryInfo {
     const diffMs = expiryDate.getTime() - baseDate.getTime();
     const daysToExpiry = Math.max(0.1, Number((diffMs / (1000 * 60 * 60 * 24)).toFixed(1)));
     const timeToExpiryYears = Math.max(0.000114, Number((daysToExpiry / 365.0).toFixed(6)));
 
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
     const dd = String(expiryDate.getDate()).padStart(2, '0');

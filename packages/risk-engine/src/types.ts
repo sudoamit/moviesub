@@ -2,11 +2,11 @@ import { Direction, IInstrument, IPositionSizing, ISignalSetup, SignalState } fr
 
 export interface IRiskConfig {
   defaultRiskPercentage?: number; // e.g. 1.0 (1%)
-  maxRiskPercentage?: number;     // e.g. 2.5 (2.5%)
+  maxRiskPercentage?: number; // e.g. 2.5 (2.5%)
   maxAccountDrawdownPercent?: number; // e.g. 10.0 (10%)
-  maxDailyDrawdownPercent?: number;   // e.g. 5.0 (5%)
-  maxOpenRiskPercent?: number;        // e.g. 6.0 (6%)
-  maxConcurrentPositions?: number;    // e.g. 5
+  maxDailyDrawdownPercent?: number; // e.g. 5.0 (5%)
+  maxOpenRiskPercent?: number; // e.g. 6.0 (6%)
+  maxConcurrentPositions?: number; // e.g. 5
 }
 
 export interface IOpenPosition {

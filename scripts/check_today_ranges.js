@@ -10,12 +10,12 @@ async function checkTodayRanges() {
       take: 25, // today's 25 15m candles
     });
     if (candles.length > 0) {
-      const highs = candles.map(c => Number(c.high));
-      const lows = candles.map(c => Number(c.low));
-      const closes = candles.map(c => Number(c.close));
+      const highs = candles.map((c) => Number(c.high));
+      const lows = candles.map((c) => Number(c.low));
+      const closes = candles.map((c) => Number(c.close));
       console.log('----------------------------------------------------');
       console.log(
-        `${inst.symbol.padEnd(10)} | Today High: ₹${Math.max(...highs).toFixed(2)} | Low: ₹${Math.min(...lows).toFixed(2)} | Close: ₹${closes[0].toFixed(2)} | Today Range: ${(Math.max(...highs) - Math.min(...lows)).toFixed(2)} pts`
+        `${inst.symbol.padEnd(10)} | Today High: ₹${Math.max(...highs).toFixed(2)} | Low: ₹${Math.min(...lows).toFixed(2)} | Close: ₹${closes[0].toFixed(2)} | Today Range: ${(Math.max(...highs) - Math.min(...lows)).toFixed(2)} pts`,
       );
     }
   }

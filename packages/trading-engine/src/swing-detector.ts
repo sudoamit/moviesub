@@ -12,10 +12,7 @@ export class SwingDetector {
    * Detects and classifies structural swings with strictly zero look-ahead bias.
    * A swing at index i is ONLY confirmed at index i + rightBars.
    */
-  static detectSwings(
-    candles: ICandle[],
-    options: ISwingDetectorOptions = {},
-  ): ISwingPoint[] {
+  static detectSwings(candles: ICandle[], options: ISwingDetectorOptions = {}): ISwingPoint[] {
     const leftBars = options.leftBars ?? 3;
     const rightBars = options.rightBars ?? 3;
     const minDistanceMult = options.minDistanceAtrMultiplier ?? 0.5;
@@ -36,7 +33,7 @@ export class SwingDetector {
     for (let i = leftBars; i < maxEvalIndex; i++) {
       const currentHigh = candles[i].high;
       const currentLow = candles[i].low;
-      const currentAtr = atr[i] || (currentHigh - currentLow);
+      const currentAtr = atr[i] || currentHigh - currentLow;
       const minDistance = currentAtr * minDistanceMult;
 
       // 1. Swing High evaluation
@@ -61,7 +58,10 @@ export class SwingDetector {
         if (!lastConfirmedLow || Math.abs(currentHigh - lastConfirmedLow.price) >= minDistance) {
           let type = StructureType.SWING_HIGH;
           if (lastConfirmedHigh) {
-            type = currentHigh > lastConfirmedHigh.price ? StructureType.HIGHER_HIGH : StructureType.LOWER_HIGH;
+            type =
+              currentHigh > lastConfirmedHigh.price
+                ? StructureType.HIGHER_HIGH
+                : StructureType.LOWER_HIGH;
           }
 
           const confirmedAtIndex = i + rightBars;
@@ -100,7 +100,10 @@ export class SwingDetector {
         if (!lastConfirmedHigh || Math.abs(currentLow - lastConfirmedHigh.price) >= minDistance) {
           let type = StructureType.SWING_LOW;
           if (lastConfirmedLow) {
-            type = currentLow < lastConfirmedLow.price ? StructureType.LOWER_LOW : StructureType.HIGHER_LOW;
+            type =
+              currentLow < lastConfirmedLow.price
+                ? StructureType.LOWER_LOW
+                : StructureType.HIGHER_LOW;
           }
 
           const confirmedAtIndex = i + rightBars;

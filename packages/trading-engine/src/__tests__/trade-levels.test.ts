@@ -18,7 +18,14 @@ describe('TradeLevelsCalculator', () => {
     const levels = TradeLevelsCalculator.calculateLevels(
       Direction.BULLISH,
       candles,
-      { index: 5, type: 'SWING_LOW' as any, price: 95, timestamp: new Date(), confirmedAtIndex: 8, confirmedAtTimestamp: new Date() },
+      {
+        index: 5,
+        type: 'SWING_LOW' as any,
+        price: 95,
+        timestamp: new Date(),
+        confirmedAtIndex: 8,
+        confirmedAtTimestamp: new Date(),
+      },
       null,
       null,
     );

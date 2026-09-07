@@ -21,7 +21,13 @@ describe('MultiTimeframeAnalyzer', () => {
         orderBlocks: [],
         activeOrderBlocks: [],
         dealingRange: null,
-        marketRegime: { regime: 'BULLISH_TREND' as any, atr: 50, adx: 30, volatility: 0.2, timestamp: new Date() },
+        marketRegime: {
+          regime: 'BULLISH_TREND' as any,
+          atr: 50,
+          adx: 30,
+          volatility: 0.2,
+          timestamp: new Date(),
+        },
         currentTrend: Direction.BULLISH,
       },
     };
@@ -42,7 +48,13 @@ describe('MultiTimeframeAnalyzer', () => {
         orderBlocks: [],
         activeOrderBlocks: [],
         dealingRange: null,
-        marketRegime: { regime: 'BULLISH_TREND' as any, atr: 100, adx: 35, volatility: 0.3, timestamp: new Date() },
+        marketRegime: {
+          regime: 'BULLISH_TREND' as any,
+          atr: 100,
+          adx: 35,
+          volatility: 0.3,
+          timestamp: new Date(),
+        },
         currentTrend: Direction.BULLISH,
       },
     };

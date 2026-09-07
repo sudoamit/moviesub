@@ -129,8 +129,8 @@ export function SidePanel({ symbol }: { symbol: string }) {
 
       {/* Disclaimer */}
       <div className="mt-auto pt-3 border-t border-surface-border text-[9px] text-slate-500 leading-relaxed">
-        <strong className="text-slate-400">Disclaimer:</strong> Signals are analytical model
-        outputs and not guaranteed investment recommendations. Always manage risk.
+        <strong className="text-slate-400">Disclaimer:</strong> Signals are analytical model outputs
+        and not guaranteed investment recommendations. Always manage risk.
       </div>
     </div>
   );

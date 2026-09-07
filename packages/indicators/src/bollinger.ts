@@ -14,7 +14,8 @@ export function calculateBollingerBands(
     return { upper: [], middle: [], lower: [], bandwidth: [], percentB: [] };
   }
 
-  const prices = typeof data[0] === 'number' ? (data as number[]) : extractPrices(data as ICandle[], 'close');
+  const prices =
+    typeof data[0] === 'number' ? (data as number[]) : extractPrices(data as ICandle[], 'close');
   const len = prices.length;
 
   const middle = calculateSMA(prices, period);
