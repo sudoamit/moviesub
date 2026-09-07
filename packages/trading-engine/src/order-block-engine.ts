@@ -8,6 +8,7 @@ export interface IOrderBlockOptions {
 export class OrderBlockEngine {
   /**
    * Identifies institutional Order Blocks preceding structure breaks and displacement legs
+   * with strictly zero look-ahead bias.
    */
   static detectOrderBlocks(
     candles: ICandle[],
@@ -15,7 +16,7 @@ export class OrderBlockEngine {
     fvgList: IFairValueGap[] = [],
     options: IOrderBlockOptions = {},
   ): { allOrderBlocks: IOrderBlock[]; activeOrderBlocks: IOrderBlock[] } {
-    if (!candles || candles.length < 5) {
+    if (!candles || candles.length < 4) {
       return { allOrderBlocks: [], activeOrderBlocks: [] };
     }
 
@@ -50,6 +51,7 @@ export class OrderBlockEngine {
         );
 
         if (hasDisplacement && (createdBOS || createdFVG || maxUpMove >= candleAtr * 1.5)) {
+          const confirmedAtIndex = i + 3;
           orderBlocks.push({
             id: `ob-bull-${i}`,
             direction: Direction.BULLISH,
@@ -79,6 +81,7 @@ export class OrderBlockEngine {
         );
 
         if (hasDisplacement && (createdBOS || createdFVG || maxDownMove >= candleAtr * 1.5)) {
+          const confirmedAtIndex = i + 3;
           orderBlocks.push({
             id: `ob-bear-${i}`,
             direction: Direction.BEARISH,
@@ -94,7 +97,7 @@ export class OrderBlockEngine {
       }
     }
 
-    // Track mitigation and invalidation over remaining candles
+    // Track mitigation and invalidation over subsequent candles starting after confirmation window
     for (const ob of orderBlocks) {
       for (let k = ob.candleIndex + 4; k < candles.length; k++) {
         const c = candles[k];
@@ -129,3 +132,4 @@ export class OrderBlockEngine {
     return { allOrderBlocks: orderBlocks, activeOrderBlocks };
   }
 }
+

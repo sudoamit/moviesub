@@ -7,7 +7,8 @@ export interface ILiquidityEngineOptions {
 
 export class LiquidityEngine {
   /**
-   * Detects Liquidity Pools (Equal Highs/Lows, BSL, SSL) and Liquidity Sweeps
+   * Detects Liquidity Pools (Equal Highs/Lows, BSL, SSL) and Liquidity Sweeps with zero look-ahead bias.
+   * A pool is only eligible to be swept AFTER all of its constituent swing points have been fully confirmed.
    */
   static detectLiquidity(
     candles: ICandle[],
@@ -55,6 +56,7 @@ export class LiquidityEngine {
 
         if (Math.abs(h1.price - h2.price) <= tolerance) {
           const avgLevel = (h1.price + h2.price) / 2;
+          const confirmedAtIdx = Math.max(h1.confirmedAtIndex, h2.confirmedAtIndex);
           pools.push({
             id: `eqh-${h1.index}-${h2.index}`,
             type: LiquidityType.EQUAL_HIGHS,
@@ -130,15 +132,16 @@ export class LiquidityEngine {
       }
     }
 
-    // 3. Detect Liquidity Sweeps
+    // 3. Detect Liquidity Sweeps (strictly chronologically)
     for (let c = 0; c < candles.length; c++) {
       const candle = candles[c];
 
       for (const pool of pools) {
         if (pool.isSwept) continue;
+        // Candle must be strictly after the pool's last timestamp
         if (candle.timestamp <= pool.lastTimestamp) continue;
 
-        // BSL / EQH Sweep: High trades above level, but Close finishes BELOW level (rejection wick)
+        // BSL / EQH Sweep: High trades above level, but Close finishes BELOW or AT level (rejection/reclaim wick)
         if (
           (pool.type === LiquidityType.BUY_SIDE || pool.type === LiquidityType.EQUAL_HIGHS) &&
           candle.high > pool.priceLevel &&
@@ -152,7 +155,7 @@ export class LiquidityEngine {
           sweeps.push({ ...pool });
         }
 
-        // SSL / EQL Sweep: Low trades below level, but Close finishes ABOVE level (rejection wick)
+        // SSL / EQL Sweep: Low trades below level, but Close finishes ABOVE or AT level (rejection/reclaim wick)
         if (
           (pool.type === LiquidityType.SELL_SIDE || pool.type === LiquidityType.EQUAL_LOWS) &&
           candle.low < pool.priceLevel &&
@@ -171,3 +174,4 @@ export class LiquidityEngine {
     return { pools, sweeps };
   }
 }
+

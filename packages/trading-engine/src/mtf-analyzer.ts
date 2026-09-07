@@ -1,6 +1,7 @@
 import { Direction, ICandle, MTFMode, Timeframe } from '@quant/shared';
 import { SMCAnalyzer } from './smc-analyzer';
 import { ISMCAnalysisResult } from './types';
+import { CandleNormalizer } from './candle-normalizer';
 
 export interface IMTFTimeframeData {
   timeframe: Timeframe | string;
@@ -21,8 +22,50 @@ export interface IMTFAnalysisResult {
 }
 
 export class MultiTimeframeAnalyzer {
+  public static getTimeframeDurationMs(tf: Timeframe | string): number {
+    const s = String(tf).toLowerCase().trim();
+    if (s === '1m') return 60 * 1000;
+    if (s === '3m') return 3 * 60 * 1000;
+    if (s === '5m') return 5 * 60 * 1000;
+    if (s === '15m') return 15 * 60 * 1000;
+    if (s === '30m') return 30 * 60 * 1000;
+    if (s === '1h' || s === '60m') return 60 * 60 * 1000;
+    if (s === '2h') return 2 * 60 * 60 * 1000;
+    if (s === '4h') return 4 * 60 * 60 * 1000;
+    if (s === '1d' || s === 'd') return 24 * 60 * 60 * 1000;
+    if (s === '1w' || s === 'w') return 7 * 24 * 60 * 60 * 1000;
+
+    const unit = s.slice(-1);
+    const val = parseInt(s.slice(0, -1), 10) || 1;
+    if (unit === 'm') return val * 60 * 1000;
+    if (unit === 'h') return val * 3600 * 1000;
+    if (unit === 'd') return val * 86400 * 1000;
+    if (unit === 'w') return val * 7 * 86400 * 1000;
+    return 15 * 60 * 1000;
+  }
+
+  /**
+   * Filters HTF candles strictly to only those whose close time is <= maxAllowedCloseTime.
+   * Eliminates look-ahead bias across all multi-timeframe analysis.
+   */
+  public static filterClosedHTFCandles(
+    htfCandles: ICandle[],
+    htfTimeframe: Timeframe | string,
+    maxAllowedCloseTime: number,
+  ): ICandle[] {
+    if (!htfCandles || htfCandles.length === 0) return [];
+    const duration = MultiTimeframeAnalyzer.getTimeframeDurationMs(htfTimeframe);
+
+    return htfCandles.filter((c) => {
+      const openTime = new Date(c.timestamp).getTime();
+      const closeTime = openTime + duration;
+      return closeTime <= maxAllowedCloseTime;
+    });
+  }
+
   /**
    * Analyzes Higher Timeframe (HTF) market structure to establish directional bias for lower timeframe execution
+   * with guaranteed zero look-ahead bias.
    */
   static analyzeMTF(
     executionTf: IMTFTimeframeData,
@@ -30,7 +73,25 @@ export class MultiTimeframeAnalyzer {
     htf2?: IMTFTimeframeData,
     mode: MTFMode = MTFMode.BALANCED,
   ): IMTFAnalysisResult {
-    const htf1Analysis = htf1.analysis || SMCAnalyzer.analyze(htf1.candles);
+    const execCandles = CandleNormalizer.normalize(executionTf.candles);
+    const lastExecCandle = execCandles[execCandles.length - 1];
+    const execDuration = MultiTimeframeAnalyzer.getTimeframeDurationMs(executionTf.timeframe);
+    const maxCloseTime = lastExecCandle
+      ? new Date(lastExecCandle.timestamp).getTime() + execDuration
+      : Date.now();
+
+    // Strictly filter HTF candles so that unclosed HTF bars cannot leak into LTF decision
+    const htf1CleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
+      CandleNormalizer.normalize(htf1.candles),
+      htf1.timeframe,
+      maxCloseTime,
+    );
+
+    const htf1Analysis =
+      htf1.analysis && htf1CleanCandles.length === htf1.candles.length
+        ? htf1.analysis
+        : SMCAnalyzer.analyze(htf1CleanCandles);
+
     const htf1Trend =
       htf1Analysis.currentTrend !== Direction.NEUTRAL
         ? htf1Analysis.currentTrend
@@ -42,7 +103,17 @@ export class MultiTimeframeAnalyzer {
 
     let htf2Trend: Direction | undefined = undefined;
     if (htf2 && htf2.candles.length > 0) {
-      const htf2Analysis = htf2.analysis || SMCAnalyzer.analyze(htf2.candles);
+      const htf2CleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
+        CandleNormalizer.normalize(htf2.candles),
+        htf2.timeframe,
+        maxCloseTime,
+      );
+
+      const htf2Analysis =
+        htf2.analysis && htf2CleanCandles.length === htf2.candles.length
+          ? htf2.analysis
+          : SMCAnalyzer.analyze(htf2CleanCandles);
+
       htf2Trend =
         htf2Analysis.currentTrend !== Direction.NEUTRAL
           ? htf2Analysis.currentTrend
@@ -103,3 +174,4 @@ export class MultiTimeframeAnalyzer {
     };
   }
 }
+

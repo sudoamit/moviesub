@@ -16,12 +16,13 @@ import { calculateEMA, calculateRSI } from '@quant/indicators';
 import { SessionFilter } from './session-filter';
 import { SaiyanOCCEngine } from './saiyan-occ-engine';
 import { SnapshotBuilder } from './quant/snapshot-builder';
+import { CandleNormalizer } from './candle-normalizer';
 
 export interface IGenerateSignalOptions {
   symbol: string;
   executionCandles: ICandle[];
   executionTimeframe?: Timeframe | string;
-  htf1Candles: ICandle[];
+  htf1Candles?: ICandle[];
   htf1Timeframe?: Timeframe | string;
   htf2Candles?: ICandle[];
   htf2Timeframe?: Timeframe | string;
@@ -32,6 +33,7 @@ export interface IGenerateSignalOptions {
 export class SignalGenerator {
   /**
    * Generates analytical LONG / SHORT / NO_TRADE signal setup with full scoring, levels, and rationale
+   * with strictly zero look-ahead bias.
    */
   static generateSignal(options: IGenerateSignalOptions): ISignalSetup {
     const symbol = options.symbol.toUpperCase();
@@ -40,32 +42,40 @@ export class SignalGenerator {
     const htf2Tf = options.htf2Timeframe || Timeframe.H4;
     const strategyMode = options.strategyMode || 'SMC';
 
-    const execCandles = options.executionCandles;
+    // 1. Canonical normalization
+    const execCandles = CandleNormalizer.normalize(options.executionCandles);
     if (!execCandles || execCandles.length < 20) {
       return SignalGenerator.createNoTradeSignal(
         symbol,
         executionTf,
         'Insufficient historical candle data',
+        execCandles.length > 0 ? execCandles[execCandles.length - 1].timestamp : new Date(),
       );
     }
 
-    // 1. Direct Routing if Saiyan OCC Strategy is Selected
+    // 2. Direct Routing if Saiyan OCC Strategy is Selected
     if (strategyMode === 'SAIYAN_OCC') {
       return SaiyanOCCEngine.generateSignal(symbol, execCandles, String(executionTf));
     }
 
-    // 2. Run Execution Timeframe SMC Analysis
+    // 3. Run Execution Timeframe SMC Analysis
     const execAnalysis = SMCAnalyzer.analyze(execCandles);
 
-    // 2. Run Multi-Timeframe Alignment
+    // 4. Run Multi-Timeframe Alignment (with strict timestamp filtering)
     const execTfData: IMTFTimeframeData = {
       timeframe: executionTf,
       candles: execCandles,
       analysis: execAnalysis,
     };
-    const htf1Data: IMTFTimeframeData = { timeframe: htf1Tf, candles: options.htf1Candles };
+    const htf1Data: IMTFTimeframeData = {
+      timeframe: htf1Tf,
+      candles: options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : [],
+    };
     const htf2Data: IMTFTimeframeData | undefined = options.htf2Candles
-      ? { timeframe: htf2Tf, candles: options.htf2Candles }
+      ? {
+          timeframe: htf2Tf,
+          candles: CandleNormalizer.normalize(options.htf2Candles),
+        }
       : undefined;
 
     const mtf = MultiTimeframeAnalyzer.analyzeMTF(
@@ -78,7 +88,7 @@ export class SignalGenerator {
     const lastCandle = execCandles[execCandles.length - 1];
     const currentPrice = lastCandle.close;
 
-    // 3. Determine Directional Candidate with Strict HTF Bias Gate
+    // 5. Determine Directional Candidate with Strict HTF Bias Gate
     let candidateDir = mtf.htfBias;
     if (candidateDir === Direction.NEUTRAL) {
       candidateDir = execAnalysis.currentTrend;
@@ -89,6 +99,7 @@ export class SignalGenerator {
         symbol,
         executionTf,
         'No directional trend bias on HTF or execution timeframe (Consolidation/Chop)',
+        lastCandle.timestamp,
       );
     }
 
@@ -98,10 +109,11 @@ export class SignalGenerator {
         symbol,
         executionTf,
         `Rejected: Execution direction (${candidateDir}) conflicts with ${mtf.htfBias} Higher Timeframe Order Flow`,
+        lastCandle.timestamp,
       );
     }
 
-    // 4. Identify Trigger Components (Liquidity Sweep, Order Block, FVG, Structure Break)
+    // 6. Identify Trigger Components (Liquidity Sweep, Order Block, FVG, Structure Break)
     const recentSweeps = execAnalysis.liquiditySweeps.slice(-4);
     const hasSweep =
       recentSweeps.length > 0 &&
@@ -176,7 +188,7 @@ export class SignalGenerator {
     const bodyRatio = candleBody / candleRange;
     const hasVolumeExpansion = rvol >= 1.2 || bodyRatio >= 0.55;
 
-    // 5. Calculate Trade Levels (Optimal Entry, Stop Loss, Target 1, Target 2, Target 3)
+    // 7. Calculate Trade Levels (Optimal Entry, Stop Loss, Target 1, Target 2, Target 3)
     const anchorSwings =
       candidateDir === Direction.BULLISH
         ? execAnalysis.confirmedSwingLows
@@ -196,10 +208,11 @@ export class SignalGenerator {
         symbol,
         executionTf,
         'Unable to compute valid risk-reward invalidation geometry',
+        lastCandle.timestamp,
       );
     }
 
-    // 6. Institutional Confluence Scoring
+    // 8. Institutional Confluence Scoring
     const scoringInputs: IScoringInputs = {
       direction: candidateDir,
       htfAligned: mtf.isAligned,
@@ -216,14 +229,37 @@ export class SignalGenerator {
 
     let { totalScore, grade, breakdown } = SignalScorer.calculateScore(scoringInputs);
 
-    // 7. Generate Trigger Description & Detailed Reasoning
+    // 9. Generate Trigger Description & Detailed Reasoning
     let triggerDesc = 'Micro-structure confirmation and price action trigger';
+    const explicitReasons: string[] = [];
+
+    if (mtf.isAligned) {
+      explicitReasons.push(`HTF_${candidateDir}_ALIGNED`);
+    }
+    if (hasSweep) {
+      explicitReasons.push(
+        candidateDir === Direction.BULLISH ? 'SELL_SIDE_LIQUIDITY_SWEPT' : 'BUY_SIDE_LIQUIDITY_SWEPT',
+      );
+    }
+    if (hasStructureBreak) {
+      explicitReasons.push(
+        recentCHOCH.length > 0 ? `${candidateDir}_CHOCH_CONFIRMED` : `${candidateDir}_BOS_CONFIRMED`,
+      );
+    }
     if (activeFVG) {
+      explicitReasons.push(`${candidateDir}_FVG_MITIGATION`);
       triggerDesc = `Mitigation tap into active ${candidateDir} Fair Value Gap [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]`;
     } else if (activeOB) {
+      explicitReasons.push(`${candidateDir}_ORDER_BLOCK_TAP`);
       triggerDesc = `Institutional ${candidateDir} Order Block tap [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]`;
     } else if (hasStructureBreak) {
       triggerDesc = `Fresh ${candidateDir} structural breakout / CHoCH expansion with ${rvol.toFixed(1)}x RVOL volume`;
+    }
+    if (inCorrectZone) {
+      explicitReasons.push(candidateDir === Direction.BULLISH ? 'DISCOUNT_ZONE' : 'PREMIUM_ZONE');
+    }
+    if (hasVolumeExpansion) {
+      explicitReasons.push('VOLUME_EXPANSION');
     }
 
     const reasoning = ReasoningGenerator.generateReasoning({
@@ -238,7 +274,7 @@ export class SignalGenerator {
       triggerDescription: triggerDesc,
     });
 
-    // 8. Hybrid Strategy Confluence Check
+    // 10. Hybrid Strategy Confluence Check
     if (strategyMode === 'HYBRID') {
       const saiyanAnalysis = SaiyanOCCEngine.analyze(execCandles);
       if (
@@ -249,6 +285,7 @@ export class SignalGenerator {
           symbol,
           executionTf,
           `Hybrid Filter: SMC ${candidateDir} bias conflicts with Saiyan OCC ${saiyanAnalysis.direction} momentum`,
+          lastCandle.timestamp,
         );
       }
       reasoning.confirmedChecklist.push(
@@ -258,7 +295,7 @@ export class SignalGenerator {
       if (totalScore >= 90) grade = SignalGrade.A_PLUS;
     }
 
-    // 9. ICT Session Killzone Filter Enrichment
+    // 11. ICT Session Killzone Filter Enrichment
     const session = SessionFilter.getSessionInfo(lastCandle.timestamp, symbol);
     if (session.isKillZone) {
       reasoning.confirmedChecklist.push(`ICT Killzone: ${session.badge} (${session.timeRange})`);
@@ -273,9 +310,7 @@ export class SignalGenerator {
         ? activeFVG.timestamp
         : anchorSwing
           ? anchorSwing.timestamp
-          : execCandles.length >= 2
-            ? execCandles[execCandles.length - 2].timestamp
-            : lastCandle.timestamp;
+          : lastCandle.timestamp;
     const signalTimestamp = new Date(anchorTime);
 
     // Build Canonical Point-In-Time Market Snapshot & Quant Intelligence State
@@ -288,7 +323,7 @@ export class SignalGenerator {
     });
 
     return {
-      id: `smc_${symbol}_${executionTf}_${signalTimestamp.getTime()}`,
+      id: `smc_${symbol}_${executionTf}_${finalDirection}_${signalTimestamp.getTime()}`,
       symbol,
       direction: finalDirection,
       score: totalScore,
@@ -301,6 +336,7 @@ export class SignalGenerator {
       takeProfits: levels.takeProfits,
       riskRewardRatios: levels.riskRewardRatios,
       reasoning,
+      reasons: explicitReasons,
       state: SignalState.PENDING,
       timestamp: signalTimestamp,
       quantSnapshot: snapshot,
@@ -308,8 +344,8 @@ export class SignalGenerator {
       regime: snapshot.regime.regime,
       volatilityPercentile: snapshot.volatility.volatilityPercentile,
       forecastVolatility: snapshot.volatility.forecastVolatility,
-      mlProbability: snapshot.ml?.probabilityWin ?? 0.75,
-      expectedR: snapshot.ml?.expectedR ?? 1.25,
+      mlProbability: snapshot.ml?.probabilityWin,
+      expectedR: snapshot.ml?.expectedR,
       decisionTrace: snapshot.trace,
     };
   }
@@ -318,6 +354,7 @@ export class SignalGenerator {
     symbol: string,
     timeframe: Timeframe | string,
     reason: string,
+    timestamp: Date = new Date(),
   ): ISignalSetup {
     return {
       symbol,
@@ -352,8 +389,10 @@ export class SignalGenerator {
         confirmedChecklist: [],
         summary: `Setup Score: 0/100 (NO_TRADE). ${reason}`,
       },
+      reasons: ['NO_VALID_SETUP'],
       state: SignalState.CANCELLED,
-      timestamp: new Date(),
+      timestamp,
     };
   }
 }
+
