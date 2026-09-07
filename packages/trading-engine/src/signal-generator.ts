@@ -43,39 +43,40 @@ export class SignalGenerator {
     const htf2Tf = options.htf2Timeframe || Timeframe.H4;
     const strategyMode = options.strategyMode || 'SMC';
 
-    // 1. Canonical normalization & point-in-time slicing
-    let execCandles = CandleNormalizer.normalize(options.executionCandles);
-    let htf1Candles = options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : [];
-    let htf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
+    // 1. Canonical normalization & point-in-time decision timestamp calculation
+    const rawExecCandles = CandleNormalizer.normalize(options.executionCandles);
+    const rawHtf1Candles = options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : [];
+    const rawHtf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
 
+    let decisionTimestamp: Date;
     if (options.asOfTimestamp) {
-      const asOfTime = options.asOfTimestamp.getTime();
-      execCandles = CandleNormalizer.getClosedCandlesAsOf(execCandles, executionTf, options.asOfTimestamp);
-      htf1Candles = CandleNormalizer.getClosedCandlesAsOf(htf1Candles, htf1Tf, options.asOfTimestamp);
-      if (htf2Candles) {
-        htf2Candles = CandleNormalizer.getClosedCandlesAsOf(htf2Candles, htf2Tf, options.asOfTimestamp);
-      }
-      if (execCandles.length === 0 && asOfTime > 0) {
-        return SignalGenerator.createNoTradeSignal(
-          symbol,
-          executionTf,
-          'No fully closed execution candles available as-of timestamp',
-          options.asOfTimestamp,
-        );
-      }
+      decisionTimestamp = new Date(options.asOfTimestamp.getTime());
+    } else {
+      const closedExec = rawExecCandles.filter((c) => c.isClosed !== false);
+      const lastClosed = closedExec.length > 0 ? closedExec[closedExec.length - 1] : null;
+      decisionTimestamp = lastClosed
+        ? CandleNormalizer.getCandleCloseTimestamp(lastClosed, executionTf)
+        : new Date();
     }
+
+    const execCandles = CandleNormalizer.getClosedCandlesAsOf(rawExecCandles, executionTf, decisionTimestamp);
+    const htf1Candles = CandleNormalizer.getClosedCandlesAsOf(rawHtf1Candles, htf1Tf, decisionTimestamp);
+    const htf2Candles = rawHtf2Candles
+      ? CandleNormalizer.getClosedCandlesAsOf(rawHtf2Candles, htf2Tf, decisionTimestamp)
+      : undefined;
 
     if (!execCandles || execCandles.length < 20) {
       return SignalGenerator.createNoTradeSignal(
         symbol,
         executionTf,
-        'Insufficient historical candle data',
-        execCandles.length > 0 ? execCandles[execCandles.length - 1].timestamp : (options.asOfTimestamp || new Date()),
+        execCandles.length === 0
+          ? 'No fully closed execution candles available as-of timestamp'
+          : 'Insufficient historical candle data',
+        decisionTimestamp,
       );
     }
 
     const lastCandle = execCandles[execCandles.length - 1];
-    const decisionTimestamp = new Date(lastCandle.timestamp);
 
     // 2. Direct Routing if Saiyan OCC Strategy is Selected
     if (strategyMode === 'SAIYAN_OCC') {
@@ -123,7 +124,7 @@ export class SignalGenerator {
         symbol,
         executionTf,
         'No directional trend bias on HTF or execution timeframe (Consolidation/Chop)',
-        lastCandle.timestamp,
+        decisionTimestamp,
       );
     }
 
@@ -133,7 +134,7 @@ export class SignalGenerator {
         symbol,
         executionTf,
         `Rejected: Execution direction (${candidateDir}) conflicts with ${mtf.htfBias} Higher Timeframe Order Flow`,
-        lastCandle.timestamp,
+        decisionTimestamp,
       );
     }
 
@@ -232,7 +233,7 @@ export class SignalGenerator {
         symbol,
         executionTf,
         'Unable to compute valid risk-reward invalidation geometry',
-        lastCandle.timestamp,
+        decisionTimestamp,
       );
     }
 
@@ -309,7 +310,7 @@ export class SignalGenerator {
           symbol,
           executionTf,
           `Hybrid Filter: SMC ${candidateDir} bias conflicts with Saiyan OCC ${saiyanAnalysis.direction} momentum`,
-          lastCandle.timestamp,
+          decisionTimestamp,
         );
       }
       reasoning.confirmedChecklist.push(
@@ -320,7 +321,7 @@ export class SignalGenerator {
     }
 
     // 11. ICT Session Killzone Filter Enrichment
-    const session = SessionFilter.getSessionInfo(lastCandle.timestamp, symbol);
+    const session = SessionFilter.getSessionInfo(decisionTimestamp, symbol);
     if (session.isKillZone) {
       reasoning.confirmedChecklist.push(`ICT Killzone: ${session.badge} (${session.timeRange})`);
     } else if (session.activeSession === 'NSE_LUNCH_CHOP') {

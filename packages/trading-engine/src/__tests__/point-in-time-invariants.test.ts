@@ -758,8 +758,46 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
     });
   });
 
-  // 17. Incremental Replay Equivalence Test
-  describe('Invariant 17: Incremental Replay Equivalence', () => {
+  // Test F — Signal future-data invariance
+  describe('Test F: Signal Future-Data Invariance', () => {
+    it('SignalGenerator.generateSignal(D, T) equals SignalGenerator.generateSignal(D+F, T) for all decision-relevant fields', () => {
+      const D: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        D.push(createCandle(i, 100 + i * 0.2, 102 + i * 0.2, 99 + i * 0.2, 101 + i * 0.2));
+      }
+      const T = CandleNormalizer.getCandleCloseTimestamp(D[35], '15m');
+
+      const signalA = SignalGenerator.generateSignal({
+        symbol: 'BTCUSDT',
+        executionCandles: D,
+        asOfTimestamp: T,
+      });
+
+      const future: ICandle[] = [
+        createCandle(40, 108, 300, 107, 295, 500000),
+        createCandle(41, 295, 305, 30, 35, 900000),
+        createCandle(42, 35, 40, 10, 15, 1000000),
+      ];
+
+      const signalB = SignalGenerator.generateSignal({
+        symbol: 'BTCUSDT',
+        executionCandles: [...D, ...future],
+        asOfTimestamp: T,
+      });
+
+      expect(signalB.symbol).toEqual(signalA.symbol);
+      expect(signalB.direction).toEqual(signalA.direction);
+      expect(signalB.score).toEqual(signalA.score);
+      expect(signalB.grade).toEqual(signalA.grade);
+      expect(signalB.htfBias).toEqual(signalA.htfBias);
+      expect(signalB.timestamp).toEqual(signalA.timestamp);
+      expect(signalB.quantSnapshot).toEqual(signalA.quantSnapshot);
+      expect(signalB.decisionTrace).toEqual(signalA.decisionTrace);
+    });
+  });
+
+  // Test G — Incremental replay
+  describe('Test G: Incremental Replay Equivalence', () => {
     it('produces identical states between incremental history feed and full batch with asOfTimestamp', () => {
       const allCandles: ICandle[] = [];
       for (let i = 0; i < 50; i++) {
