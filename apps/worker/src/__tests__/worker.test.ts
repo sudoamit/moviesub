@@ -106,6 +106,7 @@ describe('Worker Processors', () => {
         },
         candle: {
           findFirst: jest.fn().mockResolvedValue({ close: new Decimal(24150.0) }),
+          findMany: jest.fn().mockResolvedValue([]),
         },
         $transaction: jest.fn().mockImplementation((cb) => cb(mockPrisma)),
       };
@@ -152,7 +153,7 @@ describe('Worker Processors', () => {
       expect(mockPrisma.paperTrade.create).toHaveBeenCalled();
     });
 
-    it('should NOT close position if tick is stale (>5s) or unavailable', async () => {
+    it('1 & 4. stale live ticker cannot trigger SL and candle closes are never used as execution prices', async () => {
       // Mock tick that is 10 seconds old (> 5s maxAge)
       mockRedis.get = jest.fn().mockResolvedValue(
         JSON.stringify({ price: 24040.0, lastUpdated: Date.now() - 10000 }),
@@ -170,6 +171,171 @@ describe('Worker Processors', () => {
       expect(result.updated).toBe(0);
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
       expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+    });
+
+    it('2. missing live ticker cannot trigger SL', async () => {
+      mockRedis.get = jest.fn().mockResolvedValue(null);
+
+      const mockJob = {
+        id: 'monitor-missing',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('3. position monitor never reads PostgreSQL candles for execution', async () => {
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24150.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-no-candles',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(mockJob);
+      expect(mockPrisma.candle.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.candle.findMany).not.toHaveBeenCalled();
+    });
+
+    it('5. missing persisted SL does not create a synthetic SL', async () => {
+      mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
+        {
+          id: 'pos-no-sl',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: null,
+          initialStopLoss: null,
+          target1: new Decimal(24200.0),
+          target2: new Decimal(24250.0),
+          target3: new Decimal(24300.0),
+          initialTarget1: new Decimal(24200.0),
+          initialTarget2: new Decimal(24250.0),
+          initialTarget3: new Decimal(24300.0),
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(31330.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      // Price drops deeply to 23800.0, but no SL is set -> must NOT close position via fabricated SL
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 23800.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-no-sl',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(1);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('6. missing persisted TP does not create a synthetic TP', async () => {
+      mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
+        {
+          id: 'pos-no-tp',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24000.0),
+          initialStopLoss: new Decimal(24000.0),
+          target1: null,
+          target2: null,
+          target3: null,
+          initialTarget1: null,
+          initialTarget2: null,
+          initialTarget3: null,
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(31330.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      // Price rises to 24500.0, but no TP3 is set -> position remains open
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24500.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-no-tp',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(1);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('7. missing risk anchor produces 0R, not synthetic risk', async () => {
+      mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
+        {
+          id: 'pos-no-risk-anchor',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: null,
+          initialStopLoss: null,
+          target1: null,
+          target2: null,
+          target3: null,
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(31330.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24200.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-zero-r',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.updated).toBe(1);
+
+      // Verify that unrealizedR updated in DB is exactly 0
+      expect(mockPrisma.paperPosition.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            unrealizedR: new Decimal(0),
+          }),
+        }),
+      );
     });
   });
 

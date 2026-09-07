@@ -681,7 +681,7 @@ export class AILearningService implements OnModuleInit {
     realizedR?: number;
     featureSnapshotJson?: any;
     outcomeSnapshotJson?: any;
-  }): Promise<{ updateResult: any; postMortem: any }> {
+  }): Promise<{ updateResult: any; postMortem: any; skippedReason?: string }> {
     const isBull = trade.direction === 'BUY' || trade.direction === 'BULLISH';
     const sym = trade.symbol.toUpperCase();
 
@@ -690,6 +690,7 @@ export class AILearningService implements OnModuleInit {
     // 1. Consume persisted feature snapshot directly without lookahead bias
     const features: any = trade.featureSnapshotJson;
     let updateResult: any = null;
+    let skippedReason: string | undefined = undefined;
 
     const isWin =
       trade.outcomeSnapshotJson?.realizedPnL !== undefined
@@ -700,7 +701,12 @@ export class AILearningService implements OnModuleInit {
             ? trade.exitPrice > trade.entryPrice
             : trade.entryPrice > trade.exitPrice;
 
-    if (features) {
+    if (!features) {
+      skippedReason = 'ONLINE_LEARNING_SKIPPED_MISSING_FEATURE_SNAPSHOT';
+      this.logger.warn(
+        `[OnlineLearning] Skipped online learning update for ${sym}: ${skippedReason}`,
+      );
+    } else {
       updateResult = this.onlineLearningEngine.updateModel(activeModel, {
         symbol: sym,
         features,
@@ -739,7 +745,7 @@ export class AILearningService implements OnModuleInit {
       );
     }
 
-    return { updateResult, postMortem };
+    return { updateResult, postMortem, skippedReason };
   }
 
   /**

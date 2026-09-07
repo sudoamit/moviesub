@@ -82,19 +82,23 @@ export class PositionMonitorProcessor extends WorkerHost {
     // LIVE_TICK only for PAPER execution: fetch live ticker from Redis
     try {
       const cached = await this.redis.get(`ticker:${sym}:live`);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (parsed.price && Number(parsed.price) > 0) {
-          const ageSeconds = (Date.now() - (parsed.lastUpdated || Date.now())) / 1000;
-          if (ageSeconds <= 5) {
-            return Number(parsed.price);
-          }
-        }
+      if (!cached) {
+        this.logger.debug(`[PositionMonitor] No live ticker found in cache for ${sym}`);
+        return null;
       }
-    } catch {}
 
-    // Fail closed: No fresh live tick available for PAPER execution
-    return null;
+      const maxAgeSeconds = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || 5;
+      const validated = ExecutionPriceResolver.validateLiveTicker(cached, maxAgeSeconds);
+      if (validated) {
+        return validated.price;
+      } else {
+        this.logger.warn(`[PositionMonitor] Live tick for ${sym} is stale or invalid; skipping execution`);
+        return null;
+      }
+    } catch (err: any) {
+      this.logger.error(`[PositionMonitor] Error resolving live tick for ${sym}: ${err?.message}`);
+      return null;
+    }
   }
 
   private calculateCharges(turnover: number, isCrypto: boolean) {

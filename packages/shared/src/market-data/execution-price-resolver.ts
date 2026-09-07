@@ -23,9 +23,55 @@ export interface ResolveExecutionPriceOptions {
   simulateSlippage?: boolean;
 }
 
+export interface ValidatedLiveTickerResult {
+  price: number;
+  timestamp: Date;
+  ageSeconds: number;
+}
+
 export class ExecutionPriceResolver {
   public static readonly DEFAULT_MAX_DATA_AGE_SECONDS = 5;
   public static readonly DEFAULT_MAX_SLIPPAGE_BPS = 50;
+
+  /**
+   * Safely parses and validates live ticker data from Redis / streamer.
+   * Enforces price > 0, valid timestamp, and data freshness <= maxAgeSeconds.
+   * Returns null if missing, malformed, or stale (fail-closed).
+   */
+  public static validateLiveTicker(
+    tickerData: any,
+    maxAgeSeconds: number = this.DEFAULT_MAX_DATA_AGE_SECONDS,
+  ): ValidatedLiveTickerResult | null {
+    if (!tickerData) return null;
+    try {
+      const parsed = typeof tickerData === 'string' ? JSON.parse(tickerData) : tickerData;
+      const price = Number(parsed?.price);
+      if (!Number.isFinite(price) || price <= 0) return null;
+
+      const rawTimestamp = parsed.lastUpdated || parsed.timestamp;
+      if (!rawTimestamp) return null;
+
+      const tickTime =
+        rawTimestamp instanceof Date
+          ? rawTimestamp.getTime()
+          : typeof rawTimestamp === 'number'
+            ? rawTimestamp
+            : new Date(rawTimestamp).getTime();
+
+      if (!Number.isFinite(tickTime) || isNaN(tickTime)) return null;
+
+      const ageSeconds = Math.max(0, (Date.now() - tickTime) / 1000);
+      if (ageSeconds > maxAgeSeconds) return null;
+
+      return {
+        price,
+        timestamp: new Date(tickTime),
+        ageSeconds,
+      };
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Resolves execution price from authoritative market data sources according to trading mode.

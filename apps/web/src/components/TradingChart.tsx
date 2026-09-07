@@ -736,38 +736,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     effSignal.grade !== 'NO_TRADE';
 
   const entryPrice = Number(
-    (effSignal?.entryZone?.optimal || effSignal?.entryZone?.max || currentPrice).toFixed(2),
+    (effSignal?.entryZone?.optimal || effSignal?.entryZone?.max || currentPrice || 0).toFixed(2),
   );
-  const slPrice = Number(
-    (
-      effSignal?.stopLoss ||
-      (effSignal?.direction === 'BEARISH' ? entryPrice * 1.005 : entryPrice * 0.995)
-    ).toFixed(2),
-  );
-  const tp1Price = Number(
-    (
-      effSignal?.takeProfits?.tp1 ||
-      (effSignal?.direction === 'BEARISH'
-        ? entryPrice - Math.abs(entryPrice - slPrice) * 1.5
-        : entryPrice + Math.abs(entryPrice - slPrice) * 1.5)
-    ).toFixed(2),
-  );
-  const tp2Price = Number(
-    (
-      effSignal?.takeProfits?.tp2 ||
-      (effSignal?.direction === 'BEARISH'
-        ? entryPrice - Math.abs(entryPrice - slPrice) * 2.5
-        : entryPrice + Math.abs(entryPrice - slPrice) * 2.5)
-    ).toFixed(2),
-  );
-  const tp3Price = effSignal?.takeProfits?.tp3
-    ? Number(effSignal.takeProfits.tp3.toFixed(2))
-    : Number(
-        (effSignal?.direction === 'BEARISH'
-          ? entryPrice - Math.abs(entryPrice - slPrice) * 4.0
-          : entryPrice + Math.abs(entryPrice - slPrice) * 4.0
-        ).toFixed(2),
-      );
+  const slPrice = Number((effSignal?.stopLoss || 0).toFixed(2));
+  const tp1Price = Number((effSignal?.takeProfits?.tp1 || 0).toFixed(2));
+  const tp2Price = Number((effSignal?.takeProfits?.tp2 || 0).toFixed(2));
+  const tp3Price = Number((effSignal?.takeProfits?.tp3 || 0).toFixed(2));
 
   const rrRatio = effSignal?.riskRewardRatios?.rr2 || effSignal?.riskRewardRatio || 2.5;
 

@@ -105,10 +105,10 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   useEffect(() => {
     if (selectedSignal) {
       const isBtc = selectedSignal.symbol === 'BTCUSDT';
-      const optimal = selectedSignal.entryZone?.optimal || 24175.65;
-      const sl = selectedSignal.stopLoss || optimal * 0.995;
-      const tp1 = selectedSignal.takeProfits?.tp1 || optimal + Math.abs(optimal - sl) * 1.5;
-      const tp2 = selectedSignal.takeProfits?.tp2 || optimal + Math.abs(optimal - sl) * 2.5;
+      const optimal = selectedSignal.entryZone?.optimal || 0;
+      const sl = selectedSignal.stopLoss || 0;
+      const tp1 = selectedSignal.takeProfits?.tp1 || 0;
+      const tp2 = selectedSignal.takeProfits?.tp2 || 0;
 
       setEntryPrice(Number(optimal.toFixed(2)));
       setStopLoss(Number(sl.toFixed(2)));

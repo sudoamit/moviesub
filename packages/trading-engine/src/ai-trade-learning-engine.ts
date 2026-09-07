@@ -1586,7 +1586,14 @@ export interface ICalibrationBin {
   calibrationError: number; // |meanPredictedProbability - observedWinRate|
 }
 
-export type CalibrationStatus = 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' | 'INSUFFICIENT_DATA';
+export type CalibrationStatus =
+  | 'EXCELLENT'
+  | 'GOOD'
+  | 'FAIR'
+  | 'POOR'
+  | 'INSUFFICIENT_DATA'
+  | 'NOT_AVAILABLE'
+  | 'UNKNOWN';
 
 export interface ICalibrationReport {
   bins: ICalibrationBin[];
@@ -1878,7 +1885,7 @@ export interface IAIRecommendationResult {
   supportingSampleSize: number;
   calibrationStatus: CalibrationStatus;
   confidenceInterval: IConfidenceInterval | null;
-  confidenceStatus: 'CALIBRATED' | 'INSUFFICIENT_DATA';
+  confidenceStatus: 'CALIBRATED' | 'UNCALIBRATED' | 'INSUFFICIENT_DATA';
   reasons: string[];
   modelVersion: string;
 }
@@ -1947,7 +1954,7 @@ export class ExpectedValueEngine {
       probability,
       payoff,
       supportingSampleSize,
-      calibrationStatus = 'GOOD',
+      calibrationStatus = 'NOT_AVAILABLE',
       minSampleSize = 25,
       modelVersion = 'v1.0.0',
     } = params;
@@ -1958,6 +1965,13 @@ export class ExpectedValueEngine {
       supportingSampleSize,
       minSampleSize,
     );
+
+    const isCalibrated =
+      calibrationStatus === 'EXCELLENT' ||
+      calibrationStatus === 'GOOD' ||
+      calibrationStatus === 'FAIR' ||
+      calibrationStatus === 'POOR';
+    const confidenceStatus = isCalibrated ? 'CALIBRATED' : 'UNCALIBRATED';
 
     const reasons: string[] = [];
 
@@ -1995,7 +2009,7 @@ export class ExpectedValueEngine {
         supportingSampleSize,
         calibrationStatus,
         confidenceInterval,
-        confidenceStatus: 'CALIBRATED',
+        confidenceStatus,
         reasons,
         modelVersion,
       };
@@ -2015,7 +2029,7 @@ export class ExpectedValueEngine {
         supportingSampleSize,
         calibrationStatus,
         confidenceInterval,
-        confidenceStatus: 'CALIBRATED',
+        confidenceStatus,
         reasons,
         modelVersion,
       };
@@ -2066,7 +2080,7 @@ export class ExpectedValueEngine {
         supportingSampleSize,
         calibrationStatus,
         confidenceInterval,
-        confidenceStatus: 'CALIBRATED',
+        confidenceStatus,
         reasons,
         modelVersion,
       };

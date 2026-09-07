@@ -117,7 +117,12 @@ describe('AILearningService Snapshot-Driven Learning & Prediction Safety', () =>
     service = module.get<AILearningService>(AILearningService);
   });
 
-  it('should perform online learning directly from persisted PaperTrade snapshots without querying candles', async () => {
+  it('8 & 9. should perform online learning directly from persisted PaperTrade snapshots without querying candles or calling SignalGenerator', async () => {
+    // Reset any previous calls on mockPrisma.candle and mockSignalsService
+    mockPrisma.candle.findMany.mockClear();
+    mockPrisma.candle.findFirst.mockClear();
+    mockSignalsService.generateSignalForSymbol.mockClear();
+
     const result = await service.learnFromPersistedTrade('trade-1');
 
     expect(result.updateResult).toBeDefined();
@@ -126,12 +131,37 @@ describe('AILearningService Snapshot-Driven Learning & Prediction Safety', () =>
     expect(result.postMortem.outcome).toBe('WIN_TP');
     expect(result.postMortem.realizedR).toBe(2.0);
 
-    // CRITICAL PROOF: Online learning must NEVER query candles table after trade closure
+    // CRITICAL PROOF 8: Online learning must NEVER query candles table after trade closure
     expect(mockPrisma.candle.findMany).not.toHaveBeenCalled();
     expect(mockPrisma.candle.findFirst).not.toHaveBeenCalled();
+
+    // CRITICAL PROOF 9: Online learning must NEVER call SignalGenerator after trade closure
+    expect(mockSignalsService.generateSignalForSymbol).not.toHaveBeenCalled();
   });
 
-  it('should not fabricate sampleSize=120 or calibration=GOOD when predicting without trained baseline', async () => {
+  it('10. missing featureSnapshot causes learning update to be skipped', async () => {
+    const tradeWithoutSnapshot = {
+      symbol: 'NIFTY',
+      direction: 'BULLISH' as const,
+      entryPrice: 24100.0,
+      exitPrice: 24200.0,
+      entryTimestamp: new Date(Date.now() - 1800000),
+      exitTimestamp: new Date(),
+      exitReason: 'TP1_HIT',
+      realizedR: 2.0,
+      featureSnapshotJson: null, // missing snapshot
+      outcomeSnapshotJson: { realizedPnL: 5000.0, realizedR: 2.0 },
+    };
+
+    const result = await service.recordTradeOutcomeAndOnlineUpdate(tradeWithoutSnapshot);
+
+    expect(result.updateResult).toBeNull();
+    expect(result.skippedReason).toBe('ONLINE_LEARNING_SKIPPED_MISSING_FEATURE_SNAPSHOT');
+    expect(result.postMortem).toBeDefined();
+    expect(mockPrisma.candle.findMany).not.toHaveBeenCalled();
+  });
+
+  it('11. AI prediction with no trained metrics reports sampleSize=0', async () => {
     const mockSignal = {
       symbol: 'NIFTY',
       timeframe: '15m' as any,
@@ -154,11 +184,18 @@ describe('AILearningService Snapshot-Driven Learning & Prediction Safety', () =>
 
     expect(prediction).toBeDefined();
     expect(prediction.aiPrediction).toBeDefined();
-    // Untrained baseline must report WAIT with INSUFFICIENT_DATA (sample size = 0 < 25), not fake 120 samples or fake GOOD
-    expect(prediction.aiPrediction.recommendation).toBe('WAIT');
-    expect(prediction.aiPrediction.calibrationStatus).toBe('INSUFFICIENT_DATA');
     expect(prediction.aiPrediction.supportingSampleSize).toBe(0);
-    expect(prediction.aiPrediction.reasons[0]).toContain('INSUFFICIENT_DATA');
-    expect(prediction.aiPrediction.winProbability).toBeDefined();
+  });
+
+  it('12. AI prediction with no calibration report does not report GOOD calibration', async () => {
+    const prediction = await service.predictTrade({
+      symbol: 'NIFTY',
+      timeframe: '15m',
+    });
+
+    expect(prediction.aiPrediction.calibrationStatus).not.toBe('GOOD');
+    expect(prediction.aiPrediction.calibrationStatus).toBe('INSUFFICIENT_DATA');
+    expect(prediction.aiPrediction.confidenceStatus).toBe('INSUFFICIENT_DATA');
+    expect(prediction.aiPrediction.recommendation).toBe('WAIT');
   });
 });

@@ -185,25 +185,10 @@ export class PaperTradingService implements IExecutionProvider {
       }
     }
 
-    // 2. Try latest candle from candles service
-    try {
-      const candle = await this.candlesService.getLatestCandle(sym, '15m');
-      if (candle && candle.close && Number(candle.close) > 0) {
-        const candleAgeSeconds = (Date.now() - new Date(candle.timestamp).getTime()) / 1000;
-        if (candleAgeSeconds > maxAgeSeconds) {
-          throw new StaleMarketDataError(sym, candleAgeSeconds, maxAgeSeconds, new Date(candle.timestamp));
-        }
-        return { price: Number(candle.close), timestamp: new Date(candle.timestamp) };
-      }
-    } catch (err: any) {
-      if (err instanceof StaleMarketDataError) throw err;
-      this.logger.warn(`Failed to resolve candle price for ${sym}: ${err?.message}`);
-    }
-
-    // Fail closed: Never return fallback/hardcoded prices
+    // Fail closed: Never return fallback/hardcoded prices or historical candle closes for live execution
     throw new MarketDataUnavailableError(
       sym,
-      `No fresh live exchange market data available for execution. Hardcoded prices are strictly prohibited.`,
+      `No fresh live exchange market data available for execution. Hardcoded prices and historical candle fallbacks are strictly prohibited.`,
     );
   }
 
