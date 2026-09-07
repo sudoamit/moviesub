@@ -7,6 +7,8 @@ import {
   SMCAnalyzer,
   SignalGenerator,
   SnapshotBuilder,
+  MultiHorizonEngine,
+  CandleNormalizer,
 } from '../index';
 
 describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
@@ -464,6 +466,82 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       expect(torturedSnapshot.smc.currentTrend).toBe(baselineSnapshot.smc.currentTrend);
       expect(torturedSnapshot.smc.fairValueGaps.length).toBe(baselineSnapshot.smc.fairValueGaps.length);
       expect(torturedSnapshot.smc.orderBlocks.length).toBe(baselineSnapshot.smc.orderBlocks.length);
+    });
+  });
+
+  // 12. Explicit MultiHorizon Future Invariance Test
+  describe('Invariant 12: MultiHorizon Future Invariance', () => {
+    it('evaluates MultiHorizon identically regardless of future candles appended', () => {
+      const history = [
+        createCandle(0, 100, 102, 99, 101, 1000, 15 * 60 * 1000),
+        createCandle(1, 101, 103, 100, 102, 1000, 15 * 60 * 1000),
+        createCandle(2, 102, 105, 101, 104, 1000, 15 * 60 * 1000),
+        createCandle(3, 104, 106, 103, 105, 1000, 15 * 60 * 1000),
+        createCandle(4, 105, 108, 104, 107, 1000, 15 * 60 * 1000),
+      ];
+      const t = new Date(history[4].timestamp.getTime() + 15 * 60 * 1000);
+      const future = [
+        createCandle(5, 107, 200, 106, 190, 5000, 15 * 60 * 1000),
+        createCandle(6, 190, 250, 180, 240, 5000, 15 * 60 * 1000),
+      ];
+
+      const resA = MultiHorizonEngine.evaluateMultiHorizon(history, undefined, undefined, {
+        asOfTimestamp: t,
+        executionTimeframe: '15m',
+      });
+      const resB = MultiHorizonEngine.evaluateMultiHorizon(
+        [...history, ...future],
+        undefined,
+        undefined,
+        { asOfTimestamp: t, executionTimeframe: '15m' },
+      );
+      expect(resB).toEqual(resA);
+    });
+  });
+
+  // 13. Stale Analysis Rejection Test
+  describe('Invariant 13: MTF Stale Analysis Rejection', () => {
+    it('ignores stale precomputed analysis when candles are passed', () => {
+      const datasetA: ICandle[] = [
+        createCandle(0, 100, 105, 95, 100, 1000, 60 * 60 * 1000),
+        createCandle(1, 100, 108, 99, 106, 1000, 60 * 60 * 1000),
+        createCandle(2, 106, 112, 105, 110, 1000, 60 * 60 * 1000),
+        createCandle(3, 110, 120, 108, 115, 1000, 60 * 60 * 1000),
+        createCandle(4, 115, 116, 106, 108, 1000, 60 * 60 * 1000),
+        createCandle(5, 108, 112, 105, 110, 1000, 60 * 60 * 1000),
+        createCandle(6, 110, 114, 108, 112, 1000, 60 * 60 * 1000),
+        createCandle(7, 112, 135, 112, 135, 1000, 60 * 60 * 1000),
+        createCandle(8, 135, 138, 134, 136, 1000, 60 * 60 * 1000),
+      ];
+
+      const staleBearishAnalysis: any = {
+        currentTrend: Direction.BEARISH,
+        marketRegime: { regime: 'BEARISH_TREND' },
+      };
+
+      const execCandles = [createCandle(9, 135, 136, 134, 135, 1000, 60 * 60 * 1000)];
+      const result = MultiTimeframeAnalyzer.analyzeMTF(
+        { timeframe: Timeframe.H1, candles: execCandles },
+        { timeframe: Timeframe.H1, candles: datasetA, analysis: staleBearishAnalysis },
+      );
+
+      // Must recompute and evaluate to BULLISH from datasetA, ignoring staleBearishAnalysis
+      expect(result.htf1Trend).toBe(Direction.BULLISH);
+    });
+  });
+
+  // 14. Unclosed Candle Rejection Test
+  describe('Invariant 14: Unclosed Candle Rejection', () => {
+    it('excludes candles that have not closed as of the decision timestamp', () => {
+      const candles: ICandle[] = [
+        createCandle(0, 100, 102, 99, 101, 1000, 15 * 60 * 1000), // 10:00 - 10:15
+        createCandle(1, 101, 103, 100, 102, 1000, 15 * 60 * 1000), // 10:15 - 10:30
+      ];
+      // asOfTimestamp = 10:20 (Candle 0 is closed, candle 1 is still open!)
+      const asOf1020 = new Date(baseTime + 20 * 60 * 1000);
+      const closed = CandleNormalizer.getClosedCandlesAsOf(candles, '15m', asOf1020);
+      expect(closed).toHaveLength(1);
+      expect(closed[0].timestamp).toEqual(candles[0].timestamp);
     });
   });
 });

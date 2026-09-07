@@ -96,7 +96,16 @@ export class MultiHorizonEngine {
     const executionTf = options.executionTimeframe || '15m';
     const htfTf = options.htfTimeframe || '1h';
     const macroTf = options.macroTimeframe || '4h';
-    const asOfTimestamp = options.asOfTimestamp;
+
+    let asOfTimestamp = options.asOfTimestamp;
+    if (!asOfTimestamp && executionCandles && executionCandles.length > 0) {
+      const normExec = CandleNormalizer.normalize(executionCandles).filter((c) => c.isClosed !== false);
+      if (normExec.length > 0) {
+        const lastExec = normExec[normExec.length - 1];
+        const duration = CandleNormalizer.getTimeframeDurationMs(executionTf);
+        asOfTimestamp = new Date(lastExec.timestamp.getTime() + duration);
+      }
+    }
 
     const execution = this.analyzeHorizon(executionCandles, executionTf, asOfTimestamp);
     const higherTimeframe = this.analyzeHorizon(htfCandles || executionCandles, htfTf, asOfTimestamp);
