@@ -1,7 +1,8 @@
 import { Direction, ICandle, MarketRegimeType } from '@quant/shared';
-import { calculateADX, calculateATR, calculateEMA, calculateRSI } from '@quant/indicators';
+import { calculateATR, calculateEMA, calculateRSI } from '@quant/indicators';
 import { HorizonState, MultiHorizonQuantState } from './quant-types';
 import { RegimeClusteringEngine } from './regime-clustering-engine';
+import { CandleNormalizer } from '../candle-normalizer';
 
 export class MultiHorizonEngine {
   /**
@@ -12,30 +13,11 @@ export class MultiHorizonEngine {
     timeframe: string,
     asOfTimestamp?: Date,
   ): ICandle[] {
-    const normalized = candles || [];
+    if (!candles || candles.length === 0) return [];
     if (!asOfTimestamp) {
-      return normalized.filter((c) => c.isClosed !== false);
+      return CandleNormalizer.normalize(candles).filter((c) => c.isClosed !== false);
     }
-
-    const durationMs = (() => {
-      const tf = timeframe.toLowerCase();
-      if (tf.includes('1m')) return 60 * 1000;
-      if (tf.includes('5m')) return 5 * 60 * 1000;
-      if (tf.includes('15m')) return 15 * 60 * 1000;
-      if (tf.includes('30m')) return 30 * 60 * 1000;
-      if (tf.includes('1h') || tf.includes('60m')) return 60 * 60 * 1000;
-      if (tf.includes('4h')) return 4 * 60 * 60 * 1000;
-      if (tf.includes('1d') || tf.includes('d')) return 24 * 60 * 60 * 1000;
-      if (tf.includes('1w') || tf.includes('w')) return 7 * 24 * 60 * 60 * 1000;
-      return 15 * 60 * 1000;
-    })();
-
-    const asOfTime = asOfTimestamp.getTime();
-    return normalized.filter((c) => {
-      const candleTime = new Date(c.timestamp).getTime();
-      const closeTime = candleTime + durationMs;
-      return c.isClosed !== false && closeTime <= asOfTime;
-    });
+    return CandleNormalizer.getClosedCandlesAsOf(candles, timeframe, asOfTimestamp);
   }
 
   /**

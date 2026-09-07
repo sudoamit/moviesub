@@ -5,6 +5,7 @@ import { CandleNormalizer } from './candle-normalizer';
 export interface IOrderBlockOptions {
   displacementThresholdAtr?: number;
   asOfTimestamp?: Date;
+  timeframe?: string;
 }
 
 export class OrderBlockEngine {
@@ -24,7 +25,7 @@ export class OrderBlockEngine {
 
     let candles = CandleNormalizer.normalize(rawCandles);
     if (options.asOfTimestamp) {
-      candles = CandleNormalizer.getClosedCandlesAsOf(candles, undefined, options.asOfTimestamp);
+      candles = CandleNormalizer.getClosedCandlesAsOf(candles, options.timeframe, options.asOfTimestamp);
     }
 
     if (candles.length < 4) {

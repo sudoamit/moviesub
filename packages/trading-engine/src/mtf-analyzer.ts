@@ -99,15 +99,18 @@ export class MultiTimeframeAnalyzer {
           timeframe,
           maxCloseTime,
         );
-        const resolved = SMCAnalyzer.analyze(cleanCandles, {
-          asOfTimestamp: asOfTimestamp || new Date(maxCloseTime),
-        });
+        if (cleanCandles.length > 0) {
+          const resolved = SMCAnalyzer.analyze(cleanCandles, {
+            timeframe,
+            asOfTimestamp: asOfTimestamp || new Date(maxCloseTime),
+          });
 
-        if (resolved.currentTrend !== Direction.NEUTRAL) {
-          return resolved.currentTrend;
+          if (resolved.currentTrend !== Direction.NEUTRAL) {
+            return resolved.currentTrend;
+          }
+          if (resolved.marketRegime?.regime === 'BULLISH_TREND') return Direction.BULLISH;
+          if (resolved.marketRegime?.regime === 'BEARISH_TREND') return Direction.BEARISH;
         }
-        if (resolved.marketRegime?.regime === 'BULLISH_TREND') return Direction.BULLISH;
-        if (resolved.marketRegime?.regime === 'BEARISH_TREND') return Direction.BEARISH;
       }
 
       if (analysis) {

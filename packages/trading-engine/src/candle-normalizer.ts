@@ -37,16 +37,18 @@ export class CandleNormalizer {
     const normalized = CandleNormalizer.normalize(candles);
     const asOfTime = asOfTimestamp.getTime();
 
-    if (!timeframe) {
-      return normalized.filter((candle) => {
-        const candleTime = new Date(candle.timestamp).getTime();
-        return candle.isClosed !== false && candleTime <= asOfTime;
-      });
+    let durationMs: number;
+    if (timeframe) {
+      durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
+    } else if (normalized.length >= 2) {
+      const diff = normalized[1].timestamp.getTime() - normalized[0].timestamp.getTime();
+      durationMs = diff > 0 ? diff : 15 * 60 * 1000;
+    } else {
+      durationMs = 15 * 60 * 1000;
     }
 
-    const durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
     return normalized.filter((candle) => {
-      const candleTime = new Date(candle.timestamp).getTime();
+      const candleTime = candle.timestamp.getTime();
       const closeTime = candleTime + durationMs;
       return candle.isClosed !== false && closeTime <= asOfTime;
     });

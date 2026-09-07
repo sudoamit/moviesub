@@ -27,6 +27,24 @@ export class QuantSMCScorer {
    * Calculates an audited, explainable 10-pillar Quant + SMC confluence score.
    */
   public static score(inputs: IQuantScoringInputs): QuantSMCScore {
+    if (inputs.direction === Direction.NEUTRAL) {
+      return {
+        structureScore: 0,
+        mtfScore: 0,
+        liquidityScore: 0,
+        obScore: 0,
+        fvgScore: 0,
+        volumeScore: 0,
+        momentumScore: 0,
+        regimeScore: 0,
+        volatilityScore: 0,
+        riskRewardScore: 0,
+        totalScore: 0,
+        grade: SignalGrade.NO_TRADE,
+        rankingRationale: ['Market is NEUTRAL - no directional trade setup'],
+      };
+    }
+
     const isBull = inputs.direction === Direction.BULLISH;
     const rankedFactors: { factor: string; points: number }[] = [];
 

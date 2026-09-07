@@ -44,7 +44,7 @@ export class SMCAnalyzer {
 
     let candles = CandleNormalizer.normalize(rawCandles);
     if (config.asOfTimestamp) {
-      candles = CandleNormalizer.getClosedCandlesAsOf(candles, undefined, config.asOfTimestamp);
+      candles = CandleNormalizer.getClosedCandlesAsOf(candles, config.timeframe, config.asOfTimestamp);
     }
 
     if (candles.length === 0) {
@@ -115,6 +115,7 @@ export class SMCAnalyzer {
     const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(candles, {
       minGapAtrMultiplier: config.fvgMinGapAtr,
       asOfTimestamp: config.asOfTimestamp,
+      timeframe: String(config.timeframe || ''),
     });
 
     // 6. Detect Order Blocks (OB)
@@ -125,6 +126,7 @@ export class SMCAnalyzer {
       {
         displacementThresholdAtr: config.displacementThresholdAtr,
         asOfTimestamp: config.asOfTimestamp,
+        timeframe: String(config.timeframe || ''),
       },
     );
 

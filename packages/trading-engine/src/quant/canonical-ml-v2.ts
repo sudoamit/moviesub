@@ -49,8 +49,8 @@ export class CanonicalMLEngineV2 {
     const fvgSize = this.clamp((quant.smcQuant?.fvgSizeAtrRatio || 0.5) / 2.5);
     const mtfAlignment =
       horizon.alignment === 'ALIGNED' ? 1.0 : horizon.alignment === 'PARTIALLY_ALIGNED' ? 0.6 : 0.2;
-    const killZoneSession = 0.7; // default standard session
-    const smtDivergence = 0.5;
+    const killZoneSession = 0.5; // neutral default (no session feed attached)
+    const smtDivergence = 0.5; // neutral default (no SMT feed attached)
     const volatilityAtr = this.clamp(vol.atrPercentage / 4.0);
     const riskRewardRatio = this.clamp(snapshot.score.riskRewardScore / 5.0);
     const trendRegime =
@@ -71,7 +71,7 @@ export class CanonicalMLEngineV2 {
       (quant.smcQuant?.distanceToHTFOrderBlockPct || 1.0) / 5.0,
     );
     const distanceToLiquidity = this.clamp((quant.smcQuant?.distanceToLiquidityPct || 1.0) / 5.0);
-    const marketSession = 0.5;
+    const marketSession = 0.5; // neutral default
     const dayOfWeek = new Date(snapshot.timestamp).getDay() / 7.0;
 
     // 18-28 Quant Features

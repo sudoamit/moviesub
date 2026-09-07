@@ -5,6 +5,7 @@ import { CandleNormalizer } from './candle-normalizer';
 export interface IFVGEngineOptions {
   minGapAtrMultiplier?: number;
   asOfTimestamp?: Date;
+  timeframe?: string;
 }
 
 export class FVGEngine {
@@ -22,7 +23,7 @@ export class FVGEngine {
 
     let candles = CandleNormalizer.normalize(rawCandles);
     if (options.asOfTimestamp) {
-      candles = CandleNormalizer.getClosedCandlesAsOf(candles, undefined, options.asOfTimestamp);
+      candles = CandleNormalizer.getClosedCandlesAsOf(candles, options.timeframe, options.asOfTimestamp);
     }
 
     if (candles.length < 3) {

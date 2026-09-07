@@ -25,6 +25,7 @@ export interface PointInTimeContext {
 
 export interface ISMCAnalysisConfig {
   asOfTimestamp?: Date;
+  timeframe?: Timeframe | string;
   swingLeftBars?: number;
   swingRightBars?: number;
   minSwingDistanceAtrMultiplier?: number;

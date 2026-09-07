@@ -1,4 +1,4 @@
-import { Direction, ICandle, StructureType, Timeframe } from '@quant/shared';
+import { Direction, ICandle, SignalGrade, StructureType, Timeframe } from '@quant/shared';
 import {
   FVGEngine,
   OrderBlockEngine,
@@ -6,7 +6,7 @@ import {
   DealingRangeEngine,
   SMCAnalyzer,
   SignalGenerator,
-  SwingDetector,
+  SnapshotBuilder,
 } from '../index';
 
 describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
@@ -41,7 +41,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         createCandle(1, 102, 120, 102, 118, 1000), // C1: Big up move
         createCandle(2, 118, 125, 112, 122, 500), // C2: Low = 112 > 105 -> Gap [105, 112]
       ];
-      const t1 = new Date(t1Candles[2].timestamp);
+      const t1 = new Date(t1Candles[2].timestamp.getTime() + minuteMs);
 
       // Analyze at T1
       const fvgAtT1_before = FVGEngine.detectFVGs(t1Candles, { asOfTimestamp: t1 });
@@ -56,7 +56,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         createCandle(3, 122, 124, 115, 120, 200),
         createCandle(4, 120, 121, 104, 116, 800), // Fills FVG completely (low 104 < 105)
       ];
-      const t2 = new Date(t2Candles[4].timestamp);
+      const t2 = new Date(t2Candles[4].timestamp.getTime() + minuteMs);
 
       // Re-analyze at T1 using the complete t2Candles dataset with asOfTimestamp = T1
       const fvgAtT1_after = FVGEngine.detectFVGs(t2Candles, { asOfTimestamp: t1 });
@@ -84,7 +84,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         createCandle(2, 118, 130, 116, 128, 1200), // Displacement 2
         createCandle(3, 128, 135, 125, 132, 800), // Displacement 3 (Confirmed here!)
       ];
-      const t1 = new Date(t1Candles[3].timestamp);
+      const t1 = new Date(t1Candles[3].timestamp.getTime() + minuteMs);
 
       const obAtT1_before = OrderBlockEngine.detectOrderBlocks(t1Candles, [], [], {
         displacementThresholdAtr: 0.5,
@@ -104,7 +104,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         createCandle(4, 132, 134, 120, 122, 300),
         createCandle(5, 122, 123, 102, 110, 500), // Mitigates OB
       ];
-      const t2 = new Date(t2Candles[5].timestamp);
+      const t2 = new Date(t2Candles[5].timestamp.getTime() + minuteMs);
 
       // Re-evaluate at T1 with complete dataset
       const obAtT1_after = OrderBlockEngine.detectOrderBlocks(t2Candles, [], [], {
@@ -284,6 +284,186 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       expect(signalAtT_shocked.direction).toBe(signalAtT_original.direction);
       expect(signalAtT_shocked.timestamp).toEqual(signalAtT_original.timestamp);
       expect(signalAtT_shocked.reasons).toEqual(signalAtT_original.reasons);
+    });
+  });
+
+  // 7. Neutral Market Direction Invariant
+  describe('Invariant 7: SnapshotBuilder Neutral Direction Preservation', () => {
+    it('preserves NEUTRAL direction in flat/ranging markets without fabricating a BULLISH fallback', () => {
+      const flatCandles: ICandle[] = [];
+      for (let i = 0; i < 30; i++) {
+        flatCandles.push(createCandle(i, 100, 101, 99, 100));
+      }
+      const tEnd = new Date(flatCandles[29].timestamp);
+
+      const snapshot = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: flatCandles,
+        executionTimeframe: Timeframe.M15,
+        asOfTimestamp: tEnd,
+      });
+
+      expect(snapshot.trace.smc.bias).toBe(Direction.NEUTRAL);
+      expect(snapshot.trace.finalDecision).toBe('NO_TRADE');
+      expect(snapshot.score.grade).toBe(SignalGrade.NO_TRADE);
+    });
+  });
+
+  // 8. MTF Precomputed Analysis Reuse Protection
+  describe('Invariant 8: MTF Recomputation Immunity', () => {
+    it('always recomputes MTF analysis and never reuses precomputed analysis across different datasets', () => {
+      // datasetA: Forms Swing High at C3 (High 120), closes above it at C7 (Close 135) -> Bullish BOS
+      const datasetA: ICandle[] = [
+        createCandle(0, 100, 105, 95, 100, 1000, 60 * 60 * 1000),
+        createCandle(1, 100, 108, 99, 106, 1000, 60 * 60 * 1000),
+        createCandle(2, 106, 112, 105, 110, 1000, 60 * 60 * 1000),
+        createCandle(3, 110, 120, 108, 115, 1000, 60 * 60 * 1000),
+        createCandle(4, 115, 116, 106, 108, 1000, 60 * 60 * 1000),
+        createCandle(5, 108, 112, 105, 110, 1000, 60 * 60 * 1000),
+        createCandle(6, 110, 114, 108, 112, 1000, 60 * 60 * 1000),
+        createCandle(7, 112, 135, 112, 135, 1000, 60 * 60 * 1000),
+        createCandle(8, 135, 138, 134, 136, 1000, 60 * 60 * 1000),
+      ];
+
+      // datasetB: Forms Swing Low at C3 (Low 80), closes below it at C7 (Close 65) -> Bearish BOS
+      const datasetB: ICandle[] = [
+        createCandle(0, 100, 105, 95, 100, 1000, 60 * 60 * 1000),
+        createCandle(1, 100, 101, 92, 94, 1000, 60 * 60 * 1000),
+        createCandle(2, 94, 95, 88, 90, 1000, 60 * 60 * 1000),
+        createCandle(3, 90, 92, 80, 85, 1000, 60 * 60 * 1000),
+        createCandle(4, 85, 95, 84, 92, 1000, 60 * 60 * 1000),
+        createCandle(5, 92, 93, 88, 90, 1000, 60 * 60 * 1000),
+        createCandle(6, 90, 92, 86, 88, 1000, 60 * 60 * 1000),
+        createCandle(7, 88, 88, 65, 65, 1000, 60 * 60 * 1000),
+        createCandle(8, 65, 66, 60, 62, 1000, 60 * 60 * 1000),
+      ];
+
+      const execCandles = [
+        createCandle(9, 135, 136, 134, 135, 1000, 60 * 60 * 1000),
+      ];
+      const resultA = MultiTimeframeAnalyzer.analyzeMTF(
+        { timeframe: Timeframe.H1, candles: execCandles },
+        { timeframe: Timeframe.H1, candles: datasetA },
+      );
+      const resultB = MultiTimeframeAnalyzer.analyzeMTF(
+        { timeframe: Timeframe.H1, candles: execCandles },
+        { timeframe: Timeframe.H1, candles: datasetB },
+      );
+
+      expect(resultA.htf1Trend).toBe(Direction.BULLISH);
+      expect(resultB.htf1Trend).toBe(Direction.BEARISH);
+    });
+  });
+
+  // 9. Reusable Point-in-Time Invariant Assertion Helper
+  describe('Invariant 9: assertPointInTimeInvariant Helper', () => {
+    function assertPointInTimeInvariant<T>(
+      candles: ICandle[],
+      asOfTimestamp: Date,
+      analyzer: (c: ICandle[], t: Date) => T,
+      keySelector: (res: T) => any = (res) => res,
+    ) {
+      const stateBefore = keySelector(analyzer(candles, asOfTimestamp));
+      const futureCandles = [
+        createCandle(candles.length, 500, 600, 400, 550, 100000),
+        createCandle(candles.length + 1, 550, 700, 300, 350, 200000),
+      ];
+      const expanded = [...candles, ...futureCandles];
+      const stateAfter = keySelector(analyzer(expanded, asOfTimestamp));
+      expect(stateAfter).toEqual(stateBefore);
+    }
+
+    it('validates SMC, MTF, MultiHorizon, SnapshotBuilder and SignalGenerator using assertPointInTimeInvariant', () => {
+      const baseCandles: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        baseCandles.push(createCandle(i, 100 + i * 0.3, 102 + i * 0.3, 99 + i * 0.3, 101 + i * 0.3));
+      }
+      const tAsOf = new Date(baseCandles[30].timestamp);
+
+      // SMC
+      assertPointInTimeInvariant(
+        baseCandles,
+        tAsOf,
+        (c, t) => SMCAnalyzer.analyze(c, { asOfTimestamp: t }),
+        (r) => ({ trend: r.currentTrend, swings: r.swingPoints.length, bos: r.breaksOfStructure.length }),
+      );
+
+      // SnapshotBuilder
+      assertPointInTimeInvariant(
+        baseCandles,
+        tAsOf,
+        (c, t) => SnapshotBuilder.buildSnapshot({ symbol: 'NIFTY', executionCandles: c, asOfTimestamp: t }),
+        (r) => ({ decision: r.trace.finalDecision, bias: r.trace.smc.bias, score: r.score.totalScore }),
+      );
+
+      // SignalGenerator
+      assertPointInTimeInvariant(
+        baseCandles,
+        tAsOf,
+        (c, t) => SignalGenerator.generateSignal({ symbol: 'NIFTY', executionCandles: c, asOfTimestamp: t }),
+        (r) => ({ dir: r.direction, score: r.score, grade: r.grade, reasons: r.reasons }),
+      );
+    });
+  });
+
+  // 10. Mandatory Incremental Replay Test
+  describe('Invariant 10: Mandatory Incremental Replay Test', () => {
+    it('verifies process(C1..Ci) === analyze(C1..Cn, asOfTimestamp=Ti) for every closed timestamp', () => {
+      const fullCandles: ICandle[] = [];
+      for (let i = 0; i < 35; i++) {
+        fullCandles.push(createCandle(i, 100 + (i % 7), 103 + (i % 7), 98 + (i % 7), 101 + (i % 7)));
+      }
+
+      for (let i = 15; i < fullCandles.length; i++) {
+        const sliced = fullCandles.slice(0, i + 1);
+        const ti = new Date(sliced[sliced.length - 1].timestamp);
+
+        const incremental = SMCAnalyzer.analyze(sliced, { asOfTimestamp: ti });
+        const batch = SMCAnalyzer.analyze(fullCandles, { asOfTimestamp: ti });
+
+        expect(incremental.candlesCount).toBe(batch.candlesCount);
+        expect(incremental.currentTrend).toBe(batch.currentTrend);
+        expect(incremental.fairValueGaps.length).toBe(batch.fairValueGaps.length);
+        expect(incremental.orderBlocks.length).toBe(batch.orderBlocks.length);
+      }
+    });
+  });
+
+  // 11. Future-Data Torture Test
+  describe('Invariant 11: Future-Data Torture Test', () => {
+    it('guarantees zero historical leakage under wild future structural events', () => {
+      const history: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        history.push(createCandle(i, 100 + i * 0.2, 102 + i * 0.2, 99 + i * 0.2, 101 + i * 0.2));
+      }
+      const tBaseline = new Date(history[35].timestamp);
+
+      const baselineSnapshot = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: history,
+        asOfTimestamp: tBaseline,
+      });
+
+      // Wild future candles: massive FVG, OB invalidation, trend flip, extreme volatility
+      const tortureCandles = [
+        ...history,
+        createCandle(40, 108, 200, 107, 195, 500000), // Huge FVG + BOS
+        createCandle(41, 195, 205, 50, 60, 900000),   // Huge crash invalidating all OBs
+        createCandle(42, 60, 65, 10, 15, 1000000),    // Extreme crash
+      ];
+
+      const torturedSnapshot = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: tortureCandles,
+        asOfTimestamp: tBaseline,
+      });
+
+      expect(torturedSnapshot.trace.finalDecision).toBe(baselineSnapshot.trace.finalDecision);
+      expect(torturedSnapshot.trace.smc.bias).toBe(baselineSnapshot.trace.smc.bias);
+      expect(torturedSnapshot.score.totalScore).toBe(baselineSnapshot.score.totalScore);
+      expect(torturedSnapshot.smc.currentTrend).toBe(baselineSnapshot.smc.currentTrend);
+      expect(torturedSnapshot.smc.fairValueGaps.length).toBe(baselineSnapshot.smc.fairValueGaps.length);
+      expect(torturedSnapshot.smc.orderBlocks.length).toBe(baselineSnapshot.smc.orderBlocks.length);
     });
   });
 });
