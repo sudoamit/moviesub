@@ -8,165 +8,275 @@ import {
   Timeframe,
 } from '@quant/shared';
 import { SignalGenerator } from '@quant/trading-engine';
-import { PositionSizer, TradeLifecycleManager } from '@quant/risk-engine';
-import { IBacktestOptions, IBacktestSimulationResult, IEquityPoint } from './types';
+import {
+  PositionSizer,
+  TradeLifecycleManager,
+  DEFAULT_PARTIAL_EXIT_POLICY,
+  PositionLot,
+  IExecutionEvent,
+} from '@quant/risk-engine';
+import {
+  IBacktestOptions,
+  IBacktestSimulationResult,
+  IEquityPoint,
+  IEquitySnapshot,
+} from './types';
 import { MetricsCalculator } from './metrics-calculator';
+import { MarketDataRouter } from './market-data-router';
+import { FillModel, SameCandleAmbiguityMode, ExecutionSimulator } from './execution';
 
 export class BacktestSimulator {
   /**
-   * Simulates strategy historical execution candle-by-candle with zero look-ahead bias
+   * Simulates strategy historical execution candle-by-candle with zero look-ahead bias,
+   * realistic fill models, partial scale-outs, fail-closed sizing, and bar-by-bar equity tracking.
    */
   static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
     const symbol = options.symbol.toUpperCase();
-    const timeframe = (options.timeframe as string) || Timeframe.M15;
-    const candles = options.candles;
+    const timeframe = (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
     const initialCapital = options.initialCapital || 100000;
     const riskPercent = options.riskPerTradePercent || 1.0;
     const minScore = options.minScore || 65;
     const lotSize = options.lotSize || 1;
+    const fillModel = options.fillModel || FillModel.OHLC_PATH;
+    const ambiguityMode = options.ambiguityMode || SameCandleAmbiguityMode.CONSERVATIVE;
+    const partialPolicy = options.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
+    const strategyMode = options.strategyMode || 'SMC';
 
+    const router = new MarketDataRouter({
+      executionCandles: options.candles,
+      htf1Candles: options.htf1Candles,
+      htf2Candles: options.htf2Candles,
+      executionTimeframe: timeframe,
+      htf1Timeframe: options.htf1Timeframe || '1h',
+      htf2Timeframe: options.htf2Timeframe || '4h',
+    });
+
+    const executionCandles = router.getExecutionCandles();
+    let currentCash = initialCapital;
     let currentEquity = initialCapital;
+
     const trades: IBacktestTrade[] = [];
+    const positionLots: PositionLot[] = [];
+    const executionEvents: IExecutionEvent[] = [];
     const equityCurve: IEquityPoint[] = [
       {
-        timestamp: candles[0]?.timestamp || new Date(),
+        timestamp: executionCandles[0]?.timestamp ? new Date(executionCandles[0].timestamp) : new Date(),
         equity: initialCapital,
         drawdownPercent: 0,
       },
     ];
+    const equitySnapshots: IEquitySnapshot[] = [];
 
-    if (!candles || candles.length < 50) {
+    if (!executionCandles || executionCandles.length < 50) {
       const emptyMetrics = MetricsCalculator.calculateMetrics([], initialCapital, equityCurve);
       return {
         id: `bt-${Date.now()}`,
         symbol,
         timeframe,
         initialCapital,
-        ...emptyMetrics,
         trades: [],
         equityCurve,
+        equitySnapshots: [],
+        positionLots: [],
+        executionEvents: [],
+        ...emptyMetrics,
       };
     }
 
+    let activeLot: PositionLot | null = null;
     let activeSignal: ISignalSetup | null = null;
-    let activeTradeUnits = 0;
-    let activeTradeRiskAmount = 0;
-    let activeTradeEntryTime: Date | null = null;
-    let activeTradeEntryPrice = 0;
-
     const warmupBars = 40;
 
-    for (let i = warmupBars; i < candles.length; i++) {
-      const currentCandle = candles[i];
-      const slice = candles.slice(0, i + 1);
+    for (let i = warmupBars; i < executionCandles.length; i++) {
+      const currentCandle = executionCandles[i];
+      const candleTime = currentCandle.timestamp instanceof Date
+        ? currentCandle.timestamp.getTime()
+        : new Date(currentCandle.timestamp).getTime();
 
-      // 1. If currently in a trade or pending signal, manage tick update
-      if (activeSignal) {
-        const update = TradeLifecycleManager.evaluateTick(activeSignal, currentCandle);
+      // 1. Manage Active Position Lot
+      if (activeLot) {
+        const tickRes = TradeLifecycleManager.evaluateLotTick(
+          activeLot,
+          currentCandle,
+          partialPolicy,
+          candleTime,
+        );
 
-        if (activeSignal.state === SignalState.PENDING && update.newState === SignalState.ACTIVE) {
-          activeSignal.state = SignalState.ACTIVE;
-          activeTradeEntryTime = currentCandle.timestamp;
-          activeTradeEntryPrice = update.currentPrice;
+        activeLot = tickRes.lot;
+        executionEvents.push(...tickRes.events);
 
-          // Compute exact position sizing
-          const sizing = PositionSizer.calculatePosition({
-            accountBalance: currentEquity,
-            riskPercentage: riskPercent,
-            entryPrice: activeTradeEntryPrice,
-            stopLoss: activeSignal.stopLoss,
-            lotSize,
-          });
+        // Update equity floating state
+        currentEquity = Number((currentCash + activeLot.realizedPnl + activeLot.unrealizedPnl).toFixed(2));
 
-          activeTradeUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : 1;
-          activeTradeRiskAmount =
-            sizing.riskAmount > 0 ? sizing.riskAmount : currentEquity * (riskPercent / 100);
-        } else if (update.isClosed) {
-          activeSignal.state = update.newState;
+        if (tickRes.isClosed) {
+          // Position complete -> Record trade
+          const isLong = activeLot.direction === Direction.BULLISH;
+          const initialRisk = Math.abs(activeLot.entryPrice - activeLot.initialStopLoss);
+          const totalPnl = activeLot.realizedPnl;
+          currentCash = Number((currentCash + totalPnl).toFixed(2));
+          currentEquity = currentCash;
 
-          if (activeTradeUnits > 0 && activeTradeEntryTime) {
-            const isLong = activeSignal.direction === Direction.BULLISH;
-            const exitPrice = update.currentPrice;
-            const priceDiff = isLong
-              ? exitPrice - activeTradeEntryPrice
-              : activeTradeEntryPrice - exitPrice;
+          const tradeRecord: IBacktestTrade = {
+            id: `tr-${trades.length + 1}`,
+            direction: activeLot.direction,
+            entryTime: new Date(activeLot.openedAt),
+            entryPrice: activeLot.entryPrice,
+            exitTime: new Date(activeLot.closedAt || candleTime),
+            exitPrice: activeLot.partialFills[activeLot.partialFills.length - 1]?.price || activeLot.entryPrice,
+            stopLoss: activeLot.initialStopLoss,
+            takeProfit: activeLot.tp2,
+            positionSize: activeLot.initialQuantity,
+            marginRequired: Number(((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2)),
+            riskAmount: Number((initialRisk * activeLot.initialQuantity).toFixed(2)),
+            pnl: totalPnl,
+            pnlRMultiple: activeLot.realizedR,
+            exitReason: tickRes.state,
+          };
 
-            const realizedPnL = Number((priceDiff * activeTradeUnits).toFixed(2));
-            const riskPerUnit = Math.abs(activeTradeEntryPrice - activeSignal.stopLoss);
-            const pnlRMultiple =
-              riskPerUnit > 0 ? Number((priceDiff / riskPerUnit).toFixed(2)) : update.pnlRMultiple;
+          trades.push(tradeRecord);
+          positionLots.push(activeLot);
 
-            currentEquity = Number((currentEquity + realizedPnL).toFixed(2));
-
-            const notionalVal = activeTradeUnits * activeTradeEntryPrice;
-            const marginRequired = Number(Math.min(currentEquity, notionalVal / 5).toFixed(2));
-
-            const tradeRecord: IBacktestTrade = {
-              id: `tr-${trades.length + 1}`,
-              direction: activeSignal.direction,
-              entryTime: activeTradeEntryTime,
-              entryPrice: activeTradeEntryPrice,
-              exitTime: currentCandle.timestamp,
-              exitPrice,
-              stopLoss: activeSignal.stopLoss,
-              takeProfit: activeSignal.takeProfits.tp2,
-              positionSize: activeTradeUnits,
-              marginRequired,
-              riskAmount: Number(activeTradeRiskAmount.toFixed(2)),
-              pnl: realizedPnL,
-              pnlRMultiple,
-              exitReason: update.newState,
-            };
-
-            trades.push(tradeRecord);
-
-            equityCurve.push({
-              timestamp: currentCandle.timestamp,
-              equity: currentEquity,
-              drawdownPercent: 0, // Will be computed by MetricsCalculator
-            });
-          }
-
-          // Reset active trade
+          activeLot = null;
           activeSignal = null;
-          activeTradeUnits = 0;
-          activeTradeRiskAmount = 0;
-          activeTradeEntryTime = null;
-        } else {
-          activeSignal.state = update.newState;
         }
+
+        // Record Bar-by-bar Snapshot
+        const peak = Math.max(...equityCurve.map((e) => e.equity), initialCapital);
+        const ddPercent = peak > 0 ? Number((((peak - currentEquity) / peak) * 100).toFixed(2)) : 0;
+
+        equityCurve.push({
+          timestamp: new Date(candleTime),
+          equity: currentEquity,
+          drawdownPercent: ddPercent,
+        });
+
+        equitySnapshots.push({
+          timestamp: new Date(candleTime),
+          cash: currentCash,
+          realizedPnL: activeLot ? activeLot.realizedPnl : 0,
+          unrealizedPnL: activeLot ? activeLot.unrealizedPnl : 0,
+          equity: currentEquity,
+          marginUsed: activeLot ? Number(((activeLot.remainingQuantity * activeLot.entryPrice) / 5).toFixed(2)) : 0,
+          availableMargin: Math.max(0, currentEquity - (activeLot ? (activeLot.remainingQuantity * activeLot.entryPrice) / 5 : 0)),
+          grossExposure: activeLot ? activeLot.remainingQuantity * activeLot.entryPrice : 0,
+          netExposure: activeLot ? (activeLot.direction === Direction.BULLISH ? 1 : -1) * activeLot.remainingQuantity * activeLot.entryPrice : 0,
+          fees: 0,
+          slippage: 0,
+          drawdownPercent: ddPercent,
+        });
 
         continue;
       }
 
-      // 2. Scan for new high-confluence setup on historical bar i (Zero lookahead)
-      const signal = SignalGenerator.generateSignal({
-        symbol,
-        executionCandles: slice,
-        executionTimeframe: timeframe,
-        htf1Candles: slice, // Self-contained for backtest simulation
+      // 2. Evaluate Pending Signal Trigger
+      if (activeSignal && activeSignal.state === SignalState.PENDING) {
+        const isLong = activeSignal.direction === Direction.BULLISH;
+        const entryHit = isLong
+          ? currentCandle.low <= activeSignal.entryZone.max && currentCandle.high >= activeSignal.entryZone.min
+          : currentCandle.high >= activeSignal.entryZone.min && currentCandle.low <= activeSignal.entryZone.max;
+
+        if (entryHit) {
+          // Compute fail-closed position sizing
+          const sizing = PositionSizer.calculatePosition({
+            accountBalance: currentEquity,
+            riskPercentage: riskPercent,
+            entryPrice: activeSignal.entryZone.optimal,
+            stopLoss: activeSignal.stopLoss,
+            lotSize,
+          });
+
+          // FAIL CLOSED: If sizing is invalid, reject trade (do NOT silently trade 1 unit)
+          if (!sizing.isValid || sizing.roundedUnits <= 0) {
+            activeSignal = null;
+          } else {
+            activeLot = TradeLifecycleManager.createPositionLot(
+              activeSignal,
+              activeSignal.entryZone.optimal,
+              sizing.roundedUnits,
+              candleTime,
+            );
+            executionEvents.push(...activeLot.events);
+          }
+        } else {
+          // Check invalidation before entry
+          const isInvalid = isLong
+            ? currentCandle.low <= activeSignal.stopLoss
+            : currentCandle.high >= activeSignal.stopLoss;
+          if (isInvalid) {
+            activeSignal = null;
+          }
+        }
+      }
+
+      // 3. Scan for new high-confluence setup on historical bar i (Zero lookahead via MarketDataRouter)
+      if (!activeLot && !activeSignal) {
+        const mtfData = router.getAvailableMarketDataAt(i);
+
+        const signal = SignalGenerator.generateSignal({
+          symbol,
+          executionCandles: mtfData.executionSlice,
+          executionTimeframe: timeframe,
+          htf1Candles: mtfData.htf1Slice.length > 0 ? mtfData.htf1Slice : mtfData.executionSlice,
+          htf1Timeframe: options.htf1Timeframe || '1h',
+          htf2Candles: mtfData.htf2Slice.length > 0 ? mtfData.htf2Slice : undefined,
+          htf2Timeframe: options.htf2Timeframe || '4h',
+          strategyMode,
+        });
+
+        if (
+          signal.direction !== Direction.NEUTRAL &&
+          signal.score >= minScore &&
+          signal.grade !== SignalGrade.NO_TRADE
+        ) {
+          activeSignal = signal;
+        }
+      }
+
+      // Record snapshot for flat bar
+      const peak = Math.max(...equityCurve.map((e) => e.equity), initialCapital);
+      const ddPercent = peak > 0 ? Number((((peak - currentEquity) / peak) * 100).toFixed(2)) : 0;
+
+      equityCurve.push({
+        timestamp: new Date(candleTime),
+        equity: currentEquity,
+        drawdownPercent: ddPercent,
       });
 
-      if (
-        signal.direction !== Direction.NEUTRAL &&
-        signal.score >= minScore &&
-        signal.grade !== SignalGrade.NO_TRADE
-      ) {
-        activeSignal = { ...signal, id: `sig-${i}`, state: SignalState.PENDING };
-      }
+      equitySnapshots.push({
+        timestamp: new Date(candleTime),
+        cash: currentCash,
+        realizedPnL: 0,
+        unrealizedPnL: 0,
+        equity: currentEquity,
+        marginUsed: 0,
+        availableMargin: currentEquity,
+        grossExposure: 0,
+        netExposure: 0,
+        fees: 0,
+        slippage: 0,
+        drawdownPercent: ddPercent,
+      });
     }
 
-    // Compute comprehensive statistics
-    const metrics = MetricsCalculator.calculateMetrics(trades, initialCapital, equityCurve);
+    const metrics = MetricsCalculator.calculateMetrics(
+      trades,
+      initialCapital,
+      equityCurve,
+      equitySnapshots,
+      positionLots,
+    );
 
     return {
-      id: `bt-${symbol}-${timeframe}-${Date.now()}`,
+      id: `bt-${Date.now()}`,
       symbol,
       timeframe,
       initialCapital,
-      ...metrics,
       trades,
       equityCurve,
+      equitySnapshots,
+      positionLots,
+      executionEvents,
+      ...metrics,
     };
   }
 }

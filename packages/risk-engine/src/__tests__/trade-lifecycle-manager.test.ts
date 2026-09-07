@@ -1,4 +1,4 @@
-import { TradeLifecycleManager } from '../trade-lifecycle-manager';
+import { TradeLifecycleManager, DEFAULT_PARTIAL_EXIT_POLICY } from '../trade-lifecycle-manager';
 import { Direction, ISignalSetup, SignalGrade, SignalState, Timeframe } from '@quant/shared';
 
 describe('TradeLifecycleManager', () => {
@@ -86,5 +86,54 @@ describe('TradeLifecycleManager', () => {
     expect(update.newState).toBe(SignalState.TP1_HIT);
     expect(update.pnlRMultiple).toBe(1.5);
     expect(update.isClosed).toBe(false);
+  });
+
+  describe('PositionLot Multi-Tier Lifecycle & Partial Scale-Out', () => {
+    it('should create an immutable PositionLot with initial execution event', () => {
+      const lot = TradeLifecycleManager.createPositionLot(signal, 25000, 100, 1756972800000);
+      expect(lot.initialQuantity).toBe(100);
+      expect(lot.remainingQuantity).toBe(100);
+      expect(lot.status).toBe('OPEN');
+      expect(lot.events.length).toBe(1);
+      expect(lot.events[0].eventType).toBe('ENTRY_FILLED');
+      expect(lot.partialFills.length).toBe(1);
+    });
+
+    it('should scale out 30% at TP1 and move stop loss to breakeven', () => {
+      const lot = TradeLifecycleManager.createPositionLot(signal, 25000, 100, 1756972800000);
+      const tp1Candle = {
+        timestamp: new Date(1756973700000),
+        open: 25100,
+        high: 25220, // Breaches TP1 (25212.5)
+        low: 25080,
+        close: 25200,
+        volume: 5000,
+      };
+
+      const res = TradeLifecycleManager.evaluateLotTick(lot, tp1Candle, DEFAULT_PARTIAL_EXIT_POLICY);
+      expect(res.isClosed).toBe(false);
+      expect(res.lot.status).toBe('PARTIALLY_CLOSED');
+      expect(res.lot.remainingQuantity).toBe(70); // 100 - 30 = 70
+      expect(res.lot.currentStopLoss).toBe(25000); // Moved to Breakeven
+      expect(res.lot.realizedPnl).toBeGreaterThan(0);
+      expect(res.events.some((e) => e.eventType === 'TP1_FILLED')).toBe(true);
+      expect(res.events.some((e) => e.eventType === 'STOP_MOVED')).toBe(true);
+    });
+
+    it('should track MAE and MFE correctly across ticks', () => {
+      const lot = TradeLifecycleManager.createPositionLot(signal, 25000, 100, 1756972800000);
+      const adverseCandle = {
+        timestamp: new Date(1756973700000),
+        open: 25000,
+        high: 25080,
+        low: 24940, // Adverse excursion of 60 points
+        close: 25020,
+        volume: 2000,
+      };
+
+      TradeLifecycleManager.evaluateLotTick(lot, adverseCandle);
+      expect(lot.mae).toBe(60);
+      expect(lot.mfe).toBe(80);
+    });
   });
 });

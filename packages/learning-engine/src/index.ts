@@ -25,4 +25,6 @@ export * from './learning-memory';
 export * from './learning-scheduler';
 export * from './learning-engine';
 export * from './counterfactual-analyzer';
+export * from './dataset-manager';
+export * from './experiments';
 export * from './research';

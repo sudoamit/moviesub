@@ -17,8 +17,8 @@ export interface ICalculatePositionOptions {
 
 export class PositionSizer {
   /**
-   * Deterministically calculates institutional position size based on strict fixed percentage risk,
-   * adjusted dynamically by regime, volatility percentile, and calibrated Expected Value.
+   * Deterministically calculates institutional position size based on strict fixed percentage risk.
+   * STRICT FAIL-CLOSED: If position sizing is invalid or below 1 lot, fails closed with isValid: false.
    */
   static calculatePosition(options: ICalculatePositionOptions): IPositionSizing {
     let {
@@ -82,13 +82,26 @@ export class PositionSizer {
     const riskAmount = accountBalance * (riskPercentage / 100);
     const calculatedUnits = (riskAmount / riskPerUnit) * contractSize;
 
-    // Floor to instrument lot size
+    // Floor to instrument lot size (Strict fail-closed rounding)
     const effectiveLotSize = Math.max(1, lotSize);
-    let roundedUnits = Math.floor(calculatedUnits / effectiveLotSize) * effectiveLotSize;
+    const roundedUnits = Math.floor(calculatedUnits / effectiveLotSize) * effectiveLotSize;
 
-    // Must be at least 1 lot if calculated units are valid
-    if (roundedUnits === 0 && calculatedUnits >= effectiveLotSize * 0.5) {
-      roundedUnits = effectiveLotSize;
+    if (roundedUnits <= 0) {
+      return {
+        accountBalance,
+        riskPercentage,
+        riskAmount: Number(riskAmount.toFixed(2)),
+        entryPrice,
+        stopLoss,
+        riskPerUnit: Number(riskPerUnit.toFixed(4)),
+        calculatedUnits: Number(calculatedUnits.toFixed(4)),
+        lotSize: effectiveLotSize,
+        roundedUnits: 0,
+        totalPositionValue: 0,
+        maximumLoss: 0,
+        isValid: false,
+        rejectionReason: `Calculated units (${calculatedUnits.toFixed(2)}) smaller than minimum lot size (${effectiveLotSize}) without exceeding risk budget`,
+      };
     }
 
     const totalPositionValue = roundedUnits * entryPrice;
@@ -125,11 +138,7 @@ export class PositionSizer {
       roundedUnits,
       totalPositionValue: Number(totalPositionValue.toFixed(2)),
       maximumLoss: Number(maximumLoss.toFixed(2)),
-      isValid: roundedUnits > 0,
-      rejectionReason:
-        roundedUnits > 0
-          ? undefined
-          : 'Calculated position size is smaller than minimum tradeable lot size',
+      isValid: true,
     };
   }
 

@@ -1,12 +1,95 @@
 import { Direction, IInstrument, IPositionSizing, ISignalSetup, SignalState } from '@quant/shared';
 
+export type ExecutionEventType =
+  | 'ENTRY_TRIGGERED'
+  | 'ENTRY_FILLED'
+  | 'PARTIAL_TP_FILLED'
+  | 'STOP_MOVED'
+  | 'STOP_FILLED'
+  | 'TP1_FILLED'
+  | 'TP2_FILLED'
+  | 'TP3_FILLED'
+  | 'POSITION_CLOSED'
+  | 'ORDER_CANCELLED'
+  | 'ORDER_REJECTED';
+
+export interface IExecutionEvent {
+  eventId: string;
+  tradeId: string;
+  orderId?: string;
+  symbol: string;
+  eventType: ExecutionEventType;
+  timestamp: number; // Canonical UTC epoch ms
+  price: number;
+  quantity: number;
+  remainingQuantity: number;
+  fees: number;
+  slippage: number;
+  reason: string;
+}
+
+export interface IPartialFillRecord {
+  fillId: string;
+  targetType: 'ENTRY' | 'TP1' | 'TP2' | 'TP3' | 'STOP_LOSS' | 'TRAILING_STOP' | 'MANUAL';
+  timestamp: number;
+  price: number;
+  quantity: number;
+  remainingQuantity: number;
+  realizedPnl: number;
+  realizedR: number;
+  fee: number;
+  slippage: number;
+}
+
+export interface IPartialExitPolicy {
+  tp1Ratio: number; // e.g. 0.30 (30% scale-out)
+  tp2Ratio: number; // e.g. 0.30 (30% scale-out)
+  tp3Ratio: number; // e.g. 0.40 (40% runner)
+  moveStopToBreakevenOnTp1: boolean;
+  trailStopOnTp2: boolean;
+  trailStopOffsetR?: number;
+}
+
+export type PositionStatus = 'PENDING' | 'OPEN' | 'PARTIALLY_CLOSED' | 'CLOSED' | 'CANCELLED';
+
+export interface PositionLot {
+  id: string;
+  tradeId: string;
+  symbol: string;
+  direction: Direction;
+  initialQuantity: number;
+  remainingQuantity: number;
+  entryPrice: number;
+  entryTime: number; // Canonical UTC epoch ms
+  initialStopLoss: number;
+  currentStopLoss: number;
+  tp1: number;
+  tp2: number;
+  tp3: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  realizedR: number;
+  status: PositionStatus;
+  openedAt: number;
+  closedAt?: number;
+  partialFills: IPartialFillRecord[];
+  events: IExecutionEvent[];
+  mae: number; // Maximum Adverse Excursion (in price distance & percentage)
+  mfe: number; // Maximum Favorable Excursion (in price distance & percentage)
+}
+
 export interface IRiskConfig {
   defaultRiskPercentage?: number; // e.g. 1.0 (1%)
   maxRiskPercentage?: number; // e.g. 2.5 (2.5%)
   maxAccountDrawdownPercent?: number; // e.g. 10.0 (10%)
   maxDailyDrawdownPercent?: number; // e.g. 5.0 (5%)
+  maxWeeklyDrawdownPercent?: number; // e.g. 8.0 (8%)
   maxOpenRiskPercent?: number; // e.g. 6.0 (6%)
   maxConcurrentPositions?: number; // e.g. 5
+  maxSymbolExposurePercent?: number; // e.g. 25.0 (25%)
+  maxCorrelatedExposurePercent?: number; // e.g. 15.0 (15%)
+  maxConsecutiveLosses?: number; // e.g. 3
+  maxLeverage?: number; // e.g. 10
 }
 
 export interface IOpenPosition {
@@ -32,4 +115,6 @@ export interface ITradeStateUpdate {
   pnlRMultiple: number;
   isClosed: boolean;
   notes: string;
+  positionLot?: PositionLot;
+  events?: IExecutionEvent[];
 }
