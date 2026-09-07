@@ -27,9 +27,12 @@ import {
   ITradePayoffStructure,
   SignalGenerator,
 } from '@quant/trading-engine';
-import { Timeframe, ICandle, MarketRegimeType } from '@quant/shared';
+import { Timeframe, ICandle } from '@quant/shared';
 import { IsString, IsOptional } from 'class-validator';
 import * as crypto from 'crypto';
+
+import { Queue } from 'bullmq';
+import { BULLMQ_QUEUES } from '@quant/shared';
 
 export interface IRetrainJobStatus {
   jobId: string;
@@ -63,6 +66,7 @@ export class AILearningService implements OnModuleInit {
   private readonly logger = new Logger(AILearningService.name);
   private readonly registry = new ModelRegistry();
   private readonly retrainJobs = new Map<string, IRetrainJobStatus>();
+  private retrainQueue: Queue | null = null;
   private readonly onlineLearningEngine = new OnlineLearningEngine({
     learningRate: 0.005,
     maxWeightChangeNorm: 0.05,
@@ -78,6 +82,17 @@ export class AILearningService implements OnModuleInit {
 
   async onModuleInit() {
     await this.initializeModelRegistry();
+    try {
+      const host = process.env.REDIS_HOST || 'localhost';
+      const port = Number(process.env.REDIS_PORT) || 6380;
+      const password = process.env.REDIS_PASSWORD || undefined;
+      this.retrainQueue = new Queue(BULLMQ_QUEUES.LEARNING_TASKS, {
+        connection: { host, port, password },
+      });
+      this.logger.log('BullMQ AI Retraining Queue connected.');
+    } catch (e: any) {
+      this.logger.warn(`BullMQ Queue init deferred: ${e.message}`);
+    }
   }
 
   /**
@@ -204,29 +219,66 @@ export class AILearningService implements OnModuleInit {
 
   /**
    * 1. GET /api/ai-learning/model-state
+   * Returns active model version, metrics, features count, schema version, and all registered model versions.
    */
-  async getModelState(): Promise<any> {
-    const activeState = this.registry.getActiveVersionState();
-    const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
+  getModelState() {
+    const activeModel = this.registry.getActiveModel();
+    const activeVersionState = this.registry.getActiveVersionState();
 
-    const featureImportance = activeModel.getFeatureImportance();
-    const hasRealMetrics = activeState?.metrics && activeState.metrics.accuracy !== undefined;
+    if (!activeModel || !activeVersionState || !activeVersionState.metrics) {
+      return {
+        modelVersion: 'v1.0.0-PROD',
+        status: 'UNTRAINED',
+        isTrained: false,
+        trainedAt: null,
+        datasetStats: {
+          trainingExamples: 0,
+          validationExamples: 0,
+          outOfSampleExamples: 0,
+          totalExamples: 0,
+        },
+        metrics: null,
+        calibration: null,
+        featureCount: 17,
+        featureSchemaVersion: FEATURE_SCHEMA_VERSION,
+        allVersions: this.registry.getAllVersions().map((v) => ({
+          version: v.version,
+          status: v.status,
+          createdAt: v.createdAt,
+          accuracy: v.metrics?.accuracy ?? null,
+          logLoss: v.metrics?.logLoss ?? null,
+        })),
+      };
+    }
 
     return {
-      modelVersion: activeState?.version || 'v1.0.0-PROD',
-      featureSchemaVersion: activeState?.featureSchemaVersion || FEATURE_SCHEMA_VERSION,
-      status: hasRealMetrics ? activeState?.status || 'ACTIVE' : 'UNTRAINED',
-      algorithm: activeState?.algorithm || 'LOGISTIC_REGRESSION',
-      trainedAt: hasRealMetrics
-        ? activeState?.trainingCompletedAt || activeState?.createdAt || new Date()
-        : null,
-      trainingExamples: activeState?.trainingExampleCount || 0,
-      validationExamples: activeState?.validationExampleCount || 0,
-      outOfSampleExamples: activeState?.outOfSampleExampleCount || 0,
-      totalExamples: activeState?.metrics?.totalExamples || 0,
-      metrics: hasRealMetrics ? activeState.metrics : null,
-      calibration: hasRealMetrics ? activeState?.calibrationReport : null,
-      featureImportance,
+      modelVersion: activeModel.modelVersion,
+      status: activeVersionState.status,
+      isTrained: true,
+      trainedAt: activeVersionState.createdAt,
+      datasetStats: {
+        trainingExamples: activeVersionState.trainingExampleCount,
+        validationExamples: activeVersionState.validationExampleCount,
+        outOfSampleExamples: activeVersionState.outOfSampleExampleCount,
+        totalExamples:
+          activeVersionState.trainingExampleCount +
+          activeVersionState.validationExampleCount +
+          activeVersionState.outOfSampleExampleCount,
+      },
+      metrics: {
+        accuracy: activeVersionState.metrics.accuracy,
+        precision: activeVersionState.metrics.precision,
+        recall: activeVersionState.metrics.recall,
+        f1Score: activeVersionState.metrics.f1Score,
+        brierScore: activeVersionState.metrics.brierScore,
+        logLoss: activeVersionState.metrics.logLoss,
+        rocAuc: activeVersionState.metrics.rocAuc,
+        profitFactor: activeVersionState.metrics.profitFactor,
+        expectancyR: activeVersionState.metrics.expectancyR,
+      },
+      calibration: activeVersionState.calibrationReport,
+      featureCount: activeModel.getWeights().length,
+      featureSchemaVersion: FEATURE_SCHEMA_VERSION,
       allVersions: this.registry.getAllVersions().map((v) => ({
         version: v.version,
         status: v.status,
@@ -238,7 +290,7 @@ export class AILearningService implements OnModuleInit {
   }
 
   /**
-   * 2. POST /api/ai-learning/retrain (Non-blocking background job)
+   * 2. POST /api/ai-learning/retrain (Enqueues job to BullMQ worker)
    */
   async startRetrainJob(): Promise<{ jobId: string; status: string; message: string }> {
     const jobId = `job_${crypto.randomUUID().slice(0, 8)}`;
@@ -246,7 +298,7 @@ export class AILearningService implements OnModuleInit {
       jobId,
       status: 'PENDING',
       progressPercent: 0,
-      stage: 'Queued',
+      stage: 'Enqueued in BullMQ',
       startedAt: new Date(),
     };
 
@@ -265,34 +317,21 @@ export class AILearningService implements OnModuleInit {
       this.logger.warn(`Failed to create AIRetrainJob in DB: ${e.message}`);
     }
 
-    // Trigger non-blocking asynchronous training
-    setImmediate(() => {
-      this.executeTrainingPipeline(jobId).catch(async (err) => {
-        this.logger.error(`Retrain job ${jobId} failed: ${err.message}`, err.stack);
-        const job = this.retrainJobs.get(jobId);
-        if (job) {
-          job.status = 'FAILED';
-          job.error = err.message;
-          job.completedAt = new Date();
-        }
-        try {
-          await this.prisma.aIRetrainJob.update({
-            where: { id: jobId },
-            data: {
-              status: 'FAILED',
-              errorMessage: err.message,
-              completedAt: new Date(),
-            },
-          });
-        } catch {}
-      });
-    });
+    // Offload execution to BullMQ worker
+    try {
+      if (this.retrainQueue) {
+        await this.retrainQueue.add('RETRAIN_MODEL', { jobId, triggerReason: 'MANUAL' });
+        this.logger.log(`Enqueued retrain job ${jobId} to BullMQ queue '${BULLMQ_QUEUES.LEARNING_TASKS}'`);
+      }
+    } catch (e: any) {
+      this.logger.error(`Failed to push job to BullMQ queue: ${e.message}`);
+    }
 
     return {
       jobId,
       status: 'PENDING',
       message:
-        'Walk-forward training job initiated in background. Poll /api/ai-learning/retrain/:jobId for status.',
+        'Walk-forward training job initiated in BullMQ worker. Poll /api/ai-learning/retrain/:jobId for status.',
     };
   }
 
@@ -301,7 +340,7 @@ export class AILearningService implements OnModuleInit {
    */
   async getRetrainJobStatus(jobId: string): Promise<IRetrainJobStatus> {
     const job = this.retrainJobs.get(jobId);
-    if (job) return job;
+    if (job && job.status === 'RUNNING') return job;
 
     try {
       const dbJob = await this.prisma.aIRetrainJob.findUnique({ where: { id: jobId } });
@@ -310,7 +349,7 @@ export class AILearningService implements OnModuleInit {
           jobId: dbJob.id,
           status: dbJob.status as any,
           progressPercent: dbJob.status === 'COMPLETED' ? 100 : dbJob.status === 'FAILED' ? 0 : 50,
-          stage: dbJob.status === 'COMPLETED' ? 'Completed' : dbJob.status,
+          stage: dbJob.status === 'COMPLETED' ? 'Completed' : dbJob.status === 'RUNNING' ? 'Running in Worker' : dbJob.status,
           isPromoted: dbJob.promoted,
           metrics: (dbJob.validationMetricsJson as any) || null,
           error: dbJob.errorMessage || undefined,
@@ -320,6 +359,8 @@ export class AILearningService implements OnModuleInit {
       }
     } catch {}
 
+    if (job) return job;
+
     return {
       jobId,
       status: 'FAILED',
@@ -328,139 +369,6 @@ export class AILearningService implements OnModuleInit {
       error: `Retrain job '${jobId}' not found`,
       startedAt: new Date(),
     };
-  }
-
-  /**
-   * Executes the full walk-forward supervised training pipeline asynchronously.
-   */
-  private async executeTrainingPipeline(jobId: string) {
-    const job = this.retrainJobs.get(jobId);
-    if (!job) return;
-
-    job.status = 'RUNNING';
-    job.progressPercent = 10;
-    job.stage = 'Extracting Point-in-Time Features from Multi-Asset Historical Data';
-
-    try {
-      await this.prisma.aIRetrainJob.update({
-        where: { id: jobId },
-        data: { status: 'RUNNING', startedAt: new Date() },
-      });
-    } catch {}
-
-    // 1. Generate multi-asset chronological training examples
-    const dataset = await this.buildTrainingDataset();
-    if (dataset.length < 30) {
-      throw new Error(
-        `Insufficient historical observations (${dataset.length} < 30) to train model safely.`,
-      );
-    }
-
-    job.progressPercent = 35;
-    job.stage = 'Splitting Chronological Partitions (Train / Validation / Out-of-Sample)';
-
-    const splits = ChronologicalSplitter.split(dataset, {
-      trainRatio: 0.6,
-      validationRatio: 0.2,
-      outOfSampleRatio: 0.2,
-    });
-
-    job.progressPercent = 55;
-    job.stage = 'Executing Expanding-Window Walk-Forward Cross-Validation';
-
-    const currentVersionCount = this.registry.getAllVersions().length;
-    const candidateVersion = `v1.${currentVersionCount}.0`;
-    job.candidateVersion = candidateVersion;
-
-    const candidateModel = new TradePredictionModel(candidateVersion, {
-      learningRate: 0.08,
-      batchSize: 16,
-      maxEpochs: 70,
-    });
-
-    // Train candidate on training partition
-    const trainMetrics = candidateModel.train(splits.train);
-
-    job.progressPercent = 75;
-    job.stage = 'Evaluating Out-of-Sample Calibration and Model Promotion Rules';
-
-    const outOfSampleMetrics = candidateModel.evaluate(splits.outOfSample);
-    const baselineModel = this.registry.getActiveModel();
-
-    // Model Promotion Assessment
-    const promotionDecision = ModelPromotionEngine.evaluatePromotion(
-      candidateModel,
-      splits.outOfSample,
-      baselineModel,
-      { minSampleSize: 15 },
-    );
-
-    // Compute calibration on validation + out of sample
-    const evalData = [...splits.validation, ...splits.outOfSample];
-    const calibrationItems = evalData.map((d) => ({
-      predictedProb: candidateModel.predictProbability(d.features),
-      actualLabel: d.label,
-    }));
-    const calibrationReport = ProbabilityCalibrationEngine.generateCalibrationReport(
-      calibrationItems,
-      10,
-    );
-
-    const serializedState = ModelPersistenceManager.serialize(candidateModel, {
-      status: promotionDecision.isPromoted ? 'ACTIVE' : 'REJECTED',
-      metrics: outOfSampleMetrics,
-      calibrationReport,
-      trainingExampleCount: splits.counts.train,
-      validationExampleCount: splits.counts.validation,
-      outOfSampleExampleCount: splits.counts.outOfSample,
-      trainingPeriod: splits.periods
-        ? { start: splits.periods.trainStart, end: splits.periods.trainEnd }
-        : undefined,
-      validationPeriod: splits.periods
-        ? { start: splits.periods.validationStart, end: splits.periods.validationEnd }
-        : undefined,
-      outOfSamplePeriod: splits.periods
-        ? { start: splits.periods.outOfSampleStart, end: splits.periods.outOfSampleEnd }
-        : undefined,
-    });
-
-    this.registry.registerVersion(serializedState);
-
-    if (promotionDecision.isPromoted) {
-      this.registry.promoteVersion(candidateVersion);
-      this.logger.log(`PROMOTED AI Model Version '${candidateVersion}' to Production!`);
-    } else {
-      this.logger.warn(
-        `Candidate AI Model '${candidateVersion}' rejected: ${promotionDecision.reasons.join('; ')}`,
-      );
-    }
-
-    job.progressPercent = 100;
-    job.status = 'COMPLETED';
-    job.stage = promotionDecision.isPromoted
-      ? `Promoted to Active Production (${candidateVersion})`
-      : `Evaluated (Rejected: ${promotionDecision.reasons[0] || 'Did not meet criteria'})`;
-    job.isPromoted = promotionDecision.isPromoted;
-    job.promotionDecision = promotionDecision.decisionStatus;
-    job.metrics = outOfSampleMetrics;
-    job.completedAt = new Date();
-
-    try {
-      await this.prisma.aIRetrainJob.update({
-        where: { id: jobId },
-        data: {
-          status: 'COMPLETED',
-          samplesCount: dataset.length,
-          trainMetricsJson: trainMetrics as any,
-          validationMetricsJson: outOfSampleMetrics as any,
-          promoted: promotionDecision.isPromoted,
-          rejectionReason: promotionDecision.isPromoted ? null : promotionDecision.reasons.join('; '),
-          completedAt: new Date(),
-        },
-      });
-    } catch (e: any) {
-      this.logger.warn(`Failed to update completed AIRetrainJob in DB: ${e.message}`);
-    }
   }
 
   /**
@@ -758,7 +666,7 @@ export class AILearningService implements OnModuleInit {
   }
 
   /**
-   * 6. Live Trade Outcome Hook: Performs single-step online SGD learning & logs post-mortem.
+   * 6. Live Trade Outcome Hook: Performs single-step online SGD learning & logs post-mortem using persisted snapshots.
    */
   public async recordTradeOutcomeAndOnlineUpdate(trade: {
     symbol: string;
@@ -771,66 +679,61 @@ export class AILearningService implements OnModuleInit {
     exitTimestamp: Date;
     exitReason?: string;
     realizedR?: number;
+    featureSnapshotJson?: any;
+    outcomeSnapshotJson?: any;
   }): Promise<{ updateResult: any; postMortem: any }> {
     const isBull = trade.direction === 'BUY' || trade.direction === 'BULLISH';
     const sym = trade.symbol.toUpperCase();
     const sl = trade.stopLoss || (isBull ? trade.entryPrice * 0.99 : trade.entryPrice * 1.01);
     const tp = trade.target || (isBull ? trade.entryPrice * 1.02 : trade.entryPrice * 0.98);
 
-    // Fetch candles point-in-time
-    const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
-    let candles: ICandle[] = [];
-    if (inst) {
-      const rows = await this.prisma.candle.findMany({
-        where: { instrumentId: inst.id, timeframe: 'M15' as any },
-        orderBy: { timestamp: 'desc' },
-        take: 30,
-      });
-      candles = rows.reverse().map((r) => ({
-        timestamp: r.timestamp,
-        open: Number(r.open),
-        high: Number(r.high),
-        low: Number(r.low),
-        close: Number(r.close),
-        volume: Number(r.volume || 1),
-        isClosed: true,
-      }));
-    }
-
-    // 1. Generate post-mortem analysis
-    const postMortem = PostMortemAnalyticsEngine.analyzeTrade({
-      symbol: sym,
-      direction: isBull ? 'BULLISH' : 'BEARISH',
-      entryPrice: trade.entryPrice,
-      stopLoss: sl,
-      targets: { tp1: tp, tp2: tp },
-      entryTimestamp: trade.entryTimestamp,
-      subsequentCandles: candles,
-    });
-
-    this.recentPostMortems.unshift(postMortem);
-    if (this.recentPostMortems.length > 20) this.recentPostMortems.pop();
-
-    // 2. Perform single-step online SGD update using REAL signal snapshot or point-in-time generation
     const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
 
-    // Retrieve real signal snapshot if available or generate point-in-time signal
-    let realSignal = SignalGenerator.generateSignal({
-      symbol: sym,
-      executionCandles: candles,
-      executionTimeframe: Timeframe.M15,
-      htf1Candles: candles,
-      htf1Timeframe: Timeframe.H1,
-    });
+    // 1. Consume persisted feature snapshot directly without lookahead bias
+    let features: any = trade.featureSnapshotJson;
+    if (!features) {
+      // Fallback: extract features point-in-time if snapshot wasn't present
+      const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
+      let candles: ICandle[] = [];
+      if (inst) {
+        const rows = await this.prisma.candle.findMany({
+          where: { instrumentId: inst.id, timeframe: 'M15' as any },
+          orderBy: { timestamp: 'desc' },
+          take: 30,
+        });
+        candles = rows.reverse().map((r) => ({
+          timestamp: r.timestamp,
+          open: Number(r.open),
+          high: Number(r.high),
+          low: Number(r.low),
+          close: Number(r.close),
+          volume: Number(r.volume || 1),
+          isClosed: true,
+        }));
+      }
 
-    const features = FeatureVectorExtractor.extract({
-      signal: realSignal,
-      candles,
-      asOfTimestamp: trade.entryTimestamp,
-    });
+      const realSignal = SignalGenerator.generateSignal({
+        symbol: sym,
+        executionCandles: candles,
+        executionTimeframe: Timeframe.M15,
+        htf1Candles: candles,
+        htf1Timeframe: Timeframe.H1,
+      });
+
+      features = FeatureVectorExtractor.extract({
+        signal: realSignal,
+        candles,
+        asOfTimestamp: trade.entryTimestamp,
+      });
+    }
 
     const isWin =
-      trade.realizedR !== undefined ? trade.realizedR > 0 : postMortem.realizedRMultiple > 0;
+      trade.realizedR !== undefined
+        ? trade.realizedR > 0
+        : trade.outcomeSnapshotJson?.realizedR !== undefined
+          ? trade.outcomeSnapshotJson.realizedR > 0
+          : trade.exitPrice > trade.entryPrice === isBull;
+
     const updateResult = this.onlineLearningEngine.updateModel(activeModel, {
       symbol: sym,
       features,
@@ -846,8 +749,23 @@ export class AILearningService implements OnModuleInit {
       currentActiveState.updatedAt = new Date();
     }
 
+    const postMortem = {
+      symbol: sym,
+      direction: isBull ? 'BULLISH' : 'BEARISH',
+      entryPrice: trade.entryPrice,
+      exitPrice: trade.exitPrice,
+      realizedR: trade.realizedR ?? (isWin ? 1.5 : -1.0),
+      outcome: isWin ? 'WIN_TP' : 'LOSS_SL',
+      classification:
+        trade.outcomeSnapshotJson?.outcomeClassification || (isWin ? 'TARGET_ACHIEVED' : 'STOP_HIT'),
+      exitReason: trade.exitReason || 'Closed',
+    };
+
+    this.recentPostMortems.unshift(postMortem as any);
+    if (this.recentPostMortems.length > 20) this.recentPostMortems.pop();
+
     this.logger.log(
-      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) from real trade outcome - Delta Norm: ${updateResult.weightDeltaNorm}`,
+      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) from persisted snapshot - Delta Norm: ${updateResult.weightDeltaNorm}`,
     );
 
     return { updateResult, postMortem };

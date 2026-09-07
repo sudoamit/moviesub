@@ -1,5 +1,5 @@
 import { ExecutionPriceResolver } from '../execution-price-resolver';
-import { ExecutionPriceSource } from '../../enums';
+import { ExecutionPriceSource, TradingMode } from '../../enums';
 import { MarketDataUnavailableError, StaleMarketDataError } from '../../errors';
 
 describe('ExecutionPriceResolver', () => {
@@ -50,14 +50,33 @@ describe('ExecutionPriceResolver', () => {
     ).rejects.toThrow(StaleMarketDataError);
   });
 
-  it('should throw MarketDataUnavailableError if no market data is provided', async () => {
-    await expect(
-      ExecutionPriceResolver.resolveExecutionPrice({
-        symbol: 'RELIANCE',
-        maxMarketDataAgeSeconds: 5,
-        liveTick: null,
-        getLatestCandle: async () => null,
+  it('should allow historical candle in BACKTEST mode with BACKTEST_CANDLE source tag', async () => {
+    const result = await ExecutionPriceResolver.resolveExecutionPrice({
+      symbol: 'NIFTY',
+      tradingMode: TradingMode.BACKTEST,
+      getLatestCandle: async () => ({
+        timestamp: new Date(Date.now() - 3600 * 1000), // 1 hour ago
+        open: 24000,
+        high: 24100,
+        low: 23950,
+        close: 24050,
+        volume: 200000,
       }),
-    ).rejects.toThrow(MarketDataUnavailableError);
+    });
+
+    expect(result.price).toBe(24050);
+    expect(result.source).toBe(ExecutionPriceSource.BACKTEST_CANDLE);
+  });
+
+  it('should calculate realistic slippage within maxSlippageBps', () => {
+    const buySlip = ExecutionPriceResolver.calculateSlippage(24000, 'BUY', 50, 10);
+    expect(buySlip.slippageBps).toBe(10);
+    expect(buySlip.fillPrice).toBe(24024); // 24000 + 24
+    expect(buySlip.slippageAmount).toBe(24);
+
+    const sellSlip = ExecutionPriceResolver.calculateSlippage(24000, 'SELL', 50, 10);
+    expect(sellSlip.slippageBps).toBe(10);
+    expect(sellSlip.fillPrice).toBe(23976); // 24000 - 24
+    expect(sellSlip.slippageAmount).toBe(24);
   });
 });

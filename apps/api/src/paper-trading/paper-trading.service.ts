@@ -11,6 +11,8 @@ import { RealMarketStreamerService } from '../market-data/real-market-streamer.s
 import { TrailingEngine } from '@quant/trading-engine';
 import {
   Direction,
+  ExecutionPriceResolver,
+  ExecutionPriceSource,
   MarketDataUnavailableError,
   OrderState,
   PositionState,
@@ -246,9 +248,7 @@ export class PaperTradingService implements IExecutionProvider {
       const isBuy = pos.direction === Direction.BULLISH;
       const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
-      const unrealizedPnL = Number((priceDiff * quantity - charges.totalCharges).toFixed(2));
-
-      const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
+      const unrealizedPnL = Number((priceDiff * quantity - charges.totalCharges).toFixed(2));      const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
       const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
       const riskAnchor = initialStopLoss ?? stopLoss;
       const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
@@ -256,27 +256,26 @@ export class PaperTradingService implements IExecutionProvider {
       const notionalValue = Number((livePrice * quantity).toFixed(2));
       const usedMargin = Number(pos.usedMargin);
 
-      // Dynamic Trailing Stop calculation for UI badge only
-      const tp1 = pos.initialTarget1
-        ? Number(pos.initialTarget1)
-        : isBuy
-          ? entryPrice * 1.015
-          : entryPrice * 0.985;
-      const tp2 = pos.initialTarget2
-        ? Number(pos.initialTarget2)
-        : isBuy
-          ? entryPrice * 1.025
-          : entryPrice * 0.975;
-      const initialSl = initialStopLoss ?? (isBuy ? entryPrice * 0.99 : entryPrice * 1.01);
-
-      const trailing = TrailingEngine.evaluate(
-        entryPrice,
-        initialSl,
-        tp1,
-        tp2,
-        livePrice,
-        isBuy ? 'BULLISH' : 'BEARISH',
-      );
+      // Trailing Stop evaluation (ONLY if explicit targets and SL exist on the position)
+      let trailingStopState: any = undefined;
+      if (initialStopLoss && pos.initialTarget1 && pos.initialTarget2) {
+        const trailing = TrailingEngine.evaluate(
+          entryPrice,
+          Number(initialStopLoss),
+          Number(pos.initialTarget1),
+          Number(pos.initialTarget2),
+          livePrice,
+          isBuy ? 'BULLISH' : 'BEARISH',
+        );
+        trailingStopState = {
+          stage: trailing.stage,
+          stageBadge: trailing.stageBadge,
+          currentStopLoss: trailing.currentStopLoss,
+          isRiskFree: trailing.isRiskFree,
+          partialBookedPercent: trailing.partialBookedPercent,
+          recommendedAction: trailing.recommendedAction,
+        };
+      }
 
       formattedPositions.push({
         id: pos.id,
@@ -309,14 +308,8 @@ export class PaperTradingService implements IExecutionProvider {
         maxAdverseExcursion: Number(pos.maxAdverseExcursion),
         openedAt: pos.openedAt.toISOString(),
         status: pos.status as PositionState,
-        trailingStopState: {
-          stage: trailing.stage,
-          stageBadge: trailing.stageBadge,
-          currentStopLoss: trailing.currentStopLoss,
-          isRiskFree: trailing.isRiskFree,
-          partialBookedPercent: trailing.partialBookedPercent,
-          recommendedAction: trailing.recommendedAction,
-        },
+        featureSnapshotJson: pos.featureSnapshotJson || undefined,
+        trailingStopState,
         charges,
       });
 
@@ -352,6 +345,8 @@ export class PaperTradingService implements IExecutionProvider {
         openedAt: t.entryTime.toISOString(),
         closedAt: t.exitTime.toISOString(),
         totalCharges: charges.totalCharges || 0,
+        featureSnapshotJson: (t.featureSnapshotJson as any) || undefined,
+        outcomeSnapshotJson: (t.outcomeSnapshotJson as any) || undefined,
         correlationId: t.correlationId,
       };
     });
@@ -449,7 +444,7 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    // 3. Resolve Real Validated Execution Price (NO fake fallbacks)
+    // 3. Resolve Real Validated Execution Price with Mode Separation & Slippage
     let executionPrice = req.price;
     let sourceTimestamp = new Date();
 
@@ -462,7 +457,6 @@ export class PaperTradingService implements IExecutionProvider {
         executionPrice = marketPriceData.price;
         sourceTimestamp = marketPriceData.timestamp;
       } catch (err: any) {
-        // Record rejected order in database
         await this.prisma.paperOrder.create({
           data: {
             accountId: account.id,
@@ -492,7 +486,7 @@ export class PaperTradingService implements IExecutionProvider {
       }
     }
 
-    // 4. Directional SL / TP Validation (P0-4: Never silently create or alter SL/TP)
+    // 4. Directional SL / TP Validation (Never silently create or alter SL/TP)
     const isBuy = req.direction === 'BUY';
     const stopLoss = req.stopLoss;
     const target1 = req.target1;
@@ -637,7 +631,7 @@ export class PaperTradingService implements IExecutionProvider {
       }
     }
 
-    // 5. Hard Risk Limits Check (P0-11)
+    // 5. Hard Risk Limits Check
     // 5.1 Max Open Positions Limit
     const openPositionsCount = await this.prisma.paperPosition.count({
       where: {
@@ -798,58 +792,49 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    // 5.7 Total Exposure Check & Margin Availability
-    const turnover = executionPrice * req.quantity;
+    // 5.7 Slippage Simulation & Margin Accounting
+    const slippageResult = ExecutionPriceResolver.calculateSlippage(
+      executionPrice,
+      req.direction,
+      config.maxSlippageBps || 50,
+    );
+    const finalFillPrice = slippageResult.fillPrice;
+    const slippageAmount = slippageResult.slippageAmount;
+
+    const turnover = finalFillPrice * req.quantity;
     const charges = this.calculateCharges(turnover, isCrypto);
     const effLeverage = Math.max(1, Math.min(req.leverage || 5, Number(config.maxLeverage)));
     const requiredMargin = Number((turnover / effLeverage + charges.totalCharges).toFixed(2));
-    const currentUsedMargin = Number(account.usedMargin);
-    const currentCashBalance = Number(account.cashBalance);
-    const totalExposureAfterOrder = currentUsedMargin + requiredMargin;
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
-    if (totalExposureAfterOrder > maxExposureAllowed) {
-      await this.rejectOrder(
-        account.id,
-        symbol,
-        contractSymbol,
-        instrumentType,
-        req.direction,
-        req.orderType,
-        req.quantity,
-        RiskRejectionReason.TOTAL_EXPOSURE_LIMIT,
-        `Total portfolio exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds maximum limit ₹${maxExposureAllowed.toFixed(2)} (${config.maxTotalExposurePercent}%)`,
-        idempotencyKey,
-        correlationId,
-      );
-      throw new BadRequestException(
-        `Order Rejected [TOTAL_EXPOSURE_LIMIT]: Total exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds limit ₹${maxExposureAllowed.toFixed(2)}.`,
-      );
-    }
-
-    const currentAvailableMargin = currentCashBalance - currentUsedMargin;
-    if (currentAvailableMargin < requiredMargin) {
-      await this.rejectOrder(
-        account.id,
-        symbol,
-        contractSymbol,
-        instrumentType,
-        req.direction,
-        req.orderType,
-        req.quantity,
-        RiskRejectionReason.INSUFFICIENT_MARGIN,
-        `Required margin: ₹${requiredMargin.toFixed(2)}, Available margin: ₹${currentAvailableMargin.toFixed(2)}`,
-        idempotencyKey,
-        correlationId,
-      );
-      throw new BadRequestException(
-        `Insufficient margin. Required: ₹${requiredMargin.toFixed(2)}, Available: ₹${currentAvailableMargin.toFixed(2)}`,
-      );
-    }
-
-    // 6. Execute Order & Persist Position inside Atomic Database Transaction
+    // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
     const entryTime = new Date();
     const result = await this.prisma.$transaction(async (tx) => {
+      // Concurrency Lock: Re-read account inside atomic transaction
+      const txAccount = await tx.paperAccount.findUnique({
+        where: { id: account.id },
+      });
+      if (!txAccount) {
+        throw new BadRequestException('Trading account not found');
+      }
+
+      const txCash = Number(txAccount.cashBalance);
+      const txUsedMargin = Number(txAccount.usedMargin);
+      const txAvailable = txCash - txUsedMargin;
+
+      if (txAvailable < requiredMargin) {
+        throw new BadRequestException(
+          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${requiredMargin.toFixed(2)}, Available: ₹${txAvailable.toFixed(2)}`,
+        );
+      }
+
+      const totalExposureAfterOrder = txUsedMargin + requiredMargin;
+      if (totalExposureAfterOrder > maxExposureAllowed) {
+        throw new BadRequestException(
+          `[TOTAL_EXPOSURE_LIMIT] Concurrency check failed. Total exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds limit ₹${maxExposureAllowed.toFixed(2)}`,
+        );
+      }
+
       // Create PaperOrder (FILLED)
       const order = await tx.paperOrder.create({
         data: {
@@ -863,7 +848,7 @@ export class PaperTradingService implements IExecutionProvider {
           orderType: req.orderType || 'MARKET',
           requestedQuantity: new Decimal(req.quantity),
           filledQuantity: new Decimal(req.quantity),
-          price: new Decimal(executionPrice),
+          price: new Decimal(finalFillPrice),
           stopLoss: new Decimal(stopLoss),
           target1: new Decimal(target1),
           target2: target2 ? new Decimal(target2) : null,
@@ -877,15 +862,16 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // Create PaperFill
+      // Create PaperFill with slippage & executionPriceSource
       const fill = await tx.paperFill.create({
         data: {
           orderId: order.id,
-          fillPrice: new Decimal(executionPrice),
+          fillPrice: new Decimal(finalFillPrice),
           fillQuantity: new Decimal(req.quantity),
           fee: new Decimal(charges.totalCharges),
           feeBreakdownJson: charges,
-          slippage: new Decimal(0.0),
+          slippage: new Decimal(slippageAmount),
+          executionPriceSource: ExecutionPriceSource.LIVE_TICK,
           liquidityType: 'TAKER',
           sourceTimestamp,
           fillTimestamp: entryTime,
@@ -905,9 +891,9 @@ export class PaperTradingService implements IExecutionProvider {
           optionType: req.optionType,
           direction: this.toSignalDirection(req.direction),
           quantity: new Decimal(req.quantity),
-          entryPrice: new Decimal(executionPrice),
+          entryPrice: new Decimal(finalFillPrice),
           entryTime,
-          currentPrice: new Decimal(executionPrice),
+          currentPrice: new Decimal(finalFillPrice),
           stopLoss: new Decimal(stopLoss),
           initialStopLoss: new Decimal(stopLoss),
           target1: new Decimal(target1),
@@ -924,13 +910,13 @@ export class PaperTradingService implements IExecutionProvider {
           maxAdverseExcursion: new Decimal(0.0),
           status: PositionState.OPEN,
           chargesJson: charges,
-          featureSnapshotJson: req.featureSnapshotJson || null,
+          featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
           openedAt: entryTime,
           correlationId,
         },
       });
 
-      // Update PaperAccount
+      // Atomically update PaperAccount balance & usedMargin
       await tx.paperAccount.update({
         where: { id: account.id },
         data: {
@@ -953,7 +939,8 @@ export class PaperTradingService implements IExecutionProvider {
               symbol,
               direction: req.direction,
               quantity: req.quantity,
-              executionPrice,
+              executionPrice: finalFillPrice,
+              slippage: slippageAmount,
             },
             correlationId,
           },
@@ -963,7 +950,7 @@ export class PaperTradingService implements IExecutionProvider {
             eventType: 'POSITION_OPENED',
             entityType: 'POSITION',
             entityId: position.id,
-            payloadJson: { contractSymbol, entryPrice: executionPrice, requiredMargin },
+            payloadJson: { contractSymbol, entryPrice: finalFillPrice, requiredMargin },
             correlationId,
           },
         ],
@@ -973,7 +960,7 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     this.logger.log(
-      `✓ [PERSISTED PAPER POSITION OPENED] ${req.direction} ${req.quantity} ${contractSymbol} @ ₹${executionPrice.toFixed(2)} (${effLeverage}x) | Margin: ₹${requiredMargin.toFixed(2)} | Corr: ${correlationId}`,
+      `✓ [PERSISTED PAPER POSITION OPENED] ${req.direction} ${req.quantity} ${contractSymbol} @ ₹${finalFillPrice.toFixed(2)} (slip: ₹${slippageAmount.toFixed(2)}) (${effLeverage}x) | Margin: ₹${requiredMargin.toFixed(2)} | Corr: ${correlationId}`,
     );
 
     return this.mapDbPositionToInterface(result);
@@ -1027,16 +1014,24 @@ export class PaperTradingService implements IExecutionProvider {
       }
     }
 
+    // Apply exit slippage simulation
+    const exitSlippage = ExecutionPriceResolver.calculateSlippage(
+      exitPrice,
+      pos.direction === Direction.BULLISH ? 'SELL' : 'BUY',
+      config.maxSlippageBps || 50,
+    );
+    const finalExitPrice = exitSlippage.fillPrice;
+
     const exitTime = new Date();
     const quantity = Number(pos.quantity);
     const entryPrice = Number(pos.entryPrice);
-    const exitTurnover = exitPrice * quantity;
+    const exitTurnover = finalExitPrice * quantity;
     const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
 
     const isBuy = pos.direction === Direction.BULLISH;
-    const priceDiff = isBuy ? exitPrice - entryPrice : entryPrice - exitPrice;
+    const priceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
     const grossPnL = priceDiff * quantity;
     const realizedPnL = Number((grossPnL - totalCharges).toFixed(2));
 
@@ -1067,7 +1062,7 @@ export class PaperTradingService implements IExecutionProvider {
         data: {
           status: PositionState.CLOSED,
           closedAt: exitTime,
-          currentPrice: new Decimal(exitPrice),
+          currentPrice: new Decimal(finalExitPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
         },
@@ -1086,7 +1081,7 @@ export class PaperTradingService implements IExecutionProvider {
           direction: pos.direction,
           quantity: pos.quantity,
           entryPrice: pos.entryPrice,
-          exitPrice: new Decimal(exitPrice),
+          exitPrice: new Decimal(finalExitPrice),
           realizedPnL: new Decimal(realizedPnL),
           realizedR: new Decimal(realizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
@@ -1103,7 +1098,7 @@ export class PaperTradingService implements IExecutionProvider {
             realizedR,
             holdingDurationSeconds,
             outcomeClassification,
-            exitPrice,
+            exitPrice: finalExitPrice,
             exitTime: exitTime.toISOString(),
           },
           outcomeClassification,
@@ -1133,7 +1128,7 @@ export class PaperTradingService implements IExecutionProvider {
           payloadJson: {
             contractSymbol: pos.contractSymbol,
             entryPrice,
-            exitPrice,
+            exitPrice: finalExitPrice,
             realizedPnL,
             realizedR,
             exitReason,
@@ -1146,7 +1141,7 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     this.logger.log(
-      `✓ [PERSISTED PAPER POSITION CLOSED] ${pos.contractSymbol} @ ₹${exitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
+      `✓ [PERSISTED PAPER POSITION CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
     );
 
     return {
@@ -1161,7 +1156,7 @@ export class PaperTradingService implements IExecutionProvider {
       direction: trade.direction === Direction.BULLISH ? 'BUY' : 'SELL',
       quantity,
       entryPrice,
-      exitPrice,
+      exitPrice: finalExitPrice,
       realizedPnL,
       realizedR,
       maxFavorableExcursion: Number(trade.maxFavorableExcursion),
