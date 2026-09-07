@@ -22,8 +22,7 @@ export class FVGEngine {
 
     let candles = CandleNormalizer.normalize(rawCandles);
     if (options.asOfTimestamp) {
-      const asOfTime = options.asOfTimestamp.getTime();
-      candles = candles.filter((c) => new Date(c.timestamp).getTime() <= asOfTime);
+      candles = CandleNormalizer.getClosedCandlesAsOf(candles, undefined, options.asOfTimestamp);
     }
 
     if (candles.length < 3) {

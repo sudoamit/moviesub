@@ -20,7 +20,9 @@ export interface IBuildSnapshotOptions {
   executionCandles: ICandle[];
   executionTimeframe?: Timeframe | string;
   htf1Candles?: ICandle[];
+  htf1Timeframe?: Timeframe | string;
   htf2Candles?: ICandle[];
+  htf2Timeframe?: Timeframe | string;
   asOfTimestamp?: Date;
   instrument?: Partial<InstrumentIdentity>;
 }
@@ -39,18 +41,23 @@ export class SnapshotBuilder {
     let htf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
 
     if (options.asOfTimestamp) {
-      const asOfTime = options.asOfTimestamp.getTime();
-      execCandles = rawCandles.filter(
-        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+      execCandles = CandleNormalizer.getClosedCandlesAsOf(
+        rawCandles,
+        options.executionTimeframe || Timeframe.M15,
+        options.asOfTimestamp,
       );
       if (htf1Candles) {
-        htf1Candles = htf1Candles.filter(
-          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        htf1Candles = CandleNormalizer.getClosedCandlesAsOf(
+          htf1Candles,
+          options.htf1Timeframe || Timeframe.H1,
+          options.asOfTimestamp,
         );
       }
       if (htf2Candles) {
-        htf2Candles = htf2Candles.filter(
-          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        htf2Candles = CandleNormalizer.getClosedCandlesAsOf(
+          htf2Candles,
+          options.htf2Timeframe || Timeframe.H4,
+          options.asOfTimestamp,
         );
       }
     }

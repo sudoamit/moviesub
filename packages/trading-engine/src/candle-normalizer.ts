@@ -7,6 +7,51 @@ export interface ICandleNormalizerOptions {
 }
 
 export class CandleNormalizer {
+  static getTimeframeDurationMs(tf: string | number): number {
+    const value = String(tf).toLowerCase().trim();
+    if (value === '1m') return 60 * 1000;
+    if (value === '3m') return 3 * 60 * 1000;
+    if (value === '5m') return 5 * 60 * 1000;
+    if (value === '15m') return 15 * 60 * 1000;
+    if (value === '30m') return 30 * 60 * 1000;
+    if (value === '1h' || value === '60m') return 60 * 60 * 1000;
+    if (value === '2h') return 2 * 60 * 60 * 1000;
+    if (value === '4h') return 4 * 60 * 60 * 1000;
+    if (value === '1d' || value === 'd') return 24 * 60 * 60 * 1000;
+    if (value === '1w' || value === 'w') return 7 * 24 * 60 * 60 * 1000;
+
+    const unit = value.slice(-1);
+    const amount = parseInt(value.slice(0, -1), 10) || 1;
+    if (unit === 'm') return amount * 60 * 1000;
+    if (unit === 'h') return amount * 60 * 60 * 1000;
+    if (unit === 'd') return amount * 24 * 60 * 60 * 1000;
+    if (unit === 'w') return amount * 7 * 24 * 60 * 60 * 1000;
+    return 15 * 60 * 1000;
+  }
+
+  static getClosedCandlesAsOf(
+    candles: ICandle[],
+    timeframe: string | number | undefined,
+    asOfTimestamp: Date,
+  ): ICandle[] {
+    const normalized = CandleNormalizer.normalize(candles);
+    const asOfTime = asOfTimestamp.getTime();
+
+    if (!timeframe) {
+      return normalized.filter((candle) => {
+        const candleTime = new Date(candle.timestamp).getTime();
+        return candle.isClosed !== false && candleTime <= asOfTime;
+      });
+    }
+
+    const durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
+    return normalized.filter((candle) => {
+      const candleTime = new Date(candle.timestamp).getTime();
+      const closeTime = candleTime + durationMs;
+      return candle.isClosed !== false && closeTime <= asOfTime;
+    });
+  }
+
   /**
    * Validates single candle geometry and fields.
    */

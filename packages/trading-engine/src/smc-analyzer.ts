@@ -44,8 +44,7 @@ export class SMCAnalyzer {
 
     let candles = CandleNormalizer.normalize(rawCandles);
     if (config.asOfTimestamp) {
-      const asOfTime = config.asOfTimestamp.getTime();
-      candles = candles.filter((c) => new Date(c.timestamp).getTime() <= asOfTime);
+      candles = CandleNormalizer.getClosedCandlesAsOf(candles, undefined, config.asOfTimestamp);
     }
 
     if (candles.length === 0) {

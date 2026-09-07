@@ -50,15 +50,17 @@ export class SignalGenerator {
 
     if (options.asOfTimestamp) {
       const asOfTime = options.asOfTimestamp.getTime();
-      execCandles = execCandles.filter(
-        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
-      );
-      htf1Candles = htf1Candles.filter(
-        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
-      );
+      execCandles = CandleNormalizer.getClosedCandlesAsOf(execCandles, executionTf, options.asOfTimestamp);
+      htf1Candles = CandleNormalizer.getClosedCandlesAsOf(htf1Candles, htf1Tf, options.asOfTimestamp);
       if (htf2Candles) {
-        htf2Candles = htf2Candles.filter(
-          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        htf2Candles = CandleNormalizer.getClosedCandlesAsOf(htf2Candles, htf2Tf, options.asOfTimestamp);
+      }
+      if (execCandles.length === 0 && asOfTime > 0) {
+        return SignalGenerator.createNoTradeSignal(
+          symbol,
+          executionTf,
+          'No fully closed execution candles available as-of timestamp',
+          options.asOfTimestamp,
         );
       }
     }

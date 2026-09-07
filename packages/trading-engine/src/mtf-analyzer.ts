@@ -80,10 +80,7 @@ export class MultiTimeframeAnalyzer {
     let maxCloseTime: number;
     if (asOfTimestamp) {
       maxCloseTime = asOfTimestamp.getTime();
-      execCandles = execCandles.filter((c) => {
-        const closeTime = new Date(c.timestamp).getTime() + execDuration;
-        return closeTime <= maxCloseTime;
-      });
+      execCandles = CandleNormalizer.getClosedCandlesAsOf(execCandles, executionTf.timeframe, asOfTimestamp);
     } else {
       const lastExecCandle = execCandles[execCandles.length - 1];
       maxCloseTime = lastExecCandle
