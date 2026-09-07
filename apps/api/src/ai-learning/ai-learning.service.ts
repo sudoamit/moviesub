@@ -684,69 +684,37 @@ export class AILearningService implements OnModuleInit {
   }): Promise<{ updateResult: any; postMortem: any }> {
     const isBull = trade.direction === 'BUY' || trade.direction === 'BULLISH';
     const sym = trade.symbol.toUpperCase();
-    const sl = trade.stopLoss || (isBull ? trade.entryPrice * 0.99 : trade.entryPrice * 1.01);
-    const tp = trade.target || (isBull ? trade.entryPrice * 1.02 : trade.entryPrice * 0.98);
 
     const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
 
     // 1. Consume persisted feature snapshot directly without lookahead bias
-    let features: any = trade.featureSnapshotJson;
-    if (!features) {
-      // Fallback: extract features point-in-time if snapshot wasn't present
-      const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
-      let candles: ICandle[] = [];
-      if (inst) {
-        const rows = await this.prisma.candle.findMany({
-          where: { instrumentId: inst.id, timeframe: 'M15' as any },
-          orderBy: { timestamp: 'desc' },
-          take: 30,
-        });
-        candles = rows.reverse().map((r) => ({
-          timestamp: r.timestamp,
-          open: Number(r.open),
-          high: Number(r.high),
-          low: Number(r.low),
-          close: Number(r.close),
-          volume: Number(r.volume || 1),
-          isClosed: true,
-        }));
-      }
-
-      const realSignal = SignalGenerator.generateSignal({
-        symbol: sym,
-        executionCandles: candles,
-        executionTimeframe: Timeframe.M15,
-        htf1Candles: candles,
-        htf1Timeframe: Timeframe.H1,
-      });
-
-      features = FeatureVectorExtractor.extract({
-        signal: realSignal,
-        candles,
-        asOfTimestamp: trade.entryTimestamp,
-      });
-    }
+    const features: any = trade.featureSnapshotJson;
+    let updateResult: any = null;
 
     const isWin =
-      trade.realizedR !== undefined
-        ? trade.realizedR > 0
-        : trade.outcomeSnapshotJson?.realizedR !== undefined
-          ? trade.outcomeSnapshotJson.realizedR > 0
-          : trade.exitPrice > trade.entryPrice === isBull;
+      trade.outcomeSnapshotJson?.realizedPnL !== undefined
+        ? trade.outcomeSnapshotJson.realizedPnL > 0
+        : trade.realizedR !== undefined
+          ? trade.realizedR > 0
+          : isBull
+            ? trade.exitPrice > trade.entryPrice
+            : trade.entryPrice > trade.exitPrice;
 
-    const updateResult = this.onlineLearningEngine.updateModel(activeModel, {
-      symbol: sym,
-      features,
-      featureSchemaVersion: FEATURE_SCHEMA_VERSION,
-      actualLabel: isWin ? 1 : 0,
-    });
+    if (features) {
+      updateResult = this.onlineLearningEngine.updateModel(activeModel, {
+        symbol: sym,
+        features,
+        featureSchemaVersion: FEATURE_SCHEMA_VERSION,
+        actualLabel: isWin ? 1 : 0,
+      });
 
-    // Update in-memory registry with new model state
-    const currentActiveState = this.registry.getActiveVersionState();
-    if (currentActiveState) {
-      currentActiveState.weights = activeModel.getWeights();
-      currentActiveState.bias = activeModel.getBias();
-      currentActiveState.updatedAt = new Date();
+      // Update in-memory registry with new model state
+      const currentActiveState = this.registry.getActiveVersionState();
+      if (currentActiveState) {
+        currentActiveState.weights = activeModel.getWeights();
+        currentActiveState.bias = activeModel.getBias();
+        currentActiveState.updatedAt = new Date();
+      }
     }
 
     const postMortem = {
@@ -754,10 +722,11 @@ export class AILearningService implements OnModuleInit {
       direction: isBull ? 'BULLISH' : 'BEARISH',
       entryPrice: trade.entryPrice,
       exitPrice: trade.exitPrice,
-      realizedR: trade.realizedR ?? (isWin ? 1.5 : -1.0),
+      realizedR: trade.realizedR ?? trade.outcomeSnapshotJson?.realizedR ?? 0.0,
       outcome: isWin ? 'WIN_TP' : 'LOSS_SL',
       classification:
-        trade.outcomeSnapshotJson?.outcomeClassification || (isWin ? 'TARGET_ACHIEVED' : 'STOP_HIT'),
+        trade.outcomeSnapshotJson?.outcomeClassification ||
+        (isWin ? 'TARGET_ACHIEVED' : 'STOP_HIT'),
       exitReason: trade.exitReason || 'Closed',
     };
 

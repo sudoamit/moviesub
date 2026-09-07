@@ -111,7 +111,7 @@ describe('Worker Processors', () => {
       };
 
       mockRedis = {
-        get: jest.fn().mockResolvedValue(JSON.stringify({ close: 24150.0 })),
+        get: jest.fn().mockResolvedValue(JSON.stringify({ price: 24150.0, lastUpdated: Date.now() })),
         publish: jest.fn().mockResolvedValue(1),
         getClient: jest
           .fn()
@@ -137,7 +137,7 @@ describe('Worker Processors', () => {
 
     it('should trigger Stop Loss and close position atomically when price breaches SL', async () => {
       // Mock price falling to 24040.0 (below SL 24050.0)
-      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ close: 24040.0 }));
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }));
 
       const mockJob = {
         id: 'monitor-2',

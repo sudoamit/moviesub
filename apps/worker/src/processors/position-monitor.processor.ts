@@ -1,7 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS } from '@quant/shared';
+import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS, ExecutionPriceResolver } from '@quant/shared';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../redis.service';
 import { TrailingEngine } from '@quant/trading-engine';
@@ -79,29 +79,21 @@ export class PositionMonitorProcessor extends WorkerHost {
   private async resolveLivePrice(symbol: string): Promise<number | null> {
     const sym = symbol.toUpperCase();
 
-    // 1. Try Redis latest candle cache
+    // LIVE_TICK only for PAPER execution: fetch live ticker from Redis
     try {
-      const cached = await this.redis.get(`candle:${sym}:15m:latest`);
+      const cached = await this.redis.get(`ticker:${sym}:live`);
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (parsed.close && Number(parsed.close) > 0) {
-          return Number(parsed.close);
+        if (parsed.price && Number(parsed.price) > 0) {
+          const ageSeconds = (Date.now() - (parsed.lastUpdated || Date.now())) / 1000;
+          if (ageSeconds <= 5) {
+            return Number(parsed.price);
+          }
         }
       }
     } catch {}
 
-    // 2. Try DB candle
-    const candle = await this.prisma.candle.findFirst({
-      where: {
-        instrument: { symbol: sym },
-      },
-      orderBy: { timestamp: 'desc' },
-    });
-
-    if (candle && Number(candle.close) > 0) {
-      return Number(candle.close);
-    }
-
+    // Fail closed: No fresh live tick available for PAPER execution
     return null;
   }
 
@@ -137,7 +129,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
     const riskAnchor = initialStopLoss ?? stopLoss;
-    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
+    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
     const currentR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
 
     // Track MAE / MFE
@@ -153,34 +145,35 @@ export class PositionMonitorProcessor extends WorkerHost {
     const posAgeMs = Date.now() - new Date(pos.openedAt).getTime();
     const minAgeMs = 3000; // Minimum 3s to prevent race condition exits
 
-    // Trailing stop evaluation
-    const tp1 = pos.initialTarget1
-      ? Number(pos.initialTarget1)
-      : isBuy
-        ? entryPrice * 1.015
-        : entryPrice * 0.985;
-    const tp2 = pos.initialTarget2
-      ? Number(pos.initialTarget2)
-      : isBuy
-        ? entryPrice * 1.025
-        : entryPrice * 0.975;
-    const initialSl = initialStopLoss ?? (isBuy ? entryPrice * 0.99 : entryPrice * 1.01);
-
-    const trailing = TrailingEngine.evaluate(
-      entryPrice,
-      initialSl,
-      tp1,
-      tp2,
-      livePrice,
-      isBuy ? 'BULLISH' : 'BEARISH',
-    );
-
+    // Trailing stop evaluation (ONLY if explicit targets and initial SL exist)
     let newStopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
-    if (trailing.isRiskFree) {
-      if (isBuy && trailing.currentStopLoss > (newStopLoss || 0)) {
-        newStopLoss = trailing.currentStopLoss;
-      } else if (!isBuy && trailing.currentStopLoss < (newStopLoss || Infinity)) {
-        newStopLoss = trailing.currentStopLoss;
+    let trailingStateJson: any = undefined;
+
+    if (initialStopLoss && pos.initialTarget1 && pos.initialTarget2) {
+      const trailing = TrailingEngine.evaluate(
+        entryPrice,
+        Number(initialStopLoss),
+        Number(pos.initialTarget1),
+        Number(pos.initialTarget2),
+        livePrice,
+        isBuy ? 'BULLISH' : 'BEARISH',
+      );
+
+      trailingStateJson = {
+        stage: trailing.stage,
+        stageBadge: trailing.stageBadge,
+        currentStopLoss: trailing.currentStopLoss,
+        isRiskFree: trailing.isRiskFree,
+        partialBookedPercent: trailing.partialBookedPercent,
+        recommendedAction: trailing.recommendedAction,
+      };
+
+      if (trailing.isRiskFree) {
+        if (isBuy && trailing.currentStopLoss > (newStopLoss || 0)) {
+          newStopLoss = trailing.currentStopLoss;
+        } else if (!isBuy && trailing.currentStopLoss < (newStopLoss || Infinity)) {
+          newStopLoss = trailing.currentStopLoss;
+        }
       }
     }
 
@@ -193,10 +186,10 @@ export class PositionMonitorProcessor extends WorkerHost {
       const isSLHit = isBuy ? livePrice <= newStopLoss : livePrice >= newStopLoss;
       if (isSLHit) {
         shouldClose = true;
-        exitReason = trailing.isRiskFree
+        exitReason = trailingStateJson?.isRiskFree
           ? 'Breakeven / Trailing SL Triggered'
           : 'Stop Loss Hit (SL)';
-        outcomeClassification = trailing.isRiskFree ? 'BREAKEVEN' : 'LOSS_SL';
+        outcomeClassification = trailingStateJson?.isRiskFree ? 'BREAKEVEN' : 'LOSS_SL';
       }
     }
 
@@ -229,14 +222,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         unrealizedR: new Decimal(currentR),
         maxFavorableExcursion: new Decimal(currentMFE),
         maxAdverseExcursion: new Decimal(currentMAE),
-        trailingStopStateJson: {
-          stage: trailing.stage,
-          stageBadge: trailing.stageBadge,
-          currentStopLoss: trailing.currentStopLoss,
-          isRiskFree: trailing.isRiskFree,
-          partialBookedPercent: trailing.partialBookedPercent,
-          recommendedAction: trailing.recommendedAction,
-        },
+        trailingStopStateJson: trailingStateJson,
       },
     });
 
@@ -249,24 +235,32 @@ export class PositionMonitorProcessor extends WorkerHost {
     exitReason: string,
     outcomeClassification: string,
   ) {
+    // Apply exit slippage simulation within 50 bps max
+    const isBuy = pos.direction === Direction.BULLISH;
+    const slip = ExecutionPriceResolver.calculateSlippage(
+      exitPrice,
+      isBuy ? 'SELL' : 'BUY',
+      50,
+    );
+    const finalExitPrice = slip.fillPrice;
+
     const exitTime = new Date();
     const isCrypto = pos.symbol === 'BTCUSDT';
     const quantity = Number(pos.quantity);
     const entryPrice = Number(pos.entryPrice);
-    const exitTurnover = exitPrice * quantity;
+    const exitTurnover = finalExitPrice * quantity;
     const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
 
-    const isBuy = pos.direction === Direction.BULLISH;
-    const priceDiff = isBuy ? exitPrice - entryPrice : entryPrice - exitPrice;
+    const priceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
     const grossPnL = priceDiff * quantity;
     const realizedPnL = Number((grossPnL - totalCharges).toFixed(2));
 
     const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
     const riskAnchor = initialStopLoss ?? stopLoss;
-    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
+    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
     const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
     const holdingDurationSeconds = Math.max(
       0,
@@ -280,7 +274,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         data: {
           status: PositionState.CLOSED,
           closedAt: exitTime,
-          currentPrice: new Decimal(exitPrice),
+          currentPrice: new Decimal(finalExitPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
         },
@@ -299,7 +293,7 @@ export class PositionMonitorProcessor extends WorkerHost {
           direction: pos.direction,
           quantity: pos.quantity,
           entryPrice: pos.entryPrice,
-          exitPrice: new Decimal(exitPrice),
+          exitPrice: new Decimal(finalExitPrice),
           realizedPnL: new Decimal(realizedPnL),
           realizedR: new Decimal(realizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
@@ -316,7 +310,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             realizedR,
             holdingDurationSeconds,
             outcomeClassification,
-            exitPrice,
+            exitPrice: finalExitPrice,
             exitTime: exitTime.toISOString(),
           },
           outcomeClassification,
@@ -346,7 +340,7 @@ export class PositionMonitorProcessor extends WorkerHost {
           payloadJson: {
             contractSymbol: pos.contractSymbol,
             entryPrice,
-            exitPrice,
+            exitPrice: finalExitPrice,
             realizedPnL,
             realizedR,
             exitReason,
@@ -357,7 +351,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     });
 
     this.logger.log(
-      `✓ [POSITION MONITOR CLOSED] ${pos.contractSymbol} @ ₹${exitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
+      `✓ [POSITION MONITOR CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
     );
 
     // Publish WebSocket notification
@@ -368,7 +362,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         JSON.stringify({
           positionId: pos.id,
           contractSymbol: pos.contractSymbol,
-          exitPrice,
+          exitPrice: finalExitPrice,
           realizedPnL,
           realizedR,
           exitReason,

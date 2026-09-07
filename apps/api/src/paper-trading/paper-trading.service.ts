@@ -190,9 +190,8 @@ export class PaperTradingService implements IExecutionProvider {
       const candle = await this.candlesService.getLatestCandle(sym, '15m');
       if (candle && candle.close && Number(candle.close) > 0) {
         const candleAgeSeconds = (Date.now() - new Date(candle.timestamp).getTime()) / 1000;
-        // For candle data, allow up to timeframe duration (e.g. 15m) or reject if strictly stale
-        if (candleAgeSeconds > 3600) {
-          throw new StaleMarketDataError(sym, candleAgeSeconds, 3600, new Date(candle.timestamp));
+        if (candleAgeSeconds > maxAgeSeconds) {
+          throw new StaleMarketDataError(sym, candleAgeSeconds, maxAgeSeconds, new Date(candle.timestamp));
         }
         return { price: Number(candle.close), timestamp: new Date(candle.timestamp) };
       }
@@ -248,10 +247,11 @@ export class PaperTradingService implements IExecutionProvider {
       const isBuy = pos.direction === Direction.BULLISH;
       const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
-      const unrealizedPnL = Number((priceDiff * quantity - charges.totalCharges).toFixed(2));      const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
+      const unrealizedPnL = Number((priceDiff * quantity - charges.totalCharges).toFixed(2));
+      const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
       const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
       const riskAnchor = initialStopLoss ?? stopLoss;
-      const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
+      const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
       const unrealizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
       const notionalValue = Number((livePrice * quantity).toFixed(2));
       const usedMargin = Number(pos.usedMargin);
@@ -1038,7 +1038,7 @@ export class PaperTradingService implements IExecutionProvider {
     const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
     const riskAnchor = initialStopLoss ?? stopLoss;
-    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
+    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
     const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
     const holdingDurationSeconds = Math.max(
       0,

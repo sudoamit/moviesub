@@ -323,6 +323,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const redisClient = this.redis.getClient();
     if (!redisClient || redisClient.status !== 'ready') return;
 
+    // Cache live tick with timestamp for worker and execution services
+    await this.redis.set(`ticker:${ticker.symbol}:live`, JSON.stringify(ticker), 60);
+
     const payload = {
       symbol: ticker.symbol,
       timeframe: '15m',
