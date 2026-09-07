@@ -1,12 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import {
-  BULLMQ_QUEUES,
-  Direction,
-  PositionState,
-  WS_EVENTS,
-} from '@quant/shared';
+import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS } from '@quant/shared';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../redis.service';
 import { TrailingEngine } from '@quant/trading-engine';
@@ -31,7 +26,11 @@ export class PositionMonitorProcessor extends WorkerHost {
   /**
    * Main evaluation loop for all open/partially closed positions across all paper accounts.
    */
-  public async evaluateActivePositions(): Promise<{ checked: number; closed: number; updated: number }> {
+  public async evaluateActivePositions(): Promise<{
+    checked: number;
+    closed: number;
+    updated: number;
+  }> {
     const activePositions = await this.prisma.paperPosition.findMany({
       where: {
         status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
@@ -97,14 +96,23 @@ export class PositionMonitorProcessor extends WorkerHost {
   private calculateCharges(turnover: number, isCrypto: boolean) {
     if (isCrypto) {
       const brokerage = Number((turnover * 0.001).toFixed(2));
-      return { brokerage, stt: 0, exchangeTurnover: 0, gst: 0, sebiTurnover: 0, totalCharges: brokerage };
+      return {
+        brokerage,
+        stt: 0,
+        exchangeTurnover: 0,
+        gst: 0,
+        sebiTurnover: 0,
+        totalCharges: brokerage,
+      };
     }
     const brokerage = 20.0;
     const stt = Number((turnover * 0.000125).toFixed(2));
     const exchangeTurnover = Number((turnover * 0.0000345).toFixed(2));
     const gst = Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
     const sebiTurnover = Number((turnover * 0.000001).toFixed(2));
-    const totalCharges = Number((brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2));
+    const totalCharges = Number(
+      (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
+    );
     return { brokerage, stt, exchangeTurnover, gst, sebiTurnover, totalCharges };
   }
 
@@ -121,15 +129,29 @@ export class PositionMonitorProcessor extends WorkerHost {
     const currentR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
 
     // Track MAE / MFE
-    const currentMFE = Math.max(Number(pos.maxFavorableExcursion || 0), priceDiff > 0 ? priceDiff : 0);
-    const currentMAE = Math.max(Number(pos.maxAdverseExcursion || 0), priceDiff < 0 ? Math.abs(priceDiff) : 0);
+    const currentMFE = Math.max(
+      Number(pos.maxFavorableExcursion || 0),
+      priceDiff > 0 ? priceDiff : 0,
+    );
+    const currentMAE = Math.max(
+      Number(pos.maxAdverseExcursion || 0),
+      priceDiff < 0 ? Math.abs(priceDiff) : 0,
+    );
 
     const posAgeMs = Date.now() - new Date(pos.openedAt).getTime();
     const minAgeMs = 3000; // Minimum 3s to prevent race condition exits
 
     // Trailing stop evaluation
-    const tp1 = pos.initialTarget1 ? Number(pos.initialTarget1) : isBuy ? entryPrice * 1.015 : entryPrice * 0.985;
-    const tp2 = pos.initialTarget2 ? Number(pos.initialTarget2) : isBuy ? entryPrice * 1.025 : entryPrice * 0.975;
+    const tp1 = pos.initialTarget1
+      ? Number(pos.initialTarget1)
+      : isBuy
+        ? entryPrice * 1.015
+        : entryPrice * 0.985;
+    const tp2 = pos.initialTarget2
+      ? Number(pos.initialTarget2)
+      : isBuy
+        ? entryPrice * 1.025
+        : entryPrice * 0.975;
     const initialSl = initialStopLoss ?? (isBuy ? entryPrice * 0.99 : entryPrice * 1.01);
 
     const trailing = TrailingEngine.evaluate(
@@ -159,7 +181,9 @@ export class PositionMonitorProcessor extends WorkerHost {
       const isSLHit = isBuy ? livePrice <= newStopLoss : livePrice >= newStopLoss;
       if (isSLHit) {
         shouldClose = true;
-        exitReason = trailing.isRiskFree ? 'Breakeven / Trailing SL Triggered' : 'Stop Loss Hit (SL)';
+        exitReason = trailing.isRiskFree
+          ? 'Breakeven / Trailing SL Triggered'
+          : 'Stop Loss Hit (SL)';
         outcomeClassification = trailing.isRiskFree ? 'BREAKEVEN' : 'LOSS_SL';
       }
     }
@@ -232,7 +256,10 @@ export class PositionMonitorProcessor extends WorkerHost {
     const riskAnchor = initialStopLoss ?? stopLoss;
     const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
     const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
-    const holdingDurationSeconds = Math.max(0, Math.floor((exitTime.getTime() - new Date(pos.openedAt).getTime()) / 1000));
+    const holdingDurationSeconds = Math.max(
+      0,
+      Math.floor((exitTime.getTime() - new Date(pos.openedAt).getTime()) / 1000),
+    );
 
     await this.prisma.$transaction(async (tx) => {
       // 1. Mark position CLOSED

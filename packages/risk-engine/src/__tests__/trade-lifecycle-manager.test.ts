@@ -110,7 +110,11 @@ describe('TradeLifecycleManager', () => {
         volume: 5000,
       };
 
-      const res = TradeLifecycleManager.evaluateLotTick(lot, tp1Candle, DEFAULT_PARTIAL_EXIT_POLICY);
+      const res = TradeLifecycleManager.evaluateLotTick(
+        lot,
+        tp1Candle,
+        DEFAULT_PARTIAL_EXIT_POLICY,
+      );
       expect(res.isClosed).toBe(false);
       expect(res.lot.status).toBe('PARTIALLY_CLOSED');
       expect(res.lot.remainingQuantity).toBe(70); // 100 - 30 = 70

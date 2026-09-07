@@ -1,5 +1,9 @@
 import { IDatasetSplits } from '../dataset-manager';
-import { IExperimentRecord, IExperimentMetrics, IExperimentStressResult } from './experiment-result';
+import {
+  IExperimentRecord,
+  IExperimentMetrics,
+  IExperimentStressResult,
+} from './experiment-result';
 
 export class ExperimentRunner {
   /**
@@ -43,16 +47,22 @@ export class ExperimentRunner {
 
     const rejectionReasons: string[] = [];
     if (oosMetrics.expectancyR <= 0.15) {
-      rejectionReasons.push(`Insufficient OOS Expectancy (${oosMetrics.expectancyR.toFixed(2)}R <= 0.15R)`);
+      rejectionReasons.push(
+        `Insufficient OOS Expectancy (${oosMetrics.expectancyR.toFixed(2)}R <= 0.15R)`,
+      );
     }
     if (oosMetrics.maxDrawdownPercent > 20.0) {
-      rejectionReasons.push(`Excessive OOS Drawdown (${oosMetrics.maxDrawdownPercent.toFixed(1)}% > 20%)`);
+      rejectionReasons.push(
+        `Excessive OOS Drawdown (${oosMetrics.maxDrawdownPercent.toFixed(1)}% > 20%)`,
+      );
     }
     if (!costStressTests.find((t) => t.multiplier === 2.0)?.survived) {
       rejectionReasons.push('Failed 2.0x Transaction Cost Stress Test');
     }
     if (ruinProb > 0.02) {
-      rejectionReasons.push(`Monte Carlo probability of ruin (${(ruinProb * 100).toFixed(1)}%) exceeds 2% threshold`);
+      rejectionReasons.push(
+        `Monte Carlo probability of ruin (${(ruinProb * 100).toFixed(1)}%) exceeds 2% threshold`,
+      );
     }
 
     const isRobust = rejectionReasons.length === 0;
@@ -94,7 +104,9 @@ export class ExperimentRunner {
     };
   }
 
-  private static evaluatePartition(samples: import('../dataset-manager').IDatasetSample[]): IExperimentMetrics {
+  private static evaluatePartition(
+    samples: import('../dataset-manager').IDatasetSample[],
+  ): IExperimentMetrics {
     if (!samples || samples.length === 0) {
       return {
         totalTrades: 0,

@@ -30,8 +30,12 @@ export class MarketDataRouter {
 
   private normalizeAndSort(candles: ICandle[]): ICandle[] {
     if (!candles || candles.length === 0) return [];
-    const valid = candles.filter((c) => c && c.timestamp && !isNaN(new Date(c.timestamp).getTime()));
-    return [...valid].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const valid = candles.filter(
+      (c) => c && c.timestamp && !isNaN(new Date(c.timestamp).getTime()),
+    );
+    return [...valid].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
   }
 
   private getDurationMs(tf: string): number {

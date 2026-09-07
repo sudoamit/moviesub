@@ -3,7 +3,11 @@ export class MarketDataUnavailableError extends Error {
   public readonly reason: string;
   public readonly sourceTimestamp?: Date;
 
-  constructor(symbol: string, reason = 'Real-time market data is unavailable for execution', sourceTimestamp?: Date) {
+  constructor(
+    symbol: string,
+    reason = 'Real-time market data is unavailable for execution',
+    sourceTimestamp?: Date,
+  ) {
     super(`[MARKET_DATA_UNAVAILABLE] Symbol '${symbol}': ${reason}`);
     this.name = 'MarketDataUnavailableError';
     this.symbol = symbol;
@@ -18,7 +22,12 @@ export class StaleMarketDataError extends Error {
   public readonly maxAllowedSeconds: number;
   public readonly sourceTimestamp: Date;
 
-  constructor(symbol: string, ageSeconds: number, maxAllowedSeconds: number, sourceTimestamp: Date) {
+  constructor(
+    symbol: string,
+    ageSeconds: number,
+    maxAllowedSeconds: number,
+    sourceTimestamp: Date,
+  ) {
     super(
       `[STALE_MARKET_DATA] Market data for '${symbol}' is ${ageSeconds.toFixed(2)}s old (exceeds threshold of ${maxAllowedSeconds}s). Source time: ${sourceTimestamp.toISOString()}`,
     );

@@ -65,7 +65,9 @@ export class PaperTradingService implements IExecutionProvider {
           isActive: true,
         },
       });
-      this.logger.log(`Created primary paper trading account '${account.id}' with ₹10,00,000 balance.`);
+      this.logger.log(
+        `Created primary paper trading account '${account.id}' with ₹10,00,000 balance.`,
+      );
     }
 
     return account;
@@ -160,7 +162,10 @@ export class PaperTradingService implements IExecutionProvider {
    * Validates and fetches authoritative live market price without any hardcoded fallback.
    * Throws MarketDataUnavailableError if price is stale or missing.
    */
-  public async getValidatedMarketPrice(symbol: string, maxAgeSeconds = 5): Promise<{ price: number; timestamp: Date }> {
+  public async getValidatedMarketPrice(
+    symbol: string,
+    maxAgeSeconds = 5,
+  ): Promise<{ price: number; timestamp: Date }> {
     const sym = this.normalizeSymbol(symbol);
 
     // 1. Try real market streamer
@@ -252,8 +257,16 @@ export class PaperTradingService implements IExecutionProvider {
       const usedMargin = Number(pos.usedMargin);
 
       // Dynamic Trailing Stop calculation for UI badge only
-      const tp1 = pos.initialTarget1 ? Number(pos.initialTarget1) : isBuy ? entryPrice * 1.015 : entryPrice * 0.985;
-      const tp2 = pos.initialTarget2 ? Number(pos.initialTarget2) : isBuy ? entryPrice * 1.025 : entryPrice * 0.975;
+      const tp1 = pos.initialTarget1
+        ? Number(pos.initialTarget1)
+        : isBuy
+          ? entryPrice * 1.015
+          : entryPrice * 0.985;
+      const tp2 = pos.initialTarget2
+        ? Number(pos.initialTarget2)
+        : isBuy
+          ? entryPrice * 1.025
+          : entryPrice * 0.975;
       const initialSl = initialStopLoss ?? (isBuy ? entryPrice * 0.99 : entryPrice * 1.01);
 
       const trailing = TrailingEngine.evaluate(
@@ -346,17 +359,17 @@ export class PaperTradingService implements IExecutionProvider {
     const totalTrades = formattedHistory.length;
     const winningTrades = formattedHistory.filter((t) => t.realizedPnL > 0).length;
     const losingTrades = formattedHistory.filter((t) => t.realizedPnL <= 0).length;
-    const winRate = totalTrades > 0 ? Number(((winningTrades / totalTrades) * 100).toFixed(1)) : 0.0;
+    const winRate =
+      totalTrades > 0 ? Number(((winningTrades / totalTrades) * 100).toFixed(1)) : 0.0;
 
     const grossWins = formattedHistory
       .filter((t) => t.realizedPnL > 0)
       .reduce((acc, t) => acc + t.realizedPnL, 0);
     const grossLosses = Math.abs(
-      formattedHistory
-        .filter((t) => t.realizedPnL < 0)
-        .reduce((acc, t) => acc + t.realizedPnL, 0),
+      formattedHistory.filter((t) => t.realizedPnL < 0).reduce((acc, t) => acc + t.realizedPnL, 0),
     );
-    const profitFactor = grossLosses > 0 ? Number((grossWins / grossLosses).toFixed(2)) : grossWins > 0 ? 99.9 : 0.0;
+    const profitFactor =
+      grossLosses > 0 ? Number((grossWins / grossLosses).toFixed(2)) : grossWins > 0 ? 99.9 : 0.0;
 
     return {
       accountId: account.id,
@@ -384,12 +397,15 @@ export class PaperTradingService implements IExecutionProvider {
    */
   async placeOrder(req: IPaperOrderRequest): Promise<IPaperPosition> {
     if (!req.symbol || !req.direction || !req.quantity || req.quantity <= 0) {
-      throw new BadRequestException('Invalid order parameters: symbol, direction, and positive quantity required');
+      throw new BadRequestException(
+        'Invalid order parameters: symbol, direction, and positive quantity required',
+      );
     }
 
     const symbol = this.normalizeSymbol(req.symbol);
     const isCrypto = symbol === 'BTCUSDT';
-    const correlationId = req.correlationId || `corr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const correlationId =
+      req.correlationId || `corr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const instrumentType = req.instrumentType || (req.strike ? 'OPTION' : 'SPOT');
     const contractSymbol =
       req.contractSymbol ||
@@ -413,7 +429,7 @@ export class PaperTradingService implements IExecutionProvider {
     // 2. Idempotency Check
     const idempotencyKey =
       req.idempotencyKey ||
-      `${account.id}_${symbol}_${req.direction}_${req.quantity}_${Math.floor(Date.now() / 3000)}`;
+      `${account.id}_${symbol}_${req.direction}_${req.quantity}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     const existingOrder = await this.prisma.paperOrder.findUnique({
       where: { idempotencyKey },
@@ -421,12 +437,16 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     if (existingOrder) {
-      this.logger.warn(`[DUPLICATE ORDER DETECTED] Order with key '${idempotencyKey}' already processed.`);
+      this.logger.warn(
+        `[DUPLICATE ORDER DETECTED] Order with key '${idempotencyKey}' already processed.`,
+      );
       if (existingOrder.status === OrderState.FILLED && existingOrder.positions.length > 0) {
         const pos = existingOrder.positions[0];
         return this.mapDbPositionToInterface(pos);
       }
-      throw new BadRequestException(`Duplicate order detected with status: ${existingOrder.status}`);
+      throw new BadRequestException(
+        `Duplicate order detected with status: ${existingOrder.status}`,
+      );
     }
 
     // 3. Resolve Real Validated Execution Price (NO fake fallbacks)
@@ -472,60 +492,356 @@ export class PaperTradingService implements IExecutionProvider {
       }
     }
 
-    // 4. Directional SL / TP Alignment
+    // 4. Directional SL / TP Validation (P0-4: Never silently create or alter SL/TP)
     const isBuy = req.direction === 'BUY';
-    let stopLoss = req.stopLoss;
-    let target1 = req.target1;
-    let target2 = req.target2;
-    let target3 = req.target3;
+    const stopLoss = req.stopLoss;
+    const target1 = req.target1;
+    const target2 = req.target2;
+    const target3 = req.target3;
 
-    if (isBuy) {
-      if (!stopLoss || stopLoss >= executionPrice) {
-        stopLoss = Number((executionPrice * 0.99).toFixed(2));
-      }
-    } else {
-      if (!stopLoss || stopLoss <= executionPrice) {
-        stopLoss = Number((executionPrice * 1.01).toFixed(2));
+    // Check Missing Stop Loss
+    if (stopLoss === undefined || stopLoss === null || stopLoss <= 0) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MISSING_STOP_LOSS,
+        'Stop loss is required for paper trade execution. Default/fallback SL is prohibited.',
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException('Order Rejected [MISSING_STOP_LOSS]: Stop loss is required.');
+    }
+
+    // Check Invalid Stop Loss
+    if (isBuy && stopLoss >= executionPrice) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.INVALID_STOP_LOSS,
+        `Stop loss (${stopLoss}) must be strictly below execution price (${executionPrice}) for BUY order`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [INVALID_STOP_LOSS]: Stop loss (${stopLoss}) must be below execution price (${executionPrice}) for BUY.`,
+      );
+    }
+
+    if (!isBuy && stopLoss <= executionPrice) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.INVALID_STOP_LOSS,
+        `Stop loss (${stopLoss}) must be strictly above execution price (${executionPrice}) for SELL order`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [INVALID_STOP_LOSS]: Stop loss (${stopLoss}) must be above execution price (${executionPrice}) for SELL.`,
+      );
+    }
+
+    // Check Missing Take Profit (target1)
+    if (target1 === undefined || target1 === null || target1 <= 0) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MISSING_TAKE_PROFIT,
+        'Take profit (target1) is required for paper trade execution. Default/fallback TP is prohibited.',
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        'Order Rejected [MISSING_TAKE_PROFIT]: Take profit is required.',
+      );
+    }
+
+    // Check Invalid Take Profit (target1)
+    if (isBuy && target1 <= executionPrice) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.INVALID_TAKE_PROFIT,
+        `Target 1 (${target1}) must be strictly above execution price (${executionPrice}) for BUY order`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [INVALID_TAKE_PROFIT]: Target 1 (${target1}) must be above execution price (${executionPrice}) for BUY.`,
+      );
+    }
+
+    if (!isBuy && target1 >= executionPrice) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.INVALID_TAKE_PROFIT,
+        `Target 1 (${target1}) must be strictly below execution price (${executionPrice}) for SELL order`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [INVALID_TAKE_PROFIT]: Target 1 (${target1}) must be below execution price (${executionPrice}) for SELL.`,
+      );
+    }
+
+    // Check optional target2 & target3 relative validity
+    if (target2 !== undefined && target2 !== null) {
+      if ((isBuy && target2 <= target1) || (!isBuy && target2 >= target1)) {
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.INVALID_TAKE_PROFIT,
+          `Target 2 (${target2}) is invalid relative to Target 1 (${target1})`,
+          idempotencyKey,
+          correlationId,
+        );
+        throw new BadRequestException(
+          `Order Rejected [INVALID_TAKE_PROFIT]: Invalid Target 2 relative to Target 1.`,
+        );
       }
     }
 
-    const riskDistance = Math.max(Math.abs(executionPrice - stopLoss), executionPrice * 0.005);
+    // 5. Hard Risk Limits Check (P0-11)
+    // 5.1 Max Open Positions Limit
+    const openPositionsCount = await this.prisma.paperPosition.count({
+      where: {
+        accountId: account.id,
+        status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
+      },
+    });
 
-    if (isBuy) {
-      if (!target1 || target1 <= executionPrice) target1 = Number((executionPrice + 1.5 * riskDistance).toFixed(2));
-      if (!target2 || target2 <= executionPrice) target2 = Number((executionPrice + 2.5 * riskDistance).toFixed(2));
-      if (!target3 || target3 <= executionPrice) target3 = Number((executionPrice + 4.0 * riskDistance).toFixed(2));
-    } else {
-      if (!target1 || target1 >= executionPrice) target1 = Number((executionPrice - 1.5 * riskDistance).toFixed(2));
-      if (!target2 || target2 >= executionPrice) target2 = Number((executionPrice - 2.5 * riskDistance).toFixed(2));
-      if (!target3 || target3 >= executionPrice) target3 = Number((executionPrice - 4.0 * riskDistance).toFixed(2));
+    if (openPositionsCount >= config.maxOpenPositions) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MAX_OPEN_POSITIONS,
+        `Maximum open positions limit reached (${openPositionsCount} >= ${config.maxOpenPositions})`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [MAX_OPEN_POSITIONS]: Maximum open positions limit reached (${config.maxOpenPositions}).`,
+      );
     }
 
+    // 5.2 Max Trades Per Day Limit
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    const todayOrderCount = await this.prisma.paperOrder.count({
+      where: {
+        accountId: account.id,
+        createdAt: { gte: startOfDay },
+        status: { in: [OrderState.FILLED, OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED] },
+      },
+    });
+
+    if (todayOrderCount >= config.maxTradesPerDay) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MAX_TRADES_PER_DAY,
+        `Maximum trades per day limit reached (${todayOrderCount} >= ${config.maxTradesPerDay})`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [MAX_TRADES_PER_DAY]: Maximum trades per day reached (${config.maxTradesPerDay}).`,
+      );
+    }
+
+    // 5.3 Max Consecutive Losses Limit
+    const recentTrades = await this.prisma.paperTrade.findMany({
+      where: { accountId: account.id },
+      orderBy: { exitTime: 'desc' },
+      take: config.maxConsecutiveLosses,
+    });
+
+    if (
+      recentTrades.length >= config.maxConsecutiveLosses &&
+      recentTrades.every((t) => Number(t.realizedPnL) <= 0)
+    ) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MAX_CONSECUTIVE_LOSSES,
+        `Maximum consecutive losses limit reached (${config.maxConsecutiveLosses} consecutive losses)`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [MAX_CONSECUTIVE_LOSSES]: Cool-off triggered after ${config.maxConsecutiveLosses} consecutive losses.`,
+      );
+    }
+
+    // 5.4 Position Risk Limit
+    const riskPerUnit = Math.abs(executionPrice - stopLoss);
+    const totalPositionRisk = riskPerUnit * req.quantity;
+    const initialCapital = Number(account.initialCapital);
+    const maxAllowedRiskAmount = initialCapital * (Number(config.maxPositionRiskPercent) / 100);
+
+    if (totalPositionRisk > maxAllowedRiskAmount) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.POSITION_RISK_LIMIT,
+        `Position risk amount ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)} (${config.maxPositionRiskPercent}% of ₹${initialCapital})`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [POSITION_RISK_LIMIT]: Risk ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)}.`,
+      );
+    }
+
+    // 5.5 Max Daily Loss Limit
+    const todayTrades = await this.prisma.paperTrade.findMany({
+      where: {
+        accountId: account.id,
+        exitTime: { gte: startOfDay },
+      },
+    });
+    const todayRealizedPnL = todayTrades.reduce((acc, t) => acc + Number(t.realizedPnL), 0);
+    const maxDailyLossAllowed = initialCapital * (Number(config.maxDailyLossPercent) / 100);
+
+    if (todayRealizedPnL < -maxDailyLossAllowed) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.DAILY_LOSS_LIMIT,
+        `Daily loss limit breached: Realized ₹${todayRealizedPnL.toFixed(2)} exceeds max daily loss ₹${maxDailyLossAllowed.toFixed(2)} (${config.maxDailyLossPercent}%)`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [DAILY_LOSS_LIMIT]: Daily loss limit breached (₹${todayRealizedPnL.toFixed(2)} / ₹${maxDailyLossAllowed.toFixed(2)}).`,
+      );
+    }
+
+    // 5.6 Max Leverage Check
+    if (req.leverage && req.leverage > Number(config.maxLeverage)) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.MAX_LEVERAGE,
+        `Requested leverage ${req.leverage}x exceeds maximum configured leverage ${config.maxLeverage}x`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [MAX_LEVERAGE]: Requested leverage ${req.leverage}x exceeds limit ${config.maxLeverage}x.`,
+      );
+    }
+
+    // 5.7 Total Exposure Check & Margin Availability
     const turnover = executionPrice * req.quantity;
     const charges = this.calculateCharges(turnover, isCrypto);
     const effLeverage = Math.max(1, Math.min(req.leverage || 5, Number(config.maxLeverage)));
     const requiredMargin = Number((turnover / effLeverage + charges.totalCharges).toFixed(2));
+    const currentUsedMargin = Number(account.usedMargin);
+    const currentCashBalance = Number(account.cashBalance);
+    const totalExposureAfterOrder = currentUsedMargin + requiredMargin;
+    const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
-    // 5. Check Margin Availability
-    const currentAvailableMargin = Number(account.cashBalance) - Number(account.usedMargin);
+    if (totalExposureAfterOrder > maxExposureAllowed) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.TOTAL_EXPOSURE_LIMIT,
+        `Total portfolio exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds maximum limit ₹${maxExposureAllowed.toFixed(2)} (${config.maxTotalExposurePercent}%)`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [TOTAL_EXPOSURE_LIMIT]: Total exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds limit ₹${maxExposureAllowed.toFixed(2)}.`,
+      );
+    }
+
+    const currentAvailableMargin = currentCashBalance - currentUsedMargin;
     if (currentAvailableMargin < requiredMargin) {
-      await this.prisma.paperOrder.create({
-        data: {
-          accountId: account.id,
-          symbol,
-          contractSymbol,
-          instrumentType,
-          direction: this.toSignalDirection(req.direction),
-          orderType: req.orderType || 'MARKET',
-          requestedQuantity: new Decimal(req.quantity),
-          status: OrderState.REJECTED,
-          rejectionReason: RiskRejectionReason.INSUFFICIENT_MARGIN,
-          rejectionDetails: `Required margin: ₹${requiredMargin.toFixed(2)}, Available: ₹${currentAvailableMargin.toFixed(2)}`,
-          idempotencyKey,
-          correlationId,
-        },
-      });
-
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.INSUFFICIENT_MARGIN,
+        `Required margin: ₹${requiredMargin.toFixed(2)}, Available margin: ₹${currentAvailableMargin.toFixed(2)}`,
+        idempotencyKey,
+        correlationId,
+      );
       throw new BadRequestException(
         `Insufficient margin. Required: ₹${requiredMargin.toFixed(2)}, Available: ₹${currentAvailableMargin.toFixed(2)}`,
       );
@@ -550,7 +866,7 @@ export class PaperTradingService implements IExecutionProvider {
           price: new Decimal(executionPrice),
           stopLoss: new Decimal(stopLoss),
           target1: new Decimal(target1),
-          target2: new Decimal(target2),
+          target2: target2 ? new Decimal(target2) : null,
           target3: target3 ? new Decimal(target3) : null,
           leverage: new Decimal(effLeverage),
           status: OrderState.FILLED,
@@ -595,10 +911,10 @@ export class PaperTradingService implements IExecutionProvider {
           stopLoss: new Decimal(stopLoss),
           initialStopLoss: new Decimal(stopLoss),
           target1: new Decimal(target1),
-          target2: new Decimal(target2),
+          target2: target2 ? new Decimal(target2) : null,
           target3: target3 ? new Decimal(target3) : null,
           initialTarget1: new Decimal(target1),
-          initialTarget2: new Decimal(target2),
+          initialTarget2: target2 ? new Decimal(target2) : null,
           initialTarget3: target3 ? new Decimal(target3) : null,
           leverage: new Decimal(effLeverage),
           usedMargin: new Decimal(requiredMargin),
@@ -632,7 +948,12 @@ export class PaperTradingService implements IExecutionProvider {
             eventType: 'ORDER_FILLED',
             entityType: 'ORDER',
             entityId: order.id,
-            payloadJson: { symbol, direction: req.direction, quantity: req.quantity, executionPrice },
+            payloadJson: {
+              symbol,
+              direction: req.direction,
+              quantity: req.quantity,
+              executionPrice,
+            },
             correlationId,
           },
           {
@@ -672,7 +993,9 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     if (!pos || pos.status === PositionState.CLOSED) {
-      throw new NotFoundException(`Active position with ID '${positionId}' not found or already closed`);
+      throw new NotFoundException(
+        `Active position with ID '${positionId}' not found or already closed`,
+      );
     }
 
     const correlationId = correlationIdOverride || pos.correlationId || `corr_${Date.now()}`;
@@ -708,7 +1031,10 @@ export class PaperTradingService implements IExecutionProvider {
     const riskAnchor = initialStopLoss ?? stopLoss;
     const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : entryPrice * 0.005;
     const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
-    const holdingDurationSeconds = Math.max(0, Math.floor((exitTime.getTime() - pos.entryTime.getTime()) / 1000));
+    const holdingDurationSeconds = Math.max(
+      0,
+      Math.floor((exitTime.getTime() - pos.entryTime.getTime()) / 1000),
+    );
 
     // Determine outcome classification
     let outcomeClassification = 'MANUAL';
@@ -716,7 +1042,8 @@ export class PaperTradingService implements IExecutionProvider {
     else if (exitReason.includes('TP2')) outcomeClassification = 'WIN_TP2';
     else if (exitReason.includes('TP1')) outcomeClassification = 'WIN_TP1';
     else if (exitReason.includes('Breakeven')) outcomeClassification = 'BREAKEVEN';
-    else if (exitReason.includes('Stop Loss') || exitReason.includes('SL')) outcomeClassification = 'LOSS_SL';
+    else if (exitReason.includes('Stop Loss') || exitReason.includes('SL'))
+      outcomeClassification = 'LOSS_SL';
 
     // Atomic Database Transaction for Position Closure
     const trade = await this.prisma.$transaction(async (tx) => {
@@ -869,8 +1196,53 @@ export class PaperTradingService implements IExecutionProvider {
       });
     });
 
-    this.logger.log(`Paper Trading Account '${account.id}' reset to initial capital: ₹${initialCapital.toLocaleString()}`);
+    this.logger.log(
+      `Paper Trading Account '${account.id}' reset to initial capital: ₹${initialCapital.toLocaleString()}`,
+    );
     return this.getPortfolio();
+  }
+
+  private async rejectOrder(
+    accountId: string,
+    symbol: string,
+    contractSymbol: string,
+    instrumentType: string,
+    direction: 'BUY' | 'SELL',
+    orderType: string | undefined,
+    quantity: number,
+    rejectionReason: RiskRejectionReason,
+    rejectionDetails: string,
+    idempotencyKey: string,
+    correlationId: string,
+  ) {
+    try {
+      await this.prisma.paperOrder.create({
+        data: {
+          accountId,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          direction: this.toSignalDirection(direction),
+          orderType: orderType || 'MARKET',
+          requestedQuantity: new Decimal(quantity),
+          status: OrderState.REJECTED,
+          rejectionReason,
+          rejectionDetails,
+          idempotencyKey,
+          correlationId,
+        },
+      });
+
+      await this.recordAudit(
+        'ORDER_REJECTED',
+        'ORDER',
+        idempotencyKey,
+        { symbol, rejectionReason, rejectionDetails },
+        correlationId,
+      );
+    } catch (e: any) {
+      this.logger.warn(`Failed to record rejected order record: ${e.message}`);
+    }
   }
 
   private async recordAudit(
@@ -910,7 +1282,8 @@ export class PaperTradingService implements IExecutionProvider {
       direction: pos.direction === Direction.BULLISH ? 'BUY' : 'SELL',
       quantity: Number(pos.quantity),
       entryPrice: Number(pos.entryPrice),
-      entryTime: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+      entryTime:
+        pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
       averageEntryPrice: Number(pos.entryPrice),
       currentPrice: Number(pos.currentPrice),
       stopLoss: pos.stopLoss ? Number(pos.stopLoss) : undefined,

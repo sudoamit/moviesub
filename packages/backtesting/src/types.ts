@@ -174,7 +174,22 @@ export interface IBenchmarkComparison {
 }
 
 export interface IBacktestSimulationResult
-  extends Omit<IBacktestResult, 'sharpeRatio' | 'finalEquity' | 'winRate' | 'profitFactor' | 'netPnL' | 'expectancy' | 'maxDrawdownPercent' | 'maxConsecutiveLosses' | 'totalTrades' | 'winningTrades' | 'losingTrades' | 'averageR'>,
+  extends
+    Omit<
+      IBacktestResult,
+      | 'sharpeRatio'
+      | 'finalEquity'
+      | 'winRate'
+      | 'profitFactor'
+      | 'netPnL'
+      | 'expectancy'
+      | 'maxDrawdownPercent'
+      | 'maxConsecutiveLosses'
+      | 'totalTrades'
+      | 'winningTrades'
+      | 'losingTrades'
+      | 'averageR'
+    >,
     IQuantitativeMetrics {
   symbol: string;
   timeframe: string;

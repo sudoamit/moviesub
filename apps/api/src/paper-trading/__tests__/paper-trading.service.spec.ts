@@ -53,22 +53,34 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           const acc = dbAccounts.find((a) => a.id === args.where.id);
           if (acc) {
             if (args.data.cashBalance?.decrement) {
-              acc.cashBalance = new Decimal(Number(acc.cashBalance) - Number(args.data.cashBalance.decrement));
+              acc.cashBalance = new Decimal(
+                Number(acc.cashBalance) - Number(args.data.cashBalance.decrement),
+              );
             }
             if (args.data.cashBalance?.increment) {
-              acc.cashBalance = new Decimal(Number(acc.cashBalance) + Number(args.data.cashBalance.increment));
+              acc.cashBalance = new Decimal(
+                Number(acc.cashBalance) + Number(args.data.cashBalance.increment),
+              );
             }
             if (args.data.usedMargin?.increment) {
-              acc.usedMargin = new Decimal(Number(acc.usedMargin) + Number(args.data.usedMargin.increment));
+              acc.usedMargin = new Decimal(
+                Number(acc.usedMargin) + Number(args.data.usedMargin.increment),
+              );
             }
             if (args.data.usedMargin?.decrement) {
-              acc.usedMargin = new Decimal(Number(acc.usedMargin) - Number(args.data.usedMargin.decrement));
+              acc.usedMargin = new Decimal(
+                Number(acc.usedMargin) - Number(args.data.usedMargin.decrement),
+              );
             }
             if (args.data.realizedPnL?.increment) {
-              acc.realizedPnL = new Decimal(Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment));
+              acc.realizedPnL = new Decimal(
+                Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment),
+              );
             }
             if (args.data.totalChargesPaid?.increment) {
-              acc.totalChargesPaid = new Decimal(Number(acc.totalChargesPaid) + Number(args.data.totalChargesPaid.increment));
+              acc.totalChargesPaid = new Decimal(
+                Number(acc.totalChargesPaid) + Number(args.data.totalChargesPaid.increment),
+              );
             }
           }
           return Promise.resolve(acc);
@@ -84,7 +96,9 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           maxLeverage: new Decimal(5.0),
           maxMarketDataAgeSeconds: 5,
         }),
-        create: jest.fn().mockImplementation((args) => Promise.resolve({ id: 'SYSTEM_DEFAULT', ...args.data })),
+        create: jest
+          .fn()
+          .mockImplementation((args) => Promise.resolve({ id: 'SYSTEM_DEFAULT', ...args.data })),
       },
       paperOrder: {
         findUnique: jest.fn().mockImplementation((args) => {
@@ -224,6 +238,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 65,
       orderType: 'MARKET' as const,
       price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24175.0,
       idempotencyKey: 'idempotent_test_key_123',
     };
 
@@ -248,6 +264,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         direction: 'BUY',
         quantity: 10,
         orderType: 'MARKET',
+        stopLoss: 90.0,
+        target1: 110.0,
       }),
     ).rejects.toThrow();
 
@@ -255,6 +273,110 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     const rejectedOrder = dbOrders.find((o) => o.symbol === 'UNKNOWN_SYM');
     expect(rejectedOrder).toBeDefined();
     expect(rejectedOrder.status).toBe(OrderState.REJECTED);
+  });
+
+  it('should reject order if stopLoss is missing or invalid (P0-4)', async () => {
+    // Missing stopLoss
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        target1: 24200.0,
+      } as any),
+    ).rejects.toThrow('MISSING_STOP_LOSS');
+
+    // Invalid stopLoss for BUY (stopLoss >= price)
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24150.0,
+        target1: 24200.0,
+      }),
+    ).rejects.toThrow('INVALID_STOP_LOSS');
+
+    // Invalid stopLoss for SELL (stopLoss <= price)
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'SELL',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24050.0,
+        target1: 24000.0,
+      }),
+    ).rejects.toThrow('INVALID_STOP_LOSS');
+  });
+
+  it('should reject order if target1 (takeProfit) is missing or invalid (P0-4)', async () => {
+    // Missing target1
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24050.0,
+      } as any),
+    ).rejects.toThrow('MISSING_TAKE_PROFIT');
+
+    // Invalid target1 for BUY (target1 <= price)
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24050.0,
+        target1: 24080.0,
+      }),
+    ).rejects.toThrow('INVALID_TAKE_PROFIT');
+
+    // Invalid target1 for SELL (target1 >= price)
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'SELL',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24150.0,
+        target1: 24120.0,
+      }),
+    ).rejects.toThrow('INVALID_TAKE_PROFIT');
+  });
+
+  it('should reject order when emergencyStop is activated (P0-10)', async () => {
+    mockPrisma.tradingSystemConfig.findUnique.mockResolvedValue({
+      id: 'SYSTEM_DEFAULT',
+      paperTradingEnabled: true,
+      liveTradingEnabled: false,
+      emergencyStop: true,
+      maxDailyLossPercent: new Decimal(3.0),
+      maxLeverage: new Decimal(5.0),
+      maxMarketDataAgeSeconds: 5,
+    });
+
+    await expect(
+      service.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 25,
+        orderType: 'MARKET',
+        price: 24100.0,
+        stopLoss: 24050.0,
+        target1: 24200.0,
+      }),
+    ).rejects.toThrow('Emergency Stop');
   });
 
   it('should ensure getPortfolio() is strictly read-only without modifying database', async () => {
@@ -265,6 +387,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       orderType: 'MARKET',
       price: 24100.0,
       stopLoss: 24050.0,
+      target1: 24175.0,
     });
 
     const positionsCountBefore = dbPositions.length;
@@ -286,6 +409,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       orderType: 'MARKET',
       price: 24100.0,
       stopLoss: 24050.0,
+      target1: 24175.0,
     });
 
     const trade = await service.closePosition(pos.id, 'Target Achieved', 24200.0);

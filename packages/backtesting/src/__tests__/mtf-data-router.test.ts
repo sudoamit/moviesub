@@ -7,15 +7,50 @@ describe('MarketDataRouter - Multi-Timeframe Zero Look-Ahead', () => {
   // 15m candles: 10:00, 10:15, 10:30, 10:45, 11:00
   const executionCandles: ICandle[] = [
     { timestamp: new Date(baseTime), open: 100, high: 102, low: 99, close: 101, volume: 1000 },
-    { timestamp: new Date(baseTime + 15 * 60 * 1000), open: 101, high: 103, low: 100, close: 102, volume: 1100 },
-    { timestamp: new Date(baseTime + 30 * 60 * 1000), open: 102, high: 104, low: 101, close: 103, volume: 1200 },
-    { timestamp: new Date(baseTime + 45 * 60 * 1000), open: 103, high: 105, low: 102, close: 104, volume: 1300 },
-    { timestamp: new Date(baseTime + 60 * 60 * 1000), open: 104, high: 106, low: 103, close: 105, volume: 1400 },
+    {
+      timestamp: new Date(baseTime + 15 * 60 * 1000),
+      open: 101,
+      high: 103,
+      low: 100,
+      close: 102,
+      volume: 1100,
+    },
+    {
+      timestamp: new Date(baseTime + 30 * 60 * 1000),
+      open: 102,
+      high: 104,
+      low: 101,
+      close: 103,
+      volume: 1200,
+    },
+    {
+      timestamp: new Date(baseTime + 45 * 60 * 1000),
+      open: 103,
+      high: 105,
+      low: 102,
+      close: 104,
+      volume: 1300,
+    },
+    {
+      timestamp: new Date(baseTime + 60 * 60 * 1000),
+      open: 104,
+      high: 106,
+      low: 103,
+      close: 105,
+      volume: 1400,
+    },
   ];
 
   // 1h candles: 09:00-10:00 (past), 10:00-11:00 (concurrent)
   const htf1Candles: ICandle[] = [
-    { timestamp: new Date(baseTime - 60 * 60 * 1000), open: 95, high: 100, low: 94, close: 99, volume: 5000 },
+    {
+      timestamp: new Date(baseTime - 60 * 60 * 1000),
+      open: 95,
+      high: 100,
+      low: 94,
+      close: 99,
+      volume: 5000,
+    },
     { timestamp: new Date(baseTime), open: 100, high: 106, low: 99, close: 105, volume: 6000 },
   ];
 
@@ -53,7 +88,14 @@ describe('MarketDataRouter - Multi-Timeframe Zero Look-Ahead', () => {
   it('should normalize and sort out-of-order and duplicate timestamps gracefully', () => {
     const unorderedHtf: ICandle[] = [
       { timestamp: new Date(baseTime), open: 100, high: 106, low: 99, close: 105, volume: 6000 },
-      { timestamp: new Date(baseTime - 60 * 60 * 1000), open: 95, high: 100, low: 94, close: 99, volume: 5000 },
+      {
+        timestamp: new Date(baseTime - 60 * 60 * 1000),
+        open: 95,
+        high: 100,
+        low: 94,
+        close: 99,
+        volume: 5000,
+      },
     ];
 
     const router = new MarketDataRouter({

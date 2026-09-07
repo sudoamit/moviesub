@@ -406,7 +406,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
             Out-of-Sample Accuracy
           </span>
           <span className="text-lg font-black text-emerald-400 mt-1 block">
-            {modelState ? `${(modelState.metrics.accuracy * 100).toFixed(1)}%` : '...'}
+            {modelState?.metrics?.accuracy != null
+              ? `${(modelState.metrics.accuracy * 100).toFixed(1)}%`
+              : 'UNTRAINED'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">Chronological Split</span>
         </div>
@@ -416,7 +418,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
             Log Loss (BCE)
           </span>
           <span className="text-lg font-black text-cyan-300 mt-1 block">
-            {modelState ? modelState.metrics.logLoss.toFixed(3) : '...'}
+            {modelState?.metrics?.logLoss != null ? modelState.metrics.logLoss.toFixed(3) : 'N/A'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">Optimal Convergence</span>
         </div>
@@ -426,7 +428,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
             ROC-AUC Discriminator
           </span>
           <span className="text-lg font-black text-teal-300 mt-1 block">
-            {modelState ? modelState.metrics.rocAuc.toFixed(3) : '...'}
+            {modelState?.metrics?.rocAuc != null ? modelState.metrics.rocAuc.toFixed(3) : 'N/A'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">Mann-Whitney U</span>
         </div>
@@ -434,7 +436,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
         <div className="bg-[#111827]/90 border border-slate-800 p-3.5 rounded-xl text-center shadow-lg">
           <span className="text-[10px] uppercase text-slate-400 block font-bold">Brier Score</span>
           <span className="text-lg font-black text-purple-300 mt-1 block">
-            {modelState ? modelState.metrics.brierScore.toFixed(3) : '...'}
+            {modelState?.metrics?.brierScore != null
+              ? modelState.metrics.brierScore.toFixed(3)
+              : 'N/A'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">Probability Error</span>
         </div>
@@ -444,10 +448,15 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
             Profit Factor
           </span>
           <span className="text-lg font-black text-emerald-400 mt-1 block">
-            {modelState ? `${modelState.metrics.profitFactor.toFixed(2)}x` : '...'}
+            {modelState?.metrics?.profitFactor != null
+              ? `${modelState.metrics.profitFactor.toFixed(2)}x`
+              : 'N/A'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">
-            Expectancy: +{modelState?.metrics.expectancyR}R
+            Expectancy:{' '}
+            {modelState?.metrics?.expectancyR != null
+              ? `+${modelState.metrics.expectancyR}R`
+              : 'N/A'}
           </span>
         </div>
 
@@ -456,13 +465,13 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
             Calibration Status
           </span>
           <span className="text-sm font-black text-emerald-300 mt-1.5 block">
-            {modelState?.calibration?.status || 'GOOD'}
+            {modelState?.calibration?.status || 'UNTRAINED'}
           </span>
           <span className="text-[9px] text-slate-500 block mt-0.5">
             ECE:{' '}
-            {modelState
+            {modelState?.calibration?.expectedCalibrationError != null
               ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%`
-              : '...'}
+              : 'N/A'}
           </span>
         </div>
       </div>
@@ -697,9 +706,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               Expected Calib Error (ECE)
             </span>
             <span className="text-base font-black text-cyan-300 mt-0.5 block">
-              {modelState
+              {modelState?.calibration?.expectedCalibrationError != null
                 ? `${(modelState.calibration.expectedCalibrationError * 100).toFixed(1)}%`
-                : '3.8%'}
+                : 'N/A'}
             </span>
             <span className="text-[9px] text-slate-500 block">Mean Divergence from $y=x$</span>
           </div>
@@ -708,9 +717,9 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               Max Calib Error (MCE)
             </span>
             <span className="text-base font-black text-amber-300 mt-0.5 block">
-              {modelState
+              {modelState?.calibration?.maximumCalibrationError != null
                 ? `${(modelState.calibration.maximumCalibrationError * 100).toFixed(1)}%`
-                : '6.4%'}
+                : 'N/A'}
             </span>
             <span className="text-[9px] text-slate-500 block">Worst-Decile Deviation</span>
           </div>

@@ -19,8 +19,12 @@ export class ExperimentComparator {
     const deltaOOSExpectancyR = Number(
       (candidate.oosMetrics.expectancyR - baseline.oosMetrics.expectancyR).toFixed(2),
     );
-    const deltaWinRate = Number((candidate.oosMetrics.winRate - baseline.oosMetrics.winRate).toFixed(2));
-    const deltaSharpe = Number((candidate.oosMetrics.sharpeRatio - baseline.oosMetrics.sharpeRatio).toFixed(2));
+    const deltaWinRate = Number(
+      (candidate.oosMetrics.winRate - baseline.oosMetrics.winRate).toFixed(2),
+    );
+    const deltaSharpe = Number(
+      (candidate.oosMetrics.sharpeRatio - baseline.oosMetrics.sharpeRatio).toFixed(2),
+    );
     const deltaMaxDrawdown = Number(
       (candidate.oosMetrics.maxDrawdownPercent - baseline.oosMetrics.maxDrawdownPercent).toFixed(2),
     );

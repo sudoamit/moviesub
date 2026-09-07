@@ -30,9 +30,18 @@ export class TradeLifecycleManager {
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
     const riskDistance = Math.abs(executionPrice - signal.stopLoss);
-    const tp1 = signal.takeProfits?.tp1 ?? executionPrice + (signal.direction === Direction.BULLISH ? riskDistance * 1.5 : -riskDistance * 1.5);
-    const tp2 = signal.takeProfits?.tp2 ?? executionPrice + (signal.direction === Direction.BULLISH ? riskDistance * 2.5 : -riskDistance * 2.5);
-    const tp3 = signal.takeProfits?.tp3 ?? executionPrice + (signal.direction === Direction.BULLISH ? riskDistance * 4.0 : -riskDistance * 4.0);
+    const tp1 =
+      signal.takeProfits?.tp1 ??
+      executionPrice +
+        (signal.direction === Direction.BULLISH ? riskDistance * 1.5 : -riskDistance * 1.5);
+    const tp2 =
+      signal.takeProfits?.tp2 ??
+      executionPrice +
+        (signal.direction === Direction.BULLISH ? riskDistance * 2.5 : -riskDistance * 2.5);
+    const tp3 =
+      signal.takeProfits?.tp3 ??
+      executionPrice +
+        (signal.direction === Direction.BULLISH ? riskDistance * 4.0 : -riskDistance * 4.0);
 
     const entryEvent: IExecutionEvent = {
       eventId: `evt_entry_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -96,7 +105,11 @@ export class TradeLifecycleManager {
     lot: PositionLot,
     candle: ICandle,
     policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
-    candleTimestamp: number = (candle.timestamp instanceof Date ? candle.timestamp.getTime() : typeof candle.timestamp === 'number' ? candle.timestamp : Date.now()),
+    candleTimestamp: number = candle.timestamp instanceof Date
+      ? candle.timestamp.getTime()
+      : typeof candle.timestamp === 'number'
+        ? candle.timestamp
+        : Date.now(),
   ): {
     lot: PositionLot;
     events: IExecutionEvent[];
@@ -110,8 +123,12 @@ export class TradeLifecycleManager {
     const newEvents: IExecutionEvent[] = [];
 
     // Track MAE / MFE
-    const adversePrice = isLong ? Math.max(0, lot.entryPrice - low) : Math.max(0, high - lot.entryPrice);
-    const favorablePrice = isLong ? Math.max(0, high - lot.entryPrice) : Math.max(0, lot.entryPrice - low);
+    const adversePrice = isLong
+      ? Math.max(0, lot.entryPrice - low)
+      : Math.max(0, high - lot.entryPrice);
+    const favorablePrice = isLong
+      ? Math.max(0, high - lot.entryPrice)
+      : Math.max(0, lot.entryPrice - low);
     lot.mae = Math.max(lot.mae, adversePrice);
     lot.mfe = Math.max(lot.mfe, favorablePrice);
 
@@ -270,7 +287,10 @@ export class TradeLifecycleManager {
     if (isTp2Hit && !hasAlreadyTp2) {
       const exitPrice = lot.tp2;
       const targetRatio = policy.tp3Ratio > 0 ? policy.tp2Ratio : 1.0;
-      const scaleQty = Math.max(1, Math.min(lot.remainingQuantity, Math.round(lot.initialQuantity * targetRatio)));
+      const scaleQty = Math.max(
+        1,
+        Math.min(lot.remainingQuantity, Math.round(lot.initialQuantity * targetRatio)),
+      );
       const chunkDiff = isLong ? exitPrice - lot.entryPrice : lot.entryPrice - exitPrice;
       const chunkPnl = Number((chunkDiff * scaleQty).toFixed(2));
       const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
@@ -368,7 +388,10 @@ export class TradeLifecycleManager {
     const isTp1Hit = isLong ? high >= lot.tp1 : low <= lot.tp1;
     if (isTp1Hit && !hasAlreadyTp1) {
       const exitPrice = lot.tp1;
-      const scaleQty = Math.max(1, Math.min(lot.remainingQuantity, Math.round(lot.initialQuantity * policy.tp1Ratio)));
+      const scaleQty = Math.max(
+        1,
+        Math.min(lot.remainingQuantity, Math.round(lot.initialQuantity * policy.tp1Ratio)),
+      );
       const chunkDiff = isLong ? exitPrice - lot.entryPrice : lot.entryPrice - exitPrice;
       const chunkPnl = Number((chunkDiff * scaleQty).toFixed(2));
       const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));

@@ -103,11 +103,17 @@ export class MetricsCalculator {
 
     const averageWin = winningTrades > 0 ? Number((grossProfit / winningTrades).toFixed(2)) : 0;
     const averageLoss = losingTrades > 0 ? Number((grossLoss / losingTrades).toFixed(2)) : 0;
-    const payoffRatio = averageLoss > 0 ? Number((averageWin / averageLoss).toFixed(2)) : averageWin > 0 ? 99.99 : 0;
+    const payoffRatio =
+      averageLoss > 0 ? Number((averageWin / averageLoss).toFixed(2)) : averageWin > 0 ? 99.99 : 0;
 
     const winProb = winningTrades / totalTrades;
     const lossProb = losingTrades / totalTrades;
-    const expectancy = Number((winProb * (winningTrades > 0 ? grossProfit / winningTrades : 0) - lossProb * (losingTrades > 0 ? grossLoss / losingTrades : 0)).toFixed(2));
+    const expectancy = Number(
+      (
+        winProb * (winningTrades > 0 ? grossProfit / winningTrades : 0) -
+        lossProb * (losingTrades > 0 ? grossLoss / losingTrades : 0)
+      ).toFixed(2),
+    );
 
     // Peak-to-trough maximum drawdown, duration, and recovery
     let peak = initialCapital;
@@ -186,10 +192,15 @@ export class MetricsCalculator {
         ? Number(points[points.length - 1].equity.toFixed(2))
         : initialCapital + netPnL;
 
-    const totalReturnPercent = Number((((finalEquity - initialCapital) / initialCapital) * 100).toFixed(2));
+    const totalReturnPercent = Number(
+      (((finalEquity - initialCapital) / initialCapital) * 100).toFixed(2),
+    );
     const years = Math.max(0.08, points.length / 252);
-    const cagr = Number(((Math.pow(Math.max(0.01, finalEquity / initialCapital), 1 / years) - 1) * 100).toFixed(2));
-    const calmarRatio = maxDDPercent > 0 ? Number((cagr / maxDDPercent).toFixed(2)) : cagr > 0 ? 99.99 : 0;
+    const cagr = Number(
+      ((Math.pow(Math.max(0.01, finalEquity / initialCapital), 1 / years) - 1) * 100).toFixed(2),
+    );
+    const calmarRatio =
+      maxDDPercent > 0 ? Number((cagr / maxDDPercent).toFixed(2)) : cagr > 0 ? 99.99 : 0;
 
     // Fees, slippage, MAE/MFE totals
     let totalFees = 0;
@@ -207,7 +218,10 @@ export class MetricsCalculator {
     }
 
     const exposureBars = equitySnapshots.filter((s) => s.grossExposure > 0).length;
-    const exposurePercent = equitySnapshots.length > 0 ? Number(((exposureBars / equitySnapshots.length) * 100).toFixed(2)) : 0;
+    const exposurePercent =
+      equitySnapshots.length > 0
+        ? Number(((exposureBars / equitySnapshots.length) * 100).toFixed(2))
+        : 0;
 
     return {
       totalTrades,

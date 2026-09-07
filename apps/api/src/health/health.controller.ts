@@ -57,9 +57,11 @@ export class HealthController {
   @Get('metrics')
   async getMetrics() {
     const [openPositionsCount, totalTradesCount, totalOrdersCount] = await Promise.all([
-      this.prisma.paperPosition.count({
-        where: { status: { in: ['OPEN', 'PARTIALLY_CLOSED'] } },
-      }).catch(() => 0),
+      this.prisma.paperPosition
+        .count({
+          where: { status: { in: ['OPEN', 'PARTIALLY_CLOSED'] } },
+        })
+        .catch(() => 0),
       this.prisma.paperTrade.count().catch(() => 0),
       this.prisma.paperOrder.count().catch(() => 0),
     ]);
@@ -81,4 +83,3 @@ export class HealthController {
     return this.getMetrics();
   }
 }
-

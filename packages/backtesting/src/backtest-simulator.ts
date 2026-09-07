@@ -32,7 +32,8 @@ export class BacktestSimulator {
    */
   static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
     const symbol = options.symbol.toUpperCase();
-    const timeframe = (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
+    const timeframe =
+      (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
     const initialCapital = options.initialCapital || 100000;
     const riskPercent = options.riskPerTradePercent || 1.0;
     const minScore = options.minScore || 65;
@@ -60,7 +61,9 @@ export class BacktestSimulator {
     const executionEvents: IExecutionEvent[] = [];
     const equityCurve: IEquityPoint[] = [
       {
-        timestamp: executionCandles[0]?.timestamp ? new Date(executionCandles[0].timestamp) : new Date(),
+        timestamp: executionCandles[0]?.timestamp
+          ? new Date(executionCandles[0].timestamp)
+          : new Date(),
         equity: initialCapital,
         drawdownPercent: 0,
       },
@@ -89,9 +92,10 @@ export class BacktestSimulator {
 
     for (let i = warmupBars; i < executionCandles.length; i++) {
       const currentCandle = executionCandles[i];
-      const candleTime = currentCandle.timestamp instanceof Date
-        ? currentCandle.timestamp.getTime()
-        : new Date(currentCandle.timestamp).getTime();
+      const candleTime =
+        currentCandle.timestamp instanceof Date
+          ? currentCandle.timestamp.getTime()
+          : new Date(currentCandle.timestamp).getTime();
 
       // 1. Manage Active Position Lot
       if (activeLot) {
@@ -106,7 +110,9 @@ export class BacktestSimulator {
         executionEvents.push(...tickRes.events);
 
         // Update equity floating state
-        currentEquity = Number((currentCash + activeLot.realizedPnl + activeLot.unrealizedPnl).toFixed(2));
+        currentEquity = Number(
+          (currentCash + activeLot.realizedPnl + activeLot.unrealizedPnl).toFixed(2),
+        );
 
         if (tickRes.isClosed) {
           // Position complete -> Record trade
@@ -122,11 +128,15 @@ export class BacktestSimulator {
             entryTime: new Date(activeLot.openedAt),
             entryPrice: activeLot.entryPrice,
             exitTime: new Date(activeLot.closedAt || candleTime),
-            exitPrice: activeLot.partialFills[activeLot.partialFills.length - 1]?.price || activeLot.entryPrice,
+            exitPrice:
+              activeLot.partialFills[activeLot.partialFills.length - 1]?.price ||
+              activeLot.entryPrice,
             stopLoss: activeLot.initialStopLoss,
             takeProfit: activeLot.tp2,
             positionSize: activeLot.initialQuantity,
-            marginRequired: Number(((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2)),
+            marginRequired: Number(
+              ((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2),
+            ),
             riskAmount: Number((initialRisk * activeLot.initialQuantity).toFixed(2)),
             pnl: totalPnl,
             pnlRMultiple: activeLot.realizedR,
@@ -156,10 +166,20 @@ export class BacktestSimulator {
           realizedPnL: activeLot ? activeLot.realizedPnl : 0,
           unrealizedPnL: activeLot ? activeLot.unrealizedPnl : 0,
           equity: currentEquity,
-          marginUsed: activeLot ? Number(((activeLot.remainingQuantity * activeLot.entryPrice) / 5).toFixed(2)) : 0,
-          availableMargin: Math.max(0, currentEquity - (activeLot ? (activeLot.remainingQuantity * activeLot.entryPrice) / 5 : 0)),
+          marginUsed: activeLot
+            ? Number(((activeLot.remainingQuantity * activeLot.entryPrice) / 5).toFixed(2))
+            : 0,
+          availableMargin: Math.max(
+            0,
+            currentEquity -
+              (activeLot ? (activeLot.remainingQuantity * activeLot.entryPrice) / 5 : 0),
+          ),
           grossExposure: activeLot ? activeLot.remainingQuantity * activeLot.entryPrice : 0,
-          netExposure: activeLot ? (activeLot.direction === Direction.BULLISH ? 1 : -1) * activeLot.remainingQuantity * activeLot.entryPrice : 0,
+          netExposure: activeLot
+            ? (activeLot.direction === Direction.BULLISH ? 1 : -1) *
+              activeLot.remainingQuantity *
+              activeLot.entryPrice
+            : 0,
           fees: 0,
           slippage: 0,
           drawdownPercent: ddPercent,
@@ -172,8 +192,10 @@ export class BacktestSimulator {
       if (activeSignal && activeSignal.state === SignalState.PENDING) {
         const isLong = activeSignal.direction === Direction.BULLISH;
         const entryHit = isLong
-          ? currentCandle.low <= activeSignal.entryZone.max && currentCandle.high >= activeSignal.entryZone.min
-          : currentCandle.high >= activeSignal.entryZone.min && currentCandle.low <= activeSignal.entryZone.max;
+          ? currentCandle.low <= activeSignal.entryZone.max &&
+            currentCandle.high >= activeSignal.entryZone.min
+          : currentCandle.high >= activeSignal.entryZone.min &&
+            currentCandle.low <= activeSignal.entryZone.max;
 
         if (entryHit) {
           // Compute fail-closed position sizing

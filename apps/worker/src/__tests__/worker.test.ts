@@ -112,7 +112,9 @@ describe('Worker Processors', () => {
       mockRedis = {
         get: jest.fn().mockResolvedValue(JSON.stringify({ close: 24150.0 })),
         publish: jest.fn().mockResolvedValue(1),
-        getClient: jest.fn().mockReturnValue({ status: 'ready', publish: jest.fn().mockResolvedValue(1) }),
+        getClient: jest
+          .fn()
+          .mockReturnValue({ status: 'ready', publish: jest.fn().mockResolvedValue(1) }),
       };
 
       processor = new PositionMonitorProcessor(mockPrisma, mockRedis);

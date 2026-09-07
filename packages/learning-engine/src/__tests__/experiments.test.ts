@@ -32,8 +32,12 @@ describe('DatasetManager & Quantitative Experiment System', () => {
     expect(splits.outOfSample.length).toBe(20);
 
     // Verify strict chronological time-series ordering (no leakage)
-    expect(splits.train[splits.train.length - 1].timestamp).toBeLessThan(splits.validation[0].timestamp);
-    expect(splits.validation[splits.validation.length - 1].timestamp).toBeLessThan(splits.outOfSample[0].timestamp);
+    expect(splits.train[splits.train.length - 1].timestamp).toBeLessThan(
+      splits.validation[0].timestamp,
+    );
+    expect(splits.validation[splits.validation.length - 1].timestamp).toBeLessThan(
+      splits.outOfSample[0].timestamp,
+    );
   });
 
   it('should run a reproducible quantitative experiment with cost stress testing and Monte Carlo simulation', () => {
@@ -62,7 +66,9 @@ describe('DatasetManager & Quantitative Experiment System', () => {
     const splits = manager.splitDataset(dataset.metadata.datasetId);
 
     const baseline = ExperimentRunner.runExperiment('Baseline', splits, { minScore: 60 });
-    const candidate = ExperimentRunner.runExperiment('Candidate_Optimized', splits, { minScore: 75 });
+    const candidate = ExperimentRunner.runExperiment('Candidate_Optimized', splits, {
+      minScore: 75,
+    });
 
     const comparison = ExperimentComparator.compare(baseline, candidate);
     expect(comparison.deltaOOSExpectancyR).toBeDefined();

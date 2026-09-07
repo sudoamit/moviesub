@@ -359,7 +359,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const ticker = this.tickers.get(sym);
 
     if (!ticker) {
-      throw new MarketDataUnavailableError(sym, 'No active market data stream available for symbol');
+      throw new MarketDataUnavailableError(
+        sym,
+        'No active market data stream available for symbol',
+      );
     }
 
     if (!Number.isFinite(ticker.price) || ticker.price <= 0) {
@@ -372,12 +375,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     const ageSeconds = (Date.now() - ticker.lastUpdated) / 1000;
     if (ageSeconds > maxAgeSeconds) {
-      throw new StaleMarketDataError(
-        sym,
-        ageSeconds,
-        maxAgeSeconds,
-        new Date(ticker.lastUpdated),
-      );
+      throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(ticker.lastUpdated));
     }
 
     return ticker;
@@ -393,4 +391,3 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (this.microTickTimer) clearInterval(this.microTickTimer);
   }
 }
-

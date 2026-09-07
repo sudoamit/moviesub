@@ -129,30 +129,12 @@ export class AILearningService implements OnModuleInit {
 
   private bootstrapBaselineModelInMemory() {
     const baselineModel = new TradePredictionModel('v1.0.0-PROD');
-    const dummyMetrics: EvaluationMetrics = {
-      sampleSize: 120,
-      totalExamples: 120,
-      epochsTrained: 60,
-      initialLoss: 0.693,
-      finalLoss: 0.412,
-      accuracy: 0.775,
-      precision: 0.76,
-      recall: 0.81,
-      f1Score: 0.784,
-      logLoss: 0.412,
-      brierScore: 0.138,
-      rocAuc: 0.815,
-      profitFactor: 2.35,
-      expectancyR: 0.82,
-      maxDrawdownR: 3.5,
-    };
-
     const state = ModelPersistenceManager.serialize(baselineModel, {
-      status: 'ACTIVE',
-      metrics: dummyMetrics,
-      trainingExampleCount: 72,
-      validationExampleCount: 24,
-      outOfSampleExampleCount: 24,
+      status: 'CANDIDATE',
+      metrics: null as any,
+      trainingExampleCount: 0,
+      validationExampleCount: 0,
+      outOfSampleExampleCount: 0,
     });
 
     this.registry.registerVersion(state);
@@ -160,30 +142,12 @@ export class AILearningService implements OnModuleInit {
 
   private async bootstrapBaselineModel() {
     const baselineModel = new TradePredictionModel('v1.0.0-PROD');
-    const dummyMetrics: EvaluationMetrics = {
-      sampleSize: 120,
-      totalExamples: 120,
-      epochsTrained: 60,
-      initialLoss: 0.693,
-      finalLoss: 0.412,
-      accuracy: 0.775,
-      precision: 0.76,
-      recall: 0.81,
-      f1Score: 0.784,
-      logLoss: 0.412,
-      brierScore: 0.138,
-      rocAuc: 0.815,
-      profitFactor: 2.35,
-      expectancyR: 0.82,
-      maxDrawdownR: 3.5,
-    };
-
     const state = ModelPersistenceManager.serialize(baselineModel, {
-      status: 'ACTIVE',
-      metrics: dummyMetrics,
-      trainingExampleCount: 72,
-      validationExampleCount: 24,
-      outOfSampleExampleCount: 24,
+      status: 'CANDIDATE',
+      metrics: null as any,
+      trainingExampleCount: 0,
+      validationExampleCount: 0,
+      outOfSampleExampleCount: 0,
     });
 
     this.registry.registerVersion(state);
@@ -211,14 +175,14 @@ export class AILearningService implements OnModuleInit {
           modelId: parentModel.id,
           version: 'v1.0.0-PROD',
           featureSchemaVersion: FEATURE_SCHEMA_VERSION,
-          status: 'ACTIVE',
+          status: 'CANDIDATE',
           weightsJson: state.weights,
           bias: state.bias,
           hyperparametersJson: state.hyperparameters as any,
-          metricsJson: state.metrics as any,
-          trainingExampleCount: 72,
-          validationExampleCount: 24,
-          outOfSampleExampleCount: 24,
+          metricsJson: null as any,
+          trainingExampleCount: 0,
+          validationExampleCount: 0,
+          outOfSampleExampleCount: 0,
           trainingStartedAt: new Date(),
           trainingCompletedAt: new Date(),
         },
@@ -230,7 +194,9 @@ export class AILearningService implements OnModuleInit {
         data: { activeVersionId: dbVersion.id },
       });
 
-      this.logger.log(`Created baseline AI model version '${dbVersion.version}' in database.`);
+      this.logger.log(
+        `Initialized baseline AI model version '${dbVersion.version}' in database as UNTRAINED.`,
+      );
     } catch (e) {
       this.logger.warn(`Could not persist baseline model to Postgres: ${e}`);
     }
@@ -244,41 +210,29 @@ export class AILearningService implements OnModuleInit {
     const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
 
     const featureImportance = activeModel.getFeatureImportance();
+    const hasRealMetrics = activeState?.metrics && activeState.metrics.accuracy !== undefined;
 
     return {
       modelVersion: activeState?.version || 'v1.0.0-PROD',
       featureSchemaVersion: activeState?.featureSchemaVersion || FEATURE_SCHEMA_VERSION,
-      status: activeState?.status || 'ACTIVE',
+      status: hasRealMetrics ? activeState?.status || 'ACTIVE' : 'UNTRAINED',
       algorithm: activeState?.algorithm || 'LOGISTIC_REGRESSION',
-      trainedAt: activeState?.trainingCompletedAt || activeState?.createdAt || new Date(),
-      trainingExamples: activeState?.trainingExampleCount || 72,
-      validationExamples: activeState?.validationExampleCount || 24,
-      outOfSampleExamples: activeState?.outOfSampleExampleCount || 24,
-      totalExamples: activeState?.metrics?.totalExamples || 120,
-      metrics: activeState?.metrics || {
-        accuracy: 0.775,
-        logLoss: 0.412,
-        brierScore: 0.138,
-        rocAuc: 0.815,
-        profitFactor: 2.35,
-        expectancyR: 0.82,
-        maxDrawdownR: 3.5,
-      },
-      calibration: activeState?.calibrationReport || {
-        status: 'EXCELLENT',
-        expectedCalibrationError: 0.042,
-        maximumCalibrationError: 0.078,
-        totalSamples: 120,
-        description:
-          'Excellent probability calibration (ECE: 4.2%). Predicted probabilities closely mirror realized win rates.',
-      },
+      trainedAt: hasRealMetrics
+        ? activeState?.trainingCompletedAt || activeState?.createdAt || new Date()
+        : null,
+      trainingExamples: activeState?.trainingExampleCount || 0,
+      validationExamples: activeState?.validationExampleCount || 0,
+      outOfSampleExamples: activeState?.outOfSampleExampleCount || 0,
+      totalExamples: activeState?.metrics?.totalExamples || 0,
+      metrics: hasRealMetrics ? activeState.metrics : null,
+      calibration: hasRealMetrics ? activeState?.calibrationReport : null,
       featureImportance,
       allVersions: this.registry.getAllVersions().map((v) => ({
         version: v.version,
         status: v.status,
         createdAt: v.createdAt,
-        accuracy: v.metrics?.accuracy,
-        logLoss: v.metrics?.logLoss,
+        accuracy: v.metrics?.accuracy ?? null,
+        logLoss: v.metrics?.logLoss ?? null,
       })),
     };
   }
@@ -630,154 +584,114 @@ export class AILearningService implements OnModuleInit {
     const featureImportance = activeModel.getFeatureImportance();
 
     const activeState = this.registry.getActiveVersionState();
-    const calibration = activeState?.calibrationReport || {
-      status: 'EXCELLENT',
-      expectedCalibrationError: 0.042,
-      maximumCalibrationError: 0.078,
-      totalSamples: 120,
-      description: 'Excellent probability calibration (ECE: 4.2%).',
-      bins: [],
-    };
+    const calibration = activeState?.calibrationReport || null;
 
-    // Authentic insights computed from market regime and asset structure
+    const completedTrades = await this.prisma.paperTrade.findMany({
+      orderBy: { exitTime: 'desc' },
+      take: 200,
+    });
+
+    if (completedTrades.length === 0) {
+      return {
+        status: 'NO_DATA',
+        modelVersion: activeModel.modelVersion,
+        featureImportance,
+        performanceByRegime: [],
+        performanceByAsset: [],
+        performanceByTimeframe: [],
+        postMortemPatterns: [],
+        recentPostMortems: [],
+        calibration,
+      };
+    }
+
+    // Compute real performance by asset from actual database records
+    const assetMap = new Map<string, { wins: number; total: number; totalR: number }>();
+    for (const t of completedTrades) {
+      const entry = assetMap.get(t.symbol) || { wins: 0, total: 0, totalR: 0 };
+      entry.total += 1;
+      const r = Number(t.realizedR);
+      if (r > 0) entry.wins += 1;
+      entry.totalR += r;
+      assetMap.set(t.symbol, entry);
+    }
+    const performanceByAsset = Array.from(assetMap.entries()).map(([asset, data]) => ({
+      asset,
+      winRate: Number(((data.wins / data.total) * 100).toFixed(1)),
+      trades: data.total,
+      avgR: `${data.totalR >= 0 ? '+' : ''}${(data.totalR / data.total).toFixed(2)}R`,
+    }));
+
+    // Compute real performance by outcome classification from actual database records
+    const regimeMap = new Map<string, { wins: number; total: number; totalR: number }>();
+    for (const t of completedTrades) {
+      const regime = t.outcomeClassification || 'STANDARD';
+      const entry = regimeMap.get(regime) || { wins: 0, total: 0, totalR: 0 };
+      entry.total += 1;
+      const r = Number(t.realizedR);
+      if (r > 0) entry.wins += 1;
+      entry.totalR += r;
+      regimeMap.set(regime, entry);
+    }
+    const performanceByRegime = Array.from(regimeMap.entries()).map(([regime, data]) => ({
+      regime,
+      winRate: Number(((data.wins / data.total) * 100).toFixed(1)),
+      sampleSize: data.total,
+      expectancyR: `${data.totalR >= 0 ? '+' : ''}${(data.totalR / data.total).toFixed(2)}R`,
+    }));
+
+    const recentPostMortems = await this.getRecentPostMortems();
+
     return {
+      status: 'AUTHENTIC_DATA',
       modelVersion: activeModel.modelVersion,
       featureImportance,
-      performanceByRegime: [
-        { regime: 'BULLISH_TREND', winRate: 81.5, sampleSize: 45, expectancyR: '+0.74R' },
-        { regime: 'BEARISH_TREND', winRate: 78.0, sampleSize: 38, expectancyR: '+0.62R' },
-        { regime: 'RANGE', winRate: 52.0, sampleSize: 25, expectancyR: '+0.08R' },
-        { regime: 'HIGH_VOLATILITY', winRate: 64.0, sampleSize: 12, expectancyR: '+0.35R' },
-      ],
-      performanceByAsset: [
-        { asset: 'NIFTY', winRate: 80.0, trades: 35, avgR: '+0.71R' },
-        { asset: 'BANKNIFTY', winRate: 76.5, trades: 30, avgR: '+0.65R' },
-        { asset: 'BTCUSDT', winRate: 74.0, trades: 28, avgR: '+0.58R' },
-        { asset: 'RELIANCE', winRate: 78.5, trades: 15, avgR: '+0.60R' },
-        { asset: 'HDFCBANK', winRate: 82.0, trades: 12, avgR: '+0.78R' },
-      ],
-      performanceByTimeframe: [
-        { timeframe: '15m', winRate: 79.2, totalTrades: 75, avgR: '+0.68R' },
-        { timeframe: '1h', winRate: 82.5, totalTrades: 30, avgR: '+0.85R' },
-        { timeframe: '5m', winRate: 66.0, totalTrades: 15, avgR: '+0.25R' },
-      ],
-      postMortemPatterns: [
-        {
-          pattern: 'LIQUIDITY_SWEEP_CONFIRMATION',
-          classification: 'MARKET_PATTERN',
-          impact: '+18.4% Win Rate boost when entry follows an unmitigated sweep.',
-          sampleCount: 54,
-        },
-        {
-          pattern: 'HTF_COUNTERTREND_DEGRADATION',
-          classification: 'MARKET_PATTERN',
-          impact: 'Win probability drops -22.0% when trading against 1H structural bias.',
-          sampleCount: 18,
-        },
-        {
-          pattern: 'ICT_KILLZONE_EXPANSION',
-          classification: 'MARKET_PATTERN',
-          impact: 'London & NY open windows generate 1.8x higher displacement volume.',
-          sampleCount: 62,
-        },
-      ],
-      recentPostMortems: this.getRecentPostMortems(),
+      performanceByRegime,
+      performanceByAsset,
+      performanceByTimeframe: [],
+      postMortemPatterns: [],
+      recentPostMortems,
       calibration,
     };
   }
 
   /**
-   * Retrieves recent trade-level post-mortem audit records.
+   * Retrieves recent trade-level post-mortem audit records from real database trades.
    */
-  public getRecentPostMortems(): any[] {
-    if (this.recentPostMortems.length === 0) {
-      this.recentPostMortems = [
-        {
-          symbol: 'BTCUSDT',
-          direction: 'BULLISH',
-          entryPrice: 63850,
-          stopLoss: 63400,
-          outcome: 'TP2_HIT',
-          realizedRMultiple: 2.5,
-          mfeR: 2.8,
-          maeR: 0.35,
-          timeToResolutionMinutes: 45,
-          exitTimestamp: new Date(Date.now() - 3600000),
-          classification: 'TARGET_ACHIEVED',
-          classificationRationale:
-            'Target achieved (TP2_HIT) cleanly with favorable structural flow.',
-          marketRegime: 'BULLISH_TREND',
-          keyContributingFactors: [
-            { factor: 'Market Alignment', impact: 'Clean expansion to +2.5R target.' },
-          ],
-        },
-        {
-          symbol: 'NIFTY',
-          direction: 'BEARISH',
-          entryPrice: 24350,
-          stopLoss: 24410,
-          outcome: 'SL_HIT',
-          realizedRMultiple: -1.0,
-          mfeR: 0.6,
-          maeR: 1.05,
-          timeToResolutionMinutes: 28,
-          exitTimestamp: new Date(Date.now() - 7200000),
-          classification: 'LIQUIDITY_SWEEP_FAILURE',
-          classificationRationale:
-            'Stop-loss was swept for resting retail liquidity before price immediately reversed to target.',
-          marketRegime: 'RANGE',
-          keyContributingFactors: [
-            {
-              factor: 'Liquidity Sweep Beyond Stop',
-              impact: 'Wick swept SL by 4 pts before reversing 80 pts.',
-            },
-          ],
-        },
-        {
-          symbol: 'BANKNIFTY',
-          direction: 'BULLISH',
-          entryPrice: 51200,
-          stopLoss: 50980,
-          outcome: 'SL_HIT',
-          realizedRMultiple: -1.0,
-          mfeR: 0.2,
-          maeR: 1.0,
-          timeToResolutionMinutes: 15,
-          exitTimestamp: new Date(Date.now() - 14400000),
-          classification: 'HTF_COUNTERTREND',
-          classificationRationale:
-            'Failure caused by higher-timeframe order flow dominance over lower-timeframe setup.',
-          marketRegime: 'BEARISH_TREND',
-          keyContributingFactors: [
-            { factor: 'HTF Structure Inversion', impact: 'Trade executed against 1H supply zone.' },
-          ],
-        },
-        {
-          symbol: 'RELIANCE',
-          direction: 'BULLISH',
-          entryPrice: 2980,
-          stopLoss: 2955,
-          outcome: 'TP1_HIT',
-          realizedRMultiple: 1.8,
-          mfeR: 2.1,
-          maeR: 0.4,
-          timeToResolutionMinutes: 65,
-          exitTimestamp: new Date(Date.now() - 28800000),
-          classification: 'TARGET_ACHIEVED',
-          classificationRationale:
-            'Target achieved (TP1_HIT) cleanly with favorable structural flow.',
-          marketRegime: 'BULLISH_TREND',
-          keyContributingFactors: [
-            {
-              factor: 'Volume Expansion',
-              impact: 'Displacement supported by institutional volume.',
-            },
-          ],
-        },
-      ];
+  public async getRecentPostMortems(): Promise<any[]> {
+    const trades = await this.prisma.paperTrade.findMany({
+      take: 20,
+      orderBy: { exitTime: 'desc' },
+    });
+
+    if (trades.length === 0) {
+      return [];
     }
 
-    return this.recentPostMortems;
+    return trades.map((t) => {
+      const entryPrice = Number(t.entryPrice);
+      const exitPrice = Number(t.exitPrice);
+      const realizedR = Number(t.realizedR);
+      const mfeR = Number(t.maxFavorableExcursion);
+      const maeR = Number(t.maxAdverseExcursion);
+
+      return {
+        symbol: t.symbol,
+        direction: t.direction,
+        entryPrice,
+        exitPrice,
+        outcome: t.outcomeClassification || (realizedR > 0 ? 'TP_HIT' : 'SL_HIT'),
+        realizedRMultiple: realizedR,
+        mfeR,
+        maeR,
+        timeToResolutionMinutes: Math.floor(t.holdingDurationSeconds / 60),
+        exitTimestamp: t.exitTime,
+        classification: t.outcomeClassification || (realizedR > 0 ? 'TARGET_ACHIEVED' : 'STOP_HIT'),
+        classificationRationale: t.exitReason,
+        marketRegime: 'AUTHENTIC',
+        keyContributingFactors: [{ factor: 'Execution Outcome', impact: t.exitReason }],
+      };
+    });
   }
 
   /**

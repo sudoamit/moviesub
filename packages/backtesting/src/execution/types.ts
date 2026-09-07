@@ -10,8 +10,8 @@ export enum FillModel {
 
 export enum SameCandleAmbiguityMode {
   CONSERVATIVE = 'CONSERVATIVE', // Assume Stop Loss hits first
-  OPTIMISTIC = 'OPTIMISTIC',     // Assume Take Profit hits first
-  OHLC_PATH = 'OHLC_PATH',       // Infer order from Open->Low/High->Close trajectory
+  OPTIMISTIC = 'OPTIMISTIC', // Assume Take Profit hits first
+  OHLC_PATH = 'OHLC_PATH', // Infer order from Open->Low/High->Close trajectory
   LOWER_TIMEFRAME = 'LOWER_TIMEFRAME', // Use sub-minute or 1m resolution data
 }
 

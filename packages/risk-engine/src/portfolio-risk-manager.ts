@@ -71,7 +71,8 @@ export class PortfolioRiskManager {
       totalOpenRiskAmount += pos.riskAmount;
       totalGrossExposure += pos.units * pos.currentPrice;
       positionsByAssetType[pos.assetType] = (positionsByAssetType[pos.assetType] || 0) + 1;
-      positionsBySymbol[pos.symbol] = (positionsBySymbol[pos.symbol] || 0) + (pos.units * pos.currentPrice);
+      positionsBySymbol[pos.symbol] =
+        (positionsBySymbol[pos.symbol] || 0) + pos.units * pos.currentPrice;
     }
 
     const proposedExposure = proposedPosition.totalPositionValue;
@@ -110,22 +111,34 @@ export class PortfolioRiskManager {
       rejectionReason = `Portfolio gross leverage (${grossLeverage}x) exceeds MAX_LEVERAGE limit (${maxLeverage}x)`;
     }
     // 6. Daily drawdown limit
-    else if (metrics.dailyRealizedPnL !== undefined && metrics.dailyRealizedPnL < -(accountEquity * (maxDailyLossPct / 100))) {
+    else if (
+      metrics.dailyRealizedPnL !== undefined &&
+      metrics.dailyRealizedPnL < -(accountEquity * (maxDailyLossPct / 100))
+    ) {
       isAllowed = false;
       rejectionReason = `Trading halted: Daily loss threshold reached (-${maxDailyLossPct}% equity)`;
     }
     // 7. Weekly drawdown limit
-    else if (metrics.weeklyRealizedPnL !== undefined && metrics.weeklyRealizedPnL < -(accountEquity * (maxWeeklyLossPct / 100))) {
+    else if (
+      metrics.weeklyRealizedPnL !== undefined &&
+      metrics.weeklyRealizedPnL < -(accountEquity * (maxWeeklyLossPct / 100))
+    ) {
       isAllowed = false;
       rejectionReason = `Trading halted: Weekly loss threshold reached (-${maxWeeklyLossPct}% equity)`;
     }
     // 8. Account max drawdown kill switch
-    else if (metrics.currentDrawdownPercent !== undefined && metrics.currentDrawdownPercent >= maxDrawdownPct) {
+    else if (
+      metrics.currentDrawdownPercent !== undefined &&
+      metrics.currentDrawdownPercent >= maxDrawdownPct
+    ) {
       isAllowed = false;
       rejectionReason = `Trading halted: Account max drawdown kill-switch activated (${metrics.currentDrawdownPercent.toFixed(1)}% >= ${maxDrawdownPct}%)`;
     }
     // 9. Consecutive loss cooling off
-    else if (metrics.consecutiveLosses !== undefined && metrics.consecutiveLosses >= maxConsecutiveLosses) {
+    else if (
+      metrics.consecutiveLosses !== undefined &&
+      metrics.consecutiveLosses >= maxConsecutiveLosses
+    ) {
       isAllowed = false;
       rejectionReason = `Cooling-off triggered: ${metrics.consecutiveLosses} consecutive losses recorded (max ${maxConsecutiveLosses})`;
     }

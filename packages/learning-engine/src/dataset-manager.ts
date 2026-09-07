@@ -33,7 +33,8 @@ export interface IDatasetSplits {
 }
 
 export class DatasetManager {
-  private datasets: Map<string, { metadata: IDatasetMetadata; samples: IDatasetSample[] }> = new Map();
+  private datasets: Map<string, { metadata: IDatasetMetadata; samples: IDatasetSample[] }> =
+    new Map();
 
   /**
    * Registers and hashes an immutable training dataset
@@ -56,7 +57,11 @@ export class DatasetManager {
 
     const sampleFeatures = Object.keys(sorted[0].features || {});
     const contentString = `${symbol}_${timeframe}_${startDate}_${endDate}_${sorted.length}_${sampleFeatures.join(',')}`;
-    const dataHash = crypto.createHash('sha256').update(contentString).digest('hex').substring(0, 16);
+    const dataHash = crypto
+      .createHash('sha256')
+      .update(contentString)
+      .digest('hex')
+      .substring(0, 16);
 
     const datasetVersion = `v_${Date.now()}`;
     const datasetId = `ds_${symbol}_${timeframe}_${dataHash}`;
@@ -87,9 +92,9 @@ export class DatasetManager {
    */
   splitDataset(
     datasetId: string,
-    trainRatio = 0.60,
-    valRatio = 0.20,
-    oosRatio = 0.20,
+    trainRatio = 0.6,
+    valRatio = 0.2,
+    oosRatio = 0.2,
   ): IDatasetSplits {
     const record = this.datasets.get(datasetId);
     if (!record) {
