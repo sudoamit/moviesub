@@ -31,6 +31,24 @@ export class PositionMonitorProcessor extends WorkerHost {
     closed: number;
     updated: number;
   }> {
+    const config = await this.prisma.tradingSystemConfig.findUnique({
+      where: { id: 'SYSTEM_DEFAULT' },
+    });
+
+    if (
+      !config ||
+      typeof config.maxMarketDataAgeSeconds !== 'number' ||
+      typeof config.maxSlippageBps !== 'number'
+    ) {
+      this.logger.error(
+        '[PositionMonitor] Failed to load TradingSystemConfig from database. Failing closed.',
+      );
+      return { checked: 0, closed: 0, updated: 0 };
+    }
+
+    const maxMarketDataAgeSeconds = config.maxMarketDataAgeSeconds;
+    const maxSlippageBps = config.maxSlippageBps;
+
     const activePositions = await this.prisma.paperPosition.findMany({
       where: {
         status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
@@ -47,7 +65,7 @@ export class PositionMonitorProcessor extends WorkerHost {
 
     for (const pos of activePositions) {
       try {
-        const liveTick = await this.resolveLivePrice(pos.symbol);
+        const liveTick = await this.resolveLivePrice(pos.symbol, maxMarketDataAgeSeconds);
 
         // Fail-closed: If live tick is null/stale/invalid, do NOT close or alter the position
         if (!liveTick || liveTick.price <= 0) {
@@ -70,12 +88,13 @@ export class PositionMonitorProcessor extends WorkerHost {
             'Exit Pending Completed on Next Tick',
             'MANUAL',
             tickTimestamp,
+            maxSlippageBps,
           );
           closedCount++;
           continue;
         }
 
-        const isClosed = await this.evaluatePositionTick(pos, livePrice, tickTimestamp);
+        const isClosed = await this.evaluatePositionTick(pos, livePrice, tickTimestamp, maxSlippageBps);
         if (isClosed) {
           closedCount++;
         } else {
@@ -93,7 +112,10 @@ export class PositionMonitorProcessor extends WorkerHost {
    * Resolves execution/monitoring price exclusively from the live ticker cache: ticker:${SYMBOL}:live
    * NEVER queries PostgreSQL candles or candle caches.
    */
-  private async resolveLivePrice(symbol: string): Promise<ValidatedLiveTickerResult | null> {
+  private async resolveLivePrice(
+    symbol: string,
+    maxAgeSeconds: number,
+  ): Promise<ValidatedLiveTickerResult | null> {
     const sym = symbol.toUpperCase();
 
     try {
@@ -105,7 +127,6 @@ export class PositionMonitorProcessor extends WorkerHost {
         return null;
       }
 
-      const maxAgeSeconds = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || ExecutionPriceResolver.DEFAULT_MAX_DATA_AGE_SECONDS;
       const validated = ExecutionPriceResolver.validateLiveTicker(cached, maxAgeSeconds);
       if (validated && validated.price > 0) {
         return validated;
@@ -144,7 +165,12 @@ export class PositionMonitorProcessor extends WorkerHost {
     return { brokerage, stt, exchangeTurnover, gst, sebiTurnover, totalCharges };
   }
 
-  private async evaluatePositionTick(pos: any, livePrice: number, tickTimestamp?: Date): Promise<boolean> {
+  private async evaluatePositionTick(
+    pos: any,
+    livePrice: number,
+    tickTimestamp?: Date,
+    maxSlippageBps = 50,
+  ): Promise<boolean> {
     const entryPrice = Number(pos.entryPrice);
     const quantity = Number(pos.quantity);
     const isBuy = pos.direction === Direction.BULLISH;
@@ -245,7 +271,14 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
 
     if (shouldClose) {
-      await this.executeFullClose(pos, livePrice, exitReason, outcomeClassification, tickTimestamp);
+      await this.executeFullClose(
+        pos,
+        livePrice,
+        exitReason,
+        outcomeClassification,
+        tickTimestamp,
+        maxSlippageBps,
+      );
       return true;
     }
 
@@ -275,13 +308,14 @@ export class PositionMonitorProcessor extends WorkerHost {
     exitReason: string,
     outcomeClassification: string,
     sourceTimestamp?: Date,
+    maxSlippageBps = 50,
   ) {
-    // Apply exit slippage simulation within 50 bps max
+    // Apply exit slippage simulation within configured maxSlippageBps
     const isBuy = pos.direction === Direction.BULLISH;
     const slip = ExecutionPriceResolver.calculateSlippage(
       exitPrice,
       isBuy ? 'SELL' : 'BUY',
-      50,
+      maxSlippageBps,
     );
     const finalExitPrice = slip.fillPrice;
 
@@ -310,13 +344,30 @@ export class PositionMonitorProcessor extends WorkerHost {
       Math.floor((exitTime.getTime() - new Date(pos.openedAt).getTime()) / 1000),
     );
 
+    let closedSuccessfully = false;
+
     await this.prisma.$transaction(async (tx) => {
-      // 1. Mark position CLOSED using atomic conditional update (Concurrency / Double-Close Guard)
-      const updated = await tx.paperPosition.updateMany({
+      // 1. Atomic state transition: OPEN/EXIT_PENDING/PARTIALLY_CLOSED -> CLOSING (Double-Close Guard)
+      const lockResult = await tx.paperPosition.updateMany({
         where: {
           id: pos.id,
           status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
         },
+        data: {
+          status: PositionState.CLOSING,
+        },
+      });
+
+      if (lockResult.count === 0) {
+        this.logger.warn(
+          `[PositionMonitor] Position ${pos.id} is already CLOSING or CLOSED by another thread/worker; skipping duplicate close.`,
+        );
+        return;
+      }
+
+      // 2. Mark position CLOSED
+      await tx.paperPosition.update({
+        where: { id: pos.id },
         data: {
           status: PositionState.CLOSED,
           closedAt: exitTime,
@@ -326,14 +377,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      if (updated.count === 0) {
-        this.logger.warn(
-          `[PositionMonitor] Position ${pos.id} was already closed by another thread; skipping duplicate close.`,
-        );
-        return;
-      }
-
-      // 2. Persist PaperTrade record
+      // 3. Persist PaperTrade record
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -375,7 +419,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      // 3. Update PaperAccount Balance & Release Margin
+      // 4. Update PaperAccount Balance & Release Margin
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
@@ -386,7 +430,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      // 4. Audit Log
+      // 5. Audit Log
       await tx.auditEvent.create({
         data: {
           actor: 'WORKER',
@@ -407,7 +451,13 @@ export class PositionMonitorProcessor extends WorkerHost {
           correlationId: pos.correlationId || `corr_${Date.now()}`,
         },
       });
+
+      closedSuccessfully = true;
     });
+
+    if (!closedSuccessfully) {
+      return;
+    }
 
     this.logger.log(
       `✓ [POSITION MONITOR CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,

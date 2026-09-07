@@ -105,6 +105,13 @@ describe('Worker Processors', () => {
         auditEvent: {
           create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
         },
+        tradingSystemConfig: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'SYSTEM_DEFAULT',
+            maxMarketDataAgeSeconds: 5,
+            maxSlippageBps: 50,
+          }),
+        },
         candle: {
           findFirst: jest.fn().mockResolvedValue({ close: new Decimal(24150.0) }),
           findMany: jest.fn().mockResolvedValue([]),
@@ -507,6 +514,170 @@ describe('Worker Processors', () => {
           }),
         }),
       );
+    });
+
+    it('14. should fail closed when TradingSystemConfig is missing or invalid', async () => {
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue(null);
+
+      const mockJob = {
+        id: 'monitor-no-config',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(0);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+    });
+
+    it('15. should use configured maxMarketDataAgeSeconds = X dynamically', async () => {
+      // Configure maxMarketDataAgeSeconds = 15s
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue({
+        id: 'SYSTEM_DEFAULT',
+        maxMarketDataAgeSeconds: 15,
+        maxSlippageBps: 50,
+      });
+
+      // 1. Tick is 10s old (<= 15s) -> should be accepted and trigger SL close
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() - 10000 }),
+      );
+
+      const jobAccepted = {
+        id: 'monitor-freshness-accepted',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const resAccepted = await processor.process(jobAccepted);
+      expect(resAccepted.closed).toBe(1);
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledTimes(1);
+
+      // 2. Tick is 20s old (> 15s) -> should be rejected and not close
+      jest.clearAllMocks();
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() - 20000 }),
+      );
+
+      const jobRejected = {
+        id: 'monitor-freshness-rejected',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const resRejected = await processor.process(jobRejected);
+      expect(resRejected.closed).toBe(0);
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+    });
+
+    it('16. should use configured maxSlippageBps = X on BUY and SELL position exits', async () => {
+      // 1. BUY position exit (SELL fill price <= livePrice, bounded by maxSlippageBps)
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue({
+        id: 'SYSTEM_DEFAULT',
+        maxMarketDataAgeSeconds: 5,
+        maxSlippageBps: 20, // 20 bps = 0.20% max
+      });
+
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
+      );
+
+      const jobBuyExit = {
+        id: 'monitor-slippage-buy-exit',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobBuyExit);
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            outcomeSnapshotJson: expect.objectContaining({
+              slippageBps: expect.any(Number),
+              livePrice: 24040.0,
+              exitPrice: expect.any(Number),
+            }),
+          }),
+        }),
+      );
+
+      // 2. SELL position exit (BUY fill price >= livePrice)
+      mockPrisma.paperPosition.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'pos-short',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BEARISH,
+          quantity: new Decimal(50),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24150.0),
+          initialStopLoss: new Decimal(24150.0),
+          target1: new Decimal(24000.0),
+          target2: new Decimal(23950.0),
+          target3: new Decimal(23900.0),
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(30000.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24160.0, lastUpdated: Date.now() }), // breaches SL 24150.0
+      );
+
+      const jobSellExit = {
+        id: 'monitor-slippage-sell-exit',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobSellExit);
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            outcomeSnapshotJson: expect.objectContaining({
+              livePrice: 24160.0,
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('17. atomic lock collision (updateMany count = 0) must prevent duplicate PaperTrade creation', async () => {
+      // Simulate another thread/worker already transitioned the position to CLOSING or CLOSED
+      mockPrisma.paperPosition.updateMany = jest.fn().mockResolvedValue({ count: 0 });
+
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
+      );
+
+      const jobCollision = {
+        id: 'monitor-collision',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(jobCollision);
+
+      // Verify atomic lock aborted close and did NOT create trade or update account
+      expect(mockPrisma.paperPosition.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'pos-1',
+          status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
+        },
+        data: {
+          status: PositionState.CLOSING,
+        },
+      });
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+      expect(mockPrisma.paperAccount.update).not.toHaveBeenCalled();
     });
   });
 

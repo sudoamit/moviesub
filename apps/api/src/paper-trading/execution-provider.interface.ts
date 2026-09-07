@@ -123,12 +123,18 @@ export interface IPaperPortfolio {
   tradeHistory: IPaperTradeHistory[];
 }
 
+export interface IClosePositionOptions {
+  exitPriceOverride?: number;
+  allowPriceOverride?: boolean;
+  correlationId?: string;
+}
+
 export interface IExecutionProvider {
   placeOrder(req: IPaperOrderRequest): Promise<IPaperPosition>;
   closePosition(
     positionId: string,
     exitReason?: string,
-    exitPriceOverride?: number,
+    options?: IClosePositionOptions | number,
     correlationId?: string,
   ): Promise<IPaperTradeHistory>;
   getPortfolio(): Promise<IPaperPortfolio>;

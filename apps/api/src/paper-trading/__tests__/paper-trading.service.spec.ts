@@ -99,6 +99,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           maxDailyLossPercent: new Decimal(3.0),
           maxLeverage: new Decimal(5.0),
           maxMarketDataAgeSeconds: 5,
+          maxSlippageBps: 50,
         }),
         create: jest
           .fn()
@@ -418,6 +419,13 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
   });
 
   it('should close position, book realized PnL and persist PaperTrade', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24200.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
     const pos = await service.placeOrder({
       symbol: 'NIFTY',
       direction: 'BUY',
@@ -428,7 +436,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       target1: 24175.0,
     });
 
-    const trade = await service.closePosition(pos.id, 'Target Achieved', 24200.0);
+    const trade = await service.closePosition(pos.id, 'Target Achieved');
 
     expect(trade.entryPrice).toBeGreaterThanOrEqual(24100.0);
     expect(trade.exitPrice).toBeLessThanOrEqual(24200.0);
@@ -438,7 +446,95 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(dbPositions[0].status).toBe(PositionState.CLOSED);
   });
 
+  it('should support idempotent retry: calling closePosition sequentially returns existing closed trade without creating duplicate', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24200.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    // First close call creates the trade
+    const trade1 = await service.closePosition(pos.id, 'Target Achieved');
+    expect(dbTrades.length).toBe(1);
+    expect(dbPositions[0].status).toBe(PositionState.CLOSED);
+
+    // Second close call recognizes existing closed state and returns existing trade without creating duplicate
+    const trade2 = await service.closePosition(pos.id, 'Target Achieved');
+    expect(dbTrades.length).toBe(1);
+    expect(trade2.id).toBe(trade1.id);
+    expect(trade2.realizedPnL).toBe(trade1.realizedPnL);
+  });
+
+  it('should protect closePosition against arbitrary exit prices in normal PAPER mode and enforce LIVE_TICK provenance', async () => {
+    // Mock streamer returning live market price 24220.0
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24220.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    // Pass arbitrary price 99999.0 without allowPriceOverride -> must be ignored in normal PAPER mode
+    const trade = await service.closePosition(pos.id, 'TP Hit', 99999.0);
+
+    // Verify it used the streamer price (24220.0) with simulated slippage, NOT 99999.0
+    expect(trade.exitPrice).toBeLessThanOrEqual(24220.0);
+    expect(trade.exitPrice).toBeGreaterThan(24100.0);
+    expect(trade.outcomeSnapshotJson.executionPriceSource).toBe('LIVE_TICK');
+    expect(trade.outcomeSnapshotJson.livePrice).toBe(24220.0);
+    expect(dbTrades.length).toBe(1);
+  });
+
+  it('should permit exitPriceOverride only when allowPriceOverride: true is explicitly provided', async () => {
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    const trade = await service.closePosition(pos.id, 'Backtest Close', {
+      exitPriceOverride: 24250.0,
+      allowPriceOverride: true,
+    });
+
+    expect(trade.outcomeSnapshotJson.executionPriceSource).toBe('SIMULATED_FILL');
+    expect(trade.outcomeSnapshotJson.livePrice).toBe(24250.0);
+    expect(trade.exitPrice).toBeLessThanOrEqual(24250.0);
+  });
+
   it('should persist feature and outcome snapshots without data distortion', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24200.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
     const featureSnapshot = {
       htfTrendAlignment: 1,
       trend4H: 1,
@@ -460,7 +556,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
 
     expect(pos.featureSnapshotJson).toEqual(featureSnapshot);
 
-    const trade = await service.closePosition(pos.id, 'TP1_HIT', 24200.0);
+    const trade = await service.closePosition(pos.id, 'TP1_HIT');
     expect(trade.featureSnapshotJson).toEqual(featureSnapshot);
     expect(trade.outcomeSnapshotJson).toBeDefined();
     expect(trade.outcomeSnapshotJson.exitPrice).toBeLessThanOrEqual(24200.0);
@@ -523,6 +619,13 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
   });
 
   it('should prevent double-close / duplicate trades when concurrent close requests are executed on the same position', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24040.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
     const pos = await service.placeOrder({
       symbol: 'NIFTY',
       direction: 'BUY',
@@ -534,8 +637,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     });
 
     const closePromises = [
-      service.closePosition(pos.id, 'SL Triggered A', 24040.0),
-      service.closePosition(pos.id, 'SL Triggered B', 24040.0),
+      service.closePosition(pos.id, 'SL Triggered A'),
+      service.closePosition(pos.id, 'SL Triggered B'),
     ];
 
     const results = await Promise.allSettled(closePromises);
@@ -549,6 +652,13 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
   });
 
   it('should execute full end-to-end paper trading lifecycle from live tick entry to exit with preserved snapshots and exact fill prices', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24210.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
     const featureSnapshot = {
       smcScore: 0.9,
       fvgSize: 15.5,
@@ -577,7 +687,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(fillRecord.fillPrice.toNumber()).toBe(pos.entryPrice);
 
     // 2. Position exit with live tick and slippage
-    const trade = await service.closePosition(pos.id, 'TP1 Hit on Live Tick', 24210.0);
+    const trade = await service.closePosition(pos.id, 'TP1 Hit on Live Tick');
 
     expect(trade.entryPrice).toBe(pos.entryPrice);
     expect(trade.exitPrice).toBeLessThanOrEqual(24210.0);

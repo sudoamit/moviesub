@@ -28,6 +28,7 @@ import {
   IPaperPosition,
   IPaperTradeHistory,
   IPaperPortfolio,
+  IClosePositionOptions,
 } from './execution-provider.interface';
 import * as crypto from 'crypto';
 
@@ -951,36 +952,102 @@ export class PaperTradingService implements IExecutionProvider {
     return this.mapDbPositionToInterface(result);
   }
 
+  private mapDbTradeToInterface(trade: any): IPaperTradeHistory {
+    const charges = (trade.chargesJson as any) || { totalCharges: 0 };
+    return {
+      id: trade.id,
+      accountId: trade.accountId,
+      positionId: trade.positionId || undefined,
+      symbol: trade.symbol,
+      contractSymbol: trade.contractSymbol,
+      instrumentType: trade.instrumentType as any,
+      strike: trade.strike ? Number(trade.strike) : undefined,
+      optionType: (trade.optionType as any) || undefined,
+      direction: trade.direction === Direction.BULLISH ? 'BUY' : 'SELL',
+      quantity: Number(trade.quantity),
+      entryPrice: Number(trade.entryPrice),
+      exitPrice: Number(trade.exitPrice),
+      realizedPnL: Number(trade.realizedPnL),
+      realizedR: Number(trade.realizedR),
+      maxFavorableExcursion: trade.maxFavorableExcursion ? Number(trade.maxFavorableExcursion) : undefined,
+      maxAdverseExcursion: trade.maxAdverseExcursion ? Number(trade.maxAdverseExcursion) : undefined,
+      holdingDurationSeconds: trade.holdingDurationSeconds || 0,
+      exitReason: trade.exitReason,
+      openedAt: new Date(trade.entryTime).toISOString(),
+      closedAt: new Date(trade.exitTime).toISOString(),
+      totalCharges: Number(charges.totalCharges || 0),
+      featureSnapshotJson: (trade.featureSnapshotJson as any) || undefined,
+      outcomeSnapshotJson: (trade.outcomeSnapshotJson as any) || undefined,
+      correlationId: trade.correlationId,
+    };
+  }
+
   /**
    * Closes an existing paper position, books realized P&L, deducts exit charges, and persists PaperTrade in PostgreSQL.
    */
   async closePosition(
     positionId: string,
     exitReason = 'Manual Exit',
-    exitPriceOverride?: number,
+    options?: IClosePositionOptions | number,
     correlationIdOverride?: string,
   ): Promise<IPaperTradeHistory> {
+    let exitPriceOverride: number | undefined;
+    let allowPriceOverride = false;
+    let correlationIdOpt: string | undefined;
+
+    if (typeof options === 'number') {
+      exitPriceOverride = options;
+    } else if (options && typeof options === 'object') {
+      exitPriceOverride = options.exitPriceOverride;
+      allowPriceOverride = options.allowPriceOverride === true;
+      correlationIdOpt = options.correlationId;
+    }
+
     const pos = await this.prisma.paperPosition.findUnique({
       where: { id: positionId },
       include: { account: true },
     });
 
-    if (!pos || pos.status === PositionState.CLOSED) {
+    if (!pos) {
       throw new NotFoundException(
-        `Active position with ID '${positionId}' not found or already closed`,
+        `Active position with ID '${positionId}' not found`,
       );
     }
 
-    const correlationId = correlationIdOverride || pos.correlationId || `corr_${Date.now()}`;
+    if (pos.status === PositionState.CLOSED) {
+      // Idempotent retry: recognize and return existing completed PaperTrade
+      const existingTrade = await this.prisma.paperTrade.findFirst({
+        where: { positionId: pos.id },
+        orderBy: { exitTime: 'desc' },
+      });
+      if (existingTrade) {
+        return this.mapDbTradeToInterface(existingTrade);
+      }
+      throw new NotFoundException(
+        `Active position with ID '${positionId}' is already closed, but no trade record exists.`,
+      );
+    }
+
+    if (pos.status === PositionState.CLOSING) {
+      throw new BadRequestException(
+        `Position '${positionId}' is currently being closed by another request.`,
+      );
+    }
+
+    const correlationId = correlationIdOverride || correlationIdOpt || pos.correlationId || `corr_${Date.now()}`;
     const symbol = pos.symbol;
     const isCrypto = symbol === 'BTCUSDT';
     const config = await this.getSystemConfig();
 
-    // Resolve live exit price with strict fail-closed validation
-    let exitPrice = exitPriceOverride;
+    // Resolve live exit price with strict fail-closed validation & LIVE_TICK provenance
+    let exitPrice: number;
     let sourceTimestamp = new Date();
+    let priceSource = ExecutionPriceSource.LIVE_TICK;
 
-    if (!exitPrice || exitPrice <= 0) {
+    if (allowPriceOverride && exitPriceOverride && exitPriceOverride > 0) {
+      exitPrice = exitPriceOverride;
+      priceSource = ExecutionPriceSource.SIMULATED_FILL;
+    } else {
       try {
         const marketPriceData = await this.getValidatedMarketPrice(
           symbol,
@@ -1044,18 +1111,14 @@ export class PaperTradingService implements IExecutionProvider {
 
     // Atomic Database Transaction for Position Closure (with Concurrency / Double-Close Guard)
     const trade = await this.prisma.$transaction(async (tx) => {
-      // 1. Mark Position CLOSED using atomic conditional update
+      // 1. Atomic state transition: OPEN/EXIT_PENDING/PARTIALLY_CLOSED -> CLOSING
       const updated = await tx.paperPosition.updateMany({
         where: {
           id: pos.id,
           status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
         },
         data: {
-          status: PositionState.CLOSED,
-          closedAt: exitTime,
-          currentPrice: new Decimal(finalExitPrice),
-          unrealizedPnL: new Decimal(0.0),
-          unrealizedR: new Decimal(0.0),
+          status: PositionState.CLOSING,
         },
       });
 
@@ -1071,7 +1134,19 @@ export class PaperTradingService implements IExecutionProvider {
         throw new BadRequestException(`Position '${pos.id}' was already closed.`);
       }
 
-      // 2. Create PaperTrade Record
+      // 2. Mark Position CLOSED
+      await tx.paperPosition.update({
+        where: { id: pos.id },
+        data: {
+          status: PositionState.CLOSED,
+          closedAt: exitTime,
+          currentPrice: new Decimal(finalExitPrice),
+          unrealizedPnL: new Decimal(0.0),
+          unrealizedR: new Decimal(0.0),
+        },
+      });
+
+      // 3. Create PaperTrade Record
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -1096,7 +1171,7 @@ export class PaperTradingService implements IExecutionProvider {
           chargesJson: { entryCharges, exitCharges, totalCharges },
           featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
           outcomeSnapshotJson: {
-            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             livePrice: exitPrice,
             exitPrice: finalExitPrice,
@@ -1114,7 +1189,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 3. Update PaperAccount Balance & Release Margin
+      // 4. Update PaperAccount Balance & Release Margin
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
@@ -1125,7 +1200,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 4. Audit Log
+      // 5. Audit Log
       await tx.auditEvent.create({
         data: {
           actor: 'SYSTEM',
@@ -1137,7 +1212,7 @@ export class PaperTradingService implements IExecutionProvider {
             contractSymbol: pos.contractSymbol,
             entryPrice,
             exitPrice: finalExitPrice,
-            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             realizedPnL,
             realizedR,
@@ -1154,32 +1229,7 @@ export class PaperTradingService implements IExecutionProvider {
       `✓ [PERSISTED PAPER POSITION CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
     );
 
-    return {
-      id: trade.id,
-      accountId: trade.accountId,
-      positionId: trade.positionId || undefined,
-      symbol: trade.symbol,
-      contractSymbol: trade.contractSymbol,
-      instrumentType: trade.instrumentType as any,
-      strike: trade.strike ? Number(trade.strike) : undefined,
-      optionType: (trade.optionType as any) || undefined,
-      direction: trade.direction === Direction.BULLISH ? 'BUY' : 'SELL',
-      quantity,
-      entryPrice,
-      exitPrice: finalExitPrice,
-      realizedPnL,
-      realizedR,
-      maxFavorableExcursion: Number(trade.maxFavorableExcursion),
-      maxAdverseExcursion: Number(trade.maxAdverseExcursion),
-      holdingDurationSeconds,
-      exitReason,
-      openedAt: pos.entryTime.toISOString(),
-      closedAt: exitTime.toISOString(),
-      totalCharges,
-      featureSnapshotJson: (trade.featureSnapshotJson as any) || pos.featureSnapshotJson || undefined,
-      outcomeSnapshotJson: (trade.outcomeSnapshotJson as any) || undefined,
-      correlationId,
-    };
+    return this.mapDbTradeToInterface(trade);
   }
 
   /**
