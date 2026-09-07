@@ -452,6 +452,61 @@ describe('Worker Processors', () => {
         }),
       );
     });
+
+    it('4b. invalid or far future timestamp is rejected and does not close position', async () => {
+      // Future timestamp (10 minutes in the future)
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() + 600000 }),
+      );
+
+      const mockJob = {
+        id: 'monitor-future-tick',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('13. Execution price provenance records ExecutionPriceSource.LIVE_TICK and sourceTimestamp', async () => {
+      const tickTime = new Date(Date.now() - 1000);
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: tickTime.toISOString() }),
+      );
+
+      const mockJob = {
+        id: 'monitor-provenance',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.closed).toBe(1);
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            outcomeSnapshotJson: expect.objectContaining({
+              executionPriceSource: 'LIVE_TICK',
+              sourceTimestamp: tickTime.toISOString(),
+            }),
+          }),
+        }),
+      );
+      expect(mockPrisma.auditEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            payloadJson: expect.objectContaining({
+              executionPriceSource: 'LIVE_TICK',
+              sourceTimestamp: tickTime.toISOString(),
+            }),
+          }),
+        }),
+      );
+    });
   });
 
   describe('LearningProcessor', () => {

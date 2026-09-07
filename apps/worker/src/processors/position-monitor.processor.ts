@@ -1,7 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS, ExecutionPriceResolver } from '@quant/shared';
+import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS, ExecutionPriceResolver, ExecutionPriceSource, ValidatedLiveTickerResult } from '@quant/shared';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../redis.service';
 import { TrailingEngine } from '@quant/trading-engine';
@@ -47,10 +47,10 @@ export class PositionMonitorProcessor extends WorkerHost {
 
     for (const pos of activePositions) {
       try {
-        const livePrice = await this.resolveLivePrice(pos.symbol);
+        const liveTick = await this.resolveLivePrice(pos.symbol);
 
-        // Fail-closed: If live price is null/stale, do NOT close or alter the position
-        if (!livePrice || livePrice <= 0) {
+        // Fail-closed: If live tick is null/stale/invalid, do NOT close or alter the position
+        if (!liveTick || liveTick.price <= 0) {
           if (pos.status === PositionState.EXIT_PENDING) {
             this.logger.debug(
               `[PositionMonitor] Position ${pos.id} (${pos.symbol}) is EXIT_PENDING but waiting for a fresh live tick; remaining EXIT_PENDING.`,
@@ -59,6 +59,9 @@ export class PositionMonitorProcessor extends WorkerHost {
           continue;
         }
 
+        const livePrice = liveTick.price;
+        const tickTimestamp = liveTick.timestamp;
+
         // If position was already EXIT_PENDING, attempt immediate close ONLY with the validated fresh live tick
         if (pos.status === PositionState.EXIT_PENDING) {
           await this.executeFullClose(
@@ -66,12 +69,13 @@ export class PositionMonitorProcessor extends WorkerHost {
             livePrice,
             'Exit Pending Completed on Next Tick',
             'MANUAL',
+            tickTimestamp,
           );
           closedCount++;
           continue;
         }
 
-        const isClosed = await this.evaluatePositionTick(pos, livePrice);
+        const isClosed = await this.evaluatePositionTick(pos, livePrice, tickTimestamp);
         if (isClosed) {
           closedCount++;
         } else {
@@ -89,7 +93,7 @@ export class PositionMonitorProcessor extends WorkerHost {
    * Resolves execution/monitoring price exclusively from the live ticker cache: ticker:${SYMBOL}:live
    * NEVER queries PostgreSQL candles or candle caches.
    */
-  private async resolveLivePrice(symbol: string): Promise<number | null> {
+  private async resolveLivePrice(symbol: string): Promise<ValidatedLiveTickerResult | null> {
     const sym = symbol.toUpperCase();
 
     try {
@@ -101,10 +105,10 @@ export class PositionMonitorProcessor extends WorkerHost {
         return null;
       }
 
-      const maxAgeSeconds = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || 5;
+      const maxAgeSeconds = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || ExecutionPriceResolver.DEFAULT_MAX_DATA_AGE_SECONDS;
       const validated = ExecutionPriceResolver.validateLiveTicker(cached, maxAgeSeconds);
       if (validated && validated.price > 0) {
-        return validated.price;
+        return validated;
       }
 
       this.logger.warn(
@@ -140,7 +144,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     return { brokerage, stt, exchangeTurnover, gst, sebiTurnover, totalCharges };
   }
 
-  private async evaluatePositionTick(pos: any, livePrice: number): Promise<boolean> {
+  private async evaluatePositionTick(pos: any, livePrice: number, tickTimestamp?: Date): Promise<boolean> {
     const entryPrice = Number(pos.entryPrice);
     const quantity = Number(pos.quantity);
     const isBuy = pos.direction === Direction.BULLISH;
@@ -241,7 +245,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
 
     if (shouldClose) {
-      await this.executeFullClose(pos, livePrice, exitReason, outcomeClassification);
+      await this.executeFullClose(pos, livePrice, exitReason, outcomeClassification, tickTimestamp);
       return true;
     }
 
@@ -270,6 +274,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     exitPrice: number,
     exitReason: string,
     outcomeClassification: string,
+    sourceTimestamp?: Date,
   ) {
     // Apply exit slippage simulation within 50 bps max
     const isBuy = pos.direction === Direction.BULLISH;
@@ -281,6 +286,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     const finalExitPrice = slip.fillPrice;
 
     const exitTime = new Date();
+    const tickSourceTime = sourceTimestamp || exitTime;
     const isCrypto = pos.symbol === 'BTCUSDT';
     const quantity = Number(pos.quantity);
     const entryPrice = Number(pos.entryPrice);
@@ -342,12 +348,16 @@ export class PositionMonitorProcessor extends WorkerHost {
           chargesJson: { entryCharges, exitCharges, totalCharges },
           featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
           outcomeSnapshotJson: {
+            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            sourceTimestamp: tickSourceTime.toISOString(),
+            livePrice: exitPrice,
+            exitPrice: finalExitPrice,
+            slippageBps: slip.slippageBps,
             exitReason,
             realizedPnL,
             realizedR,
             holdingDurationSeconds,
             outcomeClassification,
-            exitPrice: finalExitPrice,
             exitTime: exitTime.toISOString(),
           },
           outcomeClassification,
@@ -378,6 +388,8 @@ export class PositionMonitorProcessor extends WorkerHost {
             contractSymbol: pos.contractSymbol,
             entryPrice,
             exitPrice: finalExitPrice,
+            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            sourceTimestamp: tickSourceTime.toISOString(),
             realizedPnL,
             realizedR,
             exitReason,

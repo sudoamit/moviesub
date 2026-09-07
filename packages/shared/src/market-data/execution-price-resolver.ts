@@ -58,15 +58,17 @@ export class ExecutionPriceResolver {
             ? rawTimestamp
             : new Date(rawTimestamp).getTime();
 
-      if (!Number.isFinite(tickTime) || isNaN(tickTime)) return null;
+      const now = Date.now();
+      // Reject ticks with timestamps in the future beyond 5s clock skew tolerance
+      if (tickTime > now + 5000) return null;
 
-      const ageSeconds = Math.max(0, (Date.now() - tickTime) / 1000);
-      if (ageSeconds > maxAgeSeconds) return null;
+      const ageSeconds = (now - tickTime) / 1000;
+      if (ageSeconds < -5 || ageSeconds > maxAgeSeconds) return null;
 
       return {
         price,
         timestamp: new Date(tickTime),
-        ageSeconds,
+        ageSeconds: Math.max(0, ageSeconds),
       };
     } catch {
       return null;
