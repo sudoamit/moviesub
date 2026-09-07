@@ -88,48 +88,42 @@ export class MultiTimeframeAnalyzer {
         : Date.now();
     }
 
-    // Strictly filter HTF candles so that unclosed HTF bars cannot leak into LTF decision
-    const htf1CleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
-      CandleNormalizer.normalize(htf1.candles),
-      htf1.timeframe,
-      maxCloseTime,
-    );
+    const resolveTrendFromAnalysis = (
+      candles: ICandle[],
+      timeframe: Timeframe | string,
+      analysis?: ISMCAnalysisResult,
+    ): Direction => {
+      if (candles && candles.length > 0) {
+        const cleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
+          CandleNormalizer.normalize(candles),
+          timeframe,
+          maxCloseTime,
+        );
+        const resolved = SMCAnalyzer.analyze(cleanCandles, {
+          asOfTimestamp: asOfTimestamp || new Date(maxCloseTime),
+        });
 
-    const htf1Analysis =
-      htf1.analysis && htf1CleanCandles.length === htf1.candles.length
-        ? htf1.analysis
-        : SMCAnalyzer.analyze(htf1CleanCandles);
+        if (resolved.currentTrend !== Direction.NEUTRAL) {
+          return resolved.currentTrend;
+        }
+        if (resolved.marketRegime?.regime === 'BULLISH_TREND') return Direction.BULLISH;
+        if (resolved.marketRegime?.regime === 'BEARISH_TREND') return Direction.BEARISH;
+      }
 
-    const htf1Trend =
-      htf1Analysis.currentTrend !== Direction.NEUTRAL
-        ? htf1Analysis.currentTrend
-        : htf1Analysis.marketRegime.regime === 'BULLISH_TREND'
-          ? Direction.BULLISH
-          : htf1Analysis.marketRegime.regime === 'BEARISH_TREND'
-            ? Direction.BEARISH
-            : Direction.NEUTRAL;
+      if (analysis) {
+        if (analysis.currentTrend !== Direction.NEUTRAL) return analysis.currentTrend;
+        if (analysis.marketRegime?.regime === 'BULLISH_TREND') return Direction.BULLISH;
+        if (analysis.marketRegime?.regime === 'BEARISH_TREND') return Direction.BEARISH;
+      }
+
+      return Direction.NEUTRAL;
+    };
+
+    const htf1Trend = resolveTrendFromAnalysis(htf1.candles, htf1.timeframe, htf1.analysis);
 
     let htf2Trend: Direction | undefined = undefined;
-    if (htf2 && htf2.candles.length > 0) {
-      const htf2CleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
-        CandleNormalizer.normalize(htf2.candles),
-        htf2.timeframe,
-        maxCloseTime,
-      );
-
-      const htf2Analysis =
-        htf2.analysis && htf2CleanCandles.length === htf2.candles.length
-          ? htf2.analysis
-          : SMCAnalyzer.analyze(htf2CleanCandles);
-
-      htf2Trend =
-        htf2Analysis.currentTrend !== Direction.NEUTRAL
-          ? htf2Analysis.currentTrend
-          : htf2Analysis.marketRegime.regime === 'BULLISH_TREND'
-            ? Direction.BULLISH
-            : htf2Analysis.marketRegime.regime === 'BEARISH_TREND'
-              ? Direction.BEARISH
-              : Direction.NEUTRAL;
+    if (htf2) {
+      htf2Trend = resolveTrendFromAnalysis(htf2.candles, htf2.timeframe, htf2.analysis);
     }
 
     // Determine overall HTF bias

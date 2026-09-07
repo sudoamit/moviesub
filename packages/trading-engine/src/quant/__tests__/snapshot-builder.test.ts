@@ -1,4 +1,5 @@
-import { ICandle } from '@quant/shared';
+import { Direction, ICandle } from '@quant/shared';
+import { MultiHorizonEngine } from '../multi-horizon-engine';
 import { SnapshotBuilder } from '../snapshot-builder';
 
 describe('SnapshotBuilder', () => {
@@ -41,5 +42,62 @@ describe('SnapshotBuilder', () => {
     expect(snapshot.ml?.expectedR).toBeNull();
     expect(snapshot.trace.ml.probability).toBeNull();
     expect(snapshot.trace.ml.expectedR).toBeNull();
+  });
+
+  it('should ignore future candles when asOfTimestamp is supplied to multi-horizon analysis', () => {
+    const baseCandles: ICandle[] = [];
+    for (let i = 0; i < 12; i++) {
+      const open = 100 + i * 1.5;
+      const close = 102 + i * 1.5;
+      baseCandles.push({
+        timestamp: new Date(1700000000000 + i * 15 * 60 * 1000),
+        open,
+        high: Math.max(open, close) + 2,
+        low: Math.min(open, close) - 2,
+        close,
+        volume: 1000 + i * 10,
+      });
+    }
+
+    const asOf = new Date(baseCandles[baseCandles.length - 1].timestamp);
+    const futureCandles = [
+      ...baseCandles,
+      {
+        timestamp: new Date(asOf.getTime() + 15 * 60 * 1000),
+        open: 120,
+        high: 127,
+        low: 116,
+        close: 118,
+        volume: 20000,
+      },
+      {
+        timestamp: new Date(asOf.getTime() + 30 * 60 * 1000),
+        open: 118,
+        high: 122,
+        low: 90,
+        close: 92,
+        volume: 25000,
+      },
+    ];
+
+    const historical = MultiHorizonEngine.evaluateMultiHorizon(baseCandles, baseCandles, baseCandles, {
+      asOfTimestamp: asOf,
+      executionTimeframe: '15m',
+      htfTimeframe: '1h',
+      macroTimeframe: '4h',
+    });
+
+    const withFuture = MultiHorizonEngine.evaluateMultiHorizon(futureCandles, futureCandles, futureCandles, {
+      asOfTimestamp: asOf,
+      executionTimeframe: '15m',
+      htfTimeframe: '1h',
+      macroTimeframe: '4h',
+    });
+
+    expect(withFuture.execution.trend).toBe(historical.execution.trend);
+    expect(withFuture.higherTimeframe.trend).toBe(historical.higherTimeframe.trend);
+    expect(withFuture.macro.trend).toBe(historical.macro.trend);
+    expect(withFuture.alignment).toBe(historical.alignment);
+    expect(withFuture.confluenceScore).toBe(historical.confluenceScore);
   });
 });

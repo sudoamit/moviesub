@@ -104,15 +104,18 @@ export class SnapshotBuilder {
       execCandles,
       htf1Candles,
       htf2Candles,
+      {
+        asOfTimestamp: timestamp,
+        executionTimeframe: options.executionTimeframe || Timeframe.M15,
+        htfTimeframe: options.htf1Timeframe || Timeframe.H1,
+        macroTimeframe: options.htf2Timeframe || Timeframe.H4,
+      },
     );
 
-    // 7. Determine Candidate Direction
+    // 7. Determine Candidate Direction without fabricating a directional fallback.
     let candidateDir = multiHorizon.higherTimeframe.trend;
-    if (candidateDir === Direction.NEUTRAL) {
+    if (candidateDir === Direction.NEUTRAL && smc.currentTrend !== Direction.NEUTRAL) {
       candidateDir = smc.currentTrend;
-    }
-    if (candidateDir === Direction.NEUTRAL) {
-      candidateDir = Direction.BULLISH;
     }
 
     const isBull = candidateDir === Direction.BULLISH;
