@@ -91,7 +91,6 @@ export class MultiTimeframeAnalyzer {
     const resolveTrendFromAnalysis = (
       candles: ICandle[],
       timeframe: Timeframe | string,
-      analysis?: ISMCAnalysisResult,
     ): Direction => {
       if (candles && candles.length > 0) {
         const cleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(
@@ -113,20 +112,14 @@ export class MultiTimeframeAnalyzer {
         }
       }
 
-      if (analysis) {
-        if (analysis.currentTrend !== Direction.NEUTRAL) return analysis.currentTrend;
-        if (analysis.marketRegime?.regime === 'BULLISH_TREND') return Direction.BULLISH;
-        if (analysis.marketRegime?.regime === 'BEARISH_TREND') return Direction.BEARISH;
-      }
-
       return Direction.NEUTRAL;
     };
 
-    const htf1Trend = resolveTrendFromAnalysis(htf1.candles, htf1.timeframe, htf1.analysis);
+    const htf1Trend = resolveTrendFromAnalysis(htf1.candles, htf1.timeframe);
 
     let htf2Trend: Direction | undefined = undefined;
     if (htf2) {
-      htf2Trend = resolveTrendFromAnalysis(htf2.candles, htf2.timeframe, htf2.analysis);
+      htf2Trend = resolveTrendFromAnalysis(htf2.candles, htf2.timeframe);
     }
 
     // Determine overall HTF bias

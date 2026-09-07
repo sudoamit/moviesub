@@ -516,66 +516,38 @@ describe('SMC Deterministic Fixtures and Look-Ahead Invariant Suite', () => {
     });
   });
 
-  // 15. Complete Multi-Timeframe Bullish SMC Setup
+  // 15. Multi-Timeframe Confirmation
   describe('Fixture 15: Complete Multi-Timeframe SMC Setup', () => {
     it('calculates MTF bias alignment across multiple timeframes', () => {
-      const execTf = { timeframe: Timeframe.M15, candles: [] };
-      const htf1 = {
-        timeframe: Timeframe.H1,
-        candles: [],
-        analysis: {
-          candlesCount: 100,
-          swingPoints: [],
-          confirmedSwingHighs: [],
-          confirmedSwingLows: [],
-          breaksOfStructure: [],
-          changesOfCharacter: [],
-          liquidityPools: [],
-          liquiditySweeps: [],
-          fairValueGaps: [],
-          activeFVGs: [],
-          orderBlocks: [],
-          activeOrderBlocks: [],
-          dealingRange: null,
-          marketRegime: {
-            regime: 'BULLISH_TREND' as any,
-            atr: 50,
-            adx: 30,
-            volatility: 0.2,
-            timestamp: new Date(),
-          },
-          currentTrend: Direction.BULLISH,
-        },
-      };
-      const htf2 = {
-        timeframe: Timeframe.H4,
-        candles: [],
-        analysis: {
-          candlesCount: 100,
-          swingPoints: [],
-          confirmedSwingHighs: [],
-          confirmedSwingLows: [],
-          breaksOfStructure: [],
-          changesOfCharacter: [],
-          liquidityPools: [],
-          liquiditySweeps: [],
-          fairValueGaps: [],
-          activeFVGs: [],
-          orderBlocks: [],
-          activeOrderBlocks: [],
-          dealingRange: null,
-          marketRegime: {
-            regime: 'BULLISH_TREND' as any,
-            atr: 100,
-            adx: 35,
-            volatility: 0.3,
-            timestamp: new Date(),
-          },
-          currentTrend: Direction.BULLISH,
-        },
-      };
+      const hourMs = 3600000;
+      const htf1Candles: ICandle[] = [
+        createCandle(0, 100, 105, 95, 100, 1000, hourMs),
+        createCandle(1, 100, 108, 99, 106, 1000, hourMs),
+        createCandle(2, 106, 112, 105, 110, 1000, hourMs),
+        createCandle(3, 110, 120, 108, 115, 1000, hourMs),
+        createCandle(4, 115, 116, 106, 108, 1000, hourMs),
+        createCandle(5, 108, 112, 105, 110, 1000, hourMs),
+        createCandle(6, 110, 114, 108, 112, 1000, hourMs),
+        createCandle(7, 112, 135, 112, 135, 1000, hourMs),
+        createCandle(8, 135, 138, 134, 136, 1000, hourMs),
+      ];
+      const htf2Candles: ICandle[] = [
+        createCandle(0, 100, 105, 95, 100, 1000, 4 * hourMs),
+        createCandle(1, 100, 108, 99, 106, 1000, 4 * hourMs),
+        createCandle(2, 106, 112, 105, 110, 1000, 4 * hourMs),
+        createCandle(3, 110, 120, 108, 115, 1000, 4 * hourMs),
+        createCandle(4, 115, 116, 106, 108, 1000, 4 * hourMs),
+        createCandle(5, 108, 112, 105, 110, 1000, 4 * hourMs),
+        createCandle(6, 110, 114, 108, 112, 1000, 4 * hourMs),
+        createCandle(7, 112, 135, 112, 135, 1000, 4 * hourMs),
+        createCandle(8, 135, 138, 134, 136, 1000, 4 * hourMs),
+      ];
+      const asOfTimestamp = new Date(baseTime + 36 * hourMs);
+      const execTf = { timeframe: Timeframe.M15, candles: [createCandle(143, 135, 136, 134, 135, 1000, 15 * minuteMs)] };
+      const htf1 = { timeframe: Timeframe.H1, candles: htf1Candles };
+      const htf2 = { timeframe: Timeframe.H4, candles: htf2Candles };
 
-      const res = MultiTimeframeAnalyzer.analyzeMTF(execTf, htf1, htf2, MTFMode.BALANCED);
+      const res = MultiTimeframeAnalyzer.analyzeMTF(execTf, htf1, htf2, MTFMode.BALANCED, asOfTimestamp);
       expect(res.htfBias).toBe(Direction.BULLISH);
       expect(res.isAligned).toBe(true);
       expect(res.alignmentScore).toBe(20);

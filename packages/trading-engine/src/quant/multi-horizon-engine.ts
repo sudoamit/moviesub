@@ -4,6 +4,13 @@ import { HorizonState, MultiHorizonQuantState } from './quant-types';
 import { RegimeClusteringEngine } from './regime-clustering-engine';
 import { CandleNormalizer } from '../candle-normalizer';
 
+export interface IMultiHorizonOptions {
+  asOfTimestamp?: Date;
+  executionTimeframe?: string;
+  htfTimeframe?: string;
+  macroTimeframe?: string;
+}
+
 export class MultiHorizonEngine {
   /**
    * Filters a horizon candle set down to only closed candles whose close time is <= asOfTimestamp.
@@ -91,7 +98,7 @@ export class MultiHorizonEngine {
     executionCandles: ICandle[],
     htfCandles?: ICandle[],
     macroCandles?: ICandle[],
-    options: { asOfTimestamp?: Date; executionTimeframe?: string; htfTimeframe?: string; macroTimeframe?: string } = {},
+    options: IMultiHorizonOptions = {},
   ): MultiHorizonQuantState {
     const executionTf = options.executionTimeframe || '15m';
     const htfTf = options.htfTimeframe || '1h';
@@ -107,9 +114,13 @@ export class MultiHorizonEngine {
       }
     }
 
-    const execution = this.analyzeHorizon(executionCandles, executionTf, asOfTimestamp);
-    const higherTimeframe = this.analyzeHorizon(htfCandles || executionCandles, htfTf, asOfTimestamp);
-    const macro = this.analyzeHorizon(macroCandles || htfCandles || executionCandles, macroTf, asOfTimestamp);
+    const execFiltered = this.getClosedCandlesAsOf(executionCandles, executionTf, asOfTimestamp);
+    const htfFiltered = this.getClosedCandlesAsOf(htfCandles || executionCandles, htfTf, asOfTimestamp);
+    const macroFiltered = this.getClosedCandlesAsOf(macroCandles || htfCandles || executionCandles, macroTf, asOfTimestamp);
+
+    const execution = this.analyzeHorizon(execFiltered, executionTf, asOfTimestamp);
+    const higherTimeframe = this.analyzeHorizon(htfFiltered, htfTf, asOfTimestamp);
+    const macro = this.analyzeHorizon(macroFiltered, macroTf, asOfTimestamp);
 
     const trends = [execution.trend, higherTimeframe.trend, macro.trend].filter(
       (t) => t !== Direction.NEUTRAL,

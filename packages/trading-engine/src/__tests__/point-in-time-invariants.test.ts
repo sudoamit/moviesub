@@ -134,7 +134,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
   describe('Invariant 3: MTF Closed-Candle Isolation', () => {
     it('strictly forbids unclosed HTF bars from leaking into lower timeframe analysis', () => {
       // 15m execution bar at 10:00 (closes at 10:15)
-      const execCandles: ICandle[] = [
+      const _execCandles: ICandle[] = [
         createCandle(0, 100, 102, 99, 101, 1000, 15 * 60 * 1000), // 10:00 - 10:15
       ];
       const asOf1015 = new Date(baseTime + 15 * 60 * 1000);
@@ -471,7 +471,7 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
 
   // 12. Explicit MultiHorizon Future Invariance Test
   describe('Invariant 12: MultiHorizon Future Invariance', () => {
-    it('evaluates MultiHorizon identically regardless of future candles appended', () => {
+    it('evaluates MultiHorizon identically regardless of future candles appended across all timeframes', () => {
       const history = [
         createCandle(0, 100, 102, 99, 101, 1000, 15 * 60 * 1000),
         createCandle(1, 101, 103, 100, 102, 1000, 15 * 60 * 1000),
@@ -479,22 +479,51 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
         createCandle(3, 104, 106, 103, 105, 1000, 15 * 60 * 1000),
         createCandle(4, 105, 108, 104, 107, 1000, 15 * 60 * 1000),
       ];
-      const t = new Date(history[4].timestamp.getTime() + 15 * 60 * 1000);
-      const future = [
-        createCandle(5, 107, 200, 106, 190, 5000, 15 * 60 * 1000),
-        createCandle(6, 190, 250, 180, 240, 5000, 15 * 60 * 1000),
+      const htfHistory = [
+        createCandle(0, 100, 105, 98, 103, 5000, 60 * 60 * 1000),
+        createCandle(1, 103, 110, 102, 108, 5000, 60 * 60 * 1000),
+      ];
+      const macroHistory = [
+        createCandle(0, 100, 115, 95, 112, 20000, 4 * 60 * 60 * 1000),
       ];
 
-      const resA = MultiHorizonEngine.evaluateMultiHorizon(history, undefined, undefined, {
-        asOfTimestamp: t,
-        executionTimeframe: '15m',
-      });
-      const resB = MultiHorizonEngine.evaluateMultiHorizon(
-        [...history, ...future],
-        undefined,
-        undefined,
-        { asOfTimestamp: t, executionTimeframe: '15m' },
+      const t = new Date(history[4].timestamp.getTime() + 15 * 60 * 1000);
+
+      // Future candles designed to reverse EMA trend, create extreme RSI/ATR, change regime, break structure
+      const futureExec = [
+        createCandle(5, 107, 250, 50, 55, 500000, 15 * 60 * 1000),
+        createCandle(6, 55, 60, 10, 12, 900000, 15 * 60 * 1000),
+      ];
+      const futureHTF = [
+        createCandle(2, 108, 300, 30, 35, 1000000, 60 * 60 * 1000),
+      ];
+      const futureMacro = [
+        createCandle(1, 112, 400, 20, 25, 5000000, 4 * 60 * 60 * 1000),
+      ];
+
+      const resA = MultiHorizonEngine.evaluateMultiHorizon(
+        history,
+        htfHistory,
+        macroHistory,
+        {
+          asOfTimestamp: t,
+          executionTimeframe: '15m',
+          htfTimeframe: '1h',
+          macroTimeframe: '4h',
+        },
       );
+      const resB = MultiHorizonEngine.evaluateMultiHorizon(
+        [...history, ...futureExec],
+        [...htfHistory, ...futureHTF],
+        [...macroHistory, ...futureMacro],
+        {
+          asOfTimestamp: t,
+          executionTimeframe: '15m',
+          htfTimeframe: '1h',
+          macroTimeframe: '4h',
+        },
+      );
+
       expect(resB).toEqual(resA);
     });
   });
@@ -542,6 +571,50 @@ describe('Point-in-Time Correctness & Look-Ahead Invariants Suite', () => {
       const closed = CandleNormalizer.getClosedCandlesAsOf(candles, '15m', asOf1020);
       expect(closed).toHaveLength(1);
       expect(closed[0].timestamp).toEqual(candles[0].timestamp);
+    });
+  });
+
+  // 15. SnapshotBuilder Integration Future Invariance Test
+  describe('Invariant 15: SnapshotBuilder Integration Future Invariance', () => {
+    it('guarantees all decision-relevant snapshot fields are identical regardless of future data', () => {
+      const history: ICandle[] = [];
+      for (let i = 0; i < 40; i++) {
+        history.push(createCandle(i, 100 + i * 0.2, 102 + i * 0.2, 99 + i * 0.2, 101 + i * 0.2));
+      }
+      const tBaseline = new Date(history[35].timestamp.getTime() + minuteMs);
+
+      const snapshotA = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: history,
+        asOfTimestamp: tBaseline,
+      });
+
+      const tortureCandles = [
+        ...history,
+        createCandle(40, 108, 300, 107, 295, 500000), // Wild future expansion
+        createCandle(41, 295, 305, 30, 35, 900000),   // Extreme crash
+        createCandle(42, 35, 40, 10, 15, 1000000),
+      ];
+
+      const snapshotB = SnapshotBuilder.buildSnapshot({
+        symbol: 'NIFTY',
+        executionCandles: tortureCandles,
+        asOfTimestamp: tBaseline,
+      });
+
+      expect(snapshotB.timestamp).toEqual(snapshotA.timestamp);
+      expect(snapshotB.marketPrice).toEqual(snapshotA.marketPrice);
+      expect(snapshotB.smc.currentTrend).toEqual(snapshotA.smc.currentTrend);
+      expect(snapshotB.smc.fairValueGaps).toEqual(snapshotA.smc.fairValueGaps);
+      expect(snapshotB.smc.orderBlocks).toEqual(snapshotA.smc.orderBlocks);
+      expect(snapshotB.quant.returns).toEqual(snapshotA.quant.returns);
+      expect(snapshotB.regime.regime).toEqual(snapshotA.regime.regime);
+      expect(snapshotB.volatility.volatilityPercentile).toEqual(snapshotA.volatility.volatilityPercentile);
+      expect(snapshotB.multiHorizon).toEqual(snapshotA.multiHorizon);
+      expect(snapshotB.score.totalScore).toEqual(snapshotA.score.totalScore);
+      expect(snapshotB.score.grade).toEqual(snapshotA.score.grade);
+      expect(snapshotB.trace).toEqual(snapshotA.trace);
+      expect(snapshotB.ml).toEqual(snapshotA.ml);
     });
   });
 });

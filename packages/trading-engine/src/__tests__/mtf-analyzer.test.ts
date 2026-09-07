@@ -1,65 +1,40 @@
 import { MultiTimeframeAnalyzer } from '../mtf-analyzer';
-import { Direction, MTFMode, Timeframe } from '@quant/shared';
+import { Direction, ICandle, MTFMode, Timeframe } from '@quant/shared';
 
 describe('MultiTimeframeAnalyzer', () => {
-  it('should establish strong bullish alignment when both HTF1 and HTF2 are bullish', () => {
-    const execTf = { timeframe: Timeframe.M15, candles: [] };
-    const htf1 = {
-      timeframe: Timeframe.H1,
-      candles: [],
-      analysis: {
-        candlesCount: 100,
-        swingPoints: [],
-        confirmedSwingHighs: [],
-        confirmedSwingLows: [],
-        breaksOfStructure: [],
-        changesOfCharacter: [],
-        liquidityPools: [],
-        liquiditySweeps: [],
-        fairValueGaps: [],
-        activeFVGs: [],
-        orderBlocks: [],
-        activeOrderBlocks: [],
-        dealingRange: null,
-        marketRegime: {
-          regime: 'BULLISH_TREND' as any,
-          atr: 50,
-          adx: 30,
-          volatility: 0.2,
-          timestamp: new Date(),
-        },
-        currentTrend: Direction.BULLISH,
-      },
-    };
-    const htf2 = {
-      timeframe: Timeframe.H4,
-      candles: [],
-      analysis: {
-        candlesCount: 100,
-        swingPoints: [],
-        confirmedSwingHighs: [],
-        confirmedSwingLows: [],
-        breaksOfStructure: [],
-        changesOfCharacter: [],
-        liquidityPools: [],
-        liquiditySweeps: [],
-        fairValueGaps: [],
-        activeFVGs: [],
-        orderBlocks: [],
-        activeOrderBlocks: [],
-        dealingRange: null,
-        marketRegime: {
-          regime: 'BULLISH_TREND' as any,
-          atr: 100,
-          adx: 35,
-          volatility: 0.3,
-          timestamp: new Date(),
-        },
-        currentTrend: Direction.BULLISH,
-      },
-    };
+  function createCandle(index: number, open: number, high: number, low: number, close: number, intervalMs = 3600000): ICandle {
+    return { timestamp: new Date(1700000000000 + index * intervalMs), open, high, low, close, volume: 1000 };
+  }
 
-    const res = MultiTimeframeAnalyzer.analyzeMTF(execTf, htf1, htf2, MTFMode.BALANCED);
+  it('should establish strong bullish alignment when both HTF1 and HTF2 are bullish', () => {
+    const htf1Candles: ICandle[] = [
+      createCandle(0, 100, 105, 95, 100, 3600000),
+      createCandle(1, 100, 108, 99, 106, 3600000),
+      createCandle(2, 106, 112, 105, 110, 3600000),
+      createCandle(3, 110, 120, 108, 115, 3600000),
+      createCandle(4, 115, 116, 106, 108, 3600000),
+      createCandle(5, 108, 112, 105, 110, 3600000),
+      createCandle(6, 110, 114, 108, 112, 3600000),
+      createCandle(7, 112, 135, 112, 135, 3600000),
+      createCandle(8, 135, 138, 134, 136, 3600000),
+    ];
+    const htf2Candles: ICandle[] = [
+      createCandle(0, 100, 105, 95, 100, 4 * 3600000),
+      createCandle(1, 100, 108, 99, 106, 4 * 3600000),
+      createCandle(2, 106, 112, 105, 110, 4 * 3600000),
+      createCandle(3, 110, 120, 108, 115, 4 * 3600000),
+      createCandle(4, 115, 116, 106, 108, 4 * 3600000),
+      createCandle(5, 108, 112, 105, 110, 4 * 3600000),
+      createCandle(6, 110, 114, 108, 112, 4 * 3600000),
+      createCandle(7, 112, 135, 112, 135, 4 * 3600000),
+      createCandle(8, 135, 138, 134, 136, 4 * 3600000),
+    ];
+    const asOfTimestamp = new Date(1700000000000 + 36 * 3600000);
+    const execTf = { timeframe: Timeframe.M15, candles: [createCandle(143, 135, 136, 134, 135, 15 * 60 * 1000)] };
+    const htf1 = { timeframe: Timeframe.H1, candles: htf1Candles };
+    const htf2 = { timeframe: Timeframe.H4, candles: htf2Candles };
+
+    const res = MultiTimeframeAnalyzer.analyzeMTF(execTf, htf1, htf2, MTFMode.BALANCED, asOfTimestamp);
     expect(res.htfBias).toBe(Direction.BULLISH);
     expect(res.isAligned).toBe(true);
     expect(res.alignmentScore).toBe(20);
