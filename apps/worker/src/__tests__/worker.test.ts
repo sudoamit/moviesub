@@ -151,6 +151,26 @@ describe('Worker Processors', () => {
       expect(mockPrisma.$transaction).toHaveBeenCalled();
       expect(mockPrisma.paperTrade.create).toHaveBeenCalled();
     });
+
+    it('should NOT close position if tick is stale (>5s) or unavailable', async () => {
+      // Mock tick that is 10 seconds old (> 5s maxAge)
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() - 10000 }),
+      );
+
+      const mockJob = {
+        id: 'monitor-stale',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('LearningProcessor', () => {

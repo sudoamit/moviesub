@@ -256,11 +256,11 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(dbOrders.length).toBe(1);
   });
 
-  it('should reject order if live market data is unavailable and NO fake price fallback exists', async () => {
+  it('should reject order if live market data is unavailable and NO fake price or candle fallback exists', async () => {
+    mockCandlesService.getLatestCandle.mockClear();
     mockRealMarketStreamer.getValidatedTicker.mockImplementation(() => {
       throw new MarketDataUnavailableError('UNKNOWN_SYM', 'No stream');
     });
-    mockCandlesService.getLatestCandle.mockRejectedValue(new Error('No candles'));
 
     await expect(
       service.placeOrder({
@@ -277,6 +277,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     const rejectedOrder = dbOrders.find((o) => o.symbol === 'UNKNOWN_SYM');
     expect(rejectedOrder).toBeDefined();
     expect(rejectedOrder.status).toBe(OrderState.REJECTED);
+    expect(mockCandlesService.getLatestCandle).not.toHaveBeenCalled();
   });
 
   it('should reject order if stopLoss is missing or invalid (P0-4)', async () => {

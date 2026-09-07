@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { SignalsService } from '../signals/signals.service';
 import { SMCService } from '../smc/smc.service';
@@ -504,8 +504,8 @@ export class AILearningService implements OnModuleInit {
     };
 
     const activeState = this.registry.getActiveVersionState();
-    const supportingSampleSize = activeState?.metrics?.sampleSize || 120;
-    const calibrationStatus = activeState?.calibrationReport?.status || 'GOOD';
+    const supportingSampleSize = activeState?.metrics?.sampleSize ?? 0;
+    const calibrationStatus = activeState?.calibrationReport?.status;
 
     const recommendationResult = ExpectedValueEngine.evaluateRecommendation({
       probability: predResult.probability,
@@ -733,10 +733,37 @@ export class AILearningService implements OnModuleInit {
     this.recentPostMortems.unshift(postMortem as any);
     if (this.recentPostMortems.length > 20) this.recentPostMortems.pop();
 
-    this.logger.log(
-      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) from persisted snapshot - Delta Norm: ${updateResult.weightDeltaNorm}`,
-    );
+    if (updateResult) {
+      this.logger.log(
+        `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) from persisted snapshot - Delta Norm: ${updateResult.weightDeltaNorm}`,
+      );
+    }
 
     return { updateResult, postMortem };
+  }
+
+  /**
+   * Loads a PaperTrade by ID and directly learns from its persisted snapshots without querying candles.
+   */
+  public async learnFromPersistedTrade(tradeId: string): Promise<{ updateResult: any; postMortem: any }> {
+    const trade = await this.prisma.paperTrade.findUnique({
+      where: { id: tradeId },
+    });
+    if (!trade) {
+      throw new NotFoundException(`PaperTrade '${tradeId}' not found`);
+    }
+
+    return this.recordTradeOutcomeAndOnlineUpdate({
+      symbol: trade.symbol,
+      direction: trade.direction === 'BULLISH' ? 'BUY' : 'SELL',
+      entryPrice: Number(trade.entryPrice),
+      exitPrice: Number(trade.exitPrice),
+      entryTimestamp: trade.entryTime,
+      exitTimestamp: trade.exitTime,
+      exitReason: trade.exitReason,
+      realizedR: Number(trade.realizedR),
+      featureSnapshotJson: trade.featureSnapshotJson,
+      outcomeSnapshotJson: trade.outcomeSnapshotJson,
+    });
   }
 }
