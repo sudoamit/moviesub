@@ -822,8 +822,16 @@ enum PositionState {
   OPEN
   PARTIALLY_CLOSED
   CLOSING
+  EXIT_PENDING
   CLOSED
   INVALIDATED
+}
+
+enum ExecutionPriceSource {
+  LIVE_TICK
+  LATEST_CANDLE
+  BACKTEST_CANDLE
+  SIMULATED_FILL
 }
 
 enum TradingMode {
@@ -926,12 +934,13 @@ model PaperFill {
   fillQuantity     Decimal      @db.Decimal(18, 4)
   fee              Decimal      @default(0.0) @db.Decimal(18, 4)
   feeBreakdownJson Json?
-  slippage         Decimal      @default(0.0) @db.Decimal(18, 6)
-  liquidityType    String       @default("TAKER") // MAKER, TAKER
-  sourceTimestamp  DateTime
-  fillTimestamp    DateTime     @default(now())
-  correlationId    String
-  createdAt        DateTime     @default(now())
+  slippage             Decimal              @default(0.0) @db.Decimal(18, 6)
+  executionPriceSource ExecutionPriceSource @default(LIVE_TICK)
+  liquidityType        String               @default("TAKER") // MAKER, TAKER
+  sourceTimestamp      DateTime
+  fillTimestamp        DateTime             @default(now())
+  correlationId        String
+  createdAt            DateTime             @default(now())
 
   @@index([orderId, fillTimestamp])
   @@index([correlationId])
@@ -973,6 +982,7 @@ model PaperPosition {
   executionEventsJson   Json?
   trailingStopStateJson Json?
   chargesJson           Json?
+  featureSnapshotJson   Json?
   openedAt              DateTime      @default(now())
   closedAt              DateTime?
   correlationId         String
@@ -1012,6 +1022,8 @@ model PaperTrade {
   exitReason             String
   chargesJson            Json?
   signalSnapshotJson     Json?
+  featureSnapshotJson    Json?
+  outcomeSnapshotJson    Json?
   outcomeClassification  String?       // WIN_TP1, WIN_TP2, WIN_TP3_RUNNER, LOSS_SL, BREAKEVEN, MANUAL
   correlationId          String
   createdAt              DateTime      @default(now())
@@ -1077,6 +1089,33 @@ model TradingSystemConfig {
   updatedAt               DateTime @updatedAt
 
   @@map("trading_system_configs")
+}
+
+enum RetrainJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model AIRetrainJob {
+  id                    String           @id @default(uuid())
+  status                RetrainJobStatus @default(PENDING)
+  triggerReason         String           // PERFORMANCE_DEGRADATION, SCHEDULED, MANUAL, OUTCOME_BATCH
+  samplesCount          Int              @default(0)
+  trainMetricsJson      Json?
+  validationMetricsJson Json?
+  modelArtifactPath     String?
+  promoted              Boolean          @default(false)
+  rejectionReason       String?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  errorMessage          String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@index([status, createdAt(sort: Desc)])
+  @@map("ai_retrain_jobs")
 }
 
 

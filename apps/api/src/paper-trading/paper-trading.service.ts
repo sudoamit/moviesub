@@ -924,6 +924,7 @@ export class PaperTradingService implements IExecutionProvider {
           maxAdverseExcursion: new Decimal(0.0),
           status: PositionState.OPEN,
           chargesJson: charges,
+          featureSnapshotJson: req.featureSnapshotJson || null,
           openedAt: entryTime,
           correlationId,
         },
@@ -1001,15 +1002,28 @@ export class PaperTradingService implements IExecutionProvider {
     const correlationId = correlationIdOverride || pos.correlationId || `corr_${Date.now()}`;
     const symbol = pos.symbol;
     const isCrypto = symbol === 'BTCUSDT';
+    const config = await this.getSystemConfig();
 
-    // Resolve live exit price
+    // Resolve live exit price with strict fail-closed validation
     let exitPrice = exitPriceOverride;
     if (!exitPrice || exitPrice <= 0) {
       try {
-        const marketPriceData = await this.getValidatedMarketPrice(symbol, 15);
+        const marketPriceData = await this.getValidatedMarketPrice(
+          symbol,
+          config.maxMarketDataAgeSeconds || 5,
+        );
         exitPrice = marketPriceData.price;
-      } catch {
-        exitPrice = Number(pos.currentPrice);
+      } catch (err: any) {
+        this.logger.error(
+          `[EXIT REJECTED] Cannot close position '${pos.id}' for '${symbol}': ${err.message}`,
+        );
+        await this.prisma.paperPosition.update({
+          where: { id: pos.id },
+          data: { status: PositionState.EXIT_PENDING },
+        });
+        throw new BadRequestException(
+          `Cannot close position for ${symbol}: Real-time market data unavailable (${err.message}). Position marked EXIT_PENDING.`,
+        );
       }
     }
 
@@ -1082,6 +1096,16 @@ export class PaperTradingService implements IExecutionProvider {
           exitTime,
           exitReason,
           chargesJson: { entryCharges, exitCharges, totalCharges },
+          featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
+          outcomeSnapshotJson: {
+            exitReason,
+            realizedPnL,
+            realizedR,
+            holdingDurationSeconds,
+            outcomeClassification,
+            exitPrice,
+            exitTime: exitTime.toISOString(),
+          },
           outcomeClassification,
           correlationId,
         },
@@ -1147,6 +1171,8 @@ export class PaperTradingService implements IExecutionProvider {
       openedAt: pos.entryTime.toISOString(),
       closedAt: exitTime.toISOString(),
       totalCharges,
+      featureSnapshotJson: (trade.featureSnapshotJson as any) || pos.featureSnapshotJson || undefined,
+      outcomeSnapshotJson: (trade.outcomeSnapshotJson as any) || undefined,
       correlationId,
     };
   }
@@ -1303,6 +1329,7 @@ export class PaperTradingService implements IExecutionProvider {
       maxAdverseExcursion: Number(pos.maxAdverseExcursion),
       openedAt: pos.openedAt instanceof Date ? pos.openedAt.toISOString() : String(pos.openedAt),
       status: pos.status as PositionState,
+      featureSnapshotJson: pos.featureSnapshotJson || undefined,
       charges,
     };
   }

@@ -19,7 +19,7 @@ export class AILearningController {
    * Starts a non-blocking background training job.
    */
   @Post('retrain')
-  startRetrainJob() {
+  async startRetrainJob() {
     return this.aiLearningService.startRetrainJob();
   }
 
@@ -28,7 +28,7 @@ export class AILearningController {
    * Returns status, progress percent, stage, and candidate metrics of a training job.
    */
   @Get('retrain/:jobId')
-  getRetrainJobStatus(@Param('jobId') jobId: string) {
+  async getRetrainJobStatus(@Param('jobId') jobId: string) {
     return this.aiLearningService.getRetrainJobStatus(jobId);
   }
 

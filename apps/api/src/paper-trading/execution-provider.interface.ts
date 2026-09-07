@@ -19,6 +19,7 @@ export interface IPaperOrderRequest {
   optionType?: 'CE' | 'PE';
   contractSymbol?: string;
   signalId?: string;
+  featureSnapshotJson?: any;
   idempotencyKey?: string;
   correlationId?: string;
 }
@@ -56,6 +57,7 @@ export interface IPaperPosition {
   maxAdverseExcursion?: number;
   openedAt: string;
   status: PositionState;
+  featureSnapshotJson?: any;
   trailingStopState?: {
     stage: string;
     stageBadge: string;
@@ -96,6 +98,8 @@ export interface IPaperTradeHistory {
   openedAt: string;
   closedAt: string;
   totalCharges: number;
+  featureSnapshotJson?: any;
+  outcomeSnapshotJson?: any;
   correlationId?: string;
 }
 

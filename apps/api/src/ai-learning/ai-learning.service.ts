@@ -240,7 +240,7 @@ export class AILearningService implements OnModuleInit {
   /**
    * 2. POST /api/ai-learning/retrain (Non-blocking background job)
    */
-  startRetrainJob(): { jobId: string; status: string; message: string } {
+  async startRetrainJob(): Promise<{ jobId: string; status: string; message: string }> {
     const jobId = `job_${crypto.randomUUID().slice(0, 8)}`;
     const jobStatus: IRetrainJobStatus = {
       jobId,
@@ -252,9 +252,22 @@ export class AILearningService implements OnModuleInit {
 
     this.retrainJobs.set(jobId, jobStatus);
 
+    try {
+      await this.prisma.aIRetrainJob.create({
+        data: {
+          id: jobId,
+          status: 'PENDING',
+          triggerReason: 'MANUAL',
+          startedAt: new Date(),
+        },
+      });
+    } catch (e: any) {
+      this.logger.warn(`Failed to create AIRetrainJob in DB: ${e.message}`);
+    }
+
     // Trigger non-blocking asynchronous training
     setImmediate(() => {
-      this.executeTrainingPipeline(jobId).catch((err) => {
+      this.executeTrainingPipeline(jobId).catch(async (err) => {
         this.logger.error(`Retrain job ${jobId} failed: ${err.message}`, err.stack);
         const job = this.retrainJobs.get(jobId);
         if (job) {
@@ -262,6 +275,16 @@ export class AILearningService implements OnModuleInit {
           job.error = err.message;
           job.completedAt = new Date();
         }
+        try {
+          await this.prisma.aIRetrainJob.update({
+            where: { id: jobId },
+            data: {
+              status: 'FAILED',
+              errorMessage: err.message,
+              completedAt: new Date(),
+            },
+          });
+        } catch {}
       });
     });
 
@@ -276,19 +299,35 @@ export class AILearningService implements OnModuleInit {
   /**
    * 3. GET /api/ai-learning/retrain/:jobId
    */
-  getRetrainJobStatus(jobId: string): IRetrainJobStatus {
+  async getRetrainJobStatus(jobId: string): Promise<IRetrainJobStatus> {
     const job = this.retrainJobs.get(jobId);
-    if (!job) {
-      return {
-        jobId,
-        status: 'FAILED',
-        progressPercent: 0,
-        stage: 'Unknown Job',
-        error: `Retrain job '${jobId}' not found`,
-        startedAt: new Date(),
-      };
-    }
-    return job;
+    if (job) return job;
+
+    try {
+      const dbJob = await this.prisma.aIRetrainJob.findUnique({ where: { id: jobId } });
+      if (dbJob) {
+        return {
+          jobId: dbJob.id,
+          status: dbJob.status as any,
+          progressPercent: dbJob.status === 'COMPLETED' ? 100 : dbJob.status === 'FAILED' ? 0 : 50,
+          stage: dbJob.status === 'COMPLETED' ? 'Completed' : dbJob.status,
+          isPromoted: dbJob.promoted,
+          metrics: (dbJob.validationMetricsJson as any) || null,
+          error: dbJob.errorMessage || undefined,
+          startedAt: dbJob.startedAt || dbJob.createdAt,
+          completedAt: dbJob.completedAt || undefined,
+        };
+      }
+    } catch {}
+
+    return {
+      jobId,
+      status: 'FAILED',
+      progressPercent: 0,
+      stage: 'Unknown Job',
+      error: `Retrain job '${jobId}' not found`,
+      startedAt: new Date(),
+    };
   }
 
   /**
@@ -301,6 +340,13 @@ export class AILearningService implements OnModuleInit {
     job.status = 'RUNNING';
     job.progressPercent = 10;
     job.stage = 'Extracting Point-in-Time Features from Multi-Asset Historical Data';
+
+    try {
+      await this.prisma.aIRetrainJob.update({
+        where: { id: jobId },
+        data: { status: 'RUNNING', startedAt: new Date() },
+      });
+    } catch {}
 
     // 1. Generate multi-asset chronological training examples
     const dataset = await this.buildTrainingDataset();
@@ -398,6 +444,23 @@ export class AILearningService implements OnModuleInit {
     job.promotionDecision = promotionDecision.decisionStatus;
     job.metrics = outOfSampleMetrics;
     job.completedAt = new Date();
+
+    try {
+      await this.prisma.aIRetrainJob.update({
+        where: { id: jobId },
+        data: {
+          status: 'COMPLETED',
+          samplesCount: dataset.length,
+          trainMetricsJson: trainMetrics as any,
+          validationMetricsJson: outOfSampleMetrics as any,
+          promoted: promotionDecision.isPromoted,
+          rejectionReason: promotionDecision.isPromoted ? null : promotionDecision.reasons.join('; '),
+          completedAt: new Date(),
+        },
+      });
+    } catch (e: any) {
+      this.logger.warn(`Failed to update completed AIRetrainJob in DB: ${e.message}`);
+    }
   }
 
   /**

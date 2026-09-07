@@ -113,8 +113,23 @@ export enum PositionState {
   OPEN = 'OPEN',
   PARTIALLY_CLOSED = 'PARTIALLY_CLOSED',
   CLOSING = 'CLOSING',
+  EXIT_PENDING = 'EXIT_PENDING',
   CLOSED = 'CLOSED',
   INVALIDATED = 'INVALIDATED',
+}
+
+export enum ExecutionPriceSource {
+  LIVE_TICK = 'LIVE_TICK',
+  LATEST_CANDLE = 'LATEST_CANDLE',
+  BACKTEST_CANDLE = 'BACKTEST_CANDLE',
+  SIMULATED_FILL = 'SIMULATED_FILL',
+}
+
+export enum RetrainJobStatus {
+  PENDING = 'PENDING',
+  RUNNING = 'RUNNING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
 }
 
 export enum TradingMode {

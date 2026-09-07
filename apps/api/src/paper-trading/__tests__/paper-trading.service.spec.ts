@@ -421,4 +421,57 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(dbTrades.length).toBe(1);
     expect(dbPositions[0].status).toBe(PositionState.CLOSED);
   });
+
+  it('should persist feature and outcome snapshots without data distortion', async () => {
+    const featureSnapshot = {
+      htfTrendAlignment: 1,
+      trend4H: 1,
+      trend1H: 1,
+      structure15M: 1,
+      bosChochQuality: 0.85,
+    };
+
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+      featureSnapshotJson: featureSnapshot,
+    });
+
+    expect(pos.featureSnapshotJson).toEqual(featureSnapshot);
+
+    const trade = await service.closePosition(pos.id, 'TP1_HIT', 24200.0);
+    expect(trade.featureSnapshotJson).toEqual(featureSnapshot);
+    expect(trade.outcomeSnapshotJson).toBeDefined();
+    expect(trade.outcomeSnapshotJson.exitPrice).toBe(24200.0);
+  });
+
+  it('should fail-closed and mark position EXIT_PENDING when real-time exit price cannot be resolved', async () => {
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    // Simulate market data outage
+    mockRealMarketStreamer.getValidatedTicker.mockImplementation(() => {
+      throw new MarketDataUnavailableError('NIFTY', 'Stream disconnected');
+    });
+    mockCandlesService.getLatestCandle.mockResolvedValue(null);
+
+    // Attempt close without price override and with missing market data provider
+    await expect(service.closePosition(pos.id, 'Manual Exit')).rejects.toThrow(
+      'Real-time market data unavailable',
+    );
+
+    expect(dbPositions[0].status).toBe(PositionState.EXIT_PENDING);
+  });
 });

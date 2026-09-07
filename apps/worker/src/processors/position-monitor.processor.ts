@@ -33,7 +33,7 @@ export class PositionMonitorProcessor extends WorkerHost {
   }> {
     const activePositions = await this.prisma.paperPosition.findMany({
       where: {
-        status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
+        status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
       },
       include: { account: true },
     });
@@ -49,6 +49,18 @@ export class PositionMonitorProcessor extends WorkerHost {
       try {
         const livePrice = await this.resolveLivePrice(pos.symbol);
         if (!livePrice || livePrice <= 0) continue;
+
+        // If position was already EXIT_PENDING, attempt immediate close
+        if (pos.status === PositionState.EXIT_PENDING) {
+          await this.executeFullClose(
+            pos,
+            livePrice,
+            'Exit Pending Completed on Next Tick',
+            'MANUAL',
+          );
+          closedCount++;
+          continue;
+        }
 
         const isClosed = await this.evaluatePositionTick(pos, livePrice);
         if (isClosed) {
@@ -297,6 +309,16 @@ export class PositionMonitorProcessor extends WorkerHost {
           exitTime,
           exitReason,
           chargesJson: { entryCharges, exitCharges, totalCharges },
+          featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
+          outcomeSnapshotJson: {
+            exitReason,
+            realizedPnL,
+            realizedR,
+            holdingDurationSeconds,
+            outcomeClassification,
+            exitPrice,
+            exitTime: exitTime.toISOString(),
+          },
           outcomeClassification,
           correlationId: pos.correlationId || `corr_${Date.now()}`,
         },
