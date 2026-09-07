@@ -225,13 +225,13 @@ export interface QuantSMCScore {
  * Machine-Readable Machine Learning Prediction
  */
 export interface MLTradePrediction {
-  probabilityWin: number;
-  probabilityTP1: number;
-  probabilityTP2: number;
-  probabilityStopFirst: number;
-  expectedR: number;
-  confidence: number;
-  uncertainty: number;
+  probabilityWin: number | null;
+  probabilityTP1: number | null;
+  probabilityTP2: number | null;
+  probabilityStopFirst: number | null;
+  expectedR: number | null;
+  confidence: number | null;
+  uncertainty: number | null;
   calibrated: boolean;
   featureSchemaVersion: string;
 }
@@ -274,9 +274,9 @@ export interface DecisionTrace {
     relativeVolume: number;
   };
   ml: {
-    probability: number;
-    expectedR: number;
-    confidence: number;
+    probability: number | null;
+    expectedR: number | null;
+    confidence: number | null;
   };
   multiHorizon: {
     alignment: 'ALIGNED' | 'PARTIALLY_ALIGNED' | 'CONFLICTED';

@@ -131,7 +131,7 @@ export class CanonicalMLEngineV2 {
    */
   public static predict(
     features: CanonicalTradeFeatureVectorV2,
-    expectedWinR = 2.5,
+    expectedWinR: number | null | undefined = null,
   ): MLTradePrediction {
     const arr = this.toArray(features);
 
@@ -139,18 +139,29 @@ export class CanonicalMLEngineV2 {
     for (let i = 0; i < CANONICAL_V2_DIMENSION; i++) {
       logit += this.weights[i] * (arr[i] - 0.5);
     }
-    // High score heuristic bias
     logit += (features.smcScore - 0.5) * 1.5 + (features.multiHorizonConfluence - 0.5) * 1.2;
 
     const rawProb = 1.0 / (1.0 + Math.exp(-logit));
-    const probabilityWin = Math.max(0.05, Math.min(0.95, Number(rawProb.toFixed(3))));
+    const heuristicProbability = Math.max(0.05, Math.min(0.95, Number(rawProb.toFixed(3))));
 
-    // Target probabilities
+    if (expectedWinR === null || expectedWinR === undefined || !Number.isFinite(expectedWinR)) {
+      return {
+        probabilityWin: null,
+        probabilityTP1: null,
+        probabilityTP2: null,
+        probabilityStopFirst: null,
+        expectedR: null,
+        confidence: null,
+        uncertainty: null,
+        calibrated: false,
+        featureSchemaVersion: CANONICAL_FEATURE_SCHEMA_VERSION,
+      };
+    }
+
+    const probabilityWin = heuristicProbability;
     const probTP1 = Math.max(0.1, Math.min(0.98, Number((probabilityWin * 1.18).toFixed(3))));
     const probTP2 = Math.max(0.05, Math.min(0.9, Number((probabilityWin * 0.88).toFixed(3))));
     const probStopFirst = Number((1.0 - probTP1).toFixed(3));
-
-    // Expected Value calculation: EV = P(Win) * WinR - (1 - P(Win)) * 1.0R
     const expectedR = Number(
       (probabilityWin * expectedWinR - (1.0 - probabilityWin) * 1.0).toFixed(2),
     );
@@ -167,7 +178,7 @@ export class CanonicalMLEngineV2 {
       expectedR,
       confidence,
       uncertainty,
-      calibrated: true,
+      calibrated: false,
       featureSchemaVersion: CANONICAL_FEATURE_SCHEMA_VERSION,
     };
   }

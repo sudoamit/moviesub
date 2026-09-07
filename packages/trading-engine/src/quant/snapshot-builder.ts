@@ -13,6 +13,7 @@ import { MultiHorizonEngine } from './multi-horizon-engine';
 import { QuantSMCScorer } from './quant-smc-scorer';
 import { CanonicalMLEngineV2 } from './canonical-ml-v2';
 import { LLMContextLayer } from './llm-context-layer';
+import { CandleNormalizer } from '../candle-normalizer';
 
 export interface IBuildSnapshotOptions {
   symbol: string;
@@ -30,13 +31,28 @@ export class SnapshotBuilder {
    */
   public static buildSnapshot(options: IBuildSnapshotOptions): PointInTimeMarketSnapshot {
     const symbol = options.symbol.toUpperCase();
-    const rawCandles = options.executionCandles;
+    const rawCandles = CandleNormalizer.normalize(options.executionCandles);
 
-    // Strict point-in-time candle slicing
+    // Strict point-in-time candle slicing for execution and HTF datasets
     let execCandles = rawCandles;
+    let htf1Candles = options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : undefined;
+    let htf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
+
     if (options.asOfTimestamp) {
       const asOfTime = options.asOfTimestamp.getTime();
-      execCandles = rawCandles.filter((c) => new Date(c.timestamp).getTime() <= asOfTime);
+      execCandles = rawCandles.filter(
+        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+      );
+      if (htf1Candles) {
+        htf1Candles = htf1Candles.filter(
+          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        );
+      }
+      if (htf2Candles) {
+        htf2Candles = htf2Candles.filter(
+          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        );
+      }
     }
 
     const n = execCandles.length;
@@ -63,8 +79,8 @@ export class SnapshotBuilder {
       ...options.instrument,
     };
 
-    // 2. SMC Analysis
-    const smc = SMCAnalyzer.analyze(execCandles);
+    // 2. SMC Analysis (strictly point-in-time)
+    const smc = SMCAnalyzer.analyze(execCandles, { asOfTimestamp: timestamp });
 
     // 3. Quant Features & Normalization
     const quant = QuantFeatureEngine.extractQuantState(symbol, execCandles, smc);
@@ -79,8 +95,8 @@ export class SnapshotBuilder {
     // 6. Multi-Horizon Engine
     const multiHorizon = MultiHorizonEngine.evaluateMultiHorizon(
       execCandles,
-      options.htf1Candles,
-      options.htf2Candles,
+      htf1Candles,
+      htf2Candles,
     );
 
     // 7. Determine Candidate Direction
@@ -108,23 +124,36 @@ export class SnapshotBuilder {
         inCorrectEquilibrium = false;
     }
 
+    // Measure structure strength and risk/reward ratio dynamically
+    const structureStrength = (hasBOS ? 40 : 0) + (hasCHOCH ? 30 : 0) + (hasSweep ? 30 : 0);
+    let riskRewardRatio = 2.0;
+    if (smc.dealingRange) {
+      const target = isBull ? smc.dealingRange.high : smc.dealingRange.low;
+      const riskRef = isBull
+        ? (activeOB ? activeOB.low : (smc.confirmedSwingLows[smc.confirmedSwingLows.length - 1]?.price || marketPrice * 0.99))
+        : (activeOB ? activeOB.high : (smc.confirmedSwingHighs[smc.confirmedSwingHighs.length - 1]?.price || marketPrice * 1.01));
+      const rewardDist = Math.abs(target - marketPrice);
+      const riskDist = Math.max(1e-4, Math.abs(marketPrice - riskRef));
+      riskRewardRatio = Math.max(1.0, Math.min(5.0, rewardDist / riskDist));
+    }
+
     // 8. 10-Pillar Quant + SMC Confluence Score
     const score: QuantSMCScore = QuantSMCScorer.score({
       direction: candidateDir,
       hasBOS,
       hasCHOCH,
-      structureStrength: 85,
+      structureStrength,
       mtfAlignment: multiHorizon.alignment,
       mtfConfluenceScore: multiHorizon.confluenceScore,
       hasLiquiditySweep: hasSweep,
       hasOrderBlock: activeOB !== null,
-      obStrength: activeOB?.strength ?? 75,
+      obStrength: activeOB ? Math.min(100, activeOB.strength * 40) : 0,
       hasFVG: activeFVG !== null,
       relativeVolume: quant.momentum.relativeVolume,
       rsiValue: quant.momentum.rsi14,
       regime: regime.regime,
       volatilityPercentile: volatility.volatilityPercentile,
-      riskRewardRatio: 2.5,
+      riskRewardRatio,
       inCorrectEquilibriumZone: inCorrectEquilibrium,
     });
 
@@ -166,9 +195,9 @@ export class SnapshotBuilder {
         relativeVolume: quant.momentum.relativeVolume,
       },
       ml: {
-        probability: 0.75,
-        expectedR: 1.25,
-        confidence: score.totalScore,
+        probability: null,
+        expectedR: null,
+        confidence: null,
       },
       multiHorizon: {
         alignment: multiHorizon.alignment,
@@ -217,7 +246,7 @@ export class SnapshotBuilder {
 
     // 11. Run Canonical ML v2 prediction
     const mlFeatures = CanonicalMLEngineV2.extractFeatures(snapshot);
-    const mlPrediction = CanonicalMLEngineV2.predict(mlFeatures, 2.5);
+    const mlPrediction = CanonicalMLEngineV2.predict(mlFeatures, null);
     snapshot.ml = mlPrediction;
     snapshot.trace.ml = {
       probability: mlPrediction.probabilityWin,

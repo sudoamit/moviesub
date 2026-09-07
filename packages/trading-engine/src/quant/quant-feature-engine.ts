@@ -114,22 +114,22 @@ export class QuantFeatureEngine {
     let bosStrength = 0;
     let chochStrength = 0;
     let liquiditySweepDepth = 0;
-    let orderBlockStrength = 50;
-    let fvgSizeAtrRatio = 0.5;
+    let orderBlockStrength = 0;
+    let fvgSizeAtrRatio = 0;
     let fvgFillPercentage = 0;
-    let displacementRatio = 1.0;
-    let premiumDiscountPosition = 0.5;
-    let distanceToLiquidityPct = 1.0;
-    let distanceToHTFOrderBlockPct = 1.0;
+    let displacementRatio = 0;
+    let premiumDiscountPosition = 0;
+    let distanceToLiquidityPct = 0;
+    let distanceToHTFOrderBlockPct = 0;
 
     if (smcAnalysis) {
       if (smcAnalysis.breaksOfStructure && smcAnalysis.breaksOfStructure.length > 0) {
         const lastBOS = smcAnalysis.breaksOfStructure[smcAnalysis.breaksOfStructure.length - 1];
-        bosStrength = (lastBOS as any).strength ?? 80;
+        bosStrength = typeof (lastBOS as any).strength === 'number' ? (lastBOS as any).strength : 0;
       }
       if (smcAnalysis.changesOfCharacter && smcAnalysis.changesOfCharacter.length > 0) {
         const lastCHOCH = smcAnalysis.changesOfCharacter[smcAnalysis.changesOfCharacter.length - 1];
-        chochStrength = (lastCHOCH as any).strength ?? 85;
+        chochStrength = typeof (lastCHOCH as any).strength === 'number' ? (lastCHOCH as any).strength : 0;
       }
       if (smcAnalysis.liquiditySweeps && smcAnalysis.liquiditySweeps.length > 0) {
         const lastSweep = smcAnalysis.liquiditySweeps[smcAnalysis.liquiditySweeps.length - 1];
@@ -140,7 +140,7 @@ export class QuantFeatureEngine {
       }
       if (smcAnalysis.orderBlocks && smcAnalysis.orderBlocks.length > 0) {
         const lastOB = smcAnalysis.orderBlocks[smcAnalysis.orderBlocks.length - 1];
-        orderBlockStrength = lastOB.strength ?? 75;
+        orderBlockStrength = typeof lastOB.strength === 'number' ? lastOB.strength : 0;
         if (currentPrice > 0) {
           distanceToHTFOrderBlockPct =
             (Math.abs(currentPrice - (lastOB.high + lastOB.low) / 2) / currentPrice) * 100;

@@ -37,7 +37,9 @@ describe('SnapshotBuilder', () => {
     expect(snapshot.trace).toBeDefined();
     expect(snapshot.trace.whyThisTradeRanked.length).toBeGreaterThanOrEqual(0);
     expect(snapshot.ml).toBeDefined();
-    expect(snapshot.ml?.probabilityWin).toBeGreaterThan(0);
-    expect(snapshot.ml?.expectedR).toBeDefined();
+    expect(snapshot.ml?.probabilityWin).toBeNull();
+    expect(snapshot.ml?.expectedR).toBeNull();
+    expect(snapshot.trace.ml.probability).toBeNull();
+    expect(snapshot.trace.ml.expectedR).toBeNull();
   });
 });

@@ -8,13 +8,15 @@ import { FVGEngine } from './fvg-engine';
 import { OrderBlockEngine } from './order-block-engine';
 import { DealingRangeEngine } from './dealing-range';
 import { MarketRegimeEngine } from './market-regime';
+import { CandleNormalizer } from './candle-normalizer';
 
 export class SMCAnalyzer {
   /**
    * Performs full deterministic Smart Money Concepts (SMC) analysis on candle series
+   * with strict point-in-time correctness.
    */
-  static analyze(candles: ICandle[], config: ISMCAnalysisConfig = {}): ISMCAnalysisResult {
-    if (!candles || candles.length === 0) {
+  static analyze(rawCandles: ICandle[], config: ISMCAnalysisConfig = {}): ISMCAnalysisResult {
+    if (!rawCandles || rawCandles.length === 0) {
       return {
         candlesCount: 0,
         swingPoints: [],
@@ -35,6 +37,38 @@ export class SMCAnalyzer {
           adx: 0,
           volatility: 0,
           timestamp: new Date(),
+        },
+        currentTrend: Direction.NEUTRAL,
+      };
+    }
+
+    let candles = CandleNormalizer.normalize(rawCandles);
+    if (config.asOfTimestamp) {
+      const asOfTime = config.asOfTimestamp.getTime();
+      candles = candles.filter((c) => new Date(c.timestamp).getTime() <= asOfTime);
+    }
+
+    if (candles.length === 0) {
+      return {
+        candlesCount: 0,
+        swingPoints: [],
+        confirmedSwingHighs: [],
+        confirmedSwingLows: [],
+        breaksOfStructure: [],
+        changesOfCharacter: [],
+        liquidityPools: [],
+        liquiditySweeps: [],
+        fairValueGaps: [],
+        activeFVGs: [],
+        orderBlocks: [],
+        activeOrderBlocks: [],
+        dealingRange: null,
+        marketRegime: {
+          regime: 'RANGE' as any,
+          atr: 0,
+          adx: 0,
+          volatility: 0,
+          timestamp: config.asOfTimestamp || new Date(),
         },
         currentTrend: Direction.NEUTRAL,
       };
@@ -81,6 +115,7 @@ export class SMCAnalyzer {
     // 5. Detect Fair Value Gaps (FVG)
     const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(candles, {
       minGapAtrMultiplier: config.fvgMinGapAtr,
+      asOfTimestamp: config.asOfTimestamp,
     });
 
     // 6. Detect Order Blocks (OB)
@@ -90,6 +125,7 @@ export class SMCAnalyzer {
       fairValueGaps,
       {
         displacementThresholdAtr: config.displacementThresholdAtr,
+        asOfTimestamp: config.asOfTimestamp,
       },
     );
 
@@ -99,7 +135,7 @@ export class SMCAnalyzer {
     // 8. Classify Market Regime
     const marketRegime = MarketRegimeEngine.classifyRegime(candles, swingPoints);
 
-    // Determine current structural trend
+    // Determine current structural trend from confirmed structure breaks at or before asOfTimestamp
     let currentTrend: Direction = Direction.NEUTRAL;
     if (breaksOfStructure.length > 0) {
       currentTrend = breaksOfStructure[breaksOfStructure.length - 1].direction;

@@ -55,4 +55,19 @@ describe('CanonicalMLEngineV2', () => {
     expect(prediction.featureSchemaVersion).toBe('2.0');
     expect(typeof prediction.expectedR).toBe('number');
   });
+
+  it('marks model output as unavailable when no calibrated expected win is provided', () => {
+    const candles = createMockCandles(50, 80000);
+    const snapshot = SnapshotBuilder.buildSnapshot({
+      symbol: 'BTCUSDT',
+      executionCandles: candles,
+    });
+
+    const features = CanonicalMLEngineV2.extractFeatures(snapshot);
+    const prediction = CanonicalMLEngineV2.predict(features, null);
+
+    expect(prediction.probabilityWin).toBeNull();
+    expect(prediction.expectedR).toBeNull();
+    expect(prediction.calibrated).toBe(false);
+  });
 });

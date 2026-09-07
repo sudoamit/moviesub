@@ -88,6 +88,15 @@ export interface IFairValueGap {
   isFilled: boolean;
   fillPercentage: number;
   isInvalidated: boolean;
+  status?: 'ACTIVE' | 'PARTIALLY_FILLED' | 'FILLED' | 'INVALIDATED';
+  createdAt?: Date;
+  confirmedAt?: Date;
+  filledAtIndex?: number;
+  filledAtTimestamp?: Date;
+  invalidatedAtIndex?: number;
+  invalidatedAtTimestamp?: Date;
+  filledAt?: Date;
+  invalidatedAt?: Date;
 }
 
 export interface IOrderBlock {
@@ -101,6 +110,16 @@ export interface IOrderBlock {
   mitigatedAtIndex?: number;
   isInvalidated: boolean;
   strength: number;
+  status?: 'CANDIDATE' | 'CONFIRMED' | 'ACTIVE' | 'MITIGATED' | 'INVALIDATED';
+  createdAt?: Date;
+  confirmedAtIndex?: number;
+  confirmedAtTimestamp?: Date;
+  mitigatedAtTimestamp?: Date;
+  invalidatedAtIndex?: number;
+  invalidatedAtTimestamp?: Date;
+  confirmedAt?: Date;
+  mitigatedAt?: Date;
+  invalidatedAt?: Date;
 }
 
 export interface IDealingRange {
@@ -185,8 +204,8 @@ export interface ISignalSetup {
   regime?: string;
   volatilityPercentile?: number;
   forecastVolatility?: number;
-  mlProbability?: number;
-  expectedR?: number;
+  mlProbability?: number | null;
+  expectedR?: number | null;
   decisionTrace?: any;
 }
 

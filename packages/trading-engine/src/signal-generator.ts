@@ -28,6 +28,7 @@ export interface IGenerateSignalOptions {
   htf2Timeframe?: Timeframe | string;
   mtfMode?: MTFMode;
   strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
+  asOfTimestamp?: Date;
 }
 
 export class SignalGenerator {
@@ -42,24 +43,45 @@ export class SignalGenerator {
     const htf2Tf = options.htf2Timeframe || Timeframe.H4;
     const strategyMode = options.strategyMode || 'SMC';
 
-    // 1. Canonical normalization
-    const execCandles = CandleNormalizer.normalize(options.executionCandles);
+    // 1. Canonical normalization & point-in-time slicing
+    let execCandles = CandleNormalizer.normalize(options.executionCandles);
+    let htf1Candles = options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : [];
+    let htf2Candles = options.htf2Candles ? CandleNormalizer.normalize(options.htf2Candles) : undefined;
+
+    if (options.asOfTimestamp) {
+      const asOfTime = options.asOfTimestamp.getTime();
+      execCandles = execCandles.filter(
+        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+      );
+      htf1Candles = htf1Candles.filter(
+        (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+      );
+      if (htf2Candles) {
+        htf2Candles = htf2Candles.filter(
+          (c) => new Date(c.timestamp).getTime() <= asOfTime && c.isClosed !== false,
+        );
+      }
+    }
+
     if (!execCandles || execCandles.length < 20) {
       return SignalGenerator.createNoTradeSignal(
         symbol,
         executionTf,
         'Insufficient historical candle data',
-        execCandles.length > 0 ? execCandles[execCandles.length - 1].timestamp : new Date(),
+        execCandles.length > 0 ? execCandles[execCandles.length - 1].timestamp : (options.asOfTimestamp || new Date()),
       );
     }
+
+    const lastCandle = execCandles[execCandles.length - 1];
+    const decisionTimestamp = new Date(lastCandle.timestamp);
 
     // 2. Direct Routing if Saiyan OCC Strategy is Selected
     if (strategyMode === 'SAIYAN_OCC') {
       return SaiyanOCCEngine.generateSignal(symbol, execCandles, String(executionTf));
     }
 
-    // 3. Run Execution Timeframe SMC Analysis
-    const execAnalysis = SMCAnalyzer.analyze(execCandles);
+    // 3. Run Execution Timeframe SMC Analysis (strictly point-in-time)
+    const execAnalysis = SMCAnalyzer.analyze(execCandles, { asOfTimestamp: decisionTimestamp });
 
     // 4. Run Multi-Timeframe Alignment (with strict timestamp filtering)
     const execTfData: IMTFTimeframeData = {
@@ -69,12 +91,12 @@ export class SignalGenerator {
     };
     const htf1Data: IMTFTimeframeData = {
       timeframe: htf1Tf,
-      candles: options.htf1Candles ? CandleNormalizer.normalize(options.htf1Candles) : [],
+      candles: htf1Candles,
     };
-    const htf2Data: IMTFTimeframeData | undefined = options.htf2Candles
+    const htf2Data: IMTFTimeframeData | undefined = htf2Candles
       ? {
           timeframe: htf2Tf,
-          candles: CandleNormalizer.normalize(options.htf2Candles),
+          candles: htf2Candles,
         }
       : undefined;
 
@@ -83,9 +105,9 @@ export class SignalGenerator {
       htf1Data,
       htf2Data,
       options.mtfMode ?? MTFMode.BALANCED,
+      decisionTimestamp,
     );
 
-    const lastCandle = execCandles[execCandles.length - 1];
     const currentPrice = lastCandle.close;
 
     // 5. Determine Directional Candidate with Strict HTF Bias Gate
@@ -304,26 +326,28 @@ export class SignalGenerator {
     }
 
     const finalDirection = grade === SignalGrade.NO_TRADE ? Direction.NEUTRAL : candidateDir;
-    const anchorTime = activeOB
-      ? activeOB.timestamp
-      : activeFVG
-        ? activeFVG.timestamp
-        : anchorSwing
-          ? anchorSwing.timestamp
-          : lastCandle.timestamp;
-    const signalTimestamp = new Date(anchorTime);
+    const triggerTag = hasSweep
+      ? 'SWEEP'
+      : activeOB
+        ? 'OB'
+        : activeFVG
+          ? 'FVG'
+          : hasStructureBreak
+            ? 'BOS'
+            : 'MOMENTUM';
 
     // Build Canonical Point-In-Time Market Snapshot & Quant Intelligence State
     const snapshot = SnapshotBuilder.buildSnapshot({
       symbol,
       executionCandles: execCandles,
       executionTimeframe: executionTf,
-      htf1Candles: options.htf1Candles,
-      htf2Candles: options.htf2Candles,
+      htf1Candles,
+      htf2Candles,
+      asOfTimestamp: decisionTimestamp,
     });
 
     return {
-      id: `smc_${symbol}_${executionTf}_${finalDirection}_${signalTimestamp.getTime()}`,
+      id: `smc_${symbol}_${executionTf}_${finalDirection}_${triggerTag}_${decisionTimestamp.getTime()}`,
       symbol,
       direction: finalDirection,
       score: totalScore,
@@ -338,14 +362,14 @@ export class SignalGenerator {
       reasoning,
       reasons: explicitReasons,
       state: SignalState.PENDING,
-      timestamp: signalTimestamp,
+      timestamp: decisionTimestamp,
       quantSnapshot: snapshot,
       quantScore: snapshot.score,
       regime: snapshot.regime.regime,
       volatilityPercentile: snapshot.volatility.volatilityPercentile,
       forecastVolatility: snapshot.volatility.forecastVolatility,
-      mlProbability: snapshot.ml?.probabilityWin,
-      expectedR: snapshot.ml?.expectedR,
+      mlProbability: snapshot.ml?.probabilityWin ?? undefined,
+      expectedR: snapshot.ml?.expectedR ?? undefined,
       decisionTrace: snapshot.trace,
     };
   }

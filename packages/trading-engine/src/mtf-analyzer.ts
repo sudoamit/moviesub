@@ -57,9 +57,9 @@ export class MultiTimeframeAnalyzer {
     const duration = MultiTimeframeAnalyzer.getTimeframeDurationMs(htfTimeframe);
 
     return htfCandles.filter((c) => {
-      const openTime = new Date(c.timestamp).getTime();
-      const closeTime = openTime + duration;
-      return closeTime <= maxAllowedCloseTime;
+      const candleTime = new Date(c.timestamp).getTime();
+      const closeTime = candleTime + duration;
+      return closeTime <= maxAllowedCloseTime && c.isClosed !== false;
     });
   }
 
@@ -72,13 +72,24 @@ export class MultiTimeframeAnalyzer {
     htf1: IMTFTimeframeData,
     htf2?: IMTFTimeframeData,
     mode: MTFMode = MTFMode.BALANCED,
+    asOfTimestamp?: Date,
   ): IMTFAnalysisResult {
-    const execCandles = CandleNormalizer.normalize(executionTf.candles);
-    const lastExecCandle = execCandles[execCandles.length - 1];
+    let execCandles = CandleNormalizer.normalize(executionTf.candles);
     const execDuration = MultiTimeframeAnalyzer.getTimeframeDurationMs(executionTf.timeframe);
-    const maxCloseTime = lastExecCandle
-      ? new Date(lastExecCandle.timestamp).getTime() + execDuration
-      : Date.now();
+
+    let maxCloseTime: number;
+    if (asOfTimestamp) {
+      maxCloseTime = asOfTimestamp.getTime();
+      execCandles = execCandles.filter((c) => {
+        const closeTime = new Date(c.timestamp).getTime() + execDuration;
+        return closeTime <= maxCloseTime;
+      });
+    } else {
+      const lastExecCandle = execCandles[execCandles.length - 1];
+      maxCloseTime = lastExecCandle
+        ? new Date(lastExecCandle.timestamp).getTime() + execDuration
+        : Date.now();
+    }
 
     // Strictly filter HTF candles so that unclosed HTF bars cannot leak into LTF decision
     const htf1CleanCandles = MultiTimeframeAnalyzer.filterClosedHTFCandles(

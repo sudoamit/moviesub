@@ -10,9 +10,21 @@ import {
   IOrderBlock,
   ISwingPoint,
   MarketRegimeType,
+  Timeframe,
 } from '@quant/shared';
 
+export interface PointInTimeContext {
+  asOfTimestamp: Date;
+  executionTimeframe: Timeframe | string;
+  executionCandles: ICandle[];
+  htf1Candles?: ICandle[];
+  htf1Timeframe?: Timeframe | string;
+  htf2Candles?: ICandle[];
+  htf2Timeframe?: Timeframe | string;
+}
+
 export interface ISMCAnalysisConfig {
+  asOfTimestamp?: Date;
   swingLeftBars?: number;
   swingRightBars?: number;
   minSwingDistanceAtrMultiplier?: number;

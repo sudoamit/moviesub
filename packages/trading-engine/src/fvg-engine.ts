@@ -1,19 +1,32 @@
 import { Direction, IFairValueGap, ICandle } from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
+import { CandleNormalizer } from './candle-normalizer';
 
 export interface IFVGEngineOptions {
   minGapAtrMultiplier?: number;
+  asOfTimestamp?: Date;
 }
 
 export class FVGEngine {
   /**
-   * Detects 3-candle Fair Value Gaps (imbalances) and tracks mitigation/fill percentage
+   * Detects 3-candle Fair Value Gaps (imbalances) and tracks point-in-time mitigation/fill percentage.
+   * State is evaluated strictly chronologically up to asOfTimestamp without look-ahead bias.
    */
   static detectFVGs(
-    candles: ICandle[],
+    rawCandles: ICandle[],
     options: IFVGEngineOptions = {},
   ): { allFVGs: IFairValueGap[]; activeFVGs: IFairValueGap[] } {
-    if (!candles || candles.length < 3) {
+    if (!rawCandles || rawCandles.length < 3) {
+      return { allFVGs: [], activeFVGs: [] };
+    }
+
+    let candles = CandleNormalizer.normalize(rawCandles);
+    if (options.asOfTimestamp) {
+      const asOfTime = options.asOfTimestamp.getTime();
+      candles = candles.filter((c) => new Date(c.timestamp).getTime() <= asOfTime);
+    }
+
+    if (candles.length < 3) {
       return { allFVGs: [], activeFVGs: [] };
     }
 
@@ -36,10 +49,13 @@ export class FVGEngine {
           upperBound: c3.low,
           lowerBound: c1.high,
           candleIndex: i,
-          timestamp: c3.timestamp,
+          timestamp: new Date(c3.timestamp),
+          createdAt: new Date(c3.timestamp),
+          confirmedAt: new Date(c3.timestamp),
           isFilled: false,
           fillPercentage: 0,
           isInvalidated: false,
+          status: 'ACTIVE',
         });
       }
 
@@ -51,21 +67,25 @@ export class FVGEngine {
           upperBound: c1.low,
           lowerBound: c3.high,
           candleIndex: i,
-          timestamp: c3.timestamp,
+          timestamp: new Date(c3.timestamp),
+          createdAt: new Date(c3.timestamp),
+          confirmedAt: new Date(c3.timestamp),
           isFilled: false,
           fillPercentage: 0,
           isInvalidated: false,
+          status: 'ACTIVE',
         });
       }
     }
 
-    // 2. Track subsequent price action, mitigation, and fill percentage
+    // 2. Track subsequent price action, mitigation, and fill percentage incrementally
     for (const fvg of fvgs) {
       const gapHeight = fvg.upperBound - fvg.lowerBound;
       if (gapHeight <= 0) continue;
 
       for (let k = fvg.candleIndex + 1; k < candles.length; k++) {
         const c = candles[k];
+        const cTime = new Date(c.timestamp);
 
         if (fvg.direction === Direction.BULLISH) {
           // Price moves down into Bullish FVG
@@ -74,13 +94,23 @@ export class FVGEngine {
             const currentFill = Math.min(100, (fillDepth / gapHeight) * 100);
             fvg.fillPercentage = Math.max(fvg.fillPercentage, currentFill);
 
+            if (fvg.fillPercentage > 0 && !fvg.isFilled && !fvg.isInvalidated) {
+              fvg.status = 'PARTIALLY_FILLED';
+            }
+
             if (c.low <= fvg.lowerBound) {
               fvg.isFilled = true;
+              fvg.status = 'FILLED';
+              fvg.filledAtIndex = k;
+              fvg.filledAtTimestamp = cTime;
             }
           }
           // Invalidation: candle closes below the FVG lower bound
           if (c.close < fvg.lowerBound) {
             fvg.isInvalidated = true;
+            fvg.status = 'INVALIDATED';
+            fvg.invalidatedAtIndex = k;
+            fvg.invalidatedAtTimestamp = cTime;
             break;
           }
         } else {
@@ -90,13 +120,23 @@ export class FVGEngine {
             const currentFill = Math.min(100, (fillDepth / gapHeight) * 100);
             fvg.fillPercentage = Math.max(fvg.fillPercentage, currentFill);
 
+            if (fvg.fillPercentage > 0 && !fvg.isFilled && !fvg.isInvalidated) {
+              fvg.status = 'PARTIALLY_FILLED';
+            }
+
             if (c.high >= fvg.upperBound) {
               fvg.isFilled = true;
+              fvg.status = 'FILLED';
+              fvg.filledAtIndex = k;
+              fvg.filledAtTimestamp = cTime;
             }
           }
           // Invalidation: candle closes above the FVG upper bound
           if (c.close > fvg.upperBound) {
             fvg.isInvalidated = true;
+            fvg.status = 'INVALIDATED';
+            fvg.invalidatedAtIndex = k;
+            fvg.invalidatedAtTimestamp = cTime;
             break;
           }
         }
