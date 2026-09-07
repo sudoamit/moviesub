@@ -153,7 +153,20 @@ describe('Worker Processors', () => {
       expect(mockPrisma.paperTrade.create).toHaveBeenCalled();
     });
 
-    it('1 & 4. stale live ticker cannot trigger SL and candle closes are never used as execution prices', async () => {
+    it('1. resolveLivePrice() reads ticker:${SYMBOL}:live', async () => {
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24150.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-key-check',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(mockJob);
+      expect(mockRedis.get).toHaveBeenCalledWith('ticker:NIFTY:live');
+    });
+
+    it('2. stale ticker returns null and does not close position', async () => {
       // Mock tick that is 10 seconds old (> 5s maxAge)
       mockRedis.get = jest.fn().mockResolvedValue(
         JSON.stringify({ price: 24040.0, lastUpdated: Date.now() - 10000 }),
@@ -173,7 +186,7 @@ describe('Worker Processors', () => {
       expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
     });
 
-    it('2. missing live ticker cannot trigger SL', async () => {
+    it('3. missing ticker returns null and does not close position', async () => {
       mockRedis.get = jest.fn().mockResolvedValue(null);
 
       const mockJob = {
@@ -189,7 +202,7 @@ describe('Worker Processors', () => {
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
-    it('3. position monitor never reads PostgreSQL candles for execution', async () => {
+    it('4. PositionMonitor never calls prisma.candle', async () => {
       mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24150.0, lastUpdated: Date.now() }));
 
       const mockJob = {
@@ -203,7 +216,21 @@ describe('Worker Processors', () => {
       expect(mockPrisma.candle.findMany).not.toHaveBeenCalled();
     });
 
-    it('5. missing persisted SL does not create a synthetic SL', async () => {
+    it('5. PositionMonitor never reads candle:${symbol}:15m:latest', async () => {
+      mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24150.0, lastUpdated: Date.now() }));
+
+      const mockJob = {
+        id: 'monitor-no-candle-key',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      await processor.process(mockJob);
+      expect(mockRedis.get).not.toHaveBeenCalledWith('candle:NIFTY:15m:latest');
+      expect(mockRedis.get).not.toHaveBeenCalledWith('candle:nifty:15m:latest');
+    });
+
+    it('6. missing initial SL never creates a synthetic SL', async () => {
       mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
         {
           id: 'pos-no-sl',
@@ -247,10 +274,10 @@ describe('Worker Processors', () => {
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
-    it('6. missing persisted TP does not create a synthetic TP', async () => {
+    it('7 & 8. missing TP1 or TP2 never creates synthetic targets and skips trailing stops', async () => {
       mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
         {
-          id: 'pos-no-tp',
+          id: 'pos-no-tp1-tp2',
           accountId: 'acc-1',
           symbol: 'NIFTY',
           contractSymbol: 'NIFTY SPOT',
@@ -275,7 +302,7 @@ describe('Worker Processors', () => {
         },
       ]);
 
-      // Price rises to 24500.0, but no TP3 is set -> position remains open
+      // Price rises to 24500.0, but no TP3 or trailing targets exist -> position stays open with unchanged SL
       mockRedis.get = jest.fn().mockResolvedValue(JSON.stringify({ price: 24500.0, lastUpdated: Date.now() }));
 
       const mockJob = {
@@ -289,9 +316,16 @@ describe('Worker Processors', () => {
       expect(result.closed).toBe(0);
       expect(result.updated).toBe(1);
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.paperPosition.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            trailingStopStateJson: undefined,
+          }),
+        }),
+      );
     });
 
-    it('7. missing risk anchor produces 0R, not synthetic risk', async () => {
+    it('9 & 10. missing risk anchor produces riskDistance = 0 and realizedR = 0', async () => {
       mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
         {
           id: 'pos-no-risk-anchor',
@@ -333,6 +367,87 @@ describe('Worker Processors', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             unrealizedR: new Decimal(0),
+          }),
+        }),
+      );
+    });
+
+    it('11. EXIT_PENDING remains open when ticker is stale or missing', async () => {
+      mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
+        {
+          id: 'pos-exit-pending-stale',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24000.0),
+          initialStopLoss: new Decimal(24000.0),
+          status: PositionState.EXIT_PENDING,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      // Stale tick (10s old)
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24150.0, lastUpdated: Date.now() - 10000 }),
+      );
+
+      const mockJob = {
+        id: 'monitor-exit-pending-stale',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+    });
+
+    it('12. EXIT_PENDING closes only with a fresh live ticker', async () => {
+      mockPrisma.paperPosition.findMany.mockResolvedValueOnce([
+        {
+          id: 'pos-exit-pending-fresh',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24000.0),
+          initialStopLoss: new Decimal(24000.0),
+          status: PositionState.EXIT_PENDING,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
+      // Fresh tick (just updated)
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24150.0, lastUpdated: Date.now() }),
+      );
+
+      const mockJob = {
+        id: 'monitor-exit-pending-fresh',
+        name: 'monitor-positions',
+        data: {},
+      } as Job;
+
+      const result = await processor.process(mockJob);
+      expect(result.checked).toBe(1);
+      expect(result.closed).toBe(1);
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            exitReason: 'Exit Pending Completed on Next Tick',
           }),
         }),
       );

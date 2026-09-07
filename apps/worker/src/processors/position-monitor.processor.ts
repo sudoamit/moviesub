@@ -48,9 +48,18 @@ export class PositionMonitorProcessor extends WorkerHost {
     for (const pos of activePositions) {
       try {
         const livePrice = await this.resolveLivePrice(pos.symbol);
-        if (!livePrice || livePrice <= 0) continue;
 
-        // If position was already EXIT_PENDING, attempt immediate close
+        // Fail-closed: If live price is null/stale, do NOT close or alter the position
+        if (!livePrice || livePrice <= 0) {
+          if (pos.status === PositionState.EXIT_PENDING) {
+            this.logger.debug(
+              `[PositionMonitor] Position ${pos.id} (${pos.symbol}) is EXIT_PENDING but waiting for a fresh live tick; remaining EXIT_PENDING.`,
+            );
+          }
+          continue;
+        }
+
+        // If position was already EXIT_PENDING, attempt immediate close ONLY with the validated fresh live tick
         if (pos.status === PositionState.EXIT_PENDING) {
           await this.executeFullClose(
             pos,
@@ -76,25 +85,32 @@ export class PositionMonitorProcessor extends WorkerHost {
     return { checked: activePositions.length, closed: closedCount, updated: updatedCount };
   }
 
+  /**
+   * Resolves execution/monitoring price exclusively from the live ticker cache: ticker:${SYMBOL}:live
+   * NEVER queries PostgreSQL candles or candle caches.
+   */
   private async resolveLivePrice(symbol: string): Promise<number | null> {
     const sym = symbol.toUpperCase();
 
-    // LIVE_TICK only for PAPER execution: fetch live ticker from Redis
     try {
       const cached = await this.redis.get(`ticker:${sym}:live`);
       if (!cached) {
-        this.logger.debug(`[PositionMonitor] No live ticker found in cache for ${sym}`);
+        this.logger.debug(
+          `[PositionMonitor] No live ticker cached under 'ticker:${sym}:live' for ${sym}; skipping evaluation`,
+        );
         return null;
       }
 
       const maxAgeSeconds = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || 5;
       const validated = ExecutionPriceResolver.validateLiveTicker(cached, maxAgeSeconds);
-      if (validated) {
+      if (validated && validated.price > 0) {
         return validated.price;
-      } else {
-        this.logger.warn(`[PositionMonitor] Live tick for ${sym} is stale or invalid; skipping execution`);
-        return null;
       }
+
+      this.logger.warn(
+        `[PositionMonitor] Live tick for ${sym} is stale (> ${maxAgeSeconds}s) or invalid; skipping execution to fail closed`,
+      );
+      return null;
     } catch (err: any) {
       this.logger.error(`[PositionMonitor] Error resolving live tick for ${sym}: ${err?.message}`);
       return null;
@@ -130,11 +146,20 @@ export class PositionMonitorProcessor extends WorkerHost {
     const isBuy = pos.direction === Direction.BULLISH;
     const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
 
+    // Use ONLY persisted position values (never invent synthetic risk levels)
     const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
     const riskAnchor = initialStopLoss ?? stopLoss;
+
+    // If no risk anchor exists, riskDistance is 0 and currentR is 0 (no synthetic fallback)
     const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
     const currentR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
+
+    if (!riskAnchor) {
+      this.logger.warn(
+        `[PositionMonitor] Position ${pos.id} (${pos.symbol}) is missing persisted StopLoss; SL evaluation skipped without fabricating risk levels.`,
+      );
+    }
 
     // Track MAE / MFE
     const currentMFE = Math.max(
@@ -149,11 +174,18 @@ export class PositionMonitorProcessor extends WorkerHost {
     const posAgeMs = Date.now() - new Date(pos.openedAt).getTime();
     const minAgeMs = 3000; // Minimum 3s to prevent race condition exits
 
-    // Trailing stop evaluation (ONLY if explicit targets and initial SL exist)
+    // Trailing stop evaluation: ONLY if all required persisted values exist (entry, initial SL, TP1, TP2)
     let newStopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     let trailingStateJson: any = undefined;
 
-    if (initialStopLoss && pos.initialTarget1 && pos.initialTarget2) {
+    if (
+      initialStopLoss &&
+      pos.initialTarget1 &&
+      pos.initialTarget2 &&
+      Number(pos.initialTarget1) > 0 &&
+      Number(pos.initialTarget2) > 0 &&
+      entryPrice > 0
+    ) {
       const trailing = TrailingEngine.evaluate(
         entryPrice,
         Number(initialStopLoss),
@@ -181,7 +213,7 @@ export class PositionMonitorProcessor extends WorkerHost {
       }
     }
 
-    // 1. Check Stop Loss Trigger
+    // 1. Check Stop Loss Trigger (ONLY if a valid persisted SL exists)
     let shouldClose = false;
     let exitReason = '';
     let outcomeClassification = 'MANUAL';
@@ -197,7 +229,7 @@ export class PositionMonitorProcessor extends WorkerHost {
       }
     }
 
-    // 2. Check Final TP3 (Runner) Trigger
+    // 2. Check Final TP3 (Runner) Trigger (ONLY if persisted target3 exists)
     const tp3 = pos.target3 ? Number(pos.target3) : undefined;
     if (!shouldClose && tp3 && posAgeMs >= minAgeMs) {
       const isTP3Hit = isBuy ? livePrice >= tp3 : livePrice <= tp3;
@@ -261,6 +293,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     const grossPnL = priceDiff * quantity;
     const realizedPnL = Number((grossPnL - totalCharges).toFixed(2));
 
+    // Zero synthetic risk: use only persisted SL
     const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
     const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
     const riskAnchor = initialStopLoss ?? stopLoss;
@@ -376,3 +409,4 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
   }
 }
+
