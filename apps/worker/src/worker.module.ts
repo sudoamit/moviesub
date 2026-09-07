@@ -5,6 +5,7 @@ import { BULLMQ_QUEUES } from '@quant/shared';
 import { CandleProcessor } from './processors/candle.processor';
 import { ScannerProcessor } from './processors/scanner.processor';
 import { LearningProcessor } from './processors/learning.processor';
+import { PositionMonitorProcessor } from './processors/position-monitor.processor';
 import { PrismaService } from './prisma.service';
 import { RedisService } from './redis.service';
 
@@ -36,7 +37,18 @@ import { RedisService } from './redis.service';
     BullModule.registerQueue({
       name: BULLMQ_QUEUES.LEARNING_TASKS,
     }),
+    BullModule.registerQueue({
+      name: BULLMQ_QUEUES.POSITION_MONITORING,
+    }),
   ],
-  providers: [PrismaService, RedisService, CandleProcessor, ScannerProcessor, LearningProcessor],
+  providers: [
+    PrismaService,
+    RedisService,
+    CandleProcessor,
+    ScannerProcessor,
+    LearningProcessor,
+    PositionMonitorProcessor,
+  ],
 })
 export class WorkerModule {}
+

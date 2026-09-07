@@ -24,6 +24,7 @@ describe('MarketDataService', () => {
       },
       candle: {
         upsert: jest.fn().mockResolvedValue({ id: 'c-1' }),
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
 
@@ -71,7 +72,8 @@ describe('MarketDataService', () => {
 
     expect(result.validIngested).toBe(2);
     expect(result.invalidCount).toBe(0);
-    expect(prismaService.candle.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaService.candle.createMany).toHaveBeenCalledTimes(1);
+    expect(prismaService.candle.upsert).toHaveBeenCalledTimes(1);
     expect(redisService.set).toHaveBeenCalledTimes(2); // Latest key + buffer key
   });
 

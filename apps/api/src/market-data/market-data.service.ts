@@ -75,34 +75,87 @@ export class MarketDataService {
 
     const tfEnum = toPrismaTimeframe(timeframe);
 
-    // Batch upsert to PostgreSQL
-    for (const candle of validCandles) {
+    // High-Throughput Batch Persistence to PostgreSQL
+    const candleData = validCandles.map((c) => ({
+      instrumentId: inst.id,
+      timeframe: tfEnum,
+      timestamp: c.timestamp,
+      open: new Decimal(c.open),
+      high: new Decimal(c.high),
+      low: new Decimal(c.low),
+      close: new Decimal(c.close),
+      volume: new Decimal(c.volume),
+      isClosed: c.isClosed ?? true,
+    }));
+
+    // Perform batch insert skipping duplicates
+    if (this.prisma.candle?.createMany) {
+      await this.prisma.candle.createMany({
+        data: candleData,
+        skipDuplicates: true,
+      });
+    } else {
+      for (const candle of validCandles) {
+        await this.prisma.candle.upsert({
+          where: {
+            instrumentId_timeframe_timestamp: {
+              instrumentId: inst.id,
+              timeframe: tfEnum,
+              timestamp: candle.timestamp,
+            },
+          },
+          update: {
+            open: new Decimal(candle.open),
+            high: new Decimal(candle.high),
+            low: new Decimal(candle.low),
+            close: new Decimal(candle.close),
+            volume: new Decimal(candle.volume),
+            isClosed: candle.isClosed ?? true,
+          },
+          create: {
+            instrumentId: inst.id,
+            timeframe: tfEnum,
+            timestamp: candle.timestamp,
+            open: new Decimal(candle.open),
+            high: new Decimal(candle.high),
+            low: new Decimal(candle.low),
+            close: new Decimal(candle.close),
+            volume: new Decimal(candle.volume),
+            isClosed: candle.isClosed ?? true,
+          },
+        });
+      }
+    }
+
+    // Update the most recent candle in case of in-progress candle updates
+    if (validCandles.length > 0) {
+      const latest = validCandles[validCandles.length - 1];
       await this.prisma.candle.upsert({
         where: {
           instrumentId_timeframe_timestamp: {
             instrumentId: inst.id,
             timeframe: tfEnum,
-            timestamp: candle.timestamp,
+            timestamp: latest.timestamp,
           },
         },
         update: {
-          open: new Decimal(candle.open),
-          high: new Decimal(candle.high),
-          low: new Decimal(candle.low),
-          close: new Decimal(candle.close),
-          volume: new Decimal(candle.volume),
-          isClosed: candle.isClosed ?? true,
+          open: new Decimal(latest.open),
+          high: new Decimal(latest.high),
+          low: new Decimal(latest.low),
+          close: new Decimal(latest.close),
+          volume: new Decimal(latest.volume),
+          isClosed: latest.isClosed ?? true,
         },
         create: {
           instrumentId: inst.id,
           timeframe: tfEnum,
-          timestamp: candle.timestamp,
-          open: new Decimal(candle.open),
-          high: new Decimal(candle.high),
-          low: new Decimal(candle.low),
-          close: new Decimal(candle.close),
-          volume: new Decimal(candle.volume),
-          isClosed: candle.isClosed ?? true,
+          timestamp: latest.timestamp,
+          open: new Decimal(latest.open),
+          high: new Decimal(latest.high),
+          low: new Decimal(latest.low),
+          close: new Decimal(latest.close),
+          volume: new Decimal(latest.volume),
+          isClosed: latest.isClosed ?? true,
         },
       });
     }

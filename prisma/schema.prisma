@@ -804,4 +804,270 @@ model ResearchKnowledgeNode {
   @@map("research_knowledge_nodes")
 }
 
+enum OrderState {
+  CREATED
+  RISK_CHECKED
+  REJECTED
+  SUBMITTED
+  ACKNOWLEDGED
+  PARTIALLY_FILLED
+  FILLED
+  CANCEL_REQUESTED
+  CANCELLED
+  FAILED
+}
+
+enum PositionState {
+  PENDING
+  OPEN
+  PARTIALLY_CLOSED
+  CLOSING
+  CLOSED
+  INVALIDATED
+}
+
+enum TradingMode {
+  BACKTEST
+  PAPER
+  SHADOW
+  LIVE
+}
+
+enum RiskRejectionReason {
+  DAILY_LOSS_LIMIT
+  POSITION_SIZE_LIMIT
+  EXPOSURE_LIMIT
+  TRADE_COUNT_LIMIT
+  CONSECUTIVE_LOSS_LIMIT
+  INVALID_STOP_LOSS
+  INVALID_RISK_REWARD
+  STALE_MARKET_DATA
+  MARKET_DATA_UNAVAILABLE
+  TRADING_DISABLED
+  DUPLICATE_ORDER
+  INSUFFICIENT_MARGIN
+}
+
+model PaperAccount {
+  id               String              @id @default(uuid())
+  name             String              @default("Primary Paper Account")
+  currency         String              @default("INR")
+  initialCapital   Decimal             @default(1000000.0) @db.Decimal(18, 2)
+  cashBalance      Decimal             @default(1000000.0) @db.Decimal(18, 2)
+  usedMargin       Decimal             @default(0.0) @db.Decimal(18, 2)
+  realizedPnL      Decimal             @default(0.0) @db.Decimal(18, 2)
+  totalChargesPaid Decimal             @default(0.0) @db.Decimal(18, 2)
+  tradingMode      TradingMode         @default(PAPER)
+  isActive         Boolean             @default(true)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  orders           PaperOrder[]
+  positions        PaperPosition[]
+  trades           PaperTrade[]
+  snapshots        PortfolioSnapshot[]
+
+  @@map("paper_accounts")
+}
+
+model PaperOrder {
+  id                String              @id @default(uuid())
+  accountId         String
+  account           PaperAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  symbol            String
+  contractSymbol    String
+  instrumentType    String              @default("SPOT") // SPOT, OPTION
+  strike            Decimal?            @db.Decimal(18, 4)
+  optionType        String?             // CE, PE
+  direction         Direction           // BULLISH/BEARISH or BUY/SELL
+  orderType         String              @default("MARKET") // MARKET, LIMIT
+  requestedQuantity Decimal             @db.Decimal(18, 4)
+  filledQuantity    Decimal             @default(0.0) @db.Decimal(18, 4)
+  price             Decimal?            @db.Decimal(18, 6)
+  triggerPrice      Decimal?            @db.Decimal(18, 6)
+  stopLoss          Decimal?            @db.Decimal(18, 6)
+  target1           Decimal?            @db.Decimal(18, 6)
+  target2           Decimal?            @db.Decimal(18, 6)
+  target3           Decimal?            @db.Decimal(18, 6)
+  leverage          Decimal             @default(1.0) @db.Decimal(5, 2)
+  status            OrderState          @default(CREATED)
+  rejectionReason   RiskRejectionReason?
+  rejectionDetails  String?
+  idempotencyKey    String              @unique
+  signalId          String?
+  correlationId     String
+  submittedAt       DateTime?
+  cancelledAt       DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  fills             PaperFill[]
+  positions         PaperPosition[]
+
+  @@index([accountId, symbol, status])
+  @@index([correlationId])
+  @@map("paper_orders")
+}
+
+model PaperFill {
+  id               String       @id @default(uuid())
+  orderId          String
+  order            PaperOrder   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fillPrice        Decimal      @db.Decimal(18, 6)
+  fillQuantity     Decimal      @db.Decimal(18, 4)
+  fee              Decimal      @default(0.0) @db.Decimal(18, 4)
+  feeBreakdownJson Json?
+  slippage         Decimal      @default(0.0) @db.Decimal(18, 6)
+  liquidityType    String       @default("TAKER") // MAKER, TAKER
+  sourceTimestamp  DateTime
+  fillTimestamp    DateTime     @default(now())
+  correlationId    String
+  createdAt        DateTime     @default(now())
+
+  @@index([orderId, fillTimestamp])
+  @@index([correlationId])
+  @@map("paper_fills")
+}
+
+model PaperPosition {
+  id                    String        @id @default(uuid())
+  accountId             String
+  account               PaperAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  orderId               String?
+  order                 PaperOrder?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  symbol                String
+  contractSymbol        String
+  instrumentType        String        @default("SPOT")
+  strike                Decimal?      @db.Decimal(18, 4)
+  optionType            String?
+  direction             Direction
+  quantity              Decimal       @db.Decimal(18, 4)
+  entryPrice            Decimal       @db.Decimal(18, 6)
+  entryTime             DateTime      @default(now())
+  currentPrice          Decimal       @db.Decimal(18, 6)
+  stopLoss              Decimal?      @db.Decimal(18, 6)
+  initialStopLoss       Decimal?      @db.Decimal(18, 6)
+  target1               Decimal?      @db.Decimal(18, 6)
+  target2               Decimal?      @db.Decimal(18, 6)
+  target3               Decimal?      @db.Decimal(18, 6)
+  initialTarget1        Decimal?      @db.Decimal(18, 6)
+  initialTarget2        Decimal?      @db.Decimal(18, 6)
+  initialTarget3        Decimal?      @db.Decimal(18, 6)
+  leverage              Decimal       @default(1.0) @db.Decimal(5, 2)
+  usedMargin            Decimal       @default(0.0) @db.Decimal(18, 2)
+  unrealizedPnL         Decimal       @default(0.0) @db.Decimal(18, 2)
+  unrealizedR           Decimal       @default(0.0) @db.Decimal(6, 2)
+  maxFavorableExcursion Decimal       @default(0.0) @db.Decimal(18, 6)
+  maxAdverseExcursion   Decimal       @default(0.0) @db.Decimal(18, 6)
+  status                PositionState @default(OPEN)
+  partialFillsJson      Json?
+  executionEventsJson   Json?
+  trailingStopStateJson Json?
+  chargesJson           Json?
+  openedAt              DateTime      @default(now())
+  closedAt              DateTime?
+  correlationId         String
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  trades                PaperTrade[]
+
+  @@index([accountId, symbol, status])
+  @@index([status])
+  @@index([correlationId])
+  @@map("paper_positions")
+}
+
+model PaperTrade {
+  id                     String        @id @default(uuid())
+  accountId              String
+  account                PaperAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  positionId             String?
+  position               PaperPosition? @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  symbol                 String
+  contractSymbol         String
+  instrumentType         String        @default("SPOT")
+  strike                 Decimal?      @db.Decimal(18, 4)
+  optionType             String?
+  direction              Direction
+  quantity               Decimal       @db.Decimal(18, 4)
+  entryPrice             Decimal       @db.Decimal(18, 6)
+  exitPrice              Decimal       @db.Decimal(18, 6)
+  realizedPnL            Decimal       @db.Decimal(18, 2)
+  realizedR              Decimal       @db.Decimal(6, 2)
+  maxFavorableExcursion  Decimal       @default(0.0) @db.Decimal(18, 6)
+  maxAdverseExcursion    Decimal       @default(0.0) @db.Decimal(18, 6)
+  holdingDurationSeconds Int           @default(0)
+  entryTime              DateTime
+  exitTime               DateTime      @default(now())
+  exitReason             String
+  chargesJson            Json?
+  signalSnapshotJson     Json?
+  outcomeClassification  String?       // WIN_TP1, WIN_TP2, WIN_TP3_RUNNER, LOSS_SL, BREAKEVEN, MANUAL
+  correlationId          String
+  createdAt              DateTime      @default(now())
+
+  @@index([accountId, symbol, exitTime(sort: Desc)])
+  @@index([correlationId])
+  @@map("paper_trades")
+}
+
+model PortfolioSnapshot {
+  id                 String       @id @default(uuid())
+  accountId          String
+  account            PaperAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  timestamp          DateTime     @default(now())
+  totalEquity        Decimal      @db.Decimal(18, 2)
+  cashBalance        Decimal      @db.Decimal(18, 2)
+  usedMargin         Decimal      @db.Decimal(18, 2)
+  availableMargin    Decimal      @db.Decimal(18, 2)
+  unrealizedPnL      Decimal      @db.Decimal(18, 2)
+  realizedPnL        Decimal      @db.Decimal(18, 2)
+  grossLeverage      Decimal      @default(0.0) @db.Decimal(5, 2)
+  openPositionCount  Int          @default(0)
+  winRate            Decimal      @default(0.0) @db.Decimal(5, 2)
+  profitFactor       Decimal      @default(0.0) @db.Decimal(8, 4)
+  drawdownPercent    Decimal      @default(0.0) @db.Decimal(5, 2)
+
+  @@index([accountId, timestamp(sort: Desc)])
+  @@map("portfolio_snapshots")
+}
+
+model AuditEvent {
+  id            String   @id @default(uuid())
+  timestamp     DateTime @default(now())
+  actor         String   @default("SYSTEM") // SYSTEM, USER, WORKER, RISK_ENGINE
+  service       String   // API, WORKER, TRADING_ENGINE, RISK_ENGINE
+  eventType     String   // SIGNAL_CREATED, ORDER_CREATED, ORDER_REJECTED, ORDER_SUBMITTED, ORDER_FILLED, POSITION_OPENED, POSITION_MODIFIED, POSITION_CLOSED, RISK_REJECTED, TRADING_ENABLED, TRADING_DISABLED, EMERGENCY_STOP, MODEL_TRAINED, MODEL_PROMOTED, MODEL_REJECTED
+  entityType    String   // SIGNAL, ORDER, FILL, POSITION, TRADE, ACCOUNT, MODEL, CONFIG
+  entityId      String
+  payloadJson   Json?
+  correlationId String
+
+  @@index([eventType, timestamp(sort: Desc)])
+  @@index([entityId, entityType])
+  @@index([correlationId])
+  @@map("audit_events")
+}
+
+model TradingSystemConfig {
+  id                      String   @id @default("SYSTEM_DEFAULT")
+  paperTradingEnabled     Boolean  @default(true)
+  liveTradingEnabled      Boolean  @default(false)
+  emergencyStop           Boolean  @default(false)
+  maxDailyLossPercent     Decimal  @default(3.0) @db.Decimal(5, 2)
+  maxPositionRiskPercent  Decimal  @default(1.0) @db.Decimal(5, 2)
+  maxTotalExposurePercent Decimal  @default(20.0) @db.Decimal(5, 2)
+  maxOpenPositions        Int      @default(5)
+  maxTradesPerDay         Int      @default(20)
+  maxConsecutiveLosses    Int      @default(3)
+  maxLeverage             Decimal  @default(5.0) @db.Decimal(5, 2)
+  maxSlippageBps          Int      @default(50)
+  maxMarketDataAgeSeconds Int      @default(5)
+  updatedBy               String   @default("SYSTEM")
+  updatedAt               DateTime @updatedAt
+
+  @@map("trading_system_configs")
+}
+
 

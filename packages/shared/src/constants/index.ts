@@ -32,6 +32,8 @@ export const REDIS_KEYS = {
   MARKET_REGIME: (symbol: string) => `regime:${symbol}`,
 };
 
+export const MAX_MARKET_DATA_AGE_SECONDS = 5;
+
 export const WS_EVENTS = {
   CANDLE_UPDATED: 'candle.updated',
   SIGNAL_CREATED: 'signal.created',
@@ -41,6 +43,14 @@ export const WS_EVENTS = {
   MARKET_REGIME_CHANGED: 'market.regime.changed',
   SCANNER_UPDATED: 'scanner.updated',
   ALERT_TRIGGERED: 'alert.triggered',
+  PAPER_ORDER_CREATED: 'paper.order.created',
+  PAPER_ORDER_FILLED: 'paper.order.filled',
+  PAPER_ORDER_REJECTED: 'paper.order.rejected',
+  PAPER_POSITION_OPENED: 'paper.position.opened',
+  PAPER_POSITION_UPDATED: 'paper.position.updated',
+  PAPER_POSITION_CLOSED: 'paper.position.closed',
+  AUDIT_EVENT_CREATED: 'audit.event.created',
+  KILL_SWITCH_TRIGGERED: 'system.kill_switch.triggered',
 };
 
 export const BULLMQ_QUEUES = {
@@ -51,4 +61,5 @@ export const BULLMQ_QUEUES = {
   SIGNAL_GENERATION: 'signal-generation',
   ALERT_PROCESSING: 'alert-processing',
   LEARNING_TASKS: 'learning-tasks',
+  POSITION_MONITORING: 'position-monitoring',
 };

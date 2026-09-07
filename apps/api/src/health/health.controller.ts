@@ -35,6 +35,7 @@ export class HealthController {
     const result = {
       status: isReady ? 'ready' : 'not_ready',
       timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
       services: {
         database: dbHealthy ? 'up' : 'down',
         redis: redisHealthy ? 'up' : 'down',
@@ -47,4 +48,37 @@ export class HealthController {
 
     return result;
   }
+
+  @Get('api/ready')
+  async getApiReadiness() {
+    return this.getReadiness();
+  }
+
+  @Get('metrics')
+  async getMetrics() {
+    const [openPositionsCount, totalTradesCount, totalOrdersCount] = await Promise.all([
+      this.prisma.paperPosition.count({
+        where: { status: { in: ['OPEN', 'PARTIALLY_CLOSED'] } },
+      }).catch(() => 0),
+      this.prisma.paperTrade.count().catch(() => 0),
+      this.prisma.paperOrder.count().catch(() => 0),
+    ]);
+
+    return {
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage(),
+      stats: {
+        openPositions: openPositionsCount,
+        completedTrades: totalTradesCount,
+        totalOrders: totalOrdersCount,
+      },
+    };
+  }
+
+  @Get('api/metrics')
+  async getApiMetrics() {
+    return this.getMetrics();
+  }
 }
+

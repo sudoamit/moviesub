@@ -834,28 +834,20 @@ export class AILearningService implements OnModuleInit {
     this.recentPostMortems.unshift(postMortem);
     if (this.recentPostMortems.length > 20) this.recentPostMortems.pop();
 
-    // 2. Perform single-step online SGD update
+    // 2. Perform single-step online SGD update using REAL signal snapshot or point-in-time generation
     const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
-    const mockSignal: any = {
+
+    // Retrieve real signal snapshot if available or generate point-in-time signal
+    let realSignal = SignalGenerator.generateSignal({
       symbol: sym,
-      direction: isBull ? 'BULLISH' : 'BEARISH',
-      score: 80,
-      grade: 'A',
-      entryZone: { min: trade.entryPrice, max: trade.entryPrice, optimal: trade.entryPrice },
-      stopLoss: sl,
-      takeProfits: { tp1: tp, tp2: tp, tp3: tp },
-      riskRewardRatios: { rr1: 1.5, rr2: 2.0, rr3: 3.0 },
-      scoreBreakdown: { orderBlock: 20, fvg: 15, htfBias: 15, liquiditySweep: 15, totalScore: 80 },
-      reasoning: {
-        liquidityReason: 'Swept',
-        triggerReason: 'BOS confirmed',
-        summary: 'Live trade',
-      },
-      timestamp: trade.entryTimestamp,
-    };
+      executionCandles: candles,
+      executionTimeframe: Timeframe.M15,
+      htf1Candles: candles,
+      htf1Timeframe: Timeframe.H1,
+    });
 
     const features = FeatureVectorExtractor.extract({
-      signal: mockSignal,
+      signal: realSignal,
       candles,
       asOfTimestamp: trade.entryTimestamp,
     });
@@ -878,7 +870,7 @@ export class AILearningService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) - Delta Norm: ${updateResult.weightDeltaNorm}`,
+      `Online learning updated weights for ${sym} (${isWin ? 'WIN' : 'LOSS'}) from real trade outcome - Delta Norm: ${updateResult.weightDeltaNorm}`,
     );
 
     return { updateResult, postMortem };

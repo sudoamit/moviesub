@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { RedisService } from '../common/redis/redis.service';
-import { WS_EVENTS } from '@quant/shared';
+import { WS_EVENTS, MarketDataUnavailableError, StaleMarketDataError } from '@quant/shared';
 
 interface ILiveRealTicker {
   symbol: string;
@@ -345,6 +345,44 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.tickers.get(symbol.toUpperCase());
   }
 
+  /**
+   * Retrieves live ticker with strict validation for trade execution:
+   * 1. Price > 0
+   * 2. Freshness check: age <= maxAgeSeconds (default 5s)
+   * 3. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
+   */
+  getValidatedTicker(
+    symbol: string,
+    maxAgeSeconds: number = Number(process.env.MAX_MARKET_DATA_AGE_SECONDS) || 5,
+  ): ILiveRealTicker {
+    const sym = symbol.toUpperCase();
+    const ticker = this.tickers.get(sym);
+
+    if (!ticker) {
+      throw new MarketDataUnavailableError(sym, 'No active market data stream available for symbol');
+    }
+
+    if (!Number.isFinite(ticker.price) || ticker.price <= 0) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Invalid execution price received: ${ticker.price}`,
+        new Date(ticker.lastUpdated),
+      );
+    }
+
+    const ageSeconds = (Date.now() - ticker.lastUpdated) / 1000;
+    if (ageSeconds > maxAgeSeconds) {
+      throw new StaleMarketDataError(
+        sym,
+        ageSeconds,
+        maxAgeSeconds,
+        new Date(ticker.lastUpdated),
+      );
+    }
+
+    return ticker;
+  }
+
   getAllTickers() {
     return Array.from(this.tickers.values());
   }
@@ -355,3 +393,4 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (this.microTickTimer) clearInterval(this.microTickTimer);
   }
 }
+
