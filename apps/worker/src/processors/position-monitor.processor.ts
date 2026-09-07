@@ -472,6 +472,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             holdingDurationSeconds,
             outcomeClassification,
             exitTime: exitTime.toISOString(),
+            correlationId: pos.correlationId || `corr_${Date.now()}`,
           },
           outcomeClassification,
           correlationId: pos.correlationId || `corr_${Date.now()}`,

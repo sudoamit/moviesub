@@ -786,4 +786,46 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     // d. Exactly 1 PaperTrade record created
     expect(dbTrades.length).toBe(1);
   });
+
+  it('Test B — API vs worker: simultaneous close execution race creates exactly 1 trade and 1 accounting settlement', async () => {
+    mockRealMarketStreamer.getValidatedTicker.mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24200.0,
+      timestamp: Date.now(),
+      lastUpdated: Date.now(),
+    });
+
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    const initialTradesCount = dbTrades.length;
+    const initialUsedMargin = Number(dbAccounts[0].usedMargin);
+
+    // Simulate worker concurrently locking the position in DB transaction right before API finishes
+    // API closePosition runs concurrently with a simulated worker transaction
+    const closeOperationA = service.closePosition(pos.id, 'API Close Trigger');
+    const closeOperationB = service.closePosition(pos.id, 'Worker StopLoss Trigger');
+
+    const results = await Promise.allSettled([closeOperationA, closeOperationB]);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+
+    // At least one succeeds (or both return the same trade idempotently)
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+
+    // Invariant: Exactly 1 PaperTrade created in DB
+    expect(dbTrades.length).toBe(initialTradesCount + 1);
+
+    // Invariant: Used margin released exactly once (not decremented twice)
+    expect(Number(dbAccounts[0].usedMargin)).toBe(0);
+
+    // Invariant: Position status is CLOSED
+    expect(dbPositions[0].status).toBe(PositionState.CLOSED);
+  });
 });

@@ -1183,6 +1183,7 @@ export class PaperTradingService implements IExecutionProvider {
             holdingDurationSeconds,
             outcomeClassification,
             exitTime: exitTime.toISOString(),
+            correlationId,
           },
           outcomeClassification,
           correlationId,

@@ -807,7 +807,125 @@ describe('Worker Processors', () => {
       const shortTradeCall = mockPrisma.paperTrade.create.mock.calls[0][0];
       const shortFillPrice = Number(shortTradeCall.data.exitPrice);
       expect(shortFillPrice).toBeGreaterThanOrEqual(24160.0);
-      expect(shortFillPrice).toBeLessThanOrEqual(24160.0 * (1 + 0.0010));
+      expect(shortFillPrice).toBeLessThanOrEqual(Number((24160.0 * (1 + 0.0010)).toFixed(2)));
+    });
+
+    it('Test A — worker vs worker: simultaneous close operations against same position result in exactly 1 trade, 1 account update, 1 audit event', async () => {
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue({
+        id: 'SYSTEM_DEFAULT',
+        maxMarketDataAgeSeconds: 5,
+        maxSlippageBps: 10,
+      });
+
+      // Position to close
+      const testPos = {
+        id: 'pos-concurrent-worker',
+        accountId: 'acc-1',
+        symbol: 'NIFTY',
+        contractSymbol: 'NIFTY SPOT',
+        direction: Direction.BULLISH,
+        quantity: new Decimal(50),
+        entryPrice: new Decimal(24100.0),
+        currentPrice: new Decimal(24100.0),
+        stopLoss: new Decimal(24050.0),
+        initialStopLoss: new Decimal(24050.0),
+        target1: new Decimal(24200.0),
+        leverage: new Decimal(5.0),
+        usedMargin: new Decimal(30000.0),
+        unrealizedPnL: new Decimal(0.0),
+        status: PositionState.OPEN,
+        openedAt: new Date(Date.now() - 60000),
+        chargesJson: { totalCharges: 30.0 },
+      };
+
+      mockPrisma.paperPosition.findMany = jest.fn().mockResolvedValue([testPos]);
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }), // SL breach
+      );
+
+      // Simulating atomic updateMany: first call succeeds (count: 1), second call fails (count: 0)
+      let updateManyCallCount = 0;
+      mockPrisma.paperPosition.updateMany = jest.fn().mockImplementation(async () => {
+        updateManyCallCount++;
+        if (updateManyCallCount === 1) {
+          return { count: 1 };
+        }
+        return { count: 0 };
+      });
+
+      // Two worker executions run simultaneously
+      const workerJobA = { id: 'job-worker-1', name: 'monitor-positions', data: {} } as Job;
+      const workerJobB = { id: 'job-worker-2', name: 'monitor-positions', data: {} } as Job;
+
+      const [resA, resB] = await Promise.all([
+        processor.process(workerJobA),
+        processor.process(workerJobB),
+      ]);
+
+      // Total closed across both executions is exactly 1
+      expect(resA.closed + resB.closed).toBe(1);
+
+      // Exactly 1 PaperTrade created
+      expect(mockPrisma.paperTrade.create).toHaveBeenCalledTimes(1);
+
+      // Exactly 1 PaperAccount balance and margin update
+      expect(mockPrisma.paperAccount.update).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.paperAccount.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            usedMargin: { decrement: 30000.0 },
+          }),
+        }),
+      );
+
+      // Exactly 1 AuditEvent created
+      expect(mockPrisma.auditEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('Test C — worker retry after successful close: recognized existing trade idempotently without duplicate mutations', async () => {
+      mockPrisma.tradingSystemConfig.findUnique = jest.fn().mockResolvedValue({
+        id: 'SYSTEM_DEFAULT',
+        maxMarketDataAgeSeconds: 5,
+        maxSlippageBps: 10,
+      });
+
+      const closedPos = {
+        id: 'pos-already-closed',
+        accountId: 'acc-1',
+        symbol: 'NIFTY',
+        contractSymbol: 'NIFTY SPOT',
+        direction: Direction.BULLISH,
+        quantity: new Decimal(50),
+        entryPrice: new Decimal(24100.0),
+        currentPrice: new Decimal(24040.0),
+        stopLoss: new Decimal(24050.0),
+        initialStopLoss: new Decimal(24050.0),
+        status: PositionState.EXIT_PENDING,
+        openedAt: new Date(Date.now() - 60000),
+        chargesJson: { totalCharges: 30.0 },
+      };
+
+      mockPrisma.paperPosition.findMany = jest.fn().mockResolvedValue([closedPos]);
+      mockRedis.get = jest.fn().mockResolvedValue(
+        JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
+      );
+
+      // updateMany returns 0 (already closed/closing)
+      mockPrisma.paperPosition.updateMany = jest.fn().mockResolvedValue({ count: 0 });
+
+      // Existing trade found
+      const mockExistingTrade = { id: 'trade-existing-1', positionId: 'pos-already-closed', exitPrice: new Decimal(24040.0) };
+      mockPrisma.paperTrade.findFirst = jest.fn().mockResolvedValue(mockExistingTrade);
+
+      const jobRetry = { id: 'job-retry', name: 'monitor-positions', data: {} } as Job;
+      await processor.process(jobRetry);
+
+      // Must not create another trade
+      expect(mockPrisma.paperTrade.create).not.toHaveBeenCalled();
+      // Must not mutate account again
+      expect(mockPrisma.paperAccount.update).not.toHaveBeenCalled();
+      // Must not create another audit event
+      expect(mockPrisma.auditEvent.create).not.toHaveBeenCalled();
     });
   });
 
