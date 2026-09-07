@@ -311,9 +311,12 @@ export class PositionMonitorProcessor extends WorkerHost {
     );
 
     await this.prisma.$transaction(async (tx) => {
-      // 1. Mark position CLOSED
-      await tx.paperPosition.update({
-        where: { id: pos.id },
+      // 1. Mark position CLOSED using atomic conditional update (Concurrency / Double-Close Guard)
+      const updated = await tx.paperPosition.updateMany({
+        where: {
+          id: pos.id,
+          status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
+        },
         data: {
           status: PositionState.CLOSED,
           closedAt: exitTime,
@@ -322,6 +325,13 @@ export class PositionMonitorProcessor extends WorkerHost {
           unrealizedR: new Decimal(0.0),
         },
       });
+
+      if (updated.count === 0) {
+        this.logger.warn(
+          `[PositionMonitor] Position ${pos.id} was already closed by another thread; skipping duplicate close.`,
+        );
+        return;
+      }
 
       // 2. Persist PaperTrade record
       const tradeRecord = await tx.paperTrade.create({

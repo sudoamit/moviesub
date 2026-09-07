@@ -3,9 +3,12 @@ import { ICandle } from '../interfaces';
 import { MarketDataUnavailableError, StaleMarketDataError } from '../errors';
 
 export interface ExecutionPriceResult {
-  price: number;
+  price: number; // fillPrice
+  marketPrice: number; // reference/market price
+  requestedPrice?: number;
   source: ExecutionPriceSource;
   sourceTimestamp: Date;
+  fillTimestamp: Date;
   latencyMs: number;
   ageSeconds: number;
   slippageBps?: number;
@@ -58,6 +61,8 @@ export class ExecutionPriceResolver {
             ? rawTimestamp
             : new Date(rawTimestamp).getTime();
 
+      if (!Number.isFinite(tickTime) || isNaN(tickTime)) return null;
+
       const now = Date.now();
       // Reject ticks with timestamps in the future beyond 5s clock skew tolerance
       if (tickTime > now + 5000) return null;
@@ -77,7 +82,7 @@ export class ExecutionPriceResolver {
 
   /**
    * Resolves execution price from authoritative market data sources according to trading mode.
-   * - LIVE / PAPER: Strictly requires fresh live tick (LIVE_TICK) or fresh sub-threshold candle (LATEST_CANDLE).
+   * - LIVE / PAPER: Strictly requires fresh live tick (LIVE_TICK). Never falls back to candles.
    * - BACKTEST: Allows historical candle close with BACKTEST_CANDLE tag.
    * Fails closed by throwing MarketDataUnavailableError or StaleMarketDataError if no fresh price exists.
    */
@@ -97,87 +102,66 @@ export class ExecutionPriceResolver {
 
     const now = Date.now();
 
-    // 1. Check Live Tick
-    if (liveTick && typeof liveTick.price === 'number' && Number.isFinite(liveTick.price) && liveTick.price > 0) {
-      const tickTime = liveTick.timestamp instanceof Date ? liveTick.timestamp.getTime() : new Date(liveTick.timestamp).getTime();
-      const ageSeconds = Math.max(0, (now - tickTime) / 1000);
-
-      if (ageSeconds <= maxMarketDataAgeSeconds) {
-        let finalPrice = liveTick.price;
-        let slippageBps = 0;
-        let slippageAmount = 0;
-
-        if (simulateSlippage && direction) {
-          const slip = this.calculateSlippage(liveTick.price, direction, maxSlippageBps);
-          finalPrice = slip.fillPrice;
-          slippageBps = slip.slippageBps;
-          slippageAmount = slip.slippageAmount;
-        }
-
+    // 1. Check BACKTEST Mode
+    if (tradingMode === TradingMode.BACKTEST) {
+      if (liveTick && typeof liveTick.price === 'number' && Number.isFinite(liveTick.price) && liveTick.price > 0) {
+        const tickTime = liveTick.timestamp instanceof Date ? liveTick.timestamp.getTime() : new Date(liveTick.timestamp).getTime();
         return {
-          price: finalPrice,
-          source: ExecutionPriceSource.LIVE_TICK,
+          price: liveTick.price,
+          marketPrice: liveTick.price,
+          source: ExecutionPriceSource.BACKTEST_CANDLE,
           sourceTimestamp: new Date(tickTime),
-          latencyMs: Math.round((now - tickTime)),
-          ageSeconds,
-          slippageBps,
-          slippageAmount,
+          fillTimestamp: new Date(),
+          latencyMs: 0,
+          ageSeconds: 0,
         };
       }
-    }
-
-    // 2. Check Candle Data
-    if (getLatestCandle) {
-      try {
+      if (getLatestCandle) {
         const candle = await getLatestCandle();
         if (candle && typeof candle.close === 'number' && Number.isFinite(candle.close) && candle.close > 0) {
           const candleTime = candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
-          const ageSeconds = Math.max(0, (now - candleTime) / 1000);
-
-          // For BACKTEST mode, candle price is valid regardless of real-time age
-          if (tradingMode === TradingMode.BACKTEST) {
-            return {
-              price: candle.close,
-              source: ExecutionPriceSource.BACKTEST_CANDLE,
-              sourceTimestamp: new Date(candleTime),
-              latencyMs: 0,
-              ageSeconds,
-            };
-          }
-
-          // For LIVE or PAPER mode, candle must be strictly fresh
-          if (ageSeconds <= maxMarketDataAgeSeconds) {
-            return {
-              price: candle.close,
-              source: ExecutionPriceSource.LATEST_CANDLE,
-              sourceTimestamp: new Date(candleTime),
-              latencyMs: Math.round((now - candleTime)),
-              ageSeconds,
-            };
-          } else {
-            throw new StaleMarketDataError(
-              symbol,
-              ageSeconds,
-              maxMarketDataAgeSeconds,
-              new Date(candleTime),
-            );
-          }
+          return {
+            price: candle.close,
+            marketPrice: candle.close,
+            source: ExecutionPriceSource.BACKTEST_CANDLE,
+            sourceTimestamp: new Date(candleTime),
+            fillTimestamp: new Date(),
+            latencyMs: 0,
+            ageSeconds: Math.max(0, (now - candleTime) / 1000),
+          };
         }
-      } catch (err) {
-        if (err instanceof StaleMarketDataError || err instanceof MarketDataUnavailableError) {
-          throw err;
-        }
-        throw new MarketDataUnavailableError(
-          symbol,
-          `Failed to retrieve latest candle: ${(err as Error).message}`,
-        );
       }
+      throw new MarketDataUnavailableError(
+        symbol,
+        `No historical candle data found for symbol '${symbol}' in BACKTEST mode`,
+      );
     }
 
-    // If live tick was supplied but stale, and candle was not provided/available
-    if (liveTick && liveTick.timestamp) {
-      const tickTime = liveTick.timestamp instanceof Date ? liveTick.timestamp.getTime() : new Date(liveTick.timestamp).getTime();
-      const ageSeconds = Math.max(0, (now - tickTime) / 1000);
+    // 2. LIVE / PAPER Mode: Strictly require validated fresh live tick (Zero candle fallback)
+    if (!liveTick || typeof liveTick.price !== 'number' || !Number.isFinite(liveTick.price) || liveTick.price <= 0) {
+      throw new MarketDataUnavailableError(
+        symbol,
+        `No live tick available for symbol '${symbol}' in ${tradingMode} mode. Candle execution fallback is prohibited for live/paper trading.`,
+      );
+    }
+
+    const tickTime = liveTick.timestamp instanceof Date ? liveTick.timestamp.getTime() : new Date(liveTick.timestamp).getTime();
+    if (!Number.isFinite(tickTime) || isNaN(tickTime)) {
+      throw new MarketDataUnavailableError(
+        symbol,
+        `Invalid live tick timestamp for symbol '${symbol}' in ${tradingMode} mode.`,
+      );
+    }
+
+    if (tickTime > now + 5000) {
+      throw new MarketDataUnavailableError(
+        symbol,
+        `Live tick timestamp for '${symbol}' is in the future beyond clock skew tolerance (5s).`,
+      );
+    }
+
+    const ageSeconds = (now - tickTime) / 1000;
+    if (ageSeconds > maxMarketDataAgeSeconds) {
       throw new StaleMarketDataError(
         symbol,
         ageSeconds,
@@ -186,11 +170,29 @@ export class ExecutionPriceResolver {
       );
     }
 
-    // No market data available at all
-    throw new MarketDataUnavailableError(
-      symbol,
-      `No live tick or recent candle data found for symbol '${symbol}' in ${tradingMode} mode`,
-    );
+    const marketPrice = liveTick.price;
+    let finalPrice = marketPrice;
+    let slippageBps = 0;
+    let slippageAmount = 0;
+
+    if (simulateSlippage && direction) {
+      const slip = this.calculateSlippage(marketPrice, direction, maxSlippageBps);
+      finalPrice = slip.fillPrice;
+      slippageBps = slip.slippageBps;
+      slippageAmount = slip.slippageAmount;
+    }
+
+    return {
+      price: finalPrice,
+      marketPrice,
+      source: ExecutionPriceSource.LIVE_TICK,
+      sourceTimestamp: new Date(tickTime),
+      fillTimestamp: new Date(),
+      latencyMs: Math.round(now - tickTime),
+      ageSeconds: Math.max(0, ageSeconds),
+      slippageBps,
+      slippageAmount,
+    };
   }
 
   /**
@@ -200,15 +202,24 @@ export class ExecutionPriceResolver {
   public static calculateSlippage(
     basePrice: number,
     direction: 'BUY' | 'SELL' | 'BULLISH' | 'BEARISH',
-    maxSlippageBps = 50,
+    maxSlippageBps = this.DEFAULT_MAX_SLIPPAGE_BPS,
     fixedSlippageBps?: number,
   ): { fillPrice: number; slippageBps: number; slippageAmount: number } {
     const isBuy = direction === 'BUY' || direction === 'BULLISH';
-    // Realistic slippage between 1 and min(maxSlippageBps, 15) bps by default
+    const effectiveMaxBps = Math.max(0, maxSlippageBps);
+
+    if (effectiveMaxBps === 0 || fixedSlippageBps === 0 || basePrice <= 0) {
+      return {
+        fillPrice: basePrice,
+        slippageBps: 0,
+        slippageAmount: 0,
+      };
+    }
+
     const simulatedBps =
       fixedSlippageBps !== undefined
-        ? Math.min(fixedSlippageBps, maxSlippageBps)
-        : Math.min(maxSlippageBps, Math.max(1, Math.round(Math.random() * 8 + 2)));
+        ? Math.min(Math.max(0, fixedSlippageBps), effectiveMaxBps)
+        : Math.min(effectiveMaxBps, Math.max(1, Math.round(Math.random() * 8 + 2)));
 
     const slippageMultiplier = (simulatedBps / 10000);
     const slippageAmount = Number((basePrice * slippageMultiplier).toFixed(4));

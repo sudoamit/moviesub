@@ -978,6 +978,8 @@ export class PaperTradingService implements IExecutionProvider {
 
     // Resolve live exit price with strict fail-closed validation
     let exitPrice = exitPriceOverride;
+    let sourceTimestamp = new Date();
+
     if (!exitPrice || exitPrice <= 0) {
       try {
         const marketPriceData = await this.getValidatedMarketPrice(
@@ -985,6 +987,7 @@ export class PaperTradingService implements IExecutionProvider {
           config.maxMarketDataAgeSeconds || 5,
         );
         exitPrice = marketPriceData.price;
+        sourceTimestamp = marketPriceData.timestamp;
       } catch (err: any) {
         this.logger.error(
           `[EXIT REJECTED] Cannot close position '${pos.id}' for '${symbol}': ${err.message}`,
@@ -1039,11 +1042,14 @@ export class PaperTradingService implements IExecutionProvider {
     else if (exitReason.includes('Stop Loss') || exitReason.includes('SL'))
       outcomeClassification = 'LOSS_SL';
 
-    // Atomic Database Transaction for Position Closure
+    // Atomic Database Transaction for Position Closure (with Concurrency / Double-Close Guard)
     const trade = await this.prisma.$transaction(async (tx) => {
-      // 1. Mark Position CLOSED
-      await tx.paperPosition.update({
-        where: { id: pos.id },
+      // 1. Mark Position CLOSED using atomic conditional update
+      const updated = await tx.paperPosition.updateMany({
+        where: {
+          id: pos.id,
+          status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
+        },
         data: {
           status: PositionState.CLOSED,
           closedAt: exitTime,
@@ -1052,6 +1058,18 @@ export class PaperTradingService implements IExecutionProvider {
           unrealizedR: new Decimal(0.0),
         },
       });
+
+      if (updated.count === 0) {
+        // Concurrency check: another worker/thread already closed this position!
+        const existingTrade = await tx.paperTrade.findFirst({
+          where: { positionId: pos.id },
+          orderBy: { exitTime: 'desc' },
+        });
+        if (existingTrade) {
+          return existingTrade;
+        }
+        throw new BadRequestException(`Position '${pos.id}' was already closed.`);
+      }
 
       // 2. Create PaperTrade Record
       const tradeRecord = await tx.paperTrade.create({
@@ -1078,12 +1096,17 @@ export class PaperTradingService implements IExecutionProvider {
           chargesJson: { entryCharges, exitCharges, totalCharges },
           featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
           outcomeSnapshotJson: {
+            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            sourceTimestamp: sourceTimestamp.toISOString(),
+            livePrice: exitPrice,
+            exitPrice: finalExitPrice,
+            slippageBps: exitSlippage.slippageBps,
+            slippageAmount: exitSlippage.slippageAmount,
             exitReason,
             realizedPnL,
             realizedR,
             holdingDurationSeconds,
             outcomeClassification,
-            exitPrice: finalExitPrice,
             exitTime: exitTime.toISOString(),
           },
           outcomeClassification,
@@ -1114,6 +1137,8 @@ export class PaperTradingService implements IExecutionProvider {
             contractSymbol: pos.contractSymbol,
             entryPrice,
             exitPrice: finalExitPrice,
+            executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+            sourceTimestamp: sourceTimestamp.toISOString(),
             realizedPnL,
             realizedR,
             exitReason,

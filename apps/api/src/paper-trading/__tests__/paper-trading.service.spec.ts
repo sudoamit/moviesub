@@ -152,15 +152,26 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(pos);
         }),
         updateMany: jest.fn().mockImplementation((args) => {
+          let count = 0;
           for (const pos of dbPositions) {
-            Object.assign(pos, args.data);
+            const matchesId = !args.where?.id || pos.id === args.where.id;
+            const matchesStatus =
+              !args.where?.status?.in || args.where.status.in.includes(pos.status);
+            if (matchesId && matchesStatus) {
+              Object.assign(pos, args.data);
+              count++;
+            }
           }
-          return Promise.resolve({ count: dbPositions.length });
+          return Promise.resolve({ count });
         }),
         count: jest.fn().mockImplementation(() => Promise.resolve(dbPositions.length)),
       },
       paperTrade: {
         findMany: jest.fn().mockImplementation(() => Promise.resolve(dbTrades)),
+        findFirst: jest.fn().mockImplementation((args) => {
+          const trade = dbTrades.find((t) => !args?.where?.positionId || t.positionId === args.where.positionId);
+          return Promise.resolve(trade || null);
+        }),
         create: jest.fn().mockImplementation((args) => {
           const trade = { id: `trade_${Date.now()}`, ...args.data };
           dbTrades.push(trade);
@@ -509,5 +520,80 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
 
     expect(fulfilled.length).toBe(1);
     expect(rejected.length).toBe(1);
+  });
+
+  it('should prevent double-close / duplicate trades when concurrent close requests are executed on the same position', async () => {
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+    });
+
+    const closePromises = [
+      service.closePosition(pos.id, 'SL Triggered A', 24040.0),
+      service.closePosition(pos.id, 'SL Triggered B', 24040.0),
+    ];
+
+    const results = await Promise.allSettled(closePromises);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+
+    // Both may return the trade (idempotent) or exactly one creates it
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    // Crucially, verify that only ONE PaperTrade record was created in the database
+    expect(dbTrades.length).toBe(1);
+    expect(dbPositions[0].status).toBe(PositionState.CLOSED);
+  });
+
+  it('should execute full end-to-end paper trading lifecycle from live tick entry to exit with preserved snapshots and exact fill prices', async () => {
+    const featureSnapshot = {
+      smcScore: 0.9,
+      fvgSize: 15.5,
+      regime: 'TRENDING_BULLISH',
+    };
+
+    // 1. Order placement with live tick
+    const pos = await service.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 50,
+      orderType: 'MARKET',
+      price: 24100.0,
+      stopLoss: 24050.0,
+      target1: 24200.0,
+      target2: 24250.0,
+      featureSnapshotJson: featureSnapshot,
+    });
+
+    expect(pos.entryPrice).toBeGreaterThanOrEqual(24100.0);
+    expect(pos.status).toBe(PositionState.OPEN);
+    expect(pos.featureSnapshotJson).toEqual(featureSnapshot);
+
+    const fillRecord = dbFills[0];
+    expect(fillRecord.executionPriceSource).toBe('LIVE_TICK');
+    expect(fillRecord.fillPrice.toNumber()).toBe(pos.entryPrice);
+
+    // 2. Position exit with live tick and slippage
+    const trade = await service.closePosition(pos.id, 'TP1 Hit on Live Tick', 24210.0);
+
+    expect(trade.entryPrice).toBe(pos.entryPrice);
+    expect(trade.exitPrice).toBeLessThanOrEqual(24210.0);
+    expect(trade.featureSnapshotJson).toEqual(featureSnapshot);
+    expect(trade.outcomeSnapshotJson.executionPriceSource).toBe('LIVE_TICK');
+    expect(trade.outcomeSnapshotJson.livePrice).toBe(24210.0);
+    expect(trade.outcomeSnapshotJson.exitPrice).toBe(trade.exitPrice);
+
+    // Verify P&L is calculated using exact fill prices
+    const expectedGrossPnL = (trade.exitPrice - trade.entryPrice) * 50;
+    const expectedNetPnL = Number((expectedGrossPnL - trade.totalCharges).toFixed(2));
+    expect(trade.realizedPnL).toBeCloseTo(expectedNetPnL, 1);
+
+    // Verify R multiple is calculated from initialStopLoss risk anchor
+    const expectedRiskDistance = Math.abs(pos.entryPrice - 24050.0);
+    const expectedR = Number(((trade.exitPrice - trade.entryPrice) / expectedRiskDistance).toFixed(2));
+    expect(trade.realizedR).toBeCloseTo(expectedR, 1);
   });
 });
