@@ -409,20 +409,24 @@ export class BacktestSimulator {
                   : lastFill?.targetType === 'TP2'
                     ? SignalState.TP2_HIT
                     : SignalState.TP1_HIT,
-            signalTimestamp: pendingEntrySignal?.timestamp
-              ? new Date(pendingEntrySignal.timestamp)
-              : new Date(firstFill?.timestamp || activeLot.openedAt),
-            orderCreatedAt: pendingEntryOrder?.createdAt
-              ? new Date(pendingEntryOrder.createdAt)
-              : new Date(firstFill?.timestamp || activeLot.openedAt),
-            orderSubmittedAt: pendingEntryOrder?.submittedAt
-              ? new Date(pendingEntryOrder.submittedAt)
-              : new Date(firstFill?.timestamp || activeLot.openedAt),
-            entryFillTimestamp: new Date(activeLot.openedAt),
-            entryReferencePrice: pendingEntryOrder?.referencePrice || pendingEntrySignal?.entryZone.optimal || activeLot.entryPrice,
-            entryFillPrice: activeLot.entryPrice,
-            entryFees: firstFill?.fee || 0,
-            entrySlippage: firstFill?.slippage || 0,
+            signalTimestamp: new Date(
+              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+            ),
+            orderCreatedAt: new Date(
+              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+            ),
+            orderSubmittedAt: new Date(
+              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+            ),
+            entryFillTimestamp: new Date(
+              activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt,
+            ),
+            entryReferencePrice:
+              activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
+            entryFillPrice:
+              activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
+            entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
+            entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
             exitOrderTimestamp: new Date(lastFill?.timestamp || candleTime),
             exitFillTimestamp: new Date(lastFill?.timestamp || candleTime),
             exitFillPrice: lastFill?.price || activeLot.entryPrice,

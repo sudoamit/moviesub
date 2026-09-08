@@ -12,6 +12,7 @@ export class FillModelEngine {
     parentCandle: ICandle,
     lowerTfCandles?: ICandle[],
     parentDurationMs: number = 60 * 60 * 1000,
+    allowPartial: boolean = false,
   ): { isValid: boolean; reason?: string } {
     if (!lowerTfCandles || lowerTfCandles.length === 0) {
       return { isValid: false, reason: 'MISSING_LOWER_TF_DATA' };
@@ -46,6 +47,13 @@ export class FillModelEngine {
         return { isValid: false, reason: 'SUBBARS_OUT_OF_ORDER' };
       }
       prevTime = subTime;
+    }
+
+    // P1-E: Strict 15 M1 bar count validation for 15m parent candles
+    if (parentDurationMs === 15 * 60 * 1000 && !allowPartial) {
+      if (lowerTfCandles.length !== 15) {
+        return { isValid: false, reason: 'SUBBAR_COUNT_MISMATCH_EXPECTED_15' };
+      }
     }
 
     // Check lower-TF completeness & coverage
@@ -182,6 +190,102 @@ export class FillModelEngine {
     }
 
     return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+  }
+
+  /**
+   * Evaluates an order against a specific intra-candle segment (e.g. Open -> Low, Low -> High, High -> Close)
+   */
+  static evaluateSegmentFill(
+    order: IOrder,
+    segStart: number,
+    segEnd: number,
+    candleTime: number,
+    symbol: string,
+  ): { isFilled: boolean; fill?: IFill } {
+    if (order.status !== 'PENDING') return { isFilled: false };
+
+    const minPrice = Math.min(segStart, segEnd);
+    const maxPrice = Math.max(segStart, segEnd);
+
+    // 1. STOP Order
+    if (order.orderType === 'STOP' && order.stopPrice !== undefined) {
+      const stopPrice = order.stopPrice;
+      const isTriggered =
+        order.side === 'SELL' ? minPrice <= stopPrice : maxPrice >= stopPrice;
+
+      if (!isTriggered) return { isFilled: false };
+
+      let basePrice = stopPrice;
+      if (order.side === 'SELL' && segStart <= stopPrice) {
+        basePrice = segStart;
+      } else if (order.side === 'BUY' && segStart >= stopPrice) {
+        basePrice = segStart;
+      }
+
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
+      const slip = SlippageModel.calculateSlippage(basePrice, fillQty, order.side, 'STOP');
+      const halfSpread = SpreadModel.getHalfSpread(slip.executedPrice, symbol);
+      const finalPrice = order.side === 'BUY' ? slip.executedPrice + halfSpread : slip.executedPrice - halfSpread;
+      const fee = FeeModel.calculateFees(symbol, finalPrice, fillQty, order.side, true);
+
+      const fill: IFill = {
+        fillId: `fill_${order.orderId}_${candleTime}`,
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: Number(finalPrice.toFixed(4)),
+        quantity: fillQty,
+        fee,
+        slippage: slip.slippageAmount,
+        timestamp: candleTime,
+        isPartial: false,
+        exitTarget: order.exitTarget,
+      };
+
+      return { isFilled: true, fill };
+    }
+
+    // 2. LIMIT Order
+    if (order.orderType === 'LIMIT' && order.price !== undefined) {
+      const targetPrice = order.price;
+      const isTouch =
+        order.side === 'BUY' ? minPrice <= targetPrice : maxPrice >= targetPrice;
+
+      if (!isTouch) return { isFilled: false };
+
+      let rawPrice = targetPrice;
+      if (order.side === 'SELL' && segStart >= targetPrice) {
+        rawPrice = segStart;
+      } else if (order.side === 'BUY' && segStart <= targetPrice) {
+        rawPrice = segStart;
+      }
+
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
+      const slip = SlippageModel.calculateSlippage(rawPrice, fillQty, order.side, 'LIMIT');
+      const halfSpread = SpreadModel.getHalfSpread(slip.executedPrice, symbol);
+      const finalPrice = order.side === 'BUY' ? slip.executedPrice + halfSpread : slip.executedPrice - halfSpread;
+      const fee = FeeModel.calculateFees(symbol, finalPrice, fillQty, order.side, false);
+
+      const fill: IFill = {
+        fillId: `fill_${order.orderId}_${candleTime}`,
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: Number(finalPrice.toFixed(4)),
+        quantity: fillQty,
+        fee,
+        slippage: slip.slippageAmount,
+        timestamp: candleTime,
+        isPartial: false,
+        exitTarget: order.exitTarget,
+      };
+
+      return { isFilled: true, fill };
+    }
+
+    return { isFilled: false };
   }
 
   /**
