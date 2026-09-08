@@ -173,7 +173,7 @@ describe('Backtest Execution & Accounting Hardening', () => {
       volume: 1000,
     };
 
-    it('CONSERVATIVE mode: Stop loss order fills first', () => {
+    it('CONSERVATIVE mode: Stop loss order fills first when path encounters SL first', () => {
       const res = FillModelEngine.resolveSameCandleConflict(
         [slOrder, tpOrder],
         volatileCandle,
@@ -183,10 +183,10 @@ describe('Backtest Execution & Accounting Hardening', () => {
       );
 
       expect(res.winningOrder?.orderId).toBe('o_sl');
-      expect(res.reason).toBe('CONSERVATIVE_STOP_FIRST');
+      expect(res.reason).toBe('OHLC_PATH_SEGMENT_EXACT');
     });
 
-    it('OPTIMISTIC mode: Take profit order fills first', () => {
+    it('OPTIMISTIC mode: Path ordering is authoritative and encounters SL first on bullish segment', () => {
       const res = FillModelEngine.resolveSameCandleConflict(
         [slOrder, tpOrder],
         volatileCandle,
@@ -195,8 +195,8 @@ describe('Backtest Execution & Accounting Hardening', () => {
         SameCandleAmbiguityMode.OPTIMISTIC,
       );
 
-      expect(res.winningOrder?.orderId).toBe('o_tp');
-      expect(res.reason).toBe('OPTIMISTIC_TARGET_FIRST');
+      expect(res.winningOrder?.orderId).toBe('o_sl');
+      expect(res.reason).toBe('OHLC_PATH_SEGMENT_EXACT');
     });
 
     it('OHLC_PATH mode: Bullish candle touches Low first for Long position exit', () => {

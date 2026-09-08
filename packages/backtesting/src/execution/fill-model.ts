@@ -184,7 +184,7 @@ export class FillModelEngine {
 
   /**
    * Thin compatibility wrapper for Same-Candle Ambiguity Conflict Resolution.
-   * Delegates evaluation directly to OHLCPathCursor & resolveSegmentConflict.
+   * Delegates evaluation directly to OHLCPathCursor, evaluateSegmentFill, and resolveSegmentConflict.
    */
   static resolveSameCandleConflict(
     orders: IOrder[],
@@ -197,51 +197,6 @@ export class FillModelEngine {
   ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
     if (orders.length === 0) return {};
 
-    // Validate sub-bars if LOWER_TIMEFRAME ambiguity mode is passed
-    if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
-      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
-      if (!subValidation.isValid) {
-        return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
-      }
-    }
-
-    // Evaluate fills for all orders against candle
-    const triggered: { order: IOrder; fill: IFill }[] = [];
-
-    for (const order of orders) {
-      const res = this.evaluateFill(order, currentCandle, nextCandle, model, lowerTfCandles, parentDurationMs);
-      if (res.isFilled && res.fill) {
-        triggered.push({ order, fill: res.fill });
-      }
-    }
-
-    if (triggered.length === 0) {
-      return {};
-    }
-
-    if (triggered.length === 1) {
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    // 2. CONSERVATIVE Mode: STOP loss hits first
-    if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
-      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-      if (stopTrigger) {
-        return { winningFill: stopTrigger.fill, winningOrder: stopTrigger.order, reason: 'CONSERVATIVE_STOP_FIRST' };
-      }
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    // 3. OPTIMISTIC Mode: LIMIT target hits first
-    if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
-      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
-      if (limitTrigger) {
-        return { winningFill: limitTrigger.fill, winningOrder: limitTrigger.order, reason: 'OPTIMISTIC_TARGET_FIRST' };
-      }
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    // 4. OHLC_PATH Mode: Authoritative segment-aware conflict resolution via OHLCPathCursor & resolveSegmentConflict
     const candleTime =
       currentCandle.timestamp instanceof Date
         ? currentCandle.timestamp.getTime()
@@ -252,17 +207,17 @@ export class FillModelEngine {
     const cursor = new OHLCPathCursor(currentCandle);
     for (const seg of cursor.segments) {
       const segmentTriggered: { order: IOrder; fill: IFill }[] = [];
-      for (const t of triggered) {
+      for (const order of orders) {
         const res = this.evaluateSegmentFill(
-          t.order,
+          order,
           seg.start,
           seg.end,
           candleTime,
-          t.order.symbol,
+          order.symbol,
           model,
         );
         if (res.isFilled && res.fill) {
-          segmentTriggered.push({ order: t.order, fill: res.fill });
+          segmentTriggered.push({ order, fill: res.fill });
         }
       }
 
@@ -291,7 +246,7 @@ export class FillModelEngine {
       }
     }
 
-    return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    return {};
   }
 
   /**
@@ -448,18 +403,13 @@ export class FillModelEngine {
       return { isFilled: false, reason: `ORDER_${order.status}` };
     }
 
+    // Lower-timeframe orchestration belongs exclusively to ExecutionSimulator.processCandle()
     if (model === FillModel.LOWER_TIMEFRAME) {
       const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
       if (!subValidation.isValid) {
         return { isFilled: false, reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
       }
-      for (const m1 of lowerTfCandles!) {
-        const res = this.evaluateFill(order, m1, undefined, FillModel.OHLC_PATH);
-        if (res.isFilled) {
-          return res;
-        }
-      }
-      return { isFilled: false };
+      return { isFilled: false, reason: 'LOWER_TIMEFRAME_REQUIRES_EXECUTION_SIMULATOR' };
     }
 
     const candleTime =
@@ -467,7 +417,7 @@ export class FillModelEngine {
         ? currentCandle.timestamp.getTime()
         : typeof currentCandle.timestamp === 'number'
           ? currentCandle.timestamp
-          : Date.now();
+          : new Date(currentCandle.timestamp).getTime();
 
     // 1. STOP Orders (Stop Loss / Trailing Stop) with Gap-Through-Stop Execution
     if (order.orderType === 'STOP' && order.stopPrice !== undefined) {

@@ -44,5 +44,8 @@ lerna-debug.log*
 prisma/*.db
 prisma/*.db-journal
 
+# TypeScript Build Info
+*.tsbuildinfo
+
 # Turbo
 .turbo/

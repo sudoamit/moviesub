@@ -2203,6 +2203,14 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
         expect(t1.entrySnapshot.clientOrderId).toBe(t2.entrySnapshot.clientOrderId);
       }
     }
+
+    if (res1.executionEvents && res2.executionEvents) {
+      expect(res1.executionEvents.length).toBe(res2.executionEvents.length);
+      for (let i = 0; i < res1.executionEvents.length; i++) {
+        expect(res1.executionEvents[i].eventId).toBe(res2.executionEvents[i].eventId);
+        expect(res1.executionEvents[i].orderId).toBe(res2.executionEvents[i].orderId);
+      }
+    }
   });
 
   // 51. FillModel.LIMIT_TOUCH vs FillModel.LIMIT_WITH_SLIPPAGE Economic Semantics
