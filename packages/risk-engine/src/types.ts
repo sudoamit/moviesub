@@ -13,6 +13,23 @@ export type ExecutionEventType =
   | 'ORDER_CANCELLED'
   | 'ORDER_REJECTED';
 
+export interface IEntryExecutionSnapshot {
+  entryPrice: number;
+  referencePrice: number;
+  quantity: number;
+  fee: number;
+  slippage: number;
+  signalTimestamp: number;
+  executionTimestamp: number;
+  orderId?: string;
+  clientOrderId?: string;
+  side: 'BUY' | 'SELL';
+  initialStopLoss: number;
+  tp1: number;
+  tp2: number;
+  tp3: number;
+}
+
 export interface IExecutionEvent {
   eventId: string;
   tradeId: string;
@@ -27,6 +44,10 @@ export interface IExecutionEvent {
   slippage: number;
   reason: string;
   exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+  exitOrderId?: string;
+  exitClientOrderId?: string;
+  triggerPrice?: number;
+  executedPrice?: number;
 }
 
 export interface IPartialFillRecord {
@@ -40,6 +61,10 @@ export interface IPartialFillRecord {
   realizedR: number;
   fee: number;
   slippage: number;
+  exitOrderId?: string;
+  exitClientOrderId?: string;
+  triggerPrice?: number;
+  executedPrice?: number;
 }
 
 export interface IPartialExitPolicy {
@@ -77,6 +102,7 @@ export interface PositionLot {
   events: IExecutionEvent[];
   mae: number; // Maximum Adverse Excursion (in price distance & percentage)
   mfe: number; // Maximum Favorable Excursion (in price distance & percentage)
+  entrySnapshot?: Readonly<IEntryExecutionSnapshot>;
 }
 
 export interface IRiskConfig {

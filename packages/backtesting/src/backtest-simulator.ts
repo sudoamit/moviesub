@@ -435,6 +435,7 @@ export class BacktestSimulator {
             ),
             fillModel: String(fillModel),
             ambiguityMode: String(ambiguityMode),
+            entrySnapshot: activeLot.entrySnapshot,
           };
 
           trades.push(tradeRecord);

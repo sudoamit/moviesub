@@ -272,6 +272,23 @@ export interface IBacktestResult {
   trades: IBacktestTrade[];
 }
 
+export interface IEntryExecutionSnapshot {
+  entryPrice: number;
+  referencePrice: number;
+  quantity: number;
+  fee: number;
+  slippage: number;
+  signalTimestamp: number;
+  executionTimestamp: number;
+  orderId?: string;
+  clientOrderId?: string;
+  side: 'BUY' | 'SELL';
+  initialStopLoss: number;
+  tp1: number;
+  tp2: number;
+  tp3: number;
+}
+
 export interface IBacktestTrade {
   id: string;
   direction: Direction;
@@ -305,6 +322,7 @@ export interface IBacktestTrade {
   realizedR?: number;
   fillModel?: string;
   ambiguityMode?: string;
+  entrySnapshot?: IEntryExecutionSnapshot;
 }
 
 /**

@@ -191,6 +191,10 @@ export class ExecutionSimulator {
           slippage: fill.slippage,
           reason: `Order ${order.orderId} filled at ${fill.price}`,
           exitTarget: fill.exitTarget || order.exitTarget,
+          exitOrderId: order.orderId,
+          exitClientOrderId: order.clientOrderId,
+          triggerPrice: order.stopPrice || order.price,
+          executedPrice: fill.price,
         };
 
         this.events.push(fillEvent);

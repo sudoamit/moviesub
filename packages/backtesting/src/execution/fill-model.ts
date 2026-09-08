@@ -48,6 +48,51 @@ export class FillModelEngine {
       prevTime = subTime;
     }
 
+    // Check lower-TF completeness & coverage
+    const firstTime =
+      lowerTfCandles[0].timestamp instanceof Date
+        ? lowerTfCandles[0].timestamp.getTime()
+        : new Date(lowerTfCandles[0].timestamp).getTime();
+
+    const lastTime =
+      lowerTfCandles[lowerTfCandles.length - 1].timestamp instanceof Date
+        ? lowerTfCandles[lowerTfCandles.length - 1].timestamp.getTime()
+        : new Date(lowerTfCandles[lowerTfCandles.length - 1].timestamp).getTime();
+
+    const subStepMs =
+      lowerTfCandles.length >= 2
+        ? (lowerTfCandles[1].timestamp instanceof Date
+            ? lowerTfCandles[1].timestamp.getTime()
+            : new Date(lowerTfCandles[1].timestamp).getTime()) - firstTime
+        : 60 * 1000;
+
+    // Check start boundary coverage
+    if (firstTime - parentOpenTime >= Math.max(subStepMs, 60000)) {
+      return { isValid: false, reason: 'SUBBAR_COVERAGE_INCOMPLETE' };
+    }
+
+    // Check end boundary coverage if parent duration spans multiple sub-bars
+    if (
+      parentDurationMs > Math.max(subStepMs, 60000) &&
+      parentCloseTime - (lastTime + subStepMs) > Math.max(subStepMs, 60000)
+    ) {
+      return { isValid: false, reason: 'SUBBAR_COVERAGE_INCOMPLETE' };
+    }
+
+    // Check internal sub-bar gaps
+    let prevSubTime = firstTime;
+    for (let i = 1; i < lowerTfCandles.length; i++) {
+      const currTime =
+        lowerTfCandles[i].timestamp instanceof Date
+          ? lowerTfCandles[i].timestamp.getTime()
+          : new Date(lowerTfCandles[i].timestamp).getTime();
+
+      if (currTime - prevSubTime > Math.max(subStepMs * 1.5, 90000)) {
+        return { isValid: false, reason: 'SUBBAR_COVERAGE_INCOMPLETE' };
+      }
+      prevSubTime = currTime;
+    }
+
     return { isValid: true };
   }
 

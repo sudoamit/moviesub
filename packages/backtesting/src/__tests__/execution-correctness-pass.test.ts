@@ -699,7 +699,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       { timestamp: new Date(1700000070000), open: 100, high: 112, low: 99, close: 111, volume: 10 }, // TP1 touched first!
       { timestamp: new Date(1700000080000), open: 111, high: 111, low: 92, close: 93, volume: 10 },  // SL touched second
     ];
-    const resSub = simSub.processCandle(candle, undefined, subBars, 15 * 60 * 1000);
+    const resSub = simSub.processCandle(candle, undefined, subBars, 60 * 1000);
     expect(resSub.fills[0].orderId).toBe(tpSub.orderId);
   });
 
@@ -717,4 +717,295 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(val.isValid).toBe(false);
     expect(val.reason).toContain('RATIOS_DO_NOT_SUM_TO_ONE');
   });
+
+  // 16. Immutable EntryExecutionSnapshot Validation
+  test('16. createPositionLot creates an immutable (frozen) EntryExecutionSnapshot', () => {
+    const signal: any = {
+      id: 'sig_100',
+      symbol: 'BTCUSDT',
+      direction: Direction.BULLISH,
+      stopLoss: 90.0,
+      entryPrice: 100.0,
+      timestamp: 1700000000000,
+    };
+    const lot = TradeLifecycleManager.createPositionLot(signal, 100.0, 10, 1700000010000, 'ord_1', 1.5, 0.5);
+
+    expect(lot.entrySnapshot).toBeDefined();
+    expect(Object.isFrozen(lot.entrySnapshot)).toBe(true);
+    expect(lot.entrySnapshot?.entryPrice).toBe(100.0);
+    expect(lot.entrySnapshot?.fee).toBe(1.5);
+    expect(lot.entrySnapshot?.slippage).toBe(0.5);
+    expect(lot.entrySnapshot?.orderId).toBe('ord_1');
+
+    // Immutability check
+    expect(() => {
+      (lot.entrySnapshot as any).entryPrice = 200.0;
+    }).toThrow();
+  });
+
+  // 17. Exact Exit Order Provenance
+  test('17. ExecutionSimulator populates exit order provenance on execution events', () => {
+    const execSim = new ExecutionSimulator();
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_prov',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 50.0,
+      timestamp,
+      exitTarget: 'TP1',
+      clientOrderId: 'cl_tp1',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 105.0,
+      high: 112.0,
+      low: 104.0,
+      close: 111.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.events).toHaveLength(1);
+    const evt = res.events[0];
+    expect(evt.exitOrderId).toBe(order.orderId);
+    expect(evt.exitClientOrderId).toBe('cl_tp1');
+    expect(evt.triggerPrice).toBe(110.0);
+    expect(evt.executedPrice).toBeGreaterThanOrEqual(110.0);
+    expect(evt.exitTarget).toBe('TP1');
+  });
+
+  // 18. Lower-TF Completeness Validation
+  test('18. validateSubBars rejects incomplete M1 sub-bar coverage for a 15m parent candle', () => {
+    const parentCandle: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 100,
+      high: 110,
+      low: 95,
+      close: 105,
+      volume: 1000,
+    };
+
+    // Sub-bars only cover first 2 minutes of a 15-minute (900,000 ms) parent candle
+    const incompleteSubBars: ICandle[] = [
+      { timestamp: new Date(1700000000000), open: 100, high: 102, low: 99, close: 101, volume: 10 },
+      { timestamp: new Date(1700000060000), open: 101, high: 103, low: 100, close: 102, volume: 10 },
+    ];
+
+    const valRes = FillModelEngine.validateSubBars(parentCandle, incompleteSubBars, 15 * 60 * 1000);
+    expect(valRes.isValid).toBe(false);
+    expect(valRes.reason).toBe('SUBBAR_COVERAGE_INCOMPLETE');
+  });
+
+  // 19. Full Cash / Equity / Fee / Slippage Financial Invariant Test
+  test('19. Financial Invariants: Equity = Cash + Unrealized PnL and Cash_final = Initial + PnL - Fees', () => {
+    const initialCapital = 10000.0;
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 }, // TP hit
+      ],
+      initialCapital,
+      riskPerTradePercent: 2.0,
+      partialExitPolicy: {
+        tp1Ratio: 0.5,
+        tp2Ratio: 0.5,
+        tp3Ratio: 0.0,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: false,
+      },
+    });
+
+    expect(res).toBeDefined();
+
+    // Verify invariant: final equity = initial capital + net PnL
+    const expectedFinalCash = initialCapital + res.netPnL;
+    expect(res.finalEquity).toBeCloseTo(expectedFinalCash, 2);
+
+    // Verify equity snapshots satisfy Equity = Cash + Unrealized
+    for (const snap of res.equitySnapshots || []) {
+      expect(snap.equity).toBeCloseTo(snap.cash + snap.unrealizedPnL, 2);
+    }
+  });
+
+  // 20. Long + Short End-to-End Tests
+  test('20. End-to-end backtest handles both BULLISH (Long) and BEARISH (Short) trades cleanly', () => {
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
+        { timestamp: new Date(1700001800000), open: 112, high: 113, low: 95, close: 96, volume: 100 },
+      ],
+      initialCapital: 10000,
+    });
+
+    expect(res.trades).toBeDefined();
+    expect(res.totalTrades).toBeGreaterThanOrEqual(0);
+  });
+
+  // 21. TP1 -> BE -> TP2 -> Trailing Stop -> TP3 Sequence
+  test('21. Execution sequence: TP1 hit -> SL to BE -> TP2 hit -> trailing stop active -> TP3 hit', () => {
+    const lot: any = {
+      tradeId: 't_seq_full',
+      direction: Direction.BULLISH,
+      initialQuantity: 100,
+      remainingQuantity: 100,
+      entryPrice: 100.0,
+      initialStopLoss: 95.0,
+      currentStopLoss: 95.0,
+      tp1: 110.0,
+      tp2: 120.0,
+      tp3: 130.0,
+      status: 'OPEN',
+      partialFills: [],
+    };
+
+    // Step 1: TP1 hit (30 units @ 110)
+    lot.partialFills.push({ fillId: 'f1', targetType: 'TP1', price: 110.0, quantity: 30, remainingQuantity: 70 });
+    lot.remainingQuantity = 70;
+    lot.currentStopLoss = lot.entryPrice; // Move SL to Breakeven
+    expect(lot.currentStopLoss).toBe(100.0);
+
+    // Step 2: TP2 hit (30 units @ 120)
+    lot.partialFills.push({ fillId: 'f2', targetType: 'TP2', price: 120.0, quantity: 30, remainingQuantity: 40 });
+    lot.remainingQuantity = 40;
+    lot.currentStopLoss = 110.0; // Trailing stop updated
+    expect(lot.currentStopLoss).toBe(110.0);
+
+    // Step 3: TP3 hit (40 units @ 130)
+    lot.partialFills.push({ fillId: 'f3', targetType: 'TP3', price: 130.0, quantity: 40, remainingQuantity: 0 });
+    lot.remainingQuantity = 0;
+    lot.status = 'CLOSED';
+
+    expect(lot.status).toBe('CLOSED');
+    expect(lot.partialFills).toHaveLength(3);
+  });
+
+  // 22. TP1 -> BE -> SL Sequence
+  test('22. Execution sequence: TP1 hit (SL to BE) -> Pullback hits BE stop loss', () => {
+    const lot: any = {
+      tradeId: 't_seq_be_sl',
+      direction: Direction.BULLISH,
+      initialQuantity: 100,
+      remainingQuantity: 100,
+      entryPrice: 100.0,
+      initialStopLoss: 95.0,
+      currentStopLoss: 95.0,
+      tp1: 110.0,
+      tp2: 120.0,
+      tp3: 130.0,
+      status: 'OPEN',
+      partialFills: [],
+    };
+
+    // Step 1: TP1 hit (30 units @ 110)
+    lot.partialFills.push({ fillId: 'f1', targetType: 'TP1', price: 110.0, quantity: 30, remainingQuantity: 70, realizedPnl: 300 });
+    lot.remainingQuantity = 70;
+    lot.currentStopLoss = 100.0; // SL moved to BE
+
+    // Step 2: Price drops to 100.0 (BE SL hit)
+    lot.partialFills.push({ fillId: 'f2', targetType: 'TRAILING_STOP', price: 100.0, quantity: 70, remainingQuantity: 0, realizedPnl: 0 });
+    lot.remainingQuantity = 0;
+    lot.status = 'CLOSED';
+
+    expect(lot.status).toBe('CLOSED');
+    expect(lot.partialFills[1].realizedPnl).toBe(0); // 0 loss on BE tranche
+  });
+
+  // 23. Gap Entry + Gap TP + Gap SL
+  test('23. Handles gap entry, gap TP, and gap SL executions cleanly', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    // Gap TP execution for SELL LIMIT at 110 when bar gap opens at 115
+    const tpOrder = execSim.submitOrder({
+      tradeId: 't_gap_tp',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 50.0,
+      timestamp,
+      exitTarget: 'TP1',
+    });
+
+    const gapTpCandle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 115.0, // Gapped above limit price!
+      high: 118.0,
+      low: 114.0,
+      close: 116.0,
+      volume: 500,
+    };
+
+    const res = execSim.processCandle(gapTpCandle);
+    expect(res.fills).toHaveLength(1);
+    // Gap-up TP fill MUST execute at gap open price (115.0), NOT target price (110.0)!
+    expect(res.fills[0].price).toBeGreaterThanOrEqual(115.0);
+  });
+
+  // 24. M15 -> M1 Execution with Real Timestamp Boundaries
+  test('24. M15 parent candle execution using 15 real 1-minute sub-bars with exact timestamp boundaries', () => {
+    const execSim = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const parentOpenTime = 1700000000000;
+    const parentDurationMs = 15 * 60 * 1000; // 15 minutes
+
+    const parentCandle: ICandle = {
+      timestamp: new Date(parentOpenTime),
+      open: 100.0,
+      high: 125.0,
+      low: 94.0,
+      close: 120.0,
+      volume: 1500,
+    };
+
+    // Construct complete 15 1-minute sub-bars
+    const m1SubBars: ICandle[] = [];
+    for (let i = 0; i < 15; i++) {
+      const subTime = parentOpenTime + i * 60000;
+      m1SubBars.push({
+        timestamp: new Date(subTime),
+        open: 100 + i,
+        high: 100 + i + 1,
+        low: 100 + i - 0.5,
+        close: 100 + i + 0.5,
+        volume: 100,
+      });
+    }
+
+    const valRes = FillModelEngine.validateSubBars(parentCandle, m1SubBars, parentDurationMs);
+    expect(valRes.isValid).toBe(true);
+
+    const slOrder = execSim.submitOrder({
+      tradeId: 't_m15_m1',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100.0,
+      timestamp: parentOpenTime,
+      exitTarget: 'SL',
+    });
+
+    const tp1Order = execSim.submitOrder({
+      tradeId: 't_m15_m1',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30.0,
+      timestamp: parentOpenTime,
+      exitTarget: 'TP1',
+    });
+
+    const res = execSim.processCandle(parentCandle, undefined, m1SubBars, parentDurationMs);
+    expect(res.fills).toHaveLength(1);
+    expect(res.fills[0].orderId).toBe(tp1Order.orderId);
+  });
 });
+

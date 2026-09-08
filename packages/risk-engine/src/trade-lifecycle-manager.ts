@@ -1,5 +1,6 @@
 import { Direction, ICandle, ISignalSetup, SignalState } from '@quant/shared';
 import {
+  IEntryExecutionSnapshot,
   IExecutionEvent,
   IPartialExitPolicy,
   IPartialFillRecord,
@@ -90,6 +91,29 @@ export class TradeLifecycleManager {
       slippage: entrySlippage,
     };
 
+    const signalTimestamp =
+      signal.timestamp instanceof Date
+        ? signal.timestamp.getTime()
+        : typeof signal.timestamp === 'number'
+          ? signal.timestamp
+          : executionTime;
+
+    const entrySnapshot: IEntryExecutionSnapshot = Object.freeze({
+      entryPrice: executionPrice,
+      referencePrice: signal.entryZone?.optimal || executionPrice,
+      quantity,
+      fee: entryFee,
+      slippage: entrySlippage,
+      signalTimestamp,
+      executionTimestamp: executionTime,
+      orderId,
+      side: signal.direction === Direction.BULLISH ? 'BUY' : 'SELL',
+      initialStopLoss: signal.stopLoss,
+      tp1,
+      tp2,
+      tp3,
+    });
+
     return {
       id: `lot_${tradeId}_${executionTime}`,
       tradeId,
@@ -113,6 +137,7 @@ export class TradeLifecycleManager {
       events: [entryEvent],
       mae: 0,
       mfe: 0,
+      entrySnapshot,
     };
   }
 
