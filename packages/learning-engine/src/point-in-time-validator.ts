@@ -38,24 +38,28 @@ export class PointInTimeValidator {
       return { isValid: false, reason: 'INVALID_FEATURE_TIMESTAMP' };
     }
 
-    // Default labelStart to entryTime or decisionTimestamp + 1ms if not explicitly specified
-    const defaultLabelStart = exp.execution?.entryTime
-      ? new Date(exp.execution.entryTime).getTime()
-      : decisionTimestamp + 1;
-    const labelStartTimestamp = exp.labelStartTimestamp ?? defaultLabelStart;
+    const labelStartTimestamp =
+      exp.labelStartTimestamp ??
+      (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : undefined);
 
-    if (Number.isNaN(labelStartTimestamp) || !Number.isFinite(labelStartTimestamp)) {
-      return { isValid: false, reason: 'INVALID_LABEL_START_TIMESTAMP' };
+    if (
+      labelStartTimestamp === undefined ||
+      Number.isNaN(labelStartTimestamp) ||
+      !Number.isFinite(labelStartTimestamp)
+    ) {
+      return { isValid: false, reason: 'MISSING_LABEL_START_TIMESTAMP' };
     }
 
-    // Default labelEnd to exitTime or labelStartTimestamp if not explicitly specified
-    const defaultLabelEnd = exp.execution?.exitTime
-      ? new Date(exp.execution.exitTime).getTime()
-      : labelStartTimestamp;
-    const labelEndTimestamp = exp.labelEndTimestamp ?? defaultLabelEnd;
+    const labelEndTimestamp =
+      exp.labelEndTimestamp ??
+      (exp.execution?.exitTime ? new Date(exp.execution.exitTime).getTime() : undefined);
 
-    if (Number.isNaN(labelEndTimestamp) || !Number.isFinite(labelEndTimestamp)) {
-      return { isValid: false, reason: 'INVALID_LABEL_END_TIMESTAMP' };
+    if (
+      labelEndTimestamp === undefined ||
+      Number.isNaN(labelEndTimestamp) ||
+      !Number.isFinite(labelEndTimestamp)
+    ) {
+      return { isValid: false, reason: 'MISSING_LABEL_END_TIMESTAMP' };
     }
 
     // Invariant 1: featureTimestamp <= decisionTimestamp

@@ -21,7 +21,11 @@ describe('LearningEngine Pipeline', () => {
           smc: { liquiditySweeps: isWin ? [{ id: '1' }] : [] },
         },
         decision: { action: 'BUY', score: 85 },
-        execution: { entryPrice: 24000, entryTime: new Date() },
+        execution: {
+          entryPrice: 24000,
+          entryTime: new Date(1700000000000 + i * 3600000 + 1000),
+          exitTime: new Date(1700000000000 + i * 3600000 + 1801000),
+        },
         risk: { stopLoss: 23950 },
         prediction: { probabilityWin: 0.75 },
         outcome: {
@@ -43,7 +47,7 @@ describe('LearningEngine Pipeline', () => {
         failureReasons: isWin ? [] : ['HTF_CONFLICT'],
         strategyVersion: 'v2.0',
         featureSchemaVersion: '2.0',
-        createdAt: new Date(),
+        createdAt: new Date(1700000000000 + i * 3600000),
       };
     });
   };
@@ -58,7 +62,7 @@ describe('LearningEngine Pipeline', () => {
     });
 
     expect(report.experiencesUsed).toBe(45);
-    expect(report.errorReport.totalTrades).toBe(45);
+    expect(report.errorReport.totalTrades).toBe(27); // 60% training partition of 45 experiences
     expect(report.candidatesGenerated).toBeGreaterThanOrEqual(0);
     expect(report.driftReport).toBeDefined();
     expect(report.summary).toContain('Self-Improvement cycle completed');

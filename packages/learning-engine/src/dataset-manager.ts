@@ -18,6 +18,8 @@ export interface IDatasetMetadata {
 export interface IDatasetSample {
   sampleId: string;
   timestamp: number; // UTC timestamp ms
+  labelStartTimestamp?: number;
+  labelEndTimestamp?: number;
   features: Record<string, number>;
   labelBinary: number; // 1 if +1R reached before -1R, 0 otherwise
   labelContinuousR: number; // Realized R-multiple
@@ -52,13 +54,13 @@ export class DatasetManager {
       throw new Error('Cannot create dataset with empty samples');
     }
 
-    // Deduplicate sample IDs
+    // Deduplicate sample IDs - throw error on duplicate to prevent silent data corruption
     const seenIds = new Set<string>();
     const deduplicated: IDatasetSample[] = [];
 
     for (const sample of samples) {
       if (seenIds.has(sample.sampleId)) {
-        continue; // Drop duplicate sample ID
+        throw new Error(`DUPLICATE_SAMPLE_ID:${sample.sampleId}`);
       }
       seenIds.add(sample.sampleId);
       deduplicated.push(sample);
@@ -69,8 +71,20 @@ export class DatasetManager {
     const startDate = new Date(sorted[0].timestamp).toISOString();
     const endDate = new Date(sorted[sorted.length - 1].timestamp).toISOString();
 
-    const sampleFeatures = Object.keys(sorted[0].features || {});
-    const contentString = `${symbol}_${timeframe}_${startDate}_${endDate}_${sorted.length}_${sampleFeatures.join(',')}_seed${randomSeed}`;
+    const sampleFeatures = Object.keys(sorted[0].features || {}).sort();
+
+    // Canonical serialization of all sample content for cryptographic provenance
+    const canonicalSamplesString = sorted
+      .map((s) => {
+        const sortedFeatStr = sampleFeatures
+          .map((k) => `${k}:${s.features[k] ?? 0}`)
+          .join(',');
+        const lEnd = s.labelEndTimestamp ?? s.timestamp;
+        return `${s.sampleId}|${s.timestamp}|${lEnd}|${sortedFeatStr}|${s.labelBinary}|${s.labelContinuousR}|${s.regime}|${s.volatilityBucket}`;
+      })
+      .join('\n');
+
+    const contentString = `${symbol}_${timeframe}_${startDate}_${endDate}_${sorted.length}_${sampleFeatures.join(',')}_seed${randomSeed}_version${strategyVersion}_features${featureVersion}\nCANONICAL_DATA:\n${canonicalSamplesString}`;
     const dataHash = crypto
       .createHash('sha256')
       .update(contentString)
@@ -101,8 +115,8 @@ export class DatasetManager {
   }
 
   /**
-   * Partitions a time-series dataset into strict sequential Train, Validation, and OOS splits.
-   * NEVER randomly shuffles time-series data to avoid future lookahead leakage.
+   * Partitions a time-series dataset into strict sequential Train, Validation, and OOS splits
+   * with label end timestamp purging to prevent temporal overlap leakage.
    */
   splitDataset(
     datasetId: string,
@@ -116,17 +130,37 @@ export class DatasetManager {
     }
 
     const total = record.samples.length;
-    const trainEnd = Math.floor(total * trainRatio);
-    const valEnd = Math.floor(total * (trainRatio + valRatio));
+    const trainEndIdx = Math.floor(total * trainRatio);
+    const valEndIdx = Math.floor(total * (trainRatio + valRatio));
 
-    const train = Object.freeze(record.samples.slice(0, trainEnd));
-    const validation = Object.freeze(record.samples.slice(trainEnd, valEnd));
-    const outOfSample = Object.freeze(record.samples.slice(valEnd));
+    const trainRaw = record.samples.slice(0, trainEndIdx);
+    const valRaw = record.samples.slice(trainEndIdx, valEndIdx);
+    const oosRaw = record.samples.slice(valEndIdx);
+
+    // Calculate maximum label end timestamp in training partition for embargo purging
+    let trainMaxLabelEnd = 0;
+    for (const s of trainRaw) {
+      const endTs = s.labelEndTimestamp ?? s.timestamp;
+      if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
+    }
+
+    // Purge validation samples whose start timestamp is before/during active train label horizon
+    const valPurged = valRaw.filter((s) => s.timestamp > trainMaxLabelEnd);
+
+    // Calculate maximum label end timestamp in validation partition
+    let valMaxLabelEnd = trainMaxLabelEnd;
+    for (const s of valPurged) {
+      const endTs = s.labelEndTimestamp ?? s.timestamp;
+      if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
+    }
+
+    // Purge OOS samples whose start timestamp is before/during active validation label horizon
+    const oosPurged = oosRaw.filter((s) => s.timestamp > valMaxLabelEnd);
 
     return {
-      train,
-      validation,
-      outOfSample,
+      train: Object.freeze(trainRaw),
+      validation: Object.freeze(valPurged.length > 0 ? valPurged : valRaw),
+      outOfSample: Object.freeze(oosPurged.length > 0 ? oosPurged : oosRaw),
       metadata: record.metadata,
     };
   }

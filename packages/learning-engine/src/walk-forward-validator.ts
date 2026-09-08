@@ -9,11 +9,16 @@ import { CandidateEvaluator } from './candidate-evaluator';
 export interface IWalkForwardOptions {
   numFolds?: number;
   embargoDays?: number;
+  retrainFn?: (
+    trainSlice: TradingExperience[],
+    baseCandidate: StrategyCandidate,
+    foldIndex: number,
+  ) => StrategyCandidate;
 }
 
 export class WalkForwardValidator {
   /**
-   * Performs chronological purged and embargoed walk-forward validation on strategy candidates.
+   * Performs chronological purged and embargoed walk-forward validation with genuine candidate retraining per fold.
    */
   public static validate(
     candidate: StrategyCandidate,
@@ -47,23 +52,54 @@ export class WalkForwardValidator {
     for (let f = 0; f < numFolds; f++) {
       const trainStart = 0;
       const trainEnd = (f + 1) * foldSize;
-      const valStart = trainEnd + 1; // 1-bar embargo
+      const valStart = trainEnd;
       const valEnd = Math.min(n - 1, valStart + Math.max(1, Math.floor(foldSize / 2)));
-      const testStart = valEnd + 1; // 1-bar embargo
+      const testStart = valEnd;
       const testEnd = Math.min(n - 1, testStart + foldSize);
 
       const trainSlice = sorted.slice(trainStart, trainEnd);
-      const valSlice = sorted.slice(valStart, valEnd + 1);
-      const testSlice = sorted.slice(testStart, testEnd + 1);
+      const valRaw = sorted.slice(valStart, valEnd + 1);
+      const testRaw = sorted.slice(testStart, testEnd + 1);
 
-      if (trainSlice.length === 0 || testSlice.length === 0) continue;
+      if (trainSlice.length === 0 || testRaw.length === 0) continue;
 
-      // 1. Train fold: evaluate candidate on expanding training window
-      const isEval = CandidateEvaluator.evaluate(candidate, trainSlice);
-      // 2. Validation fold: validate tuning
-      const valEval = CandidateEvaluator.evaluate(candidate, valSlice.length > 0 ? valSlice : trainSlice);
-      // 3. OOS fold: evaluate frozen candidate out-of-sample
-      const oosEval = CandidateEvaluator.evaluate(candidate, testSlice);
+      // Calculate label end timestamp purge boundary for training fold
+      let trainMaxLabelEnd = 0;
+      for (const e of trainSlice) {
+        const endTs =
+          e.labelEndTimestamp ??
+          (e.execution?.exitTime ? new Date(e.execution.exitTime).getTime() : new Date(e.timestamp).getTime());
+        if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
+      }
+
+      // Purge validation samples whose entry timestamp overlaps with active training labels
+      const valPurged = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd);
+      const valSlice = valPurged.length > 0 ? valPurged : valRaw;
+
+      // Calculate label end timestamp purge boundary for validation fold
+      let valMaxLabelEnd = trainMaxLabelEnd;
+      for (const e of valSlice) {
+        const endTs =
+          e.labelEndTimestamp ??
+          (e.execution?.exitTime ? new Date(e.execution.exitTime).getTime() : new Date(e.timestamp).getTime());
+        if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
+      }
+
+      // Purge OOS samples whose entry timestamp overlaps with active validation labels
+      const testPurged = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd);
+      const testSlice = testPurged.length > 0 ? testPurged : testRaw;
+
+      // Retrain / fit candidate strategy on training fold
+      const foldCandidate = options.retrainFn
+        ? options.retrainFn(trainSlice, candidate, f + 1)
+        : this.retrainCandidateOnFold(trainSlice, candidate, f + 1);
+
+      // 1. Evaluate retrained candidate in-sample on training fold
+      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice);
+      // 2. Evaluate retrained candidate on validation fold
+      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice);
+      // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold
+      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice);
 
       const isExp = isEval.candidateExpectancy;
       const oosExp = oosEval.candidateExpectancy;
@@ -110,6 +146,39 @@ export class WalkForwardValidator {
       meanOutOfSampleExpectancy: meanOOS,
       oosDegradationPct: Math.max(0, degradation),
       isRobust,
+    };
+  }
+
+  /**
+   * Fits candidate strategy parameters strictly on training fold data.
+   */
+  private static retrainCandidateOnFold(
+    trainSlice: TradingExperience[],
+    baseCandidate: StrategyCandidate,
+    foldIndex: number,
+  ): StrategyCandidate {
+    const winningTrain = trainSlice.filter((e) => e.outcome?.status === 'WIN');
+    const trainScores = winningTrain
+      .map((e) => e.decision?.score || 0)
+      .filter((s) => s > 0)
+      .sort((a, b) => a - b);
+
+    const fittedValue =
+      trainScores.length > 0
+        ? trainScores[Math.floor(trainScores.length / 2)]
+        : typeof baseCandidate.change?.value === 'number'
+          ? baseCandidate.change.value
+          : 70;
+
+    return {
+      ...baseCandidate,
+      candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-fold${foldIndex}`,
+      change: {
+        ...baseCandidate.change,
+        fittedOnFold: foldIndex,
+        fittedSampleCount: trainSlice.length,
+        fittedValue,
+      },
     };
   }
 }

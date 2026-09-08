@@ -100,6 +100,14 @@ export class PromotionGate {
       );
     }
 
+    // 6. Explicit Auto Promotion Approval Check
+    if (!criteria.allowAutoPromotion) {
+      rejectionDetails.push(
+        `Auto promotion disabled (allowAutoPromotion is false). Candidate strategy held in SHADOW / VALIDATED state.`,
+      );
+      score -= 50;
+    }
+
     const approved = rejectionDetails.length === 0 && score >= 70;
 
     if (approved) {

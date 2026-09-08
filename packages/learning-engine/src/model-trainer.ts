@@ -1,9 +1,11 @@
+import * as crypto from 'crypto';
 import {
   CANONICAL_FEATURE_NAMES_V2,
   CANONICAL_V2_DIMENSION,
   CanonicalTradeFeatureVectorV2,
 } from '@quant/trading-engine';
 import { NoTradePrediction, TradingExperience } from './types';
+import { IDatasetSample } from './dataset-manager';
 
 export interface ITrainedModelArtifact {
   modelVersion: string;
@@ -14,8 +16,6 @@ export interface ITrainedModelArtifact {
   trainLoss: number;
   trainedAt: Date;
 }
-
-import { IDatasetSample } from './dataset-manager';
 
 export class ModelTrainer {
   /**
@@ -34,13 +34,13 @@ export class ModelTrainer {
 
     if (!trainingDataset || trainingDataset.length === 0) {
       return {
-        modelVersion: `ml-v2-${Date.now()}`,
+        modelVersion: 'ml-v2-empty',
         weights,
         bias,
         featureSchemaVersion: '2.0',
         sampleCount: 0,
         trainLoss: 0.693,
-        trainedAt: new Date(),
+        trainedAt: new Date(0),
       };
     }
 
@@ -93,14 +93,25 @@ export class ModelTrainer {
       bias -= (learningRate * gradB) / n;
     }
 
+    const roundedWeights = weights.map((w) => Number(w.toFixed(5)));
+    const roundedBias = Number(bias.toFixed(5));
+
+    const modelContentStr = `samples:${samples.length}_w:${roundedWeights.join(',')}_b:${roundedBias}_loss:${finalLoss.toFixed(4)}_schema:2.0`;
+    const modelHash = crypto
+      .createHash('sha256')
+      .update(modelContentStr)
+      .digest('hex')
+      .substring(0, 12);
+    const modelVersion = `ml-v2-${modelHash}`;
+
     return {
-      modelVersion: `ml-v2-${Date.now()}`,
-      weights: weights.map((w) => Number(w.toFixed(5))),
-      bias: Number(bias.toFixed(5)),
+      modelVersion,
+      weights: roundedWeights,
+      bias: roundedBias,
       featureSchemaVersion: '2.0',
       sampleCount: samples.length,
       trainLoss: Number(finalLoss.toFixed(4)),
-      trainedAt: new Date(),
+      trainedAt: new Date(0),
     };
   }
 

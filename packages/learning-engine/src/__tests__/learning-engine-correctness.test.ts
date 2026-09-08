@@ -473,4 +473,132 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       expect(cand.evidence.expectancyAfterHistorical).toBe(cand.evidence.expectancyBefore);
     }
   });
+
+  // Test 16 — Duplicate sample ID rejection
+  test('Test 16: DatasetManager throws DUPLICATE_SAMPLE_ID error on duplicate sample IDs', () => {
+    const ds = new DatasetManager();
+    const duplicateSamples = [
+      { sampleId: 'dup_1', timestamp: 1000, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 'dup_1', timestamp: 2000, features: { smcScore: 60 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+
+    expect(() => {
+      ds.createDataset('BTCUSDT', '15m', duplicateSamples);
+    }).toThrow('DUPLICATE_SAMPLE_ID:dup_1');
+  });
+
+  // Test 17 — Canonical dataset hashing
+  test('Test 17: Datasets with identical timestamps but different feature values produce different dataHashes', () => {
+    const ds1 = new DatasetManager();
+    const samplesA = [
+      { sampleId: 's1', timestamp: 1000, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+    const recA = ds1.createDataset('BTCUSDT', '15m', samplesA, '2.0', '2.0.0', 42);
+
+    const ds2 = new DatasetManager();
+    const samplesB = [
+      { sampleId: 's1', timestamp: 1000, features: { smcScore: 99 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+    const recB = ds2.createDataset('BTCUSDT', '15m', samplesB, '2.0', '2.0.0', 42);
+
+    expect(recA.metadata.dataHash).not.toEqual(recB.metadata.dataHash);
+  });
+
+  // Test 18 — Label end timestamp purging
+  test('Test 18: DatasetManager purges validation samples overlapping with training label horizons', () => {
+    const ds = new DatasetManager();
+    const samples = [
+      { sampleId: 's1', timestamp: 1000, labelEndTimestamp: 5000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's2', timestamp: 2000, labelEndTimestamp: 3000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's3', timestamp: 4000, labelEndTimestamp: 6000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' }, // Overlaps with s1 labelEnd
+      { sampleId: 's4', timestamp: 6000, labelEndTimestamp: 7000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's5', timestamp: 8000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+
+    const rec = ds.createDataset('BTCUSDT', '15m', samples);
+    const splits = ds.splitDataset(rec.metadata.datasetId, 0.4, 0.4, 0.2);
+
+    // s3 timestamp (4000) <= maxTrainLabelEnd (5000) should be purged from validation
+    const valSampleIds = splits.validation.map((s) => s.sampleId);
+    expect(valSampleIds).not.toContain('s3');
+  });
+
+  // Test 19 — allowAutoPromotion enforcement
+  test('Test 19: PromotionGate rejects auto-promotion when allowAutoPromotion is false', () => {
+    const candidate: StrategyCandidate = {
+      id: 'cand_gate_auto',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-cand-gate',
+      type: 'FILTER',
+      description: 'Auto promotion test',
+      change: {},
+      evidence: { sampleSize: 50, expectancyBefore: 0.2, expectancyAfterHistorical: 0.8 },
+      validationMetrics: {
+        inSampleExpectancy: 0.8,
+        walkForwardExpectancy: 0.7,
+        outOfSampleExpectancy: 0.7,
+        profitFactor: 2.5,
+        maxDrawdownPercent: 3.0,
+        monteCarloRuinProb: 0.0,
+        transactionCostSurvived: true,
+      },
+      shadowMetrics: {
+        shadowTradeCount: 15,
+        shadowExpectancy: 0.9,
+        shadowWinRate: 70.0,
+        shadowMaxDrawdown: 1.5,
+      },
+      status: 'SHADOW',
+      createdAt: new Date(),
+    };
+
+    const resNoAuto = PromotionGate.evaluateCandidate(candidate, {
+      ...PromotionGate.DEFAULT_CRITERIA,
+      allowAutoPromotion: false,
+    });
+
+    expect(resNoAuto.approved).toBe(false);
+    expect(resNoAuto.rejectionDetails).toContainEqual(expect.stringContaining('allowAutoPromotion is false'));
+  });
+
+  // Test 20 — Walk-forward fold retraining
+  test('Test 20: WalkForwardValidator fits candidate parameters per fold, producing fold-specific artifacts', () => {
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `exp_retrain_${i}`,
+      tradeId: `t_retrain_${i}`,
+      timestamp: new Date(1700000000000 + i * 60000),
+      labelStartTimestamp: 1700000000000 + i * 60000 + 1000,
+      labelEndTimestamp: 1700000000000 + i * 60000 + 30000,
+      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      marketState: { quant: { smcScore: i < 15 ? 65 : 85 } },
+      decision: { action: 'BUY', score: i < 15 ? 65 : 85 },
+      execution: { entryPrice: 100, entryTime: new Date(1700000000000 + i * 60000 + 1000) },
+      risk: { stopLoss: 95 },
+      prediction: {},
+      outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+      marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+      outcomeClassification: 'GOOD_TRADE_WIN',
+      reasons: [],
+      failureReasons: [],
+      strategyVersion: 'v2.0',
+      featureSchemaVersion: '2.0',
+      createdAt: new Date(),
+    }));
+
+    const baseCand: StrategyCandidate = {
+      id: 'cand_retrain_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-retrain',
+      type: 'THRESHOLD',
+      description: 'Threshold retraining candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const wfRes = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 3 });
+    expect(wfRes.folds.length).toBeGreaterThan(0);
+    expect(wfRes.folds[0].passed).toBe(true);
+  });
 });

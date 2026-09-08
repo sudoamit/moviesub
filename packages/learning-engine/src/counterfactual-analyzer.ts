@@ -64,9 +64,24 @@ export class CounterfactualAnalyzer {
         const high = c.high;
         const low = c.low;
 
-        // Check SL breach
         const slHit = isBuy ? low <= exp.risk.stopLoss : high >= exp.risk.stopLoss;
-        if (slHit) {
+        const tp1Hit = isBuy ? high >= target1 : low <= target1;
+
+        if (slHit && tp1Hit) {
+          const openDistToSl = Math.abs(c.open - exp.risk.stopLoss);
+          const openDistToTp = Math.abs(c.open - target1);
+          if (openDistToTp < openDistToSl) {
+            reachedTp1 = true;
+            tp1PnLR = 1.5;
+          } else {
+            stoppedOut = true;
+            if (!reachedTp1) tp1PnLR = -1.0;
+            if (!reachedTp2) tp2PnLR = -1.0;
+            if (!reachedTp3) tp3PnLR = reachedTp1 ? 0.0 : -1.0;
+            if (!reachedTp1) bePnLR = -1.0;
+            break;
+          }
+        } else if (slHit) {
           stoppedOut = true;
           if (!reachedTp1) tp1PnLR = -1.0;
           if (!reachedTp2) tp2PnLR = -1.0;
@@ -76,7 +91,7 @@ export class CounterfactualAnalyzer {
         }
 
         // Check TP targets
-        if (isBuy ? high >= target1 : low <= target1) {
+        if (tp1Hit) {
           reachedTp1 = true;
           tp1PnLR = 1.5;
         }

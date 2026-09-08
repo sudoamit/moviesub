@@ -1,7 +1,9 @@
 import { ExperienceStore } from './experience-store';
+import { TemporalDatasetBuilder } from './dataset-manager';
 import { ErrorAnalyzer } from './error-analyzer';
 import { PatternDiscoveryEngine } from './pattern-discovery';
 import { FeatureSelector } from './feature-selector';
+import { ModelTrainer } from './model-trainer';
 import { RegimePerformanceAnalyzer } from './regime-performance-analyzer';
 import { VolatilityPerformanceAnalyzer } from './volatility-performance-analyzer';
 import { StrategyPerformanceAnalyzer } from './strategy-performance-analyzer';
@@ -39,21 +41,57 @@ export class LearningEngine {
     const experiences = ExperienceStore.query();
     const expCount = experiences.length;
 
-    // 2. Error Analysis
-    const errorReport = ErrorAnalyzer.analyze(experiences);
+    // 2. Build temporal dataset splits (Train, Validation, OOS) with label end purging
+    let trainSlice = experiences;
+    let valSlice = experiences;
+    let oosSlice = experiences;
 
-    // 3. Pattern Discovery
-    const patterns = PatternDiscoveryEngine.discover(experiences);
+    if (experiences.length >= 10) {
+      const datasetBuilder = new TemporalDatasetBuilder();
+      const symbol = experiences[0]?.instrument?.symbol || 'BTCUSDT';
 
-    // 4. Feature Selection
-    const featureSelection = FeatureSelector.selectFeatures(experiences);
+      const datasetSamples = experiences.map((exp) => ({
+        sampleId: exp.id,
+        timestamp: new Date(exp.timestamp).getTime(),
+        labelStartTimestamp: exp.labelStartTimestamp,
+        labelEndTimestamp: exp.labelEndTimestamp,
+        features: exp.marketState?.quant || {},
+        labelBinary: exp.outcome?.status === 'WIN' ? 1 : 0,
+        labelContinuousR: exp.outcome?.pnlR || 0,
+        regime: exp.marketContext?.regime || 'UNKNOWN',
+        volatilityBucket: exp.marketContext?.volatilityRegime || 'NORMAL',
+      }));
 
-    // 5. Domain Metrics
-    const regimeStats = RegimePerformanceAnalyzer.analyze(experiences);
-    const volStats = VolatilityPerformanceAnalyzer.analyze(experiences);
-    const stratStats = StrategyPerformanceAnalyzer.analyze(experiences);
+      const record = datasetBuilder.createDataset(symbol, '1h', datasetSamples);
+      const splits = datasetBuilder.splitDataset(record.metadata.datasetId, 0.6, 0.2, 0.2);
 
-    // 6. Candidate Generation
+      const trainIds = new Set(splits.train.map((s) => s.sampleId));
+      const valIds = new Set(splits.validation.map((s) => s.sampleId));
+      const oosIds = new Set(splits.outOfSample.map((s) => s.sampleId));
+
+      trainSlice = experiences.filter((e) => trainIds.has(e.id));
+      valSlice = experiences.filter((e) => valIds.has(e.id));
+      oosSlice = experiences.filter((e) => oosIds.has(e.id));
+    }
+
+    // 3. Perform Error Analysis strictly on Train slice
+    const errorReport = ErrorAnalyzer.analyze(trainSlice);
+
+    // 4. Discover Patterns strictly on Train slice
+    const patterns = PatternDiscoveryEngine.discover(trainSlice);
+
+    // 5. Select Features & Evaluate Subsets strictly on Train slice
+    const featureSelection = FeatureSelector.selectFeatures(trainSlice);
+
+    // 6. Train Canonical ML Model on Train slice
+    const modelArtifact = ModelTrainer.trainModel(trainSlice);
+
+    // 7. Domain Metrics on Train slice
+    const regimeStats = RegimePerformanceAnalyzer.analyze(trainSlice);
+    const volStats = VolatilityPerformanceAnalyzer.analyze(trainSlice);
+    const stratStats = StrategyPerformanceAnalyzer.analyze(trainSlice);
+
+    // 8. Candidate Generation based on Train-only patterns and trained model
     const candidates = CandidateGenerator.generateCandidates({
       baseStrategyVersion: baseVersion,
       errorReport,
@@ -63,44 +101,45 @@ export class LearningEngine {
     let promotedCount = 0;
     let rejectedCount = 0;
 
-    // 7. Validation Pipeline for each Candidate
+    // 9. Validation Pipeline for each generated Candidate
     for (const cand of candidates) {
-      // 7a. Historical Simulation
-      const histEval = CandidateEvaluator.evaluate(cand, experiences);
-      if (!histEval.passed) {
+      // 9a. Historical Simulation on Validation slice
+      const valEval = CandidateEvaluator.evaluate(cand, valSlice.length > 0 ? valSlice : trainSlice);
+      if (!valEval.passed) {
         cand.status = 'REJECTED';
-        cand.rejectionReason = histEval.rejectionReason || 'Historical evaluation failed.';
+        cand.rejectionReason = valEval.rejectionReason || 'Validation evaluation failed.';
         rejectedCount++;
         continue;
       }
 
-      // 7b. Walk-Forward Purged & Embargo Validation
+      // 9b. Walk-Forward Purged & Embargo Validation
       const wfEval = WalkForwardValidator.validate(cand, experiences);
 
-      // 7c. Robustness & Transaction Costs
-      const costEval = RobustnessEngine.evaluateCosts(cand, experiences);
+      // 9c. Robustness & Transaction Costs
+      const costEval = RobustnessEngine.evaluateCosts(cand, valSlice.length > 0 ? valSlice : trainSlice);
 
-      // 7d. Candidate-Specific Seeded Monte Carlo Stress Simulation
+      // 9d. Candidate-Specific Seeded Monte Carlo Stress Simulation
       const candRMultiples =
-        histEval.simulatedRMultiples && histEval.simulatedRMultiples.length > 0
-          ? histEval.simulatedRMultiples
-          : experiences.map((e) => e.outcome.pnlR);
+        valEval.simulatedRMultiples && valEval.simulatedRMultiples.length > 0
+          ? valEval.simulatedRMultiples
+          : valSlice.map((e) => e.outcome.pnlR);
       const mcEval = MonteCarloEngine.simulate(candRMultiples, { seed: 42 });
 
       cand.validationMetrics = {
-        inSampleExpectancy: wfEval.meanInSampleExpectancy || histEval.candidateExpectancy,
-        walkForwardExpectancy: wfEval.meanOutOfSampleExpectancy || histEval.candidateExpectancy,
-        outOfSampleExpectancy: wfEval.meanOutOfSampleExpectancy || histEval.candidateExpectancy,
-        profitFactor: histEval.profitFactor,
-        maxDrawdownPercent: histEval.maxDrawdownPercent,
+        inSampleExpectancy: wfEval.meanInSampleExpectancy || valEval.candidateExpectancy,
+        walkForwardExpectancy: wfEval.meanOutOfSampleExpectancy || valEval.candidateExpectancy,
+        outOfSampleExpectancy: wfEval.meanOutOfSampleExpectancy || valEval.candidateExpectancy,
+        profitFactor: valEval.profitFactor,
+        maxDrawdownPercent: valEval.maxDrawdownPercent,
         monteCarloRuinProb: mcEval.probabilityOfRuin,
         transactionCostSurvived: costEval.survivedDoubleCosts,
       };
 
-      // 7e. Activate in Shadow Trading Engine
+      // 9e. Candidate enters Shadow state (must undergo observation period before promotion)
+      cand.status = 'SHADOW';
       ShadowTradingEngine.activateCandidate(cand);
 
-      // 7f. Evaluate for Promotion
+      // 9f. Evaluate candidate against promotion gate
       const promoResult = PromotionGate.evaluateCandidate(cand, {
         ...PromotionGate.DEFAULT_CRITERIA,
         allowAutoPromotion: !!options.autoPromote,
@@ -120,9 +159,9 @@ export class LearningEngine {
       } else {
         rejectedCount++;
         LearningMemory.setMemory({
-          key: `rejected-${cand.candidateVersion}`,
+          key: `shadow-${cand.candidateVersion}`,
           memoryType: 'REJECTED_HYPOTHESIS',
-          summary: `Rejected candidate: ${cand.description}. Reason: ${cand.rejectionReason}`,
+          summary: `Candidate placed in shadow / rejected: ${cand.description}`,
           details: { ...cand.change, rejectionDetails: promoResult.rejectionDetails },
           sampleSize: cand.evidence.sampleSize,
           confidence: 80,

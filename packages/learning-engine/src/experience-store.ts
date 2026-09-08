@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { TradingExperience } from './types';
 import { PointInTimeValidator } from './point-in-time-validator';
 
@@ -64,6 +65,24 @@ export class ExperienceStore {
         }
       }
     }
+  }
+
+  /**
+   * Persists all experiences in store to a JSON file.
+   */
+  public static saveToFile(filePath: string): void {
+    const list = Array.from(this.experiences.values());
+    fs.writeFileSync(filePath, JSON.stringify(list, null, 2), 'utf-8');
+  }
+
+  /**
+   * Loads experiences from a JSON file into the store.
+   */
+  public static loadFromFile(filePath: string): void {
+    if (!fs.existsSync(filePath)) return;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(content) as TradingExperience[];
+    this.loadExperiences(parsed);
   }
 
   /**

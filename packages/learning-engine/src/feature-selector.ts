@@ -36,12 +36,16 @@ export class FeatureSelector {
       }
     }
 
-    // Evaluate measured baseline vs pruned feature performance experimentally
+    // Evaluate feature subset performance experimentally on retained dimensions
     const evaluatedRetained = experiences.filter((e) => {
-      // Retain experiences where core retained features pass threshold
-      const score = (e.marketState?.quant?.smcScore ?? 0.5);
-      return score >= 0.5;
+      // Check if all core retained features meet signal quality criteria
+      const quant = e.marketState?.quant || {};
+      return retainedFeatures.every((fName) => {
+        const val = quant[fName as keyof typeof quant];
+        return val === undefined || typeof val !== 'number' || val >= 0.35;
+      });
     });
+
     const evaluatedSumR = evaluatedRetained.reduce((sum, e) => sum + e.outcome.pnlR, 0);
     const optimizedExpectancy =
       evaluatedRetained.length > 0
