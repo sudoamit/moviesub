@@ -73,14 +73,28 @@ export class DatasetManager {
 
     const sampleFeatures = Object.keys(sorted[0].features || {}).sort();
 
-    // Canonical serialization of all sample content for cryptographic provenance
+    // P1 #25: Feature Schema Validation across all samples
+    for (let i = 0; i < sorted.length; i++) {
+      const sampleKeys = Object.keys(sorted[i].features || {}).sort();
+      if (
+        sampleKeys.length !== sampleFeatures.length ||
+        sampleKeys.some((k, idx) => k !== sampleFeatures[idx])
+      ) {
+        throw new Error(`FEATURE_SCHEMA_MISMATCH: Sample at index ${i} has mismatching feature keys`);
+      }
+    }
+
+    // P1 #24: Canonical serialization of all sample content for cryptographic provenance
     const canonicalSamplesString = sorted
       .map((s) => {
         const sortedFeatStr = sampleFeatures
           .map((k) => `${k}:${s.features[k] ?? 0}`)
           .join(',');
+        const decTs = (s as any).decisionTimestamp ?? s.timestamp;
+        const featTs = (s as any).featureTimestamp ?? s.timestamp;
+        const lStart = s.labelStartTimestamp ?? s.timestamp;
         const lEnd = s.labelEndTimestamp ?? s.timestamp;
-        return `${s.sampleId}|${s.timestamp}|${lEnd}|${sortedFeatStr}|${s.labelBinary}|${s.labelContinuousR}|${s.regime}|${s.volatilityBucket}`;
+        return `${s.sampleId}|${decTs}|${featTs}|${lStart}|${lEnd}|${sortedFeatStr}|${s.labelBinary}|${s.labelContinuousR}|${s.regime}|${s.volatilityBucket}`;
       })
       .join('\n');
 

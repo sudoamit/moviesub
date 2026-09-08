@@ -220,6 +220,25 @@ export interface StrategyCandidate {
   promotedAt?: Date;
 }
 
+export interface CandidateArtifact {
+  readonly candidateId: string;
+  readonly candidateVersion: string;
+  readonly datasetHash: string;
+  readonly strategyVersion: string;
+  readonly strategyConfig: Record<string, unknown>;
+  readonly modelArtifact?: Record<string, unknown>;
+  readonly featureSchemaVersion: string;
+  readonly selectedFeatures: string[];
+  readonly scalerArtifact?: Record<string, unknown>;
+  readonly riskConfig: Record<string, unknown>;
+  readonly executionConfig: Record<string, unknown>;
+  readonly trainingSeed?: number;
+  readonly candidateSeed?: number;
+  readonly parentCandidateId?: string;
+  readonly createdAt: Date;
+  readonly configHash: string;
+}
+
 export interface WalkForwardFold {
   foldIndex: number;
   trainRange: [Date, Date];

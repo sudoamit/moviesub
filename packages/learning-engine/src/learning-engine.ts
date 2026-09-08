@@ -103,8 +103,15 @@ export class LearningEngine {
 
     // 9. Validation Pipeline for each generated Candidate
     for (const cand of candidates) {
+      if (!valSlice || valSlice.length === 0) {
+        throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
+      }
+      if (!oosSlice || oosSlice.length === 0) {
+        throw new Error('INSUFFICIENT_FINAL_OOS_DATA');
+      }
+
       // 9a. Historical Simulation on Validation slice of development dataset
-      const valEval = CandidateEvaluator.evaluate(cand, valSlice.length > 0 ? valSlice : trainSlice);
+      const valEval = CandidateEvaluator.evaluate(cand, valSlice);
       if (!valEval.passed) {
         cand.status = 'REJECTED';
         cand.rejectionReason = valEval.rejectionReason || 'Validation evaluation failed.';
@@ -114,28 +121,26 @@ export class LearningEngine {
 
       // 9b. Walk-Forward Purged & Embargo Validation on Development Dataset
       const devExperiences = [...trainSlice, ...valSlice];
-      const wfEval = WalkForwardValidator.validate(cand, devExperiences.length >= 18 ? devExperiences : experiences);
+      const wfEval = WalkForwardValidator.validate(cand, devExperiences);
 
       // 9c. Robustness & Transaction Costs
-      const costEval = RobustnessEngine.evaluateCosts(cand, valSlice.length > 0 ? valSlice : trainSlice);
+      const costEval = RobustnessEngine.evaluateCosts(cand, valSlice);
 
       // 9d. Candidate-Specific Seeded Monte Carlo Stress Simulation
-      const candRMultiples =
-        valEval.simulatedRMultiples && valEval.simulatedRMultiples.length > 0
-          ? valEval.simulatedRMultiples
-          : valSlice.map((e) => e.outcome.pnlR);
-
-      const mcEval = MonteCarloEngine.simulate(candRMultiples, { seed: 42 });
+      if (!valEval.simulatedRMultiples || valEval.simulatedRMultiples.length === 0) {
+        throw new Error('INSUFFICIENT_CANDIDATE_EXECUTION_RESULTS');
+      }
+      const mcEval = MonteCarloEngine.simulate(valEval.simulatedRMultiples, { seed: 42 });
 
       // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset
-      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice.length > 0 ? oosSlice : valSlice);
+      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice);
 
       cand.validationMetrics = {
         inSampleExpectancy: wfEval.meanInSampleExpectancy || valEval.candidateExpectancy,
         walkForwardExpectancy: wfEval.meanOutOfSampleExpectancy || valEval.candidateExpectancy,
-        outOfSampleExpectancy: finalOosEval.candidateExpectancy || wfEval.meanOutOfSampleExpectancy,
-        profitFactor: finalOosEval.profitFactor || valEval.profitFactor,
-        maxDrawdownPercent: finalOosEval.maxDrawdownPercent || valEval.maxDrawdownPercent,
+        outOfSampleExpectancy: finalOosEval.candidateExpectancy,
+        profitFactor: finalOosEval.profitFactor,
+        maxDrawdownPercent: finalOosEval.maxDrawdownPercent,
         monteCarloRuinProb: mcEval.probabilityOfRuin,
         transactionCostSurvived: costEval.survivedDoubleCosts,
       };

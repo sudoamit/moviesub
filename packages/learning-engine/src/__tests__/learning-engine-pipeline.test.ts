@@ -48,7 +48,25 @@ describe('LearningEngine Pipeline', () => {
         strategyVersion: 'v2.0',
         featureSchemaVersion: '2.0',
         createdAt: new Date(1700000000000 + i * 3600000),
-      };
+        candlesDuringTrade: [
+          {
+            timestamp: new Date(1700000000000 + i * 3600000 + 1000),
+            open: 24000,
+            high: isWin ? 24150 : 24010,
+            low: isWin ? 23990 : 23940,
+            close: isWin ? 24100 : 23945,
+            volume: 100,
+          },
+          {
+            timestamp: new Date(1700000000000 + i * 3600000 + 61000),
+            open: isWin ? 24100 : 23945,
+            high: isWin ? 24160 : 23950,
+            low: isWin ? 24080 : 23930,
+            close: isWin ? 24150 : 23935,
+            volume: 120,
+          },
+        ],
+      } as any;
     });
   };
 

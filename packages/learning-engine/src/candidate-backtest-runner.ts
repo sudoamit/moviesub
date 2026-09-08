@@ -5,7 +5,7 @@ import {
   SameCandleAmbiguityMode,
   IOrder,
 } from '@quant/backtesting';
-import { StrategyCandidate, TradingExperience } from './types';
+import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
 
 export interface CandidateExecutionConfig {
   candidateId: string;
@@ -37,6 +37,29 @@ export interface CandidateExecutionResult {
 }
 
 export class CandidateBacktestRunner {
+  /**
+   * Creates an immutable, reproducible CandidateArtifact.
+   */
+  public static createCandidateArtifact(
+    candidate: StrategyCandidate,
+    datasetHash: string = 'canonical_default_hash',
+  ): CandidateArtifact {
+    const config = this.createExecutionConfig(candidate);
+    const artifact: CandidateArtifact = {
+      candidateId: candidate.id,
+      candidateVersion: candidate.candidateVersion || candidate.id,
+      datasetHash,
+      strategyVersion: candidate.baseStrategyVersion || '1.0.0',
+      strategyConfig: candidate.change || {},
+      featureSchemaVersion: '1.0.0',
+      selectedFeatures: [],
+      riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier },
+      executionConfig: config as any,
+      createdAt: new Date(),
+      configHash: config.configHash,
+    };
+    return Object.freeze(artifact);
+  }
   /**
    * Converts a StrategyCandidate into an executable strategy configuration object.
    */
@@ -92,12 +115,6 @@ export class CandidateBacktestRunner {
     experiences: TradingExperience[],
   ): CandidateExecutionResult {
     const config = this.createExecutionConfig(candidate);
-    const execSim = new ExecutionSimulator(
-      FillModel.OHLC_PATH,
-      SameCandleAmbiguityMode.OHLC_PATH,
-      { submissionLatencyMs: 15, processingLatencyMs: 5 },
-      `cand_${candidate.id}`,
-    );
 
     const executedTrades: IBacktestTrade[] = [];
     const rMultiples: number[] = [];
@@ -160,10 +177,21 @@ export class CandidateBacktestRunner {
       const target1 = exp.risk?.target1 || (isLong ? entryPrice + 1.5 * stopDist : entryPrice - 1.5 * stopDist);
 
       const candles = ((exp as any).candlesDuringTrade as ICandle[]) || [];
+      if (!candles || candles.length === 0) {
+        throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
+      }
+
       const entryTime = exp.labelStartTimestamp || (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : new Date(exp.timestamp).getTime());
 
-      if (candles && candles.length > 0 && stopDist > 0) {
-        // Submit entry order and execute via ExecutionSimulator
+      if (stopDist > 0) {
+        const execSim = new ExecutionSimulator(
+          FillModel.OHLC_PATH,
+          SameCandleAmbiguityMode.OHLC_PATH,
+          { submissionLatencyMs: 15, processingLatencyMs: 5 },
+          `cand_${candidate.id}_${exp.id}`,
+        );
+
+        // 1. Submit Entry Market Order
         execSim.submitOrder({
           tradeId: exp.id,
           symbol: exp.instrument?.symbol || 'BTCUSDT',
@@ -174,142 +202,124 @@ export class CandidateBacktestRunner {
           exitTarget: 'ENTRY',
         });
 
-        const candleRes = execSim.processCandle(candles[0], candles[1]);
-        const fillEntry = candleRes.fills;
+        // 2. Submit Protective Stop Order
+        execSim.submitOrder({
+          tradeId: exp.id,
+          symbol: exp.instrument?.symbol || 'BTCUSDT',
+          side: isLong ? 'SELL' : 'BUY',
+          orderType: 'STOP',
+          stopPrice,
+          quantity: currentSizing,
+          timestamp: entryTime,
+          exitTarget: 'SL',
+        });
 
-        if (fillEntry.length > 0) {
-          let exitFillPrice = fillEntry[0].price;
-          let isWin = false;
-          let stoppedOut = false;
+        // 3. Submit Take Profit Limit Order
+        execSim.submitOrder({
+          tradeId: exp.id,
+          symbol: exp.instrument?.symbol || 'BTCUSDT',
+          side: isLong ? 'SELL' : 'BUY',
+          orderType: 'LIMIT',
+          price: target1,
+          quantity: currentSizing,
+          timestamp: entryTime,
+          exitTarget: 'TP1',
+        });
 
-          for (let cIdx = 0; cIdx < candles.length; cIdx++) {
-            const candle = candles[cIdx];
-            const low = candle.low;
-            const high = candle.high;
+        // Process candles bar-by-bar through authoritative ExecutionSimulator
+        for (let cIdx = 0; cIdx < candles.length; cIdx++) {
+          const bar = candles[cIdx];
+          const nextBar = cIdx < candles.length - 1 ? candles[cIdx + 1] : undefined;
+          execSim.processCandle(bar, nextBar);
+        }
 
-            const slHit = isLong ? low <= stopPrice : high >= stopPrice;
-            const tpHit = isLong ? high >= target1 : low <= target1;
+        // Extract fills from ExecutionSimulator
+        const allFills = execSim.getAllFills();
+        const entryFill = allFills.find((f) => f.exitTarget === 'ENTRY');
+        let exitFill = allFills.find(
+          (f) => f.exitTarget === 'SL' || f.exitTarget === 'TP1' || f.exitTarget === 'TRAILING_STOP',
+        );
 
-            if (slHit && tpHit) {
-              const openDistSl = Math.abs(candle.open - stopPrice);
-              const openDistTp = Math.abs(candle.open - target1);
-              if (openDistTp < openDistSl) {
-                isWin = true;
-                exitFillPrice = target1;
-              } else {
-                stoppedOut = true;
-                exitFillPrice = stopPrice;
-              }
-              break;
-            } else if (slHit) {
-              stoppedOut = true;
-              exitFillPrice = stopPrice;
-              break;
-            } else if (tpHit) {
-              isWin = true;
-              exitFillPrice = target1;
-              break;
-            }
-          }
+        // Market exit at end of window if position remains open
+        if (entryFill && !exitFill && candles.length > 0) {
+          const lastCandle = candles[candles.length - 1];
+          const lastTime =
+            lastCandle.timestamp instanceof Date
+              ? lastCandle.timestamp.getTime()
+              : new Date(lastCandle.timestamp).getTime();
+          execSim.submitOrder({
+            tradeId: exp.id,
+            symbol: exp.instrument?.symbol || 'BTCUSDT',
+            side: isLong ? 'SELL' : 'BUY',
+            orderType: 'MARKET',
+            quantity: currentSizing,
+            timestamp: lastTime,
+            exitTarget: 'EXPIRED',
+          });
+          execSim.processCandle(lastCandle);
+          exitFill = execSim.getAllFills().find((f) => f.exitTarget === 'EXPIRED');
+        }
 
-          if (!stoppedOut && !isWin) {
-            exitFillPrice = exp.execution?.exitPrice || entryPrice;
-          }
+        if (entryFill && exitFill) {
+          const actualEntryPrice = entryFill.price;
+          const actualExitPrice = exitFill.price;
+          const totalFees = Number((entryFill.fee + exitFill.fee).toFixed(4));
+          const totalSlippage = Number((entryFill.slippage + exitFill.slippage).toFixed(4));
 
-          const realizedR = isLong
-            ? (exitFillPrice - fillEntry[0].price) / stopDist
-            : (fillEntry[0].price - exitFillPrice) / stopDist;
+          const grossPnL = isLong
+            ? (actualExitPrice - actualEntryPrice) * currentSizing
+            : (actualEntryPrice - actualExitPrice) * currentSizing;
+          const pnl = Number((grossPnL - totalFees).toFixed(2));
 
-          const pnlR = Number((realizedR * currentSizing - 0.05).toFixed(4));
-          const pnl = Number(((exitFillPrice - fillEntry[0].price) * (isLong ? 1 : -1) * currentSizing).toFixed(2));
+          const rawR = isLong
+            ? (actualExitPrice - actualEntryPrice) / stopDist
+            : (actualEntryPrice - actualExitPrice) / stopDist;
+          const pnlR = Number((rawR * currentSizing - totalFees / (stopDist * currentSizing || 1)).toFixed(4));
+
+          const exitReason =
+            exitFill.exitTarget === 'TP1'
+              ? SignalState.TP1_HIT
+              : exitFill.exitTarget === 'SL'
+              ? SignalState.SL_HIT
+              : SignalState.EXPIRED;
 
           rMultiples.push(pnlR);
           executedTrades.push({
             id: `tr_${exp.id}`,
             direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-            entryTime: new Date(entryTime),
-            entryPrice: fillEntry[0].price,
-            exitTime: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitPrice: exitFillPrice,
+            entryTime: new Date(entryFill.timestamp),
+            entryPrice: actualEntryPrice,
+            exitTime: new Date(exitFill.timestamp),
+            exitPrice: actualExitPrice,
             stopLoss: stopPrice,
             takeProfit: target1,
             positionSize: currentSizing,
             pnl,
             pnlRMultiple: pnlR,
-            exitReason: isWin ? SignalState.TP1_HIT : stoppedOut ? SignalState.SL_HIT : SignalState.EXPIRED,
+            exitReason,
             signalTimestamp: new Date(exp.decisionTimestamp || entryTime),
-            orderCreatedAt: new Date(entryTime),
-            orderSubmittedAt: new Date(entryTime),
-            entryFillTimestamp: new Date(entryTime),
+            orderCreatedAt: new Date(entryFill.orderCreatedAt || entryTime),
+            orderSubmittedAt: new Date(entryFill.orderSubmittedAt || entryTime),
+            entryFillTimestamp: new Date(entryFill.timestamp),
             entryReferencePrice: entryPrice,
-            entryFillPrice: fillEntry[0].price,
-            entryFees: 0.0007 * fillEntry[0].price * currentSizing,
-            entrySlippage: Math.abs(fillEntry[0].price - entryPrice),
-            exitOrderTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitOrderCreatedAt: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitOrderSubmittedAt: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitTriggerTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitFillTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-            exitReferencePrice: exitFillPrice,
-            exitFillPrice,
-            exitFees: 0.0007 * exitFillPrice * currentSizing,
-            exitSlippage: 0,
-            executedPrice: exitFillPrice,
-            fees: 0.0014 * exitFillPrice * currentSizing,
-            slippageAmount: Math.abs(fillEntry[0].price - entryPrice),
+            entryFillPrice: actualEntryPrice,
+            entryFees: entryFill.fee,
+            entrySlippage: entryFill.slippage,
+            exitOrderTimestamp: new Date(exitFill.timestamp),
+            exitOrderCreatedAt: new Date(exitFill.exitOrderCreatedAt || exitFill.timestamp),
+            exitOrderSubmittedAt: new Date(exitFill.exitOrderSubmittedAt || exitFill.timestamp),
+            exitTriggerTimestamp: new Date(exitFill.exitTriggerTimestamp || exitFill.timestamp),
+            exitFillTimestamp: new Date(exitFill.timestamp),
+            exitReferencePrice: actualExitPrice,
+            exitFillPrice: actualExitPrice,
+            exitFees: exitFill.fee,
+            exitSlippage: exitFill.slippage,
+            executedPrice: actualExitPrice,
+            fees: totalFees,
+            slippageAmount: totalSlippage,
             slippageBps: 5,
           } as any);
         }
-      } else {
-        // Fallback using exact price levels and risk distance
-        const expRealizedR = exp.outcome?.pnlR || 0;
-        let realizedR = expRealizedR;
-        if (candidate.type === 'EXIT' && candidate.change.parameter === 'stopLossAtrMultiplier') {
-          const slMult = config.stopLossAtrMultiplier || 1.0;
-          if (exp.outcome?.status === 'LOSS') {
-            const maxAdverse = exp.outcome.maxAdverseExcursion || 1.0;
-            realizedR = maxAdverse <= slMult ? expRealizedR : -1.0;
-          }
-        }
-        const pnlR = Number((realizedR * currentSizing - 0.05).toFixed(4));
-        const pnl = Number(((exp.outcome?.pnl || 0) * currentSizing).toFixed(2));
-
-        rMultiples.push(pnlR);
-        executedTrades.push({
-          id: `tr_${exp.id}`,
-          direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-          entryTime: new Date(entryTime),
-          entryPrice,
-          exitTime: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitPrice: exp.execution?.exitPrice || entryPrice,
-          stopLoss: stopPrice,
-          takeProfit: target1,
-          positionSize: currentSizing,
-          pnl,
-          pnlRMultiple: pnlR,
-          exitReason: exp.outcome?.status === 'WIN' ? SignalState.TP1_HIT : SignalState.SL_HIT,
-          signalTimestamp: new Date(exp.decisionTimestamp || entryTime),
-          orderCreatedAt: new Date(entryTime),
-          orderSubmittedAt: new Date(entryTime),
-          entryFillTimestamp: new Date(entryTime),
-          entryReferencePrice: entryPrice,
-          entryFillPrice: entryPrice,
-          entryFees: 0.0007 * entryPrice * currentSizing,
-          entrySlippage: 0,
-          exitOrderTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitOrderCreatedAt: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitOrderSubmittedAt: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitTriggerTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitFillTimestamp: new Date(exp.labelEndTimestamp || entryTime + 3600000),
-          exitReferencePrice: exp.execution?.exitPrice || entryPrice,
-          exitFillPrice: exp.execution?.exitPrice || entryPrice,
-          exitFees: 0.0007 * (exp.execution?.exitPrice || entryPrice) * currentSizing,
-          exitSlippage: 0,
-          executedPrice: exp.execution?.exitPrice || entryPrice,
-          fees: 0.0014 * entryPrice * currentSizing,
-          slippageAmount: 0,
-          slippageBps: 0,
-        } as any);
       }
     }
 
