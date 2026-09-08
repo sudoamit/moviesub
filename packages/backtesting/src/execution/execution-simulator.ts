@@ -86,64 +86,29 @@ export class ExecutionSimulator {
   private selectNextTrigger(
     triggered: { order: IOrder; fill: IFill }[],
     candle: ICandle,
+    nextCandle?: ICandle,
+    lowerTfCandles?: ICandle[],
+    parentDurationMs?: number,
   ): { order: IOrder; fill: IFill } | undefined {
     if (triggered.length === 0) return undefined;
     if (triggered.length === 1) return triggered[0];
 
-    const isBullish = candle.close >= candle.open;
+    const orders = triggered.map((t) => t.order);
+    const resolved = FillModelEngine.resolveSameCandleConflict(
+      orders,
+      candle,
+      nextCandle,
+      this.fillModel,
+      this.ambiguityMode,
+      lowerTfCandles,
+      parentDurationMs,
+    );
 
-    if (this.ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
-      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-      if (stopTrigger) return stopTrigger;
-      return triggered[0];
+    if (resolved.winningOrder && resolved.winningFill) {
+      return { order: resolved.winningOrder, fill: resolved.winningFill };
     }
 
-    if (this.ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
-      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
-      if (limitTrigger) return limitTrigger;
-      return triggered[0];
-    }
-
-    // OHLC_PATH or DEFAULT:
-    const isLong = triggered[0].order.side === 'SELL'; // Exit order side for Long is SELL
-
-    if (isLong) {
-      if (isBullish) {
-        // Bullish path: Open -> Low -> High -> Close
-        // Low touched first (STOP order)
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        if (stopTrigger) return stopTrigger;
-        const limits = triggered
-          .filter((t) => t.order.orderType === 'LIMIT')
-          .sort((a, b) => (a.order.price || 0) - (b.order.price || 0));
-        return limits[0] || triggered[0];
-      } else {
-        // Bearish path: Open -> High -> Low -> Close
-        // High touched first (LIMIT orders before STOP order)
-        const limits = triggered
-          .filter((t) => t.order.orderType === 'LIMIT')
-          .sort((a, b) => (a.order.price || 0) - (b.order.price || 0));
-        if (limits.length > 0) return limits[0];
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        return stopTrigger || triggered[0];
-      }
-    } else {
-      if (isBullish) {
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        if (stopTrigger) return stopTrigger;
-        const limits = triggered
-          .filter((t) => t.order.orderType === 'LIMIT')
-          .sort((a, b) => (b.order.price || 0) - (a.order.price || 0));
-        return limits[0] || triggered[0];
-      } else {
-        const limits = triggered
-          .filter((t) => t.order.orderType === 'LIMIT')
-          .sort((a, b) => (b.order.price || 0) - (a.order.price || 0));
-        if (limits.length > 0) return limits[0];
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        return stopTrigger || triggered[0];
-      }
-    }
+    return triggered[0];
   }
 
   processCandle(
@@ -186,7 +151,7 @@ export class ExecutionSimulator {
 
         if (triggered.length === 0) break;
 
-        const nextTrigger = this.selectNextTrigger(triggered, candle);
+        const nextTrigger = this.selectNextTrigger(triggered, candle, nextCandle, lowerTfCandles, parentDurationMs);
         if (!nextTrigger) break;
 
         const { order, fill } = nextTrigger;
@@ -225,6 +190,7 @@ export class ExecutionSimulator {
           fees: fill.fee,
           slippage: fill.slippage,
           reason: `Order ${order.orderId} filled at ${fill.price}`,
+          exitTarget: fill.exitTarget || order.exitTarget,
         };
 
         this.events.push(fillEvent);

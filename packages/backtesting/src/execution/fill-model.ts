@@ -162,7 +162,10 @@ export class FillModelEngine {
           : Date.now();
 
     // 1. Lower Timeframe Resolution (1m sub-bars) - FAIL CLOSED IF MISSING/INVALID
-    if (model === FillModel.LOWER_TIMEFRAME || order.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
+    if (
+      model === FillModel.LOWER_TIMEFRAME ||
+      (order.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME && lowerTfCandles !== undefined)
+    ) {
       const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
       if (!subValidation.isValid) {
         return { isFilled: false, reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };

@@ -26,6 +26,7 @@ export interface IExecutionEvent {
   fees: number;
   slippage: number;
   reason: string;
+  exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
 }
 
 export interface IPartialFillRecord {

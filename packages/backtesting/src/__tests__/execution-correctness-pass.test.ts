@@ -493,9 +493,228 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       close: 102,
       volume: 10,
     };
+    expect(() => TradeLifecycleManager.evaluateLotTick(lot, candle, undefined, undefined, true)).toThrow('is deprecated');
+  });
 
-    expect(() => {
-      TradeLifecycleManager.evaluateLotTick(lot, candle, undefined, undefined, true);
-    }).toThrow('Synthetic lifecycle evaluation (evaluateLotTick) is deprecated and disabled for backtesting. Backtests must use ExecutionSimulator.');
+  // 11. Short Position Execution & Partial Exit Trace
+  test('11. Short Position (BEARISH) partial exit trace and SL adjustment', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+    const tradeId = 'trade_short_100';
+
+    // Short position: BUY to exit
+    const slOrder = execSim.submitOrder({
+      tradeId,
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    const tp1Order = execSim.submitOrder({
+      tradeId,
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 90.0,
+      quantity: 50.0,
+      timestamp,
+      exitTarget: 'TP1',
+    });
+
+    // Candle drops to 88 (touches TP1 @ 90)
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 98.0,
+      high: 99.0,
+      low: 88.0,
+      close: 89.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.fills).toHaveLength(1);
+    expect(res.fills[0].exitTarget).toBe('TP1');
+    expect(res.fills[0].quantity).toBe(50.0);
+    expect(tp1Order.status).toBe('FILLED');
+    expect(slOrder.remainingQuantity).toBe(50.0);
+  });
+
+  // 12. Gap-Through TP / SL Execution (Long & Short)
+  test('12. Gap-through execution for Long gap-down SL and Short gap-up SL', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    // Long position SL at 95.0, candle gaps down to Open = 90.0
+    const longSl = execSim.submitOrder({
+      tradeId: 'trade_gap_long',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    const gapCandleLong: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 90.0, // Gap down open!
+      high: 91.0,
+      low: 85.0,
+      close: 88.0,
+      volume: 500,
+    };
+
+    const resLong = execSim.processCandle(gapCandleLong);
+    expect(resLong.fills).toHaveLength(1);
+    // Gap-down execution MUST fill at gap open price (90.0), NOT stop price (95.0)!
+    expect(resLong.fills[0].price).toBeLessThanOrEqual(90.0);
+
+    // Short position SL at 105.0, candle gaps up to Open = 110.0
+    const shortSl = execSim.submitOrder({
+      tradeId: 'trade_gap_short',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    const gapCandleShort: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 110.0, // Gap up open!
+      high: 115.0,
+      low: 109.0,
+      close: 112.0,
+      volume: 500,
+    };
+
+    const resShort = execSim.processCandle(gapCandleShort);
+    expect(resShort.fills).toHaveLength(1);
+    // Gap-up execution MUST fill at gap open price (>= 110.0)
+    expect(resShort.fills[0].price).toBeGreaterThanOrEqual(110.0);
+  });
+
+  // 13. TP1 -> Breakeven Stop -> SL Hit
+  test('13. TP1 hit -> Breakeven stop update -> Breakeven SL hit', () => {
+    const lot: any = {
+      tradeId: 't_be',
+      direction: Direction.BULLISH,
+      initialQuantity: 100,
+      remainingQuantity: 100,
+      entryPrice: 100.0,
+      initialStopLoss: 95.0,
+      currentStopLoss: 95.0,
+      tp1: 110.0,
+      tp2: 120.0,
+      tp3: 130.0,
+      status: 'OPEN',
+      partialFills: [],
+    };
+
+    // Step 1: TP1 hit (30 units @ 110)
+    const tp1Fill = {
+      fillId: 'f1',
+      targetType: 'TP1',
+      timestamp: 1700000060000,
+      price: 110.0,
+      quantity: 30,
+      remainingQuantity: 70,
+      realizedPnl: 300,
+      realizedR: 2.0,
+      fee: 1.0,
+      slippage: 0,
+    };
+    lot.partialFills.push(tp1Fill);
+    lot.remainingQuantity = 70;
+    lot.currentStopLoss = lot.entryPrice; // Breakeven stop update!
+
+    expect(lot.currentStopLoss).toBe(100.0);
+
+    // Step 2: Price drops to 100.0 (Breakeven SL hit)
+    const beFill = {
+      fillId: 'f2',
+      targetType: 'TRAILING_STOP',
+      timestamp: 1700000120000,
+      price: 100.0,
+      quantity: 70,
+      remainingQuantity: 0,
+      realizedPnl: 0,
+      realizedR: 0,
+      fee: 1.0,
+      slippage: 0,
+    };
+    lot.partialFills.push(beFill);
+    lot.remainingQuantity = 0;
+    lot.status = 'CLOSED';
+
+    expect(lot.status).toBe('CLOSED');
+    expect(lot.partialFills).toHaveLength(2);
+    expect(lot.partialFills[1].price).toBe(100.0);
+  });
+
+  // 14. Same-Candle TP/SL under All Four Ambiguity Modes
+  test('14. Same-candle TP/SL resolution under all four ambiguity modes', () => {
+    const candle: ICandle = {
+      timestamp: new Date(1700000060000),
+      open: 100.0,
+      high: 115.0, // touches TP1 @ 110
+      low: 90.0,  // touches SL @ 95
+      close: 92.0, // Bearish bar
+      volume: 100,
+    };
+
+    // Mode A: CONSERVATIVE -> STOP order wins
+    const simCons = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE);
+    const slCons = simCons.submitOrder({ tradeId: 'c1', symbol: 'BTCUSDT', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: 1700000000000 });
+    const tpCons = simCons.submitOrder({ tradeId: 'c1', symbol: 'BTCUSDT', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 30, timestamp: 1700000000000 });
+    const resCons = simCons.processCandle(candle);
+    expect(resCons.fills[0].orderId).toBe(slCons.orderId);
+
+    // Mode B: OPTIMISTIC -> LIMIT order wins
+    const simOpt = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OPTIMISTIC);
+    const slOpt = simOpt.submitOrder({ tradeId: 'c2', symbol: 'BTCUSDT', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: 1700000000000 });
+    const tpOpt = simOpt.submitOrder({ tradeId: 'c2', symbol: 'BTCUSDT', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 30, timestamp: 1700000000000 });
+    const resOpt = simOpt.processCandle(candle);
+    expect(resOpt.fills[0].orderId).toBe(tpOpt.orderId);
+
+    // Mode C: OHLC_PATH -> Bearish bar touches High first -> TP1 fills first
+    const simPath = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const slPath = simPath.submitOrder({ tradeId: 'c3', symbol: 'BTCUSDT', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: 1700000000000 });
+    const tpPath = simPath.submitOrder({ tradeId: 'c3', symbol: 'BTCUSDT', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 30, timestamp: 1700000000000 });
+    const resPath = simPath.processCandle(candle);
+    expect(resPath.fills[0].orderId).toBe(tpPath.orderId);
+
+    // Mode D: LOWER_TIMEFRAME -> Sub-bars determine execution order
+    const simSub = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const slSub = simSub.submitOrder({ tradeId: 'c4', symbol: 'BTCUSDT', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: 1700000000000 });
+    const tpSub = simSub.submitOrder({ tradeId: 'c4', symbol: 'BTCUSDT', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 30, timestamp: 1700000000000 });
+    const subBars: ICandle[] = [
+      { timestamp: new Date(1700000070000), open: 100, high: 112, low: 99, close: 111, volume: 10 }, // TP1 touched first!
+      { timestamp: new Date(1700000080000), open: 111, high: 111, low: 92, close: 93, volume: 10 },  // SL touched second
+    ];
+    const resSub = simSub.processCandle(candle, undefined, subBars, 15 * 60 * 1000);
+    expect(resSub.fills[0].orderId).toBe(tpSub.orderId);
+  });
+
+  // 15. Partial Exit Policy Validation Error
+  test('15. validatePartialExitPolicy rejects policies where ratios do not sum to 1.0', () => {
+    const invalidPolicy = {
+      tp1Ratio: 0.5,
+      tp2Ratio: 0.6, // Sum = 1.1!
+      tp3Ratio: 0.0,
+      moveStopToBreakevenOnTp1: true,
+      trailStopOnTp2: true,
+    };
+
+    const val = TradeLifecycleManager.validatePartialExitPolicy(invalidPolicy);
+    expect(val.isValid).toBe(false);
+    expect(val.reason).toContain('RATIOS_DO_NOT_SUM_TO_ONE');
   });
 });

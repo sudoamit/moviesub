@@ -19,6 +19,23 @@ export const DEFAULT_PARTIAL_EXIT_POLICY: IPartialExitPolicy = {
 
 export class TradeLifecycleManager {
   /**
+   * Validates partial exit ratios to guarantee exact 100% position allocation
+   */
+  static validatePartialExitPolicy(policy: IPartialExitPolicy): { isValid: boolean; reason?: string } {
+    if (!policy) {
+      return { isValid: false, reason: 'POLICY_MISSING' };
+    }
+    if (policy.tp1Ratio < 0 || policy.tp2Ratio < 0 || policy.tp3Ratio < 0) {
+      return { isValid: false, reason: 'RATIOS_NEGATIVE' };
+    }
+    const sum = Number((policy.tp1Ratio + policy.tp2Ratio + policy.tp3Ratio).toFixed(4));
+    if (sum !== 1.0) {
+      return { isValid: false, reason: `RATIOS_DO_NOT_SUM_TO_ONE (sum=${sum})` };
+    }
+    return { isValid: true };
+  }
+
+  /**
    * Initializes an explicit, immutable PositionLot from an activated setup
    */
   static createPositionLot(

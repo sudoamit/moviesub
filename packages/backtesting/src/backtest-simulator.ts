@@ -55,6 +55,11 @@ export class BacktestSimulator {
 
     if (remainingQty <= 0) return;
 
+    const val = TradeLifecycleManager.validatePartialExitPolicy(policy);
+    if (!val.isValid) {
+      throw new Error(`Invalid partial exit policy: ${val.reason}`);
+    }
+
     // 1. Resting Stop Loss Order (Protective Stop for open position)
     execSim.submitOrder({
       tradeId: lot.tradeId,
