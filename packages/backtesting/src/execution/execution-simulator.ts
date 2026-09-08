@@ -150,6 +150,7 @@ export class ExecutionSimulator {
     candle: ICandle,
     nextCandle?: ICandle,
     lowerTfCandles?: ICandle[],
+    parentDurationMs?: number,
   ): { fills: IFill[]; events: IExecutionEvent[] } {
     const newFills: IFill[] = [];
     const newEvents: IExecutionEvent[] = [];
@@ -176,6 +177,7 @@ export class ExecutionSimulator {
             nextCandle,
             this.fillModel,
             lowerTfCandles,
+            parentDurationMs,
           );
           if (res.isFilled && res.fill) {
             triggered.push({ order, fill: res.fill });
@@ -202,13 +204,20 @@ export class ExecutionSimulator {
         this.fills.push(fill);
         newFills.push(fill);
 
+        const eventType =
+          order.exitTarget === 'ENTRY'
+            ? 'ENTRY_FILLED'
+            : order.orderType === 'STOP'
+              ? 'STOP_FILLED'
+              : 'TP_FILLED';
+
         this.eventCounter++;
         const fillEvent: IExecutionEvent = {
           eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
           tradeId: order.tradeId,
           orderId: order.orderId,
           symbol: order.symbol,
-          eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
+          eventType: eventType as any,
           timestamp: fill.timestamp,
           price: fill.price,
           quantity: fill.quantity,

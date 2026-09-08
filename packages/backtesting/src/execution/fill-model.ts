@@ -61,12 +61,13 @@ export class FillModelEngine {
     model: FillModel = FillModel.OHLC_PATH,
     ambiguityMode: SameCandleAmbiguityMode = SameCandleAmbiguityMode.CONSERVATIVE,
     lowerTfCandles?: ICandle[],
+    parentDurationMs?: number,
   ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
     // Evaluate fills for all orders against candle
     const triggered: { order: IOrder; fill: IFill }[] = [];
 
     for (const order of orders) {
-      const res = this.evaluateFill(order, currentCandle, nextCandle, model, lowerTfCandles);
+      const res = this.evaluateFill(order, currentCandle, nextCandle, model, lowerTfCandles, parentDurationMs);
       if (res.isFilled && res.fill) {
         triggered.push({ order, fill: res.fill });
       }
@@ -119,14 +120,14 @@ export class FillModelEngine {
     }
 
     if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
-      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles);
+      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
       if (!subValidation.isValid) {
         return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
       }
 
       for (const m1 of lowerTfCandles!) {
         for (const t of triggered) {
-          const res = this.evaluateFill(t.order, m1, undefined, FillModel.OHLC_PATH);
+          const res = this.evaluateFill(t.order, m1, undefined, FillModel.OHLC_PATH, undefined, parentDurationMs);
           if (res.isFilled && res.fill) {
             return { winningFill: res.fill, winningOrder: t.order, reason: 'LOWER_TIMEFRAME_SUBBAR_MATCH' };
           }
@@ -147,6 +148,7 @@ export class FillModelEngine {
     nextCandle?: ICandle,
     model: FillModel = FillModel.OHLC_PATH,
     lowerTfCandles?: ICandle[],
+    parentDurationMs?: number,
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
     if (order.status === 'FILLED' || order.status === 'CANCELLED' || order.status === 'REJECTED') {
       return { isFilled: false, reason: `ORDER_${order.status}` };
@@ -161,60 +163,18 @@ export class FillModelEngine {
 
     // 1. Lower Timeframe Resolution (1m sub-bars) - FAIL CLOSED IF MISSING/INVALID
     if (model === FillModel.LOWER_TIMEFRAME || order.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
-      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles);
+      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
       if (!subValidation.isValid) {
         return { isFilled: false, reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
       }
       for (const m1 of lowerTfCandles!) {
-        const res = this.evaluateFill(order, m1, undefined, FillModel.OHLC_PATH);
+        const res = this.evaluateFill(order, m1, undefined, FillModel.OHLC_PATH, undefined, parentDurationMs);
         if (res.isFilled) return res;
       }
       return { isFilled: false };
     }
 
-    // 2. Next Bar Market Model
-    if (model === FillModel.NEXT_BAR_MARKET) {
-      if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
-      const rawPrice = nextCandle.open;
-      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
-      const slip = SlippageModel.calculateSlippage(
-        rawPrice,
-        fillQty,
-        order.side,
-        'MARKET',
-        nextCandle,
-      );
-      const halfSpread = SpreadModel.getHalfSpread(slip.executedPrice, order.symbol);
-      const finalPrice =
-        order.side === 'BUY' ? slip.executedPrice + halfSpread : slip.executedPrice - halfSpread;
-      const fee = FeeModel.calculateFees(
-        order.symbol,
-        finalPrice,
-        fillQty,
-        order.side,
-        false,
-      );
-
-      const fillTime =
-        nextCandle.timestamp instanceof Date ? nextCandle.timestamp.getTime() : candleTime;
-      const fill: IFill = {
-        fillId: `fill_${order.orderId}_${fillTime}`,
-        orderId: order.orderId,
-        tradeId: order.tradeId,
-        symbol: order.symbol,
-        side: order.side,
-        price: Number(finalPrice.toFixed(4)),
-        quantity: fillQty,
-        fee,
-        slippage: slip.slippageAmount,
-        timestamp: fillTime,
-        isPartial: false,
-        exitTarget: order.exitTarget,
-      };
-      return { isFilled: true, fill };
-    }
-
-    // 3. STOP Orders (Stop Loss / Trailing Stop) with Gap-Through-Stop Execution
+    // 2. STOP Orders (Stop Loss / Trailing Stop) with Gap-Through-Stop Execution
     if (order.orderType === 'STOP' && order.stopPrice !== undefined) {
       const stopPrice = order.stopPrice;
       const isTriggered =
@@ -270,7 +230,7 @@ export class FillModelEngine {
       return { isFilled: true, fill };
     }
 
-    // 4. Limit Order Models with Gap-Through-TP Execution
+    // 3. Limit Order Models with Gap-Through-TP Execution
     if (order.orderType === 'LIMIT' && order.price !== undefined) {
       const targetPrice = order.price;
       const isTouch =
@@ -325,7 +285,49 @@ export class FillModelEngine {
       return { isFilled: true, fill };
     }
 
-    // 5. Default Market Order Model
+    // 4. Next Bar Market Model for MARKET Orders
+    if (model === FillModel.NEXT_BAR_MARKET) {
+      if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
+      const rawPrice = nextCandle.open;
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
+      const slip = SlippageModel.calculateSlippage(
+        rawPrice,
+        fillQty,
+        order.side,
+        'MARKET',
+        nextCandle,
+      );
+      const halfSpread = SpreadModel.getHalfSpread(slip.executedPrice, order.symbol);
+      const finalPrice =
+        order.side === 'BUY' ? slip.executedPrice + halfSpread : slip.executedPrice - halfSpread;
+      const fee = FeeModel.calculateFees(
+        order.symbol,
+        finalPrice,
+        fillQty,
+        order.side,
+        false,
+      );
+
+      const fillTime =
+        nextCandle.timestamp instanceof Date ? nextCandle.timestamp.getTime() : candleTime;
+      const fill: IFill = {
+        fillId: `fill_${order.orderId}_${fillTime}`,
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: Number(finalPrice.toFixed(4)),
+        quantity: fillQty,
+        fee,
+        slippage: slip.slippageAmount,
+        timestamp: fillTime,
+        isPartial: false,
+        exitTarget: order.exitTarget,
+      };
+      return { isFilled: true, fill };
+    }
+
+    // 5. Default Market Order Model (Current Bar Open)
     if (order.orderType === 'MARKET') {
       const rawPrice = currentCandle.open;
       const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;

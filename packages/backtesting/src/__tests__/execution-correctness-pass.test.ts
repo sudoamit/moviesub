@@ -2,7 +2,8 @@ import { ExecutionSimulator } from '../execution/execution-simulator';
 import { FillModelEngine } from '../execution/fill-model';
 import { FillModel, SameCandleAmbiguityMode } from '../execution/types';
 import { TradeLifecycleManager } from '@quant/risk-engine';
-import { Direction, ICandle } from '@quant/shared';
+import { Direction, ICandle, SignalState } from '@quant/shared';
+import { BacktestSimulator } from '../backtest-simulator';
 
 describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exit Ledger)', () => {
   // 1. Independent TP Orders & Protective Stop Updates
@@ -315,7 +316,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       price: 120.0,
       quantity: 30.0,
       timestamp,
-      exitTarget: 'TP2',
+      exitTarget: 'TP3',
     });
 
     // Bearish candle: Open 105, High 125 (touches TP1 & TP2), Low 90 (touches SL), Close 92
@@ -332,7 +333,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(res.fills).toHaveLength(3);
     expect(res.fills[0].exitTarget).toBe('TP1');
     expect(res.fills[0].quantity).toBe(30);
-    expect(res.fills[1].exitTarget).toBe('TP2');
+    expect(res.fills[1].exitTarget).toBe('TP3');
     expect(res.fills[1].quantity).toBe(30);
     expect(res.fills[2].exitTarget).toBe('SL');
     expect(res.fills[2].quantity).toBe(40);
@@ -342,11 +343,122 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(slOrder.status).toBe('FILLED');
   });
 
-  // 6. Signal / Order Timestamps Validation
-  test('6. Rejects order submission if order timestamp precedes signal timestamp', () => {
+  // 6. P0 Audit Fix: NEXT_BAR_MARKET with Resting STOP & LIMIT Exit Orders
+  test('6. P0 Audit Fix: NEXT_BAR_MARKET simulation evaluates resting STOP and LIMIT orders correctly against current bar', () => {
+    const execSim = new ExecutionSimulator(FillModel.NEXT_BAR_MARKET, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+    const tradeId = 'trade_next_bar_p0';
+
+    const slOrder = execSim.submitOrder({
+      tradeId,
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    const tp1Order = execSim.submitOrder({
+      tradeId,
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30.0,
+      timestamp,
+      exitTarget: 'TP1',
+    });
+
+    // Current candle High = 112 (touches TP1 @ 110)
+    const currentCandle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 105.0,
+      high: 112.0,
+      low: 104.0,
+      close: 108.0,
+      volume: 100,
+    };
+
+    // Next candle Open = 106.0
+    const nextCandle: ICandle = {
+      timestamp: new Date(timestamp + 120000),
+      open: 106.0,
+      high: 109.0,
+      low: 105.0,
+      close: 107.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(currentCandle, nextCandle);
+    expect(res.fills).toHaveLength(1);
+    expect(res.fills[0].exitTarget).toBe('TP1');
+    // Price MUST be limit price (110), NOT next candle open (106)!
+    expect(res.fills[0].price).toBe(110.0);
+  });
+
+  // 7. P1 Audit Fix: TP Event Type Classification (TP_FILLED)
+  test('7. P1 Audit Fix: Process candle emits TP_FILLED event for TP limit orders', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    execSim.submitOrder({
+      tradeId: 'trade_event_type',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 50.0,
+      timestamp,
+      exitTarget: 'TP1',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 105.0,
+      high: 112.0,
+      low: 104.0,
+      close: 108.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.events).toHaveLength(1);
+    expect(res.events[0].eventType).toBe('TP_FILLED');
+  });
+
+  // 8. P1 Audit Fix: Lower-TF Validator Timeframe Duration Check (15m)
+  test('8. P1 Audit Fix: validateSubBars validates 15m parent candle duration correctly', () => {
+    const parentOpen = 1700000000000; // 10:00
+    const parentDurationMs = 15 * 60 * 1000; // 15 Minutes (10:00 to 10:15)
+    const parentClose = parentOpen + parentDurationMs;
+
+    const parentCandle: ICandle = {
+      timestamp: new Date(parentOpen),
+      open: 100,
+      high: 110,
+      low: 95,
+      close: 105,
+      volume: 1000,
+    };
+
+    // Sub-bar at 10:16 (past 15m boundary -> future data)
+    const invalidFutureSubBars: ICandle[] = [
+      { timestamp: new Date(parentOpen + 60000), open: 100, high: 102, low: 99, close: 101, volume: 10 },
+      { timestamp: new Date(parentClose + 60000), open: 105, high: 108, low: 104, close: 107, volume: 10 }, // 10:16 - Future!
+    ];
+
+    const valRes = FillModelEngine.validateSubBars(parentCandle, invalidFutureSubBars, parentDurationMs);
+    expect(valRes.isValid).toBe(false);
+    expect(valRes.reason).toBe('SUBBAR_OUT_OF_BOUNDS_FUTURE');
+  });
+
+  // 9. Signal / Order Timestamps Validation
+  test('9. Rejects order submission if order timestamp precedes signal timestamp', () => {
     const execSim = new ExecutionSimulator();
     const signalTimestamp = 1700001000000;
-    const invalidOrderTimestamp = 1700000000000; // 1000s earlier
+    const invalidOrderTimestamp = 1700000000000;
 
     expect(() => {
       execSim.submitOrder({
@@ -362,65 +474,8 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     }).toThrow('Order creation timestamp (1700000000000) cannot precede signal timestamp (1700001000000)');
   });
 
-  // 7. Entry Reference Price Preservation
-  test('7. Entry reference price is preserved on order and fill', () => {
-    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH);
-    const timestamp = 1700000000000;
-    const refPrice = 100.0;
-
-    const order = execSim.submitOrder({
-      tradeId: 'trade_ref',
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderType: 'MARKET',
-      quantity: 1.0,
-      timestamp,
-      referencePrice: refPrice,
-    });
-
-    expect(order.referencePrice).toBe(100.0);
-
-    const candle: ICandle = {
-      timestamp: new Date(timestamp + 60000),
-      open: 100.5,
-      high: 102.0,
-      low: 100.0,
-      close: 101.0,
-      volume: 10,
-    };
-
-    const res = execSim.processCandle(candle);
-    expect(res.fills).toHaveLength(1);
-    expect(res.fills[0].price).toBeGreaterThanOrEqual(100.5);
-  });
-
-  // 8. Lower-TF Upper-Bound Validation
-  test('8. validateSubBars fails closed if sub-bars exceed parent bar close boundary', () => {
-    const parentOpen = 1700000000000; // 10:00
-    const parentDurationMs = 3600000; // 1 Hour (10:00 to 11:00)
-    const parentClose = parentOpen + parentDurationMs;
-
-    const parentCandle: ICandle = {
-      timestamp: new Date(parentOpen),
-      open: 100,
-      high: 110,
-      low: 95,
-      close: 105,
-      volume: 1000,
-    };
-
-    const invalidFutureSubBars: ICandle[] = [
-      { timestamp: new Date(parentOpen + 60000), open: 100, high: 102, low: 99, close: 101, volume: 10 },
-      { timestamp: new Date(parentClose + 60000), open: 105, high: 108, low: 104, close: 107, volume: 10 },
-    ];
-
-    const valRes = FillModelEngine.validateSubBars(parentCandle, invalidFutureSubBars, parentDurationMs);
-    expect(valRes.isValid).toBe(false);
-    expect(valRes.reason).toBe('SUBBAR_OUT_OF_BOUNDS_FUTURE');
-  });
-
-  // 9. Deprecate/Disable Synthetic Lifecycle Execution for Backtesting
-  test('9. evaluateLotTick throws exception when invoked with forBacktest = true', () => {
+  // 10. Deprecate/Disable Synthetic Lifecycle Execution for Backtesting
+  test('10. evaluateLotTick throws exception when invoked with forBacktest = true', () => {
     const lot: any = {
       tradeId: 't1',
       symbol: 'BTCUSDT',

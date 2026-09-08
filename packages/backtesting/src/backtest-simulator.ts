@@ -71,62 +71,50 @@ export class BacktestSimulator {
     const hasAlreadyTp1 = lot.partialFills.some((f) => f.targetType === 'TP1');
     const hasAlreadyTp2 = lot.partialFills.some((f) => f.targetType === 'TP2');
 
-    if (!hasAlreadyTp1 && policy.tp1Ratio > 0) {
-      const tp1Qty = Math.min(
-        remainingQty,
-        Math.round(lot.initialQuantity * policy.tp1Ratio),
-      );
-      if (tp1Qty > 0) {
-        execSim.submitOrder({
-          tradeId: lot.tradeId,
-          symbol,
-          side: exitSide,
-          orderType: 'LIMIT',
-          price: lot.tp1,
-          quantity: tp1Qty,
-          timestamp,
-          exitTarget: 'TP1',
-        });
-      }
+    const tp1Qty = Math.round(lot.initialQuantity * policy.tp1Ratio);
+    const tp2Qty =
+      policy.tp3Ratio > 0
+        ? Math.round(lot.initialQuantity * policy.tp2Ratio)
+        : lot.initialQuantity - tp1Qty;
+    const tp3Qty = policy.tp3Ratio > 0 ? lot.initialQuantity - (tp1Qty + tp2Qty) : 0;
+
+    if (!hasAlreadyTp1 && tp1Qty > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp1,
+        quantity: Math.min(remainingQty, tp1Qty),
+        timestamp,
+        exitTarget: 'TP1',
+      });
     }
 
-    if (!hasAlreadyTp2 && policy.tp2Ratio > 0) {
-      const targetRatio = policy.tp3Ratio > 0 ? policy.tp2Ratio : 1.0;
-      const tp2Qty = Math.min(
-        remainingQty,
-        Math.round(lot.initialQuantity * targetRatio),
-      );
-      if (tp2Qty > 0) {
-        execSim.submitOrder({
-          tradeId: lot.tradeId,
-          symbol,
-          side: exitSide,
-          orderType: 'LIMIT',
-          price: lot.tp2,
-          quantity: tp2Qty,
-          timestamp,
-          exitTarget: 'TP2',
-        });
-      }
+    if (!hasAlreadyTp2 && tp2Qty > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp2,
+        quantity: Math.min(remainingQty, tp2Qty),
+        timestamp,
+        exitTarget: 'TP2',
+      });
     }
 
-    if (policy.tp3Ratio > 0) {
-      const tp3Qty = Math.min(
-        remainingQty,
-        Math.round(lot.initialQuantity * policy.tp3Ratio),
-      );
-      if (tp3Qty > 0) {
-        execSim.submitOrder({
-          tradeId: lot.tradeId,
-          symbol,
-          side: exitSide,
-          orderType: 'LIMIT',
-          price: lot.tp3,
-          quantity: tp3Qty,
-          timestamp,
-          exitTarget: 'TP3',
-        });
-      }
+    if (tp3Qty > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp3,
+        quantity: Math.min(remainingQty, tp3Qty),
+        timestamp,
+        exitTarget: 'TP3',
+      });
     }
   }
 
@@ -150,12 +138,13 @@ export class BacktestSimulator {
 
     // 0. Temporal filter on candles if asOfTimestamp is provided
     let inputCandles = options.candles || [];
+    const tfMs = this.getDurationMs(timeframe);
+
     if (options.asOfTimestamp) {
       const cutoffMs =
         options.asOfTimestamp instanceof Date
           ? options.asOfTimestamp.getTime()
           : new Date(options.asOfTimestamp).getTime();
-      const tfMs = this.getDurationMs(timeframe);
       inputCandles = inputCandles.filter((c) => {
         const openMs =
           c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
@@ -232,7 +221,7 @@ export class BacktestSimulator {
 
       // 1. Process Candle through Authoritative ExecutionSimulator
       const subBarCandles = options.lowerTfCandles;
-      const simResult = execSim.processCandle(currentCandle, nextCandle, subBarCandles);
+      const simResult = execSim.processCandle(currentCandle, nextCandle, subBarCandles, tfMs);
       executionEvents.push(...simResult.events);
 
       // 2. Handle Entry Order Fill
@@ -410,7 +399,11 @@ export class BacktestSimulator {
               lastFill?.targetType === 'STOP_LOSS' ||
               lastFill?.targetType === 'TRAILING_STOP'
                 ? SignalState.SL_HIT
-                : SignalState.TP1_HIT,
+                : lastFill?.targetType === 'TP3'
+                  ? SignalState.TP3_HIT
+                  : lastFill?.targetType === 'TP2'
+                    ? SignalState.TP2_HIT
+                    : SignalState.TP1_HIT,
             signalTimestamp: pendingEntrySignal?.timestamp
               ? new Date(pendingEntrySignal.timestamp)
               : new Date(firstFill?.timestamp || activeLot.openedAt),
