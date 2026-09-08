@@ -1,11 +1,16 @@
+import { BacktestSimulator } from '@quant/backtesting';
 import { TradingExperience } from './types';
 
 export interface CounterfactualExitScenario {
   scenarioName:
-    'TP1_FIXED' | 'TP2_STANDARD' | 'TP3_RUNNER' | 'TRAILING_BREAKEVEN' | 'TIME_BASED_CUTOFF';
+    | 'TP1_FIXED'
+    | 'TP2_STANDARD'
+    | 'TP3_RUNNER'
+    | 'TRAILING_BREAKEVEN'
+    | 'TIME_BASED_CUTOFF';
   simulatedExitPrice: number;
   simulatedPnLR: number;
-  realizedDeltaR: number; // counterfactual R - actual R
+  realizedDeltaR: number;
   wasSuperiorToActual: boolean;
 }
 
@@ -21,9 +26,8 @@ export interface TradeCounterfactualAnalysis {
 
 export class CounterfactualAnalyzer {
   /**
-   * Analyzes a closed trading experience under alternative exit policies.
-   * STRICT POINT-IN-TIME GUARANTEE: Uses only ex-post trade telemetry for post-mortem learning,
-   * never leaking future information into live decision gates.
+   * Analyzes a closed trading experience under alternative exit policies
+   * strictly through the authoritative BacktestSimulator execution pipeline.
    */
   public static analyzeExperience(exp: TradingExperience): TradeCounterfactualAnalysis {
     const entryPrice = exp.execution?.entryPrice || 0;
@@ -44,68 +48,67 @@ export class CounterfactualAnalyzer {
       exp.risk?.target3 ||
       (isBuy ? entryPrice + 4.0 * riskDistance : entryPrice - 4.0 * riskDistance);
 
-    const mfe = exp.outcome?.maxFavorableExcursion || 0;
-
     const candles = (exp as any).candlesDuringTrade || [];
     let tp1PnLR = actualPnLR;
     let tp2PnLR = actualPnLR;
     let tp3PnLR = actualPnLR;
     let bePnLR = actualPnLR;
 
-    if (candles && candles.length > 0 && riskDistance > 0) {
-      // Evaluate sequential candle-by-candle trajectory
-      let reachedTp1 = false;
-      let reachedTp2 = false;
-      let reachedTp3 = false;
-      let stoppedOut = false;
+    if (candles && candles.length >= 2) {
+      // Replay experience through authoritative BacktestSimulator for each counterfactual scenario
+      const symbol = exp.instrument?.symbol || 'BTCUSDT';
+      const timeframe = exp.timeframe || '15m';
 
-      for (const c of candles) {
-        if (stoppedOut) break;
-        const high = c.high;
-        const low = c.low;
+      // 1. TP1 Fixed Scenario
+      const resTp1 = BacktestSimulator.runSimulation({
+        symbol,
+        timeframe,
+        candles,
+        experiences: [exp],
+        partialExitPolicy: { tp1Ratio: 1.0, tp2Ratio: 0, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+        minimumCandles: 2,
+        warmupBars: 0,
+      });
+      tp1PnLR = resTp1.trades[0]?.pnlRMultiple ?? actualPnLR;
 
-        const slHit = isBuy ? low <= exp.risk.stopLoss : high >= exp.risk.stopLoss;
-        const tp1Hit = isBuy ? high >= target1 : low <= target1;
+      // 2. TP2 Standard Scenario
+      const resTp2 = BacktestSimulator.runSimulation({
+        symbol,
+        timeframe,
+        candles,
+        experiences: [exp],
+        partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+        minimumCandles: 2,
+        warmupBars: 0,
+      });
+      tp2PnLR = resTp2.trades[0]?.pnlRMultiple ?? actualPnLR;
 
-        if (slHit && tp1Hit) {
-          const openDistToSl = Math.abs(c.open - exp.risk.stopLoss);
-          const openDistToTp = Math.abs(c.open - target1);
-          if (openDistToTp < openDistToSl) {
-            reachedTp1 = true;
-            tp1PnLR = 1.5;
-          } else {
-            stoppedOut = true;
-            if (!reachedTp1) tp1PnLR = -1.0;
-            if (!reachedTp2) tp2PnLR = -1.0;
-            if (!reachedTp3) tp3PnLR = reachedTp1 ? 0.0 : -1.0;
-            if (!reachedTp1) bePnLR = -1.0;
-            break;
-          }
-        } else if (slHit) {
-          stoppedOut = true;
-          if (!reachedTp1) tp1PnLR = -1.0;
-          if (!reachedTp2) tp2PnLR = -1.0;
-          if (!reachedTp3) tp3PnLR = reachedTp1 ? 0.0 : -1.0;
-          if (!reachedTp1) bePnLR = -1.0;
-          break;
-        }
+      // 3. TP3 Runner Scenario
+      const resTp3 = BacktestSimulator.runSimulation({
+        symbol,
+        timeframe,
+        candles,
+        experiences: [exp],
+        partialExitPolicy: { tp1Ratio: 0.33, tp2Ratio: 0.33, tp3Ratio: 0.34, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+        minimumCandles: 2,
+        warmupBars: 0,
+      });
+      tp3PnLR = resTp3.trades[0]?.pnlRMultiple ?? actualPnLR;
 
-        // Check TP targets
-        if (tp1Hit) {
-          reachedTp1 = true;
-          tp1PnLR = 1.5;
-        }
-        if (isBuy ? high >= target2 : low <= target2) {
-          reachedTp2 = true;
-          tp2PnLR = 2.5;
-        }
-        if (isBuy ? high >= target3 : low <= target3) {
-          reachedTp3 = true;
-          tp3PnLR = 4.0;
-        }
-      }
+      // 4. Trailing Breakeven Scenario
+      const resBe = BacktestSimulator.runSimulation({
+        symbol,
+        timeframe,
+        candles,
+        experiences: [exp],
+        enablePartialTp1Trailing: true,
+        partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: true, trailStopOnTp2: false },
+        minimumCandles: 2,
+        warmupBars: 0,
+      });
+      bePnLR = resBe.trades[0]?.pnlRMultiple ?? actualPnLR;
     } else {
-      // Fallback: evaluate using realized trade outcome status and targets
+      // Fallback if no candle telemetry is present
       if (exp.outcome?.status === 'WIN') {
         tp1PnLR = 1.5;
         tp2PnLR = exp.outcome.pnlR >= 2.5 ? 2.5 : 1.5;

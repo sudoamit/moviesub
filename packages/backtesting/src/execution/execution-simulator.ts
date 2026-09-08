@@ -130,6 +130,7 @@ export class ExecutionSimulator {
         if (!seg) break;
 
         let segHasTrigger = false;
+        let currentSegStart = seg.start;
         let currentOrders = Array.from(this.orders.values()).filter(
           (o) => o.tradeId === tradeId && o.status === 'PENDING',
         );
@@ -141,16 +142,26 @@ export class ExecutionSimulator {
 
             let res: { isFilled: boolean; fill?: IFill };
             if (this.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
-              res = FillModelEngine.evaluateFill(
-                order,
-                bar,
-                nextCandle,
-                this.fillModel,
-              );
+              const orderSubTime = order.submittedAt || order.createdAt;
+              if (orderSubTime < candleTime) {
+                res = FillModelEngine.evaluateFill(
+                  order,
+                  bar,
+                  undefined,
+                  FillModel.OHLC_PATH,
+                );
+              } else {
+                res = FillModelEngine.evaluateFill(
+                  order,
+                  bar,
+                  nextCandle,
+                  this.fillModel,
+                );
+              }
             } else {
               res = FillModelEngine.evaluateSegmentFill(
                 order,
-                seg.start,
+                currentSegStart,
                 seg.end,
                 candleTime,
                 order.symbol,
@@ -171,7 +182,7 @@ export class ExecutionSimulator {
           } else {
             const segResolved = FillModelEngine.resolveSegmentConflict(
               triggered,
-              seg.start,
+              currentSegStart,
               seg.end,
               this.ambiguityMode,
             );
@@ -185,6 +196,9 @@ export class ExecutionSimulator {
 
           const { order, fill } = nextTrigger;
           segHasTrigger = true;
+
+          const trigPrice = order.orderType === 'STOP' ? (order.stopPrice ?? fill.price) : (order.price ?? fill.price);
+          currentSegStart = trigPrice;
 
           this.fillCounter++;
           fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
@@ -266,6 +280,18 @@ export class ExecutionSimulator {
               if (remainingPosQty > 0) {
                 slOrder.quantity = remainingPosQty;
                 slOrder.remainingQuantity = remainingPosQty;
+
+                if (order.exitTarget === 'TP1') {
+                  const entryFill = this.fills.find(
+                    (f) => f.tradeId === tradeId && f.exitTarget === 'ENTRY',
+                  );
+                  const bePrice =
+                    entryFill?.price ?? (order.referencePrice ?? slOrder.price);
+                  if (bePrice !== undefined) {
+                    slOrder.stopPrice = bePrice;
+                    (slOrder as any).exitTarget = 'TRAILING_STOP';
+                  }
+                }
               } else {
                 this.cancelTradeOrders(tradeId);
                 break;

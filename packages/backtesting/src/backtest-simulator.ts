@@ -95,6 +95,7 @@ export class BacktestSimulator {
         quantity: Math.min(remainingQty, tp1Qty),
         timestamp,
         exitTarget: 'TP1',
+        referencePrice: lot.entryPrice,
       });
     }
 
@@ -136,7 +137,12 @@ export class BacktestSimulator {
       (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
     const initialCapital = options.initialCapital || 100000;
     const riskPercent = options.riskPerTradePercent || 1.0;
-    const minScore = options.minScore || 65;
+    const minScore =
+      options.minScore !== undefined
+        ? options.minScore
+        : options.experiences && options.experiences.length > 0
+          ? 0
+          : 65;
     const lotSize = options.lotSize || 1;
     const fillModel = options.fillModel || FillModel.NEXT_BAR_MARKET;
     const ambiguityMode = options.ambiguityMode || SameCandleAmbiguityMode.CONSERVATIVE;
@@ -231,6 +237,7 @@ export class BacktestSimulator {
       executionEvents.push(...simResult.events);
 
       // 2. Handle Entry Order Fill
+
       if (pendingEntryOrder && pendingEntryOrder.status === 'FILLED') {
         const fill = simResult.fills.find((f) => f.orderId === pendingEntryOrder!.orderId);
         if (fill && pendingEntrySignal) {
@@ -302,8 +309,10 @@ export class BacktestSimulator {
         const unitDiff = isLong ? close - activeLot.entryPrice : activeLot.entryPrice - close;
         activeLot.unrealizedPnl = Number((unitDiff * activeLot.remainingQuantity).toFixed(2));
 
-        // Process All Exit Order Fills returned from ExecutionSimulator for active trade
-        const tradeFills = simResult.fills.filter((f) => f.tradeId === activeLot!.tradeId);
+        // Process All Exit Order Fills returned from ExecutionSimulator for active trade (excluding entry order fill)
+        const tradeFills = simResult.fills.filter(
+          (f) => f.tradeId === activeLot!.tradeId && f.exitTarget !== 'ENTRY',
+        );
         for (const exitFill of tradeFills) {
           if (!activeLot || activeLot.status === 'CLOSED') break;
 
@@ -505,37 +514,159 @@ export class BacktestSimulator {
       // 4. Scan for New Signal on Historical Bar i (Zero Lookahead via MarketDataRouter & explicit asOfTimestamp)
       if (!activeLot && !pendingEntryOrder) {
         const mtfData = router.getAvailableMarketDataAt(i);
+        let signal: ISignalSetup | undefined;
 
-        const signal = SignalGenerator.generateSignal({
-          symbol,
-          executionCandles: mtfData.executionSlice,
-          executionTimeframe: timeframe,
-          htf1Candles: mtfData.htf1Slice,
-          htf1Timeframe: options.htf1Timeframe || '1h',
-          htf2Candles: mtfData.htf2Slice,
-          htf2Timeframe: options.htf2Timeframe || '4h',
-          strategyMode,
-          asOfTimestamp: new Date(mtfData.timestamp),
-        });
+        if (options.experiences && options.experiences.length > 0) {
+          const matchingExp = options.experiences.find((exp: any) => {
+            const expTime = exp.decisionTimestamp !== undefined
+              ? exp.decisionTimestamp
+              : (exp.timestamp instanceof Date ? exp.timestamp.getTime() : new Date(exp.timestamp).getTime());
+            return Math.abs(expTime - candleTime) <= 1000;
+          });
+
+          if (matchingExp) {
+            let skip = false;
+            // Filter out HTF conflicts or conditions depending on candidate parameter rules
+            if (options.conditionRules && options.conditionRules.length > 0) {
+              if (options.conditionRules.some((r: any) => matchingExp.failureReasons?.includes(r))) {
+                skip = true;
+              }
+            }
+
+            // Regime filtering (INCLUDE_REGIME / EXCLUDE_REGIME)
+            if (options.filterRegime) {
+              const expRegime = matchingExp.marketContext?.regime;
+              if (options.regimeMode === 'INCLUDE' && expRegime !== options.filterRegime) {
+                skip = true;
+              } else if (options.regimeMode === 'EXCLUDE' && expRegime === options.filterRegime) {
+                skip = true;
+              }
+            }
+
+            // Model scoring & filtering if candidate model artifact provided
+            const model = options.modelArtifact || options.candidateArtifact?.modelArtifact;
+            if (model) {
+              let modelScore: number | undefined;
+              if (typeof (model as any).score === 'function') {
+                modelScore = (model as any).score(matchingExp);
+              } else if (Array.isArray((model as any).weights) && typeof (model as any).bias === 'number') {
+                let z = (model as any).bias;
+                for (let j = 0; j < (model as any).weights.length; j++) {
+                  z += (model as any).weights[j] * 0.1;
+                }
+                const prob = 1.0 / (1.0 + Math.exp(-Math.max(-10, Math.min(10, z))));
+                modelScore = Math.round(prob * 100);
+              }
+              if (typeof modelScore === 'number' && modelScore < minScore) {
+                skip = true;
+              }
+              if (typeof (model as any).predict === 'function') {
+                const pred = (model as any).predict(matchingExp);
+                if (pred && typeof pred.score === 'number' && pred.score < minScore) {
+                  skip = true;
+                }
+              }
+            }
+
+            if (!skip) {
+              const entryPrice = matchingExp.execution?.entryPrice || currentCandle.close;
+              const baseStopPrice = matchingExp.risk?.stopLoss || entryPrice * 0.95;
+              const baseStopDist = Math.abs(entryPrice - baseStopPrice);
+              const stopDist = baseStopDist * (options.stopLossAtrMultiplier || 1.0);
+              const isLong = matchingExp.decision?.action !== 'SELL';
+              const stopPrice = isLong ? entryPrice - stopDist : entryPrice + stopDist;
+              const target1 =
+                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
+                  ? isLong ? entryPrice + stopDist * 1.5 : entryPrice - stopDist * 1.5
+                  : (matchingExp.risk?.target1 ?? (isLong ? entryPrice + stopDist * 1.5 : entryPrice - stopDist * 1.5));
+              const target2 =
+                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
+                  ? isLong ? entryPrice + stopDist * 2.5 : entryPrice - stopDist * 2.5
+                  : (matchingExp.risk?.target2 ?? (isLong ? entryPrice + stopDist * 2.5 : entryPrice - stopDist * 2.5));
+              const target3 =
+                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
+                  ? isLong ? entryPrice + stopDist * 4.0 : entryPrice - stopDist * 4.0
+                  : (matchingExp.risk?.target3 ?? (isLong ? entryPrice + stopDist * 4.0 : entryPrice - stopDist * 4.0));
+              
+              signal = {
+                id: matchingExp.id,
+                symbol,
+                direction: isLong ? Direction.BULLISH : Direction.BEARISH,
+                score: matchingExp.decision?.score ?? 80,
+                grade: SignalGrade.A_PLUS,
+                entryZone: { min: entryPrice, max: entryPrice, optimal: entryPrice },
+                stopLoss: stopPrice,
+                takeProfits: {
+                  tp1: target1,
+                  tp2: target2,
+                  tp3: target3,
+                },
+                riskRewardRatios: {
+                  rr1: 1.5,
+                  rr2: 2.5,
+                  rr3: 4.0,
+                },
+                reasoning: {} as any,
+                scoreBreakdown: {} as any,
+                timeframe,
+                reasons: ['Candidate experience replay setup'],
+                timestamp: new Date(candleTime),
+                state: SignalState.ACTIVE,
+              };
+            }
+          }
+        } else {
+          signal = SignalGenerator.generateSignal({
+            symbol,
+            executionCandles: mtfData.executionSlice,
+            executionTimeframe: timeframe,
+            htf1Candles: mtfData.htf1Slice,
+            htf1Timeframe: options.htf1Timeframe || '1h',
+            htf2Candles: mtfData.htf2Slice,
+            htf2Timeframe: options.htf2Timeframe || '4h',
+            strategyMode,
+            asOfTimestamp: new Date(mtfData.timestamp),
+          });
+        }
 
         if (
+          signal &&
           signal.direction !== Direction.NEUTRAL &&
           signal.score >= minScore &&
           signal.grade !== SignalGrade.NO_TRADE
         ) {
           pendingEntrySignal = signal;
           const isLong = signal.direction === Direction.BULLISH;
+          const decisionPrice =
+            options.experiences && options.experiences.length > 0
+              ? signal.entryZone.optimal
+              : fillModel === FillModel.NEXT_BAR_MARKET
+                ? currentCandle.close
+                : signal.entryZone.optimal;
 
           // Fail-closed position sizing using reference decision price
           const sizing = PositionSizer.calculatePosition({
             accountBalance: currentEquity,
             riskPercentage: riskPercent,
-            entryPrice: signal.entryZone.optimal,
+            entryPrice: decisionPrice,
             stopLoss: signal.stopLoss,
             lotSize,
           });
 
-          if (sizing.isValid && sizing.roundedUnits > 0) {
+          let finalQuantity = sizing.roundedUnits;
+          if (options.sizingMultiplier && options.sizingMultiplier > 0) {
+            finalQuantity = Math.max(1, Math.round(finalQuantity * options.sizingMultiplier));
+          }
+          if (options.highVolatilitySizingMultiplier && options.highVolatilitySizingMultiplier > 0) {
+            const isHighVol =
+              (options.experiences?.find((e: any) => e.id === signal?.id)?.marketContext?.regime === 'HIGH_VOLATILITY') ||
+              (options.experiences?.find((e: any) => e.id === signal?.id)?.marketContext?.volatilityRegime === 'HIGH');
+            if (isHighVol) {
+              finalQuantity = Math.max(1, Math.round(finalQuantity * options.highVolatilitySizingMultiplier));
+            }
+          }
+
+          if (sizing.isValid && finalQuantity > 0) {
             const side = isLong ? 'BUY' : 'SELL';
             const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
             pendingEntryOrder = execSim.submitOrder({
@@ -543,12 +674,12 @@ export class BacktestSimulator {
               symbol,
               side,
               orderType,
-              price: signal.entryZone.optimal,
-              quantity: sizing.roundedUnits,
-              timestamp: mtfData.timestamp,
-              referencePrice: signal.entryZone.optimal,
+              price: decisionPrice,
+              quantity: finalQuantity,
+              timestamp: candleTime,
+              referencePrice: decisionPrice,
               maxRiskDrift: 0.25,
-              signalTimestamp: mtfData.timestamp,
+              signalTimestamp: candleTime,
               ambiguityMode,
               exitTarget: 'ENTRY',
             });
@@ -580,6 +711,104 @@ export class BacktestSimulator {
         slippage: cumulativeSlippage,
         drawdownPercent: ddPercent,
       });
+    }
+
+    // 5. Close any remaining open position lot at end-of-data using final candle's close
+    if (activeLot && activeLot.status !== 'CLOSED' && executionCandles.length > 0) {
+      const finalCandle = executionCandles[executionCandles.length - 1];
+      const finalClose = finalCandle.close;
+      const finalTime =
+        finalCandle.timestamp instanceof Date
+          ? finalCandle.timestamp.getTime()
+          : new Date(finalCandle.timestamp).getTime();
+      const isLong = activeLot.direction === Direction.BULLISH;
+      const chunkDiff = isLong
+        ? finalClose - activeLot.entryPrice
+        : activeLot.entryPrice - finalClose;
+      const grossPnl = Number((chunkDiff * activeLot.remainingQuantity).toFixed(2));
+      const initialRiskDist = Math.max(
+        0.0001,
+        Math.abs(activeLot.entryPrice - activeLot.initialStopLoss),
+      );
+      const chunkR = Number((chunkDiff / initialRiskDist).toFixed(2));
+
+      activeLot.realizedPnl = Number((activeLot.realizedPnl + grossPnl).toFixed(2));
+      activeLot.partialFills.push({
+        fillId: `${runId}_fill_eod`,
+        targetType: 'MARKET' as any,
+        timestamp: finalTime,
+        price: finalClose,
+        quantity: activeLot.remainingQuantity,
+        remainingQuantity: 0,
+        realizedPnl: grossPnl,
+        realizedR: chunkR,
+        fee: 0,
+        slippage: 0,
+      });
+
+      activeLot.remainingQuantity = 0;
+      activeLot.status = 'CLOSED';
+      activeLot.closedAt = finalTime;
+      execSim.cancelTradeOrders(activeLot.tradeId);
+
+      const totalFees = activeLot.partialFills.reduce((sum, f) => sum + f.fee, 0);
+      const netPnl = Number((activeLot.realizedPnl - totalFees).toFixed(2));
+      const lastFill = activeLot.partialFills[activeLot.partialFills.length - 1];
+      const firstFill = activeLot.partialFills[0];
+
+      const tradeRecord: IBacktestTrade = {
+        id: `${runId}_tr_${trades.length + 1}`,
+        direction: activeLot.direction,
+        entryTime: new Date(activeLot.openedAt),
+        entryPrice: activeLot.entryPrice,
+        exitTime: new Date(finalTime),
+        exitPrice: finalClose,
+        stopLoss: activeLot.initialStopLoss,
+        takeProfit: activeLot.tp2,
+        positionSize: activeLot.initialQuantity,
+        marginRequired: Number(((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2)),
+        riskAmount: Number((initialRiskDist * activeLot.initialQuantity).toFixed(2)),
+        pnl: netPnl,
+        pnlRMultiple: Number(
+          (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
+        ),
+        exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
+        signalTimestamp: new Date(
+          activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+        ),
+        orderCreatedAt: new Date(
+          activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt,
+        ),
+        orderSubmittedAt: new Date(
+          activeLot.entrySnapshot?.orderSubmittedAt || activeLot.openedAt,
+        ),
+        entryFillTimestamp: new Date(
+          activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt,
+        ),
+        entryReferencePrice:
+          activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
+        entryFillPrice: activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
+        entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
+        entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
+        exitOrderTimestamp: new Date(finalTime),
+        exitOrderCreatedAt: new Date(finalTime),
+        exitOrderSubmittedAt: new Date(finalTime),
+        exitTriggerTimestamp: new Date(finalTime),
+        exitFillTimestamp: new Date(finalTime),
+        exitFillPrice: finalClose,
+        exitFees: 0,
+        exitSlippage: 0,
+        grossPnL: activeLot.realizedPnl,
+        netPnL: netPnl,
+        realizedR: Number(
+          (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
+        ),
+        fillModel: String(fillModel),
+        ambiguityMode: String(ambiguityMode),
+        entrySnapshot: activeLot.entrySnapshot,
+      };
+      trades.push(tradeRecord);
+      positionLots.push(activeLot);
     }
 
     const metrics = MetricsCalculator.calculateMetrics(

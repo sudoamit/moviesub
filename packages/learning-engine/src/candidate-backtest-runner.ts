@@ -1,10 +1,6 @@
-import { ICandle, IBacktestTrade, Direction, SignalState, SignalGrade } from '@quant/shared';
-import {
-  ExecutionSimulator,
-  FillModel,
-  SameCandleAmbiguityMode,
-  IOrder,
-} from '@quant/backtesting';
+import { createHash } from 'crypto';
+import { ICandle, IBacktestTrade } from '@quant/shared';
+import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
 import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
 
 export interface CandidateExecutionConfig {
@@ -17,6 +13,7 @@ export interface CandidateExecutionConfig {
   highVolatilitySizingMultiplier?: number;
   sizingMultiplier?: number;
   filterRegime?: string;
+  regimeMode?: 'INCLUDE' | 'EXCLUDE';
   minProbability?: number;
   conditionRules?: string[];
   fittedValue?: number;
@@ -36,6 +33,17 @@ export interface CandidateExecutionResult {
   maxDrawdownR: number;
 }
 
+function deepFreeze<T extends object>(obj: T): Readonly<T> {
+  Object.freeze(obj);
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    const val = (obj as any)[key];
+    if (val !== null && (typeof val === 'object' || typeof val === 'function') && !Object.isFrozen(val)) {
+      deepFreeze(val);
+    }
+  }
+  return obj;
+}
+
 export class CandidateBacktestRunner {
   /**
    * Creates an immutable, reproducible CandidateArtifact.
@@ -45,51 +53,85 @@ export class CandidateBacktestRunner {
     datasetHash: string = 'canonical_default_hash',
   ): CandidateArtifact {
     const config = this.createExecutionConfig(candidate);
+    const artifactId = createHash('sha256')
+      .update(`${candidate.id}_${candidate.candidateVersion || candidate.id}_${config.configHash}_${datasetHash}`)
+      .digest('hex');
+
     const artifact: CandidateArtifact = {
+      artifactId,
       candidateId: candidate.id,
       candidateVersion: candidate.candidateVersion || candidate.id,
       datasetHash,
       strategyVersion: candidate.baseStrategyVersion || '1.0.0',
       strategyConfig: candidate.change || {},
-      featureSchemaVersion: '1.0.0',
-      selectedFeatures: [],
+      featureSchemaVersion: candidate.featureSchemaVersion || '2.0',
+      selectedFeatures: (candidate.change?.selectedFeatures as string[]) || [],
+      modelArtifact: (candidate.change?.modelArtifact as any) || undefined,
+      scalerArtifact: (candidate.change?.scalerArtifact as any) || undefined,
       riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier },
       executionConfig: config as any,
       createdAt: new Date(),
       configHash: config.configHash,
     };
-    return Object.freeze(artifact);
+    return deepFreeze(artifact);
   }
+
   /**
-   * Converts a StrategyCandidate into an executable strategy configuration object.
+   * Converts a StrategyCandidate into an executable strategy configuration object
+   * with a canonical SHA-256 configuration hash.
    */
   public static createExecutionConfig(candidate: StrategyCandidate): CandidateExecutionConfig {
     const change = candidate.change || {};
     const minMtfScore =
       change.parameter === 'minMtfScore'
         ? (typeof change.value === 'number' ? change.value : (change.fittedValue as number))
-        : (change.minScore as number);
+        : (typeof change.minMtfScore === 'number' ? change.minMtfScore : (change.minScore as number));
 
     const stopLossAtrMultiplier =
-      change.parameter === 'stopLossAtrMultiplier' ? (change.value as number) : 1.0;
+      typeof change.stopLossAtrMultiplier === 'number'
+        ? change.stopLossAtrMultiplier
+        : (change.parameter === 'stopLossAtrMultiplier' ? (change.value as number) : 1.0);
 
     const sizingMultiplier =
-      change.parameter === 'sizingMultiplier'
-        ? (change.value as number)
-        : (change.sizingMultiplier as number) || 1.0;
+      typeof change.sizingMultiplier === 'number'
+        ? change.sizingMultiplier
+        : (change.parameter === 'sizingMultiplier' ? (change.value as number) : 1.0);
 
     const highVolatilitySizingMultiplier =
-      (change.highVolatilitySizingMultiplier as number) ||
-      (change.parameter === 'highVolatilitySizingMultiplier' ? (change.value as number) : undefined);
+      typeof change.highVolatilitySizingMultiplier === 'number'
+        ? change.highVolatilitySizingMultiplier
+        : (change.parameter === 'highVolatilitySizingMultiplier' ? (change.value as number) : undefined);
 
     const minProbability =
-      (change.minProbability as number) ||
-      (change.parameter === 'minProbability' ? (change.value as number) : undefined);
+      typeof change.minProbability === 'number'
+        ? change.minProbability
+        : (change.parameter === 'minProbability' ? (change.value as number) : undefined);
 
     const filterRegime = (change.filterRegime as string) || (change.parameter === 'filterRegime' ? (change.value as string) : undefined);
+    const regimeMode: 'INCLUDE' | 'EXCLUDE' = (change.regimeMode as 'INCLUDE' | 'EXCLUDE') || (candidate.type === 'REGIME' && change.includeRegime ? 'INCLUDE' : 'EXCLUDE');
     const conditionRules = (change.conditionRules as string[]) || [];
 
-    const configHash = `cfg_${candidate.id}_${minMtfScore ?? 0}_${stopLossAtrMultiplier}_${sizingMultiplier}`;
+    // Canonical SHA-256 hash over candidate parameters
+    const hashPayload = JSON.stringify({
+      id: candidate.id,
+      candidateVersion: candidate.candidateVersion,
+      type: candidate.type,
+      baseStrategyVersion: candidate.baseStrategyVersion,
+      minMtfScore,
+      stopLossAtrMultiplier,
+      sizingMultiplier,
+      highVolatilitySizingMultiplier,
+      filterRegime,
+      regimeMode,
+      minProbability,
+      conditionRules,
+      enablePartialTp1Trailing: change.parameter === 'enablePartialTp1Trailing',
+      fittedValue: typeof change.fittedValue === 'number' ? change.fittedValue : undefined,
+      fittedOnFold: change.fittedOnFold,
+      modelArtifactId: (change.modelArtifact as any)?.modelVersion || (change.modelArtifact as any)?.modelId,
+      changeValues: Object.keys(change).sort().map(k => [k, change[k]]),
+    });
+    const configHash = createHash('sha256').update(hashPayload).digest('hex');
 
     return {
       candidateId: candidate.id,
@@ -101,6 +143,7 @@ export class CandidateBacktestRunner {
       highVolatilitySizingMultiplier,
       sizingMultiplier,
       filterRegime,
+      regimeMode,
       minProbability,
       conditionRules,
       fittedValue: typeof change.fittedValue === 'number' ? change.fittedValue : undefined,
@@ -108,271 +151,76 @@ export class CandidateBacktestRunner {
   }
 
   /**
-   * Replays trading experiences through the authoritative ExecutionSimulator from @quant/backtesting.
+   * Replays candidate execution strictly through the authoritative BacktestSimulator engine.
    */
   public static runCandidateBacktest(
     candidate: StrategyCandidate,
     experiences: TradingExperience[],
+    options?: { candles?: ICandle[] },
   ): CandidateExecutionResult {
     const config = this.createExecutionConfig(candidate);
 
-    const executedTrades: IBacktestTrade[] = [];
-    const rMultiples: number[] = [];
-
-    for (let idx = 0; idx < experiences.length; idx++) {
-      const exp = experiences[idx];
-
-      // 1. FILTER candidate checks
-      if (candidate.type === 'FILTER') {
-        if (config.conditionRules?.includes('HTF_CONFLICT') && exp.failureReasons?.includes('HTF_CONFLICT')) {
-          continue;
-        }
-        if (config.conditionRules?.includes('HIGH_VOLATILITY') && exp.marketContext?.regime === 'HIGH_VOLATILITY') {
-          continue;
-        }
-        if (config.minMtfScore !== undefined && (exp.decision?.score || 0) < config.minMtfScore) {
-          continue;
+    // Collect and order market candles from experiences or options
+    let candles: ICandle[] = options?.candles || [];
+    if (!candles || candles.length === 0) {
+      const candleMap = new Map<number, ICandle>();
+      for (const exp of experiences) {
+        const expCandles = (exp as any).candlesDuringTrade || [];
+        for (const c of expCandles) {
+          const t = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
+          if (!candleMap.has(t)) {
+            candleMap.set(t, c);
+          }
         }
       }
 
-      // 2. THRESHOLD candidate checks
-      if (candidate.type === 'THRESHOLD') {
-        if (config.minMtfScore !== undefined && (exp.decision?.score || 0) < config.minMtfScore) {
-          continue;
-        }
-      }
-
-      // 3. REGIME candidate checks
-      if (candidate.type === 'REGIME' && config.filterRegime) {
-        if (exp.marketContext?.regime === config.filterRegime) {
-          continue;
-        }
-      }
-
-      // 4. MODEL / FEATURE candidate checks
-      if ((candidate.type === 'MODEL' || candidate.type === 'FEATURE') && config.minProbability !== undefined) {
-        if (exp.prediction?.probabilityWin !== undefined && exp.prediction.probabilityWin < config.minProbability) {
-          continue;
-        }
-      }
-
-      // Determine sizing multiplier
-      let currentSizing = config.sizingMultiplier || 1.0;
-      if (
-        (exp.marketContext?.regime === 'HIGH_VOLATILITY' || exp.marketContext?.volatilityRegime === 'HIGH') &&
-        config.highVolatilitySizingMultiplier !== undefined
-      ) {
-        currentSizing = config.highVolatilitySizingMultiplier;
-      }
-
-      // Extract entry & risk parameters
-      const entryPrice = exp.execution?.entryPrice || 100;
-      const initialStop = exp.risk?.stopLoss || entryPrice * 0.99;
-      const isLong = exp.decision?.action === 'BUY' || entryPrice > initialStop;
-      const originalRiskDist = Math.abs(entryPrice - initialStop);
-
-      // Adjust stop distance if candidate alters stopLossAtrMultiplier
-      const stopDist = originalRiskDist * (config.stopLossAtrMultiplier || 1.0);
-      const stopPrice = isLong ? entryPrice - stopDist : entryPrice + stopDist;
-      const target1 = exp.risk?.target1 || (isLong ? entryPrice + 1.5 * stopDist : entryPrice - 1.5 * stopDist);
-
-      const candles = ((exp as any).candlesDuringTrade as ICandle[]) || [];
-      if (!candles || candles.length === 0) {
-        throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
-      }
-
-      const entryTime = exp.labelStartTimestamp || (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : new Date(exp.timestamp).getTime());
-
-      if (stopDist > 0) {
-        const execSim = new ExecutionSimulator(
-          FillModel.OHLC_PATH,
-          SameCandleAmbiguityMode.OHLC_PATH,
-          { submissionLatencyMs: 15, processingLatencyMs: 5 },
-          `cand_${candidate.id}_${exp.id}`,
-        );
-
-        // 1. Submit Entry Market Order
-        execSim.submitOrder({
-          tradeId: exp.id,
-          symbol: exp.instrument?.symbol || 'BTCUSDT',
-          side: isLong ? 'BUY' : 'SELL',
-          orderType: 'MARKET',
-          quantity: currentSizing,
-          timestamp: entryTime,
-          exitTarget: 'ENTRY',
-        });
-
-        // 2. Submit Protective Stop Order
-        execSim.submitOrder({
-          tradeId: exp.id,
-          symbol: exp.instrument?.symbol || 'BTCUSDT',
-          side: isLong ? 'SELL' : 'BUY',
-          orderType: 'STOP',
-          stopPrice,
-          quantity: currentSizing,
-          timestamp: entryTime,
-          exitTarget: 'SL',
-        });
-
-        // 3. Submit Take Profit Limit Order
-        execSim.submitOrder({
-          tradeId: exp.id,
-          symbol: exp.instrument?.symbol || 'BTCUSDT',
-          side: isLong ? 'SELL' : 'BUY',
-          orderType: 'LIMIT',
-          price: target1,
-          quantity: currentSizing,
-          timestamp: entryTime,
-          exitTarget: 'TP1',
-        });
-
-        // Process candles bar-by-bar through authoritative ExecutionSimulator
-        for (let cIdx = 0; cIdx < candles.length; cIdx++) {
-          const bar = candles[cIdx];
-          const nextBar = cIdx < candles.length - 1 ? candles[cIdx + 1] : undefined;
-          execSim.processCandle(bar, nextBar);
-        }
-
-        // Extract fills from ExecutionSimulator
-        const allFills = execSim.getAllFills();
-        const entryFill = allFills.find((f) => f.exitTarget === 'ENTRY');
-        let exitFill = allFills.find(
-          (f) => f.exitTarget === 'SL' || f.exitTarget === 'TP1' || f.exitTarget === 'TRAILING_STOP',
-        );
-
-        // Market exit at end of window if position remains open
-        if (entryFill && !exitFill && candles.length > 0) {
-          const lastCandle = candles[candles.length - 1];
-          const lastTime =
-            lastCandle.timestamp instanceof Date
-              ? lastCandle.timestamp.getTime()
-              : new Date(lastCandle.timestamp).getTime();
-          execSim.submitOrder({
-            tradeId: exp.id,
-            symbol: exp.instrument?.symbol || 'BTCUSDT',
-            side: isLong ? 'SELL' : 'BUY',
-            orderType: 'MARKET',
-            quantity: currentSizing,
-            timestamp: lastTime,
-            exitTarget: 'EXPIRED',
-          });
-          execSim.processCandle(lastCandle);
-          exitFill = execSim.getAllFills().find((f) => f.exitTarget === 'EXPIRED');
-        }
-
-        if (entryFill && exitFill) {
-          const actualEntryPrice = entryFill.price;
-          const actualExitPrice = exitFill.price;
-          const totalFees = Number((entryFill.fee + exitFill.fee).toFixed(4));
-          const totalSlippage = Number((entryFill.slippage + exitFill.slippage).toFixed(4));
-
-          const grossPnL = isLong
-            ? (actualExitPrice - actualEntryPrice) * currentSizing
-            : (actualEntryPrice - actualExitPrice) * currentSizing;
-          const pnl = Number((grossPnL - totalFees).toFixed(2));
-
-          const rawR = isLong
-            ? (actualExitPrice - actualEntryPrice) / stopDist
-            : (actualEntryPrice - actualExitPrice) / stopDist;
-          const pnlR = Number((rawR * currentSizing - totalFees / (stopDist * currentSizing || 1)).toFixed(4));
-
-          const exitReason =
-            exitFill.exitTarget === 'TP1'
-              ? SignalState.TP1_HIT
-              : exitFill.exitTarget === 'SL'
-              ? SignalState.SL_HIT
-              : SignalState.EXPIRED;
-
-          rMultiples.push(pnlR);
-          executedTrades.push({
-            id: `tr_${exp.id}`,
-            direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-            entryTime: new Date(entryFill.timestamp),
-            entryPrice: actualEntryPrice,
-            exitTime: new Date(exitFill.timestamp),
-            exitPrice: actualExitPrice,
-            stopLoss: stopPrice,
-            takeProfit: target1,
-            positionSize: currentSizing,
-            pnl,
-            pnlRMultiple: pnlR,
-            exitReason,
-            signalTimestamp: new Date(exp.decisionTimestamp || entryTime),
-            orderCreatedAt: new Date(entryFill.orderCreatedAt || entryTime),
-            orderSubmittedAt: new Date(entryFill.orderSubmittedAt || entryTime),
-            entryFillTimestamp: new Date(entryFill.timestamp),
-            entryReferencePrice: entryPrice,
-            entryFillPrice: actualEntryPrice,
-            entryFees: entryFill.fee,
-            entrySlippage: entryFill.slippage,
-            exitOrderTimestamp: new Date(exitFill.timestamp),
-            exitOrderCreatedAt: new Date(exitFill.exitOrderCreatedAt || exitFill.timestamp),
-            exitOrderSubmittedAt: new Date(exitFill.exitOrderSubmittedAt || exitFill.timestamp),
-            exitTriggerTimestamp: new Date(exitFill.exitTriggerTimestamp || exitFill.timestamp),
-            exitFillTimestamp: new Date(exitFill.timestamp),
-            exitReferencePrice: actualExitPrice,
-            exitFillPrice: actualExitPrice,
-            exitFees: exitFill.fee,
-            exitSlippage: exitFill.slippage,
-            executedPrice: actualExitPrice,
-            fees: totalFees,
-            slippageAmount: totalSlippage,
-            slippageBps: 5,
-          } as any);
-        }
-      }
+      candles = Array.from(candleMap.values()).sort((a, b) => {
+        const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+        const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+        return ta - tb;
+      });
     }
 
-    const totalTrades = executedTrades.length;
-    if (totalTrades === 0) {
-      return {
-        candidateId: candidate.id,
-        totalTrades: 0,
-        trades: [],
-        rMultiples: [],
-        netPnL: 0,
-        grossProfit: 0,
-        grossLoss: 0,
-        winRate: 0,
-        expectancyR: 0,
-        profitFactor: 0,
-        maxDrawdownR: 0,
-      };
+    if (!candles || candles.length === 0) {
+      throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
     }
 
-    const netPnL = executedTrades.reduce((sum, t) => sum + t.pnl, 0);
-    const grossProfit = executedTrades.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0);
-    const grossLoss = executedTrades.filter((t) => t.pnl < 0).reduce((sum, t) => sum + Math.abs(t.pnl), 0);
+    const backtestOptions: IBacktestOptions = {
+      runId: `cand_bt_${candidate.id}`,
+      symbol: experiences[0]?.instrument?.symbol || 'BTCUSDT',
+      timeframe: (experiences[0] as any)?.timeframe || '15m',
+      candles,
+      experiences,
+      minimumCandles: 1,
+      warmupBars: 0,
+      minScore: config.minMtfScore,
+      stopLossAtrMultiplier: config.stopLossAtrMultiplier,
+      sizingMultiplier: config.sizingMultiplier,
+      highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
+      filterRegime: config.filterRegime,
+      regimeMode: config.regimeMode,
+      minProbability: config.minProbability,
+      conditionRules: config.conditionRules,
+      enablePartialTp1Trailing: config.enablePartialTp1Trailing,
+    };
 
-    const wins = executedTrades.filter((t) => t.pnlRMultiple > 0).length;
-    const winRate = Number(((wins / totalTrades) * 100).toFixed(1));
-
-    const sumR = rMultiples.reduce((sum, r) => sum + r, 0);
-    const expectancyR = Number((sumR / totalTrades).toFixed(4));
-    const profitFactor = grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? 5.0 : 0.0;
-
-    let peakR = 0;
-    let runningR = 0;
-    let maxDDR = 0;
-    for (const r of rMultiples) {
-      runningR += r;
-      if (runningR > peakR) peakR = runningR;
-      const dd = peakR - runningR;
-      if (dd > maxDDR) maxDDR = dd;
-    }
+    // Invoke authoritative BacktestSimulator engine directly
+    const simResult = BacktestSimulator.runSimulation(backtestOptions);
+    const trades = simResult.trades || [];
+    const rMultiples = trades.map((t) => t.pnlRMultiple || 0);
 
     return {
       candidateId: candidate.id,
-      totalTrades,
-      trades: executedTrades,
+      totalTrades: simResult.totalTrades,
+      trades,
       rMultiples,
-      netPnL: Number(netPnL.toFixed(2)),
-      grossProfit: Number(grossProfit.toFixed(2)),
-      grossLoss: Number(grossLoss.toFixed(2)),
-      winRate,
-      expectancyR,
-      profitFactor,
-      maxDrawdownR: Number(maxDDR.toFixed(2)),
+      netPnL: simResult.netPnL,
+      grossProfit: simResult.trades.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0),
+      grossLoss: simResult.trades.filter((t) => t.pnl < 0).reduce((sum, t) => sum + Math.abs(t.pnl), 0),
+      winRate: simResult.winRate,
+      expectancyR: simResult.averageR,
+      profitFactor: simResult.profitFactor,
+      maxDrawdownR: simResult.maxDrawdownPercent,
     };
   }
 }

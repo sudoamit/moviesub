@@ -90,6 +90,19 @@ export interface IBacktestOptions {
   asOfTimestamp?: Date | number;
   warmupBars?: number;
   minimumCandles?: number;
+
+  // Replay & Candidate Evaluation Options
+  experiences?: any[];
+  stopLossAtrMultiplier?: number;
+  sizingMultiplier?: number;
+  highVolatilitySizingMultiplier?: number;
+  filterRegime?: string;
+  regimeMode?: 'INCLUDE' | 'EXCLUDE';
+  minProbability?: number;
+  conditionRules?: string[];
+  enablePartialTp1Trailing?: boolean;
+  candidateArtifact?: any;
+  modelArtifact?: any;
 }
 
 export type AblationVariant =

@@ -23,6 +23,7 @@ import { LearningRunReport, StrategyCandidate } from './types';
 export interface ILearningCycleOptions {
   baseStrategyVersion?: string;
   autoPromote?: boolean;
+  embargoMs?: number;
 }
 
 export class LearningEngine {
@@ -36,12 +37,13 @@ export class LearningEngine {
   ): Promise<LearningRunReport> {
     const startedAt = new Date();
     const baseVersion = options.baseStrategyVersion || 'v2.0-smc-quant';
+    const embargoMs = options.embargoMs ?? 0;
 
     // 1. Ingest experiences
     const experiences = ExperienceStore.query();
     const expCount = experiences.length;
 
-    // 2. Build temporal dataset splits (Train, Validation, OOS) with label end purging
+    // 2. Build temporal dataset splits (Train, Validation, OOS) with label end purging & embargo
     let trainSlice = experiences;
     let valSlice = experiences;
     let oosSlice = experiences;
@@ -50,20 +52,24 @@ export class LearningEngine {
       const datasetBuilder = new TemporalDatasetBuilder();
       const symbol = experiences[0]?.instrument?.symbol || 'BTCUSDT';
 
-      const datasetSamples = experiences.map((exp) => ({
-        sampleId: exp.id,
-        timestamp: new Date(exp.timestamp).getTime(),
-        labelStartTimestamp: exp.labelStartTimestamp,
-        labelEndTimestamp: exp.labelEndTimestamp,
-        features: exp.marketState?.quant || {},
-        labelBinary: exp.outcome?.status === 'WIN' ? 1 : 0,
-        labelContinuousR: exp.outcome?.pnlR || 0,
-        regime: exp.marketContext?.regime || 'UNKNOWN',
-        volatilityBucket: exp.marketContext?.volatilityRegime || 'NORMAL',
-      }));
+      const datasetSamples = experiences.map((exp) => {
+        const entryMs = exp.labelStartTimestamp || (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : new Date(exp.timestamp).getTime());
+        const exitMs = exp.labelEndTimestamp || (exp.execution?.exitTime ? new Date(exp.execution.exitTime).getTime() : entryMs + 1800000);
+        return {
+          sampleId: exp.id,
+          timestamp: new Date(exp.timestamp).getTime(),
+          labelStartTimestamp: entryMs,
+          labelEndTimestamp: exitMs,
+          features: exp.marketState?.quant || {},
+          labelBinary: exp.outcome?.status === 'WIN' ? 1 : 0,
+          labelContinuousR: exp.outcome?.pnlR || 0,
+          regime: exp.marketContext?.regime || 'UNKNOWN',
+          volatilityBucket: exp.marketContext?.volatilityRegime || 'NORMAL',
+        };
+      });
 
       const record = datasetBuilder.createDataset(symbol, '1h', datasetSamples);
-      const splits = datasetBuilder.splitDataset(record.metadata.datasetId, 0.6, 0.2, 0.2);
+      const splits = datasetBuilder.splitDataset(record.metadata.datasetId, 0.6, 0.2, 0.2, embargoMs);
 
       const trainIds = new Set(splits.train.map((s) => s.sampleId));
       const valIds = new Set(splits.validation.map((s) => s.sampleId));
@@ -83,23 +89,26 @@ export class LearningEngine {
     // 5. Select Features & Evaluate Subsets strictly on Train slice
     const featureSelection = FeatureSelector.selectFeatures(trainSlice);
 
-    // 6. Train Canonical ML Model on Train slice
+    // 6. Train Canonical ML Model strictly on Train slice
     const modelArtifact = ModelTrainer.trainModel(trainSlice);
 
     // 7. Domain Metrics on Train slice
-    const regimeStats = RegimePerformanceAnalyzer.analyze(trainSlice);
-    const volStats = VolatilityPerformanceAnalyzer.analyze(trainSlice);
-    const stratStats = StrategyPerformanceAnalyzer.analyze(trainSlice);
+    RegimePerformanceAnalyzer.analyze(trainSlice);
+    VolatilityPerformanceAnalyzer.analyze(trainSlice);
+    StrategyPerformanceAnalyzer.analyze(trainSlice);
 
-    // 8. Candidate Generation based on Train-only patterns and trained model
+    // 8. Candidate Generation based on Train-only patterns, feature selection, and trained ML model
     const candidates = CandidateGenerator.generateCandidates({
       baseStrategyVersion: baseVersion,
       errorReport,
       patterns,
+      modelArtifact,
+      featureSelection,
     });
 
     let promotedCount = 0;
     let rejectedCount = 0;
+    let shadowCount = 0;
 
     // 9. Validation Pipeline for each generated Candidate
     for (const cand of candidates) {
@@ -121,7 +130,7 @@ export class LearningEngine {
 
       // 9b. Walk-Forward Purged & Embargo Validation on Development Dataset
       const devExperiences = [...trainSlice, ...valSlice];
-      const wfEval = WalkForwardValidator.validate(cand, devExperiences);
+      const wfEval = WalkForwardValidator.validate(cand, devExperiences, { embargoMs });
 
       // 9c. Robustness & Transaction Costs
       const costEval = RobustnessEngine.evaluateCosts(cand, valSlice);
@@ -145,34 +154,36 @@ export class LearningEngine {
         transactionCostSurvived: costEval.survivedDoubleCosts,
       };
 
-      // 9f. Candidate enters Shadow state (must undergo observation period before promotion)
+      // 9f. Candidate enters SHADOW state (must undergo live/simulated observation period before promotion)
       cand.status = 'SHADOW';
       ShadowTradingEngine.activateCandidate(cand);
+      shadowCount++;
 
-      // 9g. Promotion Gate evaluates ONLY candidates with completed shadow periods
-      const promoResult = PromotionGate.evaluateCandidate(cand, {
-        ...PromotionGate.DEFAULT_CRITERIA,
-        allowAutoPromotion: !!options.autoPromote,
-      });
-
-      if (promoResult.approved) {
-        promotedCount++;
-        LearningMemory.setMemory({
-          key: `promoted-${cand.candidateVersion}`,
-          memoryType: 'PROVEN_PATTERN',
-          summary: `Promoted strategy candidate: ${cand.description}`,
-          details: { ...cand.change, ...cand.validationMetrics },
-          sampleSize: cand.evidence.sampleSize,
-          confidence: cand.evidence.pValue ? Math.round((1 - cand.evidence.pValue) * 100) : 95,
-          status: 'ACTIVE',
+      // 9g. Evaluate promotion ONLY if candidate has completed shadow trade evidence
+      if (options.autoPromote && cand.shadowMetrics && cand.shadowMetrics.shadowTradeCount >= 10) {
+        const promoResult = PromotionGate.evaluateCandidate(cand, {
+          ...PromotionGate.DEFAULT_CRITERIA,
+          allowAutoPromotion: true,
         });
+
+        if (promoResult.approved) {
+          promotedCount++;
+          LearningMemory.setMemory({
+            key: `promoted-${cand.candidateVersion}`,
+            memoryType: 'PROVEN_PATTERN',
+            summary: `Promoted strategy candidate: ${cand.description}`,
+            details: { ...cand.change, ...cand.validationMetrics },
+            sampleSize: cand.evidence.sampleSize,
+            confidence: cand.evidence.pValue ? Math.round((1 - cand.evidence.pValue) * 100) : 95,
+            status: 'ACTIVE',
+          });
+        }
       } else {
-        rejectedCount++;
         LearningMemory.setMemory({
           key: `shadow-${cand.candidateVersion}`,
           memoryType: 'REJECTED_HYPOTHESIS',
-          summary: `Candidate placed in shadow / rejected: ${cand.description}`,
-          details: { ...cand.change, rejectionDetails: promoResult.rejectionDetails },
+          summary: `Candidate placed in shadow observation: ${cand.description}`,
+          details: { ...cand.change, validationMetrics: cand.validationMetrics },
           sampleSize: cand.evidence.sampleSize,
           confidence: 80,
           status: 'ACTIVE',
@@ -180,17 +191,17 @@ export class LearningEngine {
       }
     }
 
-    // 8. Drift Detection
+    // 10. Drift Detection
     const driftReport = DriftDetector.evaluateDrift(experiences);
 
-    // 9. Rollback Evaluation
+    // 11. Rollback Evaluation
     RollbackManager.checkAndExecuteRollback(experiences);
 
-    // 10. Mark Scheduler
+    // 12. Mark Scheduler
     LearningScheduler.markCycleCompleted(expCount);
     const completedAt = new Date();
 
-    const summary = `Self-Improvement cycle completed in ${completedAt.getTime() - startedAt.getTime()}ms. Processed ${expCount} experiences, mined ${patterns.length} patterns, generated ${candidates.length} candidates (${promotedCount} promoted, ${rejectedCount} rejected/in-shadow). System drift: ${driftReport.hasDrift ? 'DETECTED' : 'NORMAL'}.`;
+    const summary = `Self-Improvement cycle completed in ${completedAt.getTime() - startedAt.getTime()}ms. Processed ${expCount} experiences, mined ${patterns.length} patterns, generated ${candidates.length} candidates (${shadowCount} placed in shadow observation, ${promotedCount} promoted, ${rejectedCount} rejected). System drift: ${driftReport.hasDrift ? 'DETECTED' : 'NORMAL'}.`;
 
     return {
       id: `learn-run-${Date.now()}`,

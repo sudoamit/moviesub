@@ -14,6 +14,10 @@ describe('LearningEngine Pipeline', () => {
         id: `exp-${i}`,
         tradeId: `tr-${i}`,
         timestamp: new Date(1700000000000 + i * 3600000),
+        decisionTimestamp: 1700000000000 + i * 3600000,
+        featureTimestamp: 1700000000000 + i * 3600000,
+        labelStartTimestamp: 1700000000000 + i * 3600000 + 1000,
+        labelEndTimestamp: 1700000000000 + i * 3600000 + 1801000,
         instrument: { symbol: 'NIFTY', assetType: 'INDEX' },
         marketState: {
           quant: { smcScore: 0.8, mtfAlignment: 0.9, obStrength: 0.85 },

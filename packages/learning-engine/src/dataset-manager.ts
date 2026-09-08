@@ -193,6 +193,35 @@ export class DatasetManager {
   getDataset(datasetId: string) {
     return this.datasets.get(datasetId);
   }
+
+  public static computeCanonicalDatasetHash(samples: any[]): string {
+    if (!samples || samples.length === 0) return 'canonical_empty_hash';
+    const sorted = [...samples].sort((a, b) => {
+      const ta = typeof a.timestamp === 'number' ? a.timestamp : new Date(a.timestamp || 0).getTime();
+      const tb = typeof b.timestamp === 'number' ? b.timestamp : new Date(b.timestamp || 0).getTime();
+      return ta - tb;
+    });
+
+    const canonicalSamplesString = sorted
+      .map((s) => {
+        const feats = s.features || s.marketState?.quant || {};
+        const featKeys = Object.keys(feats).sort();
+        const sortedFeatStr = featKeys.map((k) => `${k}:${feats[k] ?? 0}`).join(',');
+        const sampleId = s.sampleId || s.id || 'sample_id';
+        const decTs = s.decisionTimestamp ?? (typeof s.timestamp === 'number' ? s.timestamp : new Date(s.timestamp || 0).getTime());
+        const featTs = s.featureTimestamp ?? decTs;
+        const lStart = s.labelStartTimestamp ?? decTs;
+        const lEnd = s.labelEndTimestamp ?? decTs;
+        const labelBinary = s.labelBinary ?? (s.outcome?.status === 'WIN' ? 1 : 0);
+        const labelR = s.labelContinuousR ?? (s.outcome?.pnlR ?? 0);
+        const regime = s.regime || s.marketContext?.regime || 'NORMAL';
+        const vol = s.volatilityBucket || s.marketContext?.volatilityRegime || 'NORMAL';
+        return `${sampleId}|${decTs}|${featTs}|${lStart}|${lEnd}|${sortedFeatStr}|${labelBinary}|${labelR}|${regime}|${vol}`;
+      })
+      .join('\n');
+
+    return crypto.createHash('sha256').update(canonicalSamplesString).digest('hex').substring(0, 16);
+  }
 }
 
 export const TemporalDatasetBuilder = DatasetManager;

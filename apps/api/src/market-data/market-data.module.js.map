@@ -1,1 +1,0 @@
-{"version":3,"file":"market-data.module.js","sourceRoot":"","sources":["market-data.module.ts"],"names":[],"mappings":";;;;;;;;;AAAA,2CAAwC;AACxC,+DAA0D;AAC1D,iFAA2E;AAMpE,IAAM,gBAAgB,GAAtB,MAAM,gBAAgB;CAAG,CAAA;AAAnB,4CAAgB;2BAAhB,gBAAgB;IAJ5B,IAAA,eAAM,EAAC;QACN,SAAS,EAAE,CAAC,uCAAiB,EAAE,wDAAyB,CAAC;QACzD,OAAO,EAAE,CAAC,uCAAiB,EAAE,wDAAyB,CAAC;KACxD,CAAC;GACW,gBAAgB,CAAG"}

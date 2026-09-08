@@ -1,16 +1,20 @@
-import { DiscoveredPattern, IErrorReport, StrategyCandidate, StrategyCandidateType } from './types';
+import { DiscoveredPattern, FeatureSelectionResult, IErrorReport, StrategyCandidate, StrategyCandidateType } from './types';
+import { ITrainedModelArtifact } from './model-trainer';
 
 export interface ICandidateGeneratorInputs {
   baseStrategyVersion: string;
   errorReport: IErrorReport;
   patterns: DiscoveredPattern[];
+  modelArtifact?: ITrainedModelArtifact;
+  featureSelection?: FeatureSelectionResult;
 }
 
 export class CandidateGenerator {
   private static candidateSeq = 1;
 
   /**
-   * Translates error reports and discovered patterns into structured machine-readable Strategy Candidates.
+   * Translates error reports, discovered patterns, trained ML models, and feature selections
+   * into structured machine-readable Strategy Candidates.
    */
   public static generateCandidates(inputs: ICandidateGeneratorInputs): StrategyCandidate[] {
     const candidates: StrategyCandidate[] = [];
@@ -36,9 +40,7 @@ export class CandidateGenerator {
         evidence: {
           sampleSize: pat.sampleSize,
           expectancyBefore: pat.expectancy,
-          expectancyAfterHistorical: pat.expectancy, // Initialized to baseline prior to actual simulation
-          confidenceInterval: pat.confidenceInterval,
-          pValue: pat.pVal,
+          expectancyAfterHistorical: pat.expectancy,
         },
         status: 'GENERATED',
         createdAt: new Date(),
@@ -83,7 +85,7 @@ export class CandidateGenerator {
           evidence: {
             sampleSize: driver.count,
             expectancyBefore: driver.averageR,
-            expectancyAfterHistorical: driver.averageR, // Initialized to baseline prior to actual simulation
+            expectancyAfterHistorical: driver.averageR,
           },
           status: 'GENERATED',
           createdAt: new Date(),
@@ -108,9 +110,56 @@ export class CandidateGenerator {
         evidence: {
           sampleSize: pat.sampleSize,
           expectancyBefore: pat.expectancy,
-          expectancyAfterHistorical: pat.expectancy, // Initialized to baseline prior to actual simulation
-          confidenceInterval: pat.confidenceInterval,
-          pValue: pat.pVal,
+          expectancyAfterHistorical: pat.expectancy,
+        },
+        status: 'GENERATED',
+        createdAt: new Date(),
+      });
+    }
+
+    // 4. Generate Model Candidate from Trained Model Artifact
+    if (inputs.modelArtifact) {
+      candidates.push({
+        id: `cand-${Date.now()}-${this.candidateSeq++}`,
+        baseStrategyVersion: baseVersion,
+        candidateVersion: `${baseVersion}-cand-model-${inputs.modelArtifact.modelVersion}`,
+        type: 'MODEL',
+        targetComponent: 'MODEL',
+        description: `Apply trained canonical ML model filter (Version: ${inputs.modelArtifact.modelVersion}, Min Prob: 0.55)`,
+        change: {
+          parameter: 'minProbability',
+          minProbability: 0.55,
+          value: 0.55,
+          modelArtifact: inputs.modelArtifact,
+        },
+        evidence: {
+          sampleSize: inputs.modelArtifact.sampleCount,
+          expectancyBefore: 0,
+          expectancyAfterHistorical: 0,
+        },
+        status: 'GENERATED',
+        createdAt: new Date(),
+      });
+    }
+
+    // 5. Generate Feature Candidate from Feature Selection
+    if (inputs.featureSelection && inputs.featureSelection.prunedFeatures.length > 0) {
+      candidates.push({
+        id: `cand-${Date.now()}-${this.candidateSeq++}`,
+        baseStrategyVersion: baseVersion,
+        candidateVersion: `${baseVersion}-cand-feature-${this.candidateSeq}`,
+        type: 'FEATURE',
+        targetComponent: 'FEATURE_SELECTION',
+        description: `Prune low-importance features: [${inputs.featureSelection.prunedFeatures.join(', ')}]`,
+        change: {
+          parameter: 'featurePruning',
+          selectedFeatures: inputs.featureSelection.retainedFeatures,
+          prunedFeatures: inputs.featureSelection.prunedFeatures,
+        },
+        evidence: {
+          sampleSize: 10,
+          expectancyBefore: inputs.featureSelection.baselineExpectancy,
+          expectancyAfterHistorical: inputs.featureSelection.optimizedExpectancy,
         },
         status: 'GENERATED',
         createdAt: new Date(),

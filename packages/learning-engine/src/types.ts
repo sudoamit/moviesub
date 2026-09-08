@@ -54,6 +54,7 @@ export interface TradingExperience {
     assetType: string;
     exchange?: string;
   };
+  timeframe?: string;
   marketState: PointInTimeMarketSnapshot | any;
   decision: {
     action: 'BUY' | 'SELL' | 'WAIT' | 'NO_TRADE';
@@ -102,6 +103,7 @@ export interface TradingExperience {
   strategyVersion: string;
   modelVersion?: string;
   featureSchemaVersion: string;
+  candlesDuringTrade?: any[];
   createdAt: Date;
 }
 
@@ -180,10 +182,20 @@ export interface FeatureSelectionResult {
 }
 
 export type StrategyCandidateType =
-  'FILTER' | 'THRESHOLD' | 'FEATURE' | 'MODEL' | 'REGIME' | 'VOLATILITY' | 'EXIT' | 'POSITION_SIZE';
+  | 'FILTER'
+  | 'THRESHOLD'
+  | 'FEATURE'
+  | 'MODEL'
+  | 'REGIME'
+  | 'VOLATILITY'
+  | 'EXIT'
+  | 'POSITION_SIZE'
+  | 'RISK'
+  | 'SIZING'
+  | 'TRAILING';
 
 export type CandidateStatus =
-  'GENERATED' | 'BACKTESTING' | 'VALIDATED' | 'SHADOW' | 'PROMOTED' | 'REJECTED' | 'ROLLED_BACK';
+  | 'GENERATED' | 'BACKTESTING' | 'VALIDATED' | 'SHADOW' | 'PROMOTED' | 'REJECTED' | 'ROLLED_BACK';
 
 export interface StrategyCandidate {
   id: string;
@@ -192,6 +204,7 @@ export interface StrategyCandidate {
   type: StrategyCandidateType;
   description: string;
   change: Record<string, unknown>;
+  featureSchemaVersion?: string;
   evidence: {
     sampleSize: number;
     expectancyBefore: number;
@@ -216,11 +229,13 @@ export interface StrategyCandidate {
   };
   status: CandidateStatus;
   rejectionReason?: string;
+  targetComponent?: string;
   createdAt: Date;
   promotedAt?: Date;
 }
 
 export interface CandidateArtifact {
+  readonly artifactId: string;
   readonly candidateId: string;
   readonly candidateVersion: string;
   readonly datasetHash: string;

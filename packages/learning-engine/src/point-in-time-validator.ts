@@ -23,42 +23,35 @@ export class PointInTimeValidator {
       return { isValid: false, reason: 'MISSING_EXPERIENCE' };
     }
 
-    const decisionTimestamp =
-      exp.decisionTimestamp ??
-      (exp.timestamp ? new Date(exp.timestamp).getTime() : undefined);
-
-    if (decisionTimestamp === undefined || Number.isNaN(decisionTimestamp) || !Number.isFinite(decisionTimestamp)) {
+    if (exp.decisionTimestamp === undefined || exp.decisionTimestamp === null) {
+      return { isValid: false, reason: 'MISSING_DECISION_TIMESTAMP' };
+    }
+    const decisionTimestamp = exp.decisionTimestamp;
+    if (Number.isNaN(decisionTimestamp) || !Number.isFinite(decisionTimestamp)) {
       return { isValid: false, reason: 'INVALID_DECISION_TIMESTAMP' };
     }
 
-    const featureTimestamp =
-      exp.featureTimestamp ?? decisionTimestamp;
-
+    if (exp.featureTimestamp === undefined || exp.featureTimestamp === null) {
+      return { isValid: false, reason: 'MISSING_FEATURE_TIMESTAMP' };
+    }
+    const featureTimestamp = exp.featureTimestamp;
     if (Number.isNaN(featureTimestamp) || !Number.isFinite(featureTimestamp)) {
       return { isValid: false, reason: 'INVALID_FEATURE_TIMESTAMP' };
     }
 
-    const labelStartTimestamp =
-      exp.labelStartTimestamp ??
-      (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : undefined);
-
-    if (
-      labelStartTimestamp === undefined ||
-      Number.isNaN(labelStartTimestamp) ||
-      !Number.isFinite(labelStartTimestamp)
-    ) {
+    if (exp.labelStartTimestamp === undefined || exp.labelStartTimestamp === null) {
       return { isValid: false, reason: 'MISSING_LABEL_START_TIMESTAMP' };
     }
+    const labelStartTimestamp = exp.labelStartTimestamp;
+    if (Number.isNaN(labelStartTimestamp) || !Number.isFinite(labelStartTimestamp)) {
+      return { isValid: false, reason: 'INVALID_LABEL_START_TIMESTAMP' };
+    }
 
-    const labelEndTimestamp =
-      exp.labelEndTimestamp ??
-      (exp.execution?.exitTime ? new Date(exp.execution.exitTime).getTime() : undefined);
-
-    if (
-      labelEndTimestamp === undefined ||
-      Number.isNaN(labelEndTimestamp) ||
-      !Number.isFinite(labelEndTimestamp)
-    ) {
+    if (exp.labelEndTimestamp === undefined || exp.labelEndTimestamp === null) {
+      return { isValid: false, reason: 'MISSING_LABEL_END_TIMESTAMP' };
+    }
+    const labelEndTimestamp = exp.labelEndTimestamp;
+    if (Number.isNaN(labelEndTimestamp) || !Number.isFinite(labelEndTimestamp)) {
       return { isValid: false, reason: 'MISSING_LABEL_END_TIMESTAMP' };
     }
 

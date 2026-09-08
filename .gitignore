@@ -49,3 +49,10 @@ prisma/*.db-journal
 
 # Turbo
 .turbo/
+
+# Source directory build outputs
+**/src/**/*.js
+**/src/**/*.js.map
+**/src/**/*.d.ts
+**/src/**/*.d.ts.map
+**/src/**/*.tsbuildinfo
