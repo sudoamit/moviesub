@@ -287,6 +287,24 @@ export interface IBacktestTrade {
   pnl: number;
   pnlRMultiple: number;
   exitReason: SignalState;
+  signalTimestamp?: Date;
+  orderCreatedAt?: Date;
+  orderSubmittedAt?: Date;
+  entryFillTimestamp?: Date;
+  entryReferencePrice?: number;
+  entryFillPrice?: number;
+  entryFees?: number;
+  entrySlippage?: number;
+  exitOrderTimestamp?: Date;
+  exitFillTimestamp?: Date;
+  exitFillPrice?: number;
+  exitFees?: number;
+  exitSlippage?: number;
+  grossPnL?: number;
+  netPnL?: number;
+  realizedR?: number;
+  fillModel?: string;
+  ambiguityMode?: string;
 }
 
 /**

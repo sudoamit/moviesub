@@ -39,6 +39,10 @@ export interface IOrder {
   fees: number;
   slippage: number;
   rejectionReason?: string;
+  referencePrice?: number;
+  maxRiskDrift?: number;
+  signalTimestamp?: number;
+  ambiguityMode?: SameCandleAmbiguityMode;
 }
 
 export interface IFill {

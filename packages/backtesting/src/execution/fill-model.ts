@@ -1,4 +1,4 @@
-import { FillModel, IOrder, IFill, OrderSide } from './types';
+import { FillModel, IFill, IOrder, OrderSide, SameCandleAmbiguityMode } from './types';
 import { ICandle } from '@quant/shared';
 import { SlippageModel } from './slippage-model';
 import { FeeModel } from './fee-model';
@@ -16,7 +16,7 @@ export class FillModelEngine {
     lowerTfCandles?: ICandle[],
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
     if (order.status === 'FILLED' || order.status === 'CANCELLED' || order.status === 'REJECTED') {
-      return { isFilled: false };
+      return { isFilled: false, reason: `ORDER_${order.status}` };
     }
 
     const candleTime =
@@ -26,8 +26,11 @@ export class FillModelEngine {
           ? currentCandle.timestamp
           : Date.now();
 
-    // 1. Lower Timeframe Resolution (1m sub-bars)
-    if (model === FillModel.LOWER_TIMEFRAME && lowerTfCandles && lowerTfCandles.length > 0) {
+    // 1. Lower Timeframe Resolution (1m sub-bars) - FAIL CLOSED IF MISSING
+    if (model === FillModel.LOWER_TIMEFRAME || order.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
+      if (!lowerTfCandles || lowerTfCandles.length === 0) {
+        return { isFilled: false, reason: 'MISSING_LOWER_TF_DATA' };
+      }
       for (const m1 of lowerTfCandles) {
         const res = this.evaluateFill(order, m1, undefined, FillModel.OHLC_PATH);
         if (res.isFilled) return res;
@@ -37,7 +40,7 @@ export class FillModelEngine {
 
     // 2. Next Bar Market Model
     if (model === FillModel.NEXT_BAR_MARKET) {
-      if (!nextCandle) return { isFilled: false };
+      if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
       const rawPrice = nextCandle.open;
       const slip = SlippageModel.calculateSlippage(
         rawPrice,
@@ -75,7 +78,61 @@ export class FillModelEngine {
       return { isFilled: true, fill };
     }
 
-    // 3. Limit Order Models
+    // 3. STOP Orders (Stop Loss / Trailing Stop) with Gap-Through-Stop Execution
+    if (order.orderType === 'STOP' && order.stopPrice !== undefined) {
+      const stopPrice = order.stopPrice;
+      const isTriggered =
+        order.side === 'SELL'
+          ? currentCandle.low <= stopPrice
+          : currentCandle.high >= stopPrice;
+
+      if (!isTriggered) {
+        return { isFilled: false };
+      }
+
+      // Gap-through-stop pricing
+      let basePrice = stopPrice;
+      if (order.side === 'SELL' && currentCandle.open <= stopPrice) {
+        basePrice = currentCandle.open; // Gap down open price
+      } else if (order.side === 'BUY' && currentCandle.open >= stopPrice) {
+        basePrice = currentCandle.open; // Gap up open price
+      }
+
+      const slip = SlippageModel.calculateSlippage(
+        basePrice,
+        order.quantity,
+        order.side,
+        'MARKET',
+        currentCandle,
+      );
+      const halfSpread = SpreadModel.getHalfSpread(slip.executedPrice, order.symbol);
+      const finalPrice =
+        order.side === 'BUY' ? slip.executedPrice + halfSpread : slip.executedPrice - halfSpread;
+      const fee = FeeModel.calculateFees(
+        order.symbol,
+        finalPrice,
+        order.quantity,
+        order.side,
+        false,
+      );
+
+      const fill: IFill = {
+        fillId: `fill_${order.orderId}_${candleTime}`,
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: Number(finalPrice.toFixed(4)),
+        quantity: order.quantity,
+        fee,
+        slippage: slip.slippageAmount,
+        timestamp: candleTime,
+        isPartial: false,
+      };
+      return { isFilled: true, fill };
+    }
+
+    // 4. Limit Order Models with Gap-Through-TP Execution
     if (order.orderType === 'LIMIT' && order.price !== undefined) {
       const targetPrice = order.price;
       const isTouch =
@@ -85,7 +142,14 @@ export class FillModelEngine {
         return { isFilled: false };
       }
 
-      const rawPrice = targetPrice;
+      // Gap-through-TP pricing
+      let rawPrice = targetPrice;
+      if (order.side === 'SELL' && currentCandle.open >= targetPrice) {
+        rawPrice = currentCandle.open; // Gap up open price
+      } else if (order.side === 'BUY' && currentCandle.open <= targetPrice) {
+        rawPrice = currentCandle.open; // Gap down open price
+      }
+
       const slip =
         model === FillModel.LIMIT_WITH_SLIPPAGE
           ? SlippageModel.calculateSlippage(
@@ -121,7 +185,7 @@ export class FillModelEngine {
       return { isFilled: true, fill };
     }
 
-    // 4. Default OHLC Path Market/Stop Order Model
+    // 5. Default Market Order Model
     if (order.orderType === 'MARKET') {
       const rawPrice = currentCandle.open;
       const slip = SlippageModel.calculateSlippage(

@@ -1,4 +1,4 @@
-import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType } from './types';
+import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
@@ -8,14 +8,23 @@ export class ExecutionSimulator {
   private fills: IFill[] = [];
   private events: IExecutionEvent[] = [];
   private fillModel: FillModel;
+  private ambiguityMode: SameCandleAmbiguityMode;
   private latencyConfig: ILatencyConfig;
+  private orderCounter = 0;
+  private fillCounter = 0;
+  private eventCounter = 0;
+  private runId: string;
 
   constructor(
     fillModel: FillModel = FillModel.OHLC_PATH,
+    ambiguityMode: SameCandleAmbiguityMode = SameCandleAmbiguityMode.CONSERVATIVE,
     latencyConfig: ILatencyConfig = { submissionLatencyMs: 15, processingLatencyMs: 5 },
+    runId = 'bt1',
   ) {
     this.fillModel = fillModel;
+    this.ambiguityMode = ambiguityMode;
     this.latencyConfig = latencyConfig;
+    this.runId = runId;
   }
 
   submitOrder(params: {
@@ -28,9 +37,14 @@ export class ExecutionSimulator {
     stopPrice?: number;
     quantity: number;
     timestamp: number;
+    referencePrice?: number;
+    maxRiskDrift?: number;
+    signalTimestamp?: number;
+    ambiguityMode?: SameCandleAmbiguityMode;
   }): IOrder {
-    const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const clientOrderId = params.clientOrderId || `cl_${orderId}`;
+    this.orderCounter++;
+    const orderId = `${this.runId}_ord_${this.orderCounter}`;
+    const clientOrderId = params.clientOrderId || `${this.runId}_cl_${this.orderCounter}`;
 
     const order: IOrder = {
       orderId,
@@ -48,6 +62,10 @@ export class ExecutionSimulator {
       submittedAt: params.timestamp + this.latencyConfig.submissionLatencyMs,
       fees: 0,
       slippage: 0,
+      referencePrice: params.referencePrice,
+      maxRiskDrift: params.maxRiskDrift,
+      signalTimestamp: params.signalTimestamp,
+      ambiguityMode: params.ambiguityMode || this.ambiguityMode,
     };
 
     this.orders.set(orderId, order);
@@ -74,7 +92,10 @@ export class ExecutionSimulator {
       );
 
       if (fillResult.isFilled && fillResult.fill) {
+        this.fillCounter++;
         const fill = fillResult.fill;
+        fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+
         order.status = 'FILLED';
         order.filledAt = fill.timestamp;
         order.avgFillPrice = fill.price;
@@ -85,8 +106,9 @@ export class ExecutionSimulator {
         this.fills.push(fill);
         newFills.push(fill);
 
+        this.eventCounter++;
         const fillEvent: IExecutionEvent = {
-          eventId: `evt_fill_${fill.timestamp}_${orderId}`,
+          eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
           tradeId: order.tradeId,
           orderId,
           symbol: order.symbol,

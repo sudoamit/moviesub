@@ -44,7 +44,7 @@ export class TradeLifecycleManager {
         (signal.direction === Direction.BULLISH ? riskDistance * 4.0 : -riskDistance * 4.0);
 
     const entryEvent: IExecutionEvent = {
-      eventId: `evt_entry_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      eventId: `evt_entry_${executionTime}_${tradeId}`,
       tradeId,
       orderId,
       symbol: signal.symbol,
@@ -59,7 +59,7 @@ export class TradeLifecycleManager {
     };
 
     const initialFill: IPartialFillRecord = {
-      fillId: `fill_entry_${Date.now()}`,
+      fillId: `fill_entry_${executionTime}_${tradeId}`,
       targetType: 'ENTRY',
       timestamp: executionTime,
       price: executionPrice,
@@ -72,7 +72,7 @@ export class TradeLifecycleManager {
     };
 
     return {
-      id: `lot_${tradeId}_${Date.now()}`,
+      id: `lot_${tradeId}_${executionTime}`,
       tradeId,
       symbol: signal.symbol,
       direction: signal.direction,
