@@ -55,9 +55,7 @@ export class BacktestSimulator {
 
     if (remainingQty <= 0) return;
 
-    const ocoGroupId = `oco_${lot.tradeId}_${timestamp}`;
-
-    // 1. Resting Stop Loss Order
+    // 1. Resting Stop Loss Order (Protective Stop for open position)
     execSim.submitOrder({
       tradeId: lot.tradeId,
       symbol,
@@ -67,10 +65,9 @@ export class BacktestSimulator {
       quantity: remainingQty,
       timestamp,
       exitTarget: lot.currentStopLoss === lot.entryPrice ? 'TRAILING_STOP' : 'SL',
-      ocoGroupId,
     });
 
-    // 2. Resting Target Orders (TP1, TP2, TP3)
+    // 2. Resting Target Limit Orders (TP1, TP2, TP3)
     const hasAlreadyTp1 = lot.partialFills.some((f) => f.targetType === 'TP1');
     const hasAlreadyTp2 = lot.partialFills.some((f) => f.targetType === 'TP2');
 
@@ -89,7 +86,6 @@ export class BacktestSimulator {
           quantity: tp1Qty,
           timestamp,
           exitTarget: 'TP1',
-          ocoGroupId,
         });
       }
     }
@@ -110,7 +106,6 @@ export class BacktestSimulator {
           quantity: tp2Qty,
           timestamp,
           exitTarget: 'TP2',
-          ocoGroupId,
         });
       }
     }
@@ -130,7 +125,6 @@ export class BacktestSimulator {
           quantity: tp3Qty,
           timestamp,
           exitTarget: 'TP3',
-          ocoGroupId,
         });
       }
     }
@@ -313,9 +307,11 @@ export class BacktestSimulator {
         const unitDiff = isLong ? close - activeLot.entryPrice : activeLot.entryPrice - close;
         activeLot.unrealizedPnl = Number((unitDiff * activeLot.remainingQuantity).toFixed(2));
 
-        // Process Exit Order Fills returned from ExecutionSimulator
-        const exitFill = simResult.fills.find((f) => f.tradeId === activeLot!.tradeId);
-        if (exitFill) {
+        // Process All Exit Order Fills returned from ExecutionSimulator for active trade
+        const tradeFills = simResult.fills.filter((f) => f.tradeId === activeLot!.tradeId);
+        for (const exitFill of tradeFills) {
+          if (!activeLot || activeLot.status === 'CLOSED') break;
+
           const fillQty = exitFill.quantity;
           const chunkDiff = isLong
             ? exitFill.price - activeLot.entryPrice
@@ -336,11 +332,12 @@ export class BacktestSimulator {
 
           const filledOrder = execSim.getOrder(exitFill.orderId);
           const targetType =
-            filledOrder?.orderType === 'STOP'
+            exitFill.exitTarget ||
+            (filledOrder?.orderType === 'STOP'
               ? activeLot.currentStopLoss === activeLot.entryPrice
                 ? 'TRAILING_STOP'
-                : 'STOP_LOSS'
-              : 'TP1';
+                : 'SL'
+              : 'TP1');
 
           activeLot.partialFills.push({
             fillId: exitFill.fillId,
@@ -355,25 +352,28 @@ export class BacktestSimulator {
             slippage: exitFill.slippage,
           });
 
-          // Cancel Sibling Resting Orders for trade
-          execSim.cancelTradeOrders(activeLot.tradeId);
-
           if (activeLot.remainingQuantity <= 0) {
             activeLot.status = 'CLOSED';
             activeLot.closedAt = exitFill.timestamp;
             activeLot.unrealizedPnl = 0;
+            execSim.cancelTradeOrders(activeLot.tradeId);
           } else {
             activeLot.status = 'PARTIALLY_CLOSED';
-            if (partialPolicy.moveStopToBreakevenOnTp1) {
+            if (targetType === 'TP1' && partialPolicy.moveStopToBreakevenOnTp1) {
               activeLot.currentStopLoss = activeLot.entryPrice;
+              // Update resting SL order stop price in execSim if present
+              const slOrder = Array.from((execSim as any).orders.values()).find(
+                (o: any) => o.tradeId === activeLot!.tradeId && o.orderType === 'STOP' && o.status === 'PENDING',
+              );
+              if (slOrder) {
+                (slOrder as any).stopPrice = activeLot.entryPrice;
+              }
             }
-            // Submit updated resting exit orders for remaining quantity
-            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, exitFill.timestamp);
           }
         }
 
         // Record Closed Trade Record
-        if (activeLot.status === 'CLOSED') {
+        if (activeLot && activeLot.status === 'CLOSED') {
           const totalFees = activeLot.partialFills.reduce((sum, f) => sum + f.fee, 0);
           const totalSlippageCost = activeLot.partialFills.reduce((sum, f) => sum + f.slippage, 0);
           const grossPnl = activeLot.realizedPnl;
@@ -405,14 +405,23 @@ export class BacktestSimulator {
               (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
             ),
             exitReason:
-              lastFill?.targetType === 'STOP_LOSS' || lastFill?.targetType === 'TRAILING_STOP'
+              (lastFill?.targetType as string) === 'SL' ||
+              (lastFill?.targetType as string) === 'STOP' ||
+              lastFill?.targetType === 'STOP_LOSS' ||
+              lastFill?.targetType === 'TRAILING_STOP'
                 ? SignalState.SL_HIT
                 : SignalState.TP1_HIT,
-            signalTimestamp: new Date(firstFill?.timestamp || activeLot.openedAt),
-            orderCreatedAt: new Date(firstFill?.timestamp || activeLot.openedAt),
-            orderSubmittedAt: new Date(firstFill?.timestamp || activeLot.openedAt),
+            signalTimestamp: pendingEntrySignal?.timestamp
+              ? new Date(pendingEntrySignal.timestamp)
+              : new Date(firstFill?.timestamp || activeLot.openedAt),
+            orderCreatedAt: pendingEntryOrder?.createdAt
+              ? new Date(pendingEntryOrder.createdAt)
+              : new Date(firstFill?.timestamp || activeLot.openedAt),
+            orderSubmittedAt: pendingEntryOrder?.submittedAt
+              ? new Date(pendingEntryOrder.submittedAt)
+              : new Date(firstFill?.timestamp || activeLot.openedAt),
             entryFillTimestamp: new Date(activeLot.openedAt),
-            entryReferencePrice: activeLot.entryPrice,
+            entryReferencePrice: pendingEntryOrder?.referencePrice || pendingEntrySignal?.entryZone.optimal || activeLot.entryPrice,
             entryFillPrice: activeLot.entryPrice,
             entryFees: firstFill?.fee || 0,
             entrySlippage: firstFill?.slippage || 0,

@@ -77,9 +77,73 @@ export class ExecutionSimulator {
       exitTarget: params.exitTarget,
       ocoGroupId: params.ocoGroupId,
     };
+    (order as any)._initialQty = params.quantity;
 
     this.orders.set(orderId, order);
     return order;
+  }
+
+  private selectNextTrigger(
+    triggered: { order: IOrder; fill: IFill }[],
+    candle: ICandle,
+  ): { order: IOrder; fill: IFill } | undefined {
+    if (triggered.length === 0) return undefined;
+    if (triggered.length === 1) return triggered[0];
+
+    const isBullish = candle.close >= candle.open;
+
+    if (this.ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
+      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+      if (stopTrigger) return stopTrigger;
+      return triggered[0];
+    }
+
+    if (this.ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
+      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
+      if (limitTrigger) return limitTrigger;
+      return triggered[0];
+    }
+
+    // OHLC_PATH or DEFAULT:
+    const isLong = triggered[0].order.side === 'SELL'; // Exit order side for Long is SELL
+
+    if (isLong) {
+      if (isBullish) {
+        // Bullish path: Open -> Low -> High -> Close
+        // Low touched first (STOP order)
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        if (stopTrigger) return stopTrigger;
+        const limits = triggered
+          .filter((t) => t.order.orderType === 'LIMIT')
+          .sort((a, b) => (a.order.price || 0) - (b.order.price || 0));
+        return limits[0] || triggered[0];
+      } else {
+        // Bearish path: Open -> High -> Low -> Close
+        // High touched first (LIMIT orders before STOP order)
+        const limits = triggered
+          .filter((t) => t.order.orderType === 'LIMIT')
+          .sort((a, b) => (a.order.price || 0) - (b.order.price || 0));
+        if (limits.length > 0) return limits[0];
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        return stopTrigger || triggered[0];
+      }
+    } else {
+      if (isBullish) {
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        if (stopTrigger) return stopTrigger;
+        const limits = triggered
+          .filter((t) => t.order.orderType === 'LIMIT')
+          .sort((a, b) => (b.order.price || 0) - (a.order.price || 0));
+        return limits[0] || triggered[0];
+      } else {
+        const limits = triggered
+          .filter((t) => t.order.orderType === 'LIMIT')
+          .sort((a, b) => (b.order.price || 0) - (a.order.price || 0));
+        if (limits.length > 0) return limits[0];
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        return stopTrigger || triggered[0];
+      }
+    }
   }
 
   processCandle(
@@ -100,104 +164,95 @@ export class ExecutionSimulator {
     }
 
     for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
-      if (tradeOrders.length === 1) {
-        const order = tradeOrders[0];
-        const res = FillModelEngine.evaluateFill(
-          order,
-          candle,
-          nextCandle,
-          this.fillModel,
-          lowerTfCandles,
-        );
+      let currentOrders = [...tradeOrders];
 
-        if (res.isFilled && res.fill) {
-          this.fillCounter++;
-          const fill = res.fill;
-          fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
-
-          order.status = 'FILLED';
-          order.filledAt = fill.timestamp;
-          order.avgFillPrice = fill.price;
-          order.fees = fill.fee;
-          order.slippage = fill.slippage;
-          order.remainingQuantity = 0;
-
-          this.fills.push(fill);
-          newFills.push(fill);
-
-          this.eventCounter++;
-          const fillEvent: IExecutionEvent = {
-            eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
-            tradeId: order.tradeId,
-            orderId: order.orderId,
-            symbol: order.symbol,
-            eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
-            timestamp: fill.timestamp,
-            price: fill.price,
-            quantity: fill.quantity,
-            remainingQuantity: 0,
-            fees: fill.fee,
-            slippage: fill.slippage,
-            reason: `Order ${order.orderId} filled at ${fill.price}`,
-          };
-
-          this.events.push(fillEvent);
-          newEvents.push(fillEvent);
-
-          if (order.ocoGroupId) {
-            this.cancelOcoGroup(order.ocoGroupId, order.orderId);
+      while (currentOrders.length > 0) {
+        const triggered: { order: IOrder; fill: IFill }[] = [];
+        for (const order of currentOrders) {
+          if (order.status !== 'PENDING') continue;
+          const res = FillModelEngine.evaluateFill(
+            order,
+            candle,
+            nextCandle,
+            this.fillModel,
+            lowerTfCandles,
+          );
+          if (res.isFilled && res.fill) {
+            triggered.push({ order, fill: res.fill });
           }
         }
-      } else {
-        // Multiple pending orders for trade -> Centralized Ambiguity Conflict Resolution
-        const conflictRes = FillModelEngine.resolveSameCandleConflict(
-          tradeOrders,
-          candle,
-          nextCandle,
-          this.fillModel,
-          this.ambiguityMode,
-          lowerTfCandles,
-        );
 
-        if (conflictRes.winningFill && conflictRes.winningOrder) {
-          const order = conflictRes.winningOrder;
-          this.fillCounter++;
-          const fill = conflictRes.winningFill;
-          fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+        if (triggered.length === 0) break;
 
-          order.status = 'FILLED';
-          order.filledAt = fill.timestamp;
-          order.avgFillPrice = fill.price;
-          order.fees = fill.fee;
-          order.slippage = fill.slippage;
-          order.remainingQuantity = 0;
+        const nextTrigger = this.selectNextTrigger(triggered, candle);
+        if (!nextTrigger) break;
 
-          this.fills.push(fill);
-          newFills.push(fill);
+        const { order, fill } = nextTrigger;
 
-          this.eventCounter++;
-          const fillEvent: IExecutionEvent = {
-            eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
-            tradeId: order.tradeId,
-            orderId: order.orderId,
-            symbol: order.symbol,
-            eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
-            timestamp: fill.timestamp,
-            price: fill.price,
-            quantity: fill.quantity,
-            remainingQuantity: 0,
-            fees: fill.fee,
-            slippage: fill.slippage,
-            reason: `Order ${order.orderId} filled at ${fill.price} (${conflictRes.reason})`,
-          };
+        this.fillCounter++;
+        fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
 
-          this.events.push(fillEvent);
-          newEvents.push(fillEvent);
+        order.status = 'FILLED';
+        order.filledAt = fill.timestamp;
+        order.avgFillPrice = fill.price;
+        order.fees = fill.fee;
+        order.slippage = fill.slippage;
+        order.remainingQuantity = 0;
 
-          if (order.ocoGroupId) {
-            this.cancelOcoGroup(order.ocoGroupId, order.orderId);
+        this.fills.push(fill);
+        newFills.push(fill);
+
+        this.eventCounter++;
+        const fillEvent: IExecutionEvent = {
+          eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
+          tradeId: order.tradeId,
+          orderId: order.orderId,
+          symbol: order.symbol,
+          eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
+          timestamp: fill.timestamp,
+          price: fill.price,
+          quantity: fill.quantity,
+          remainingQuantity: 0,
+          fees: fill.fee,
+          slippage: fill.slippage,
+          reason: `Order ${order.orderId} filled at ${fill.price}`,
+        };
+
+        this.events.push(fillEvent);
+        newEvents.push(fillEvent);
+
+        if (order.orderType === 'STOP') {
+          // Protective stop triggered -> Full exit, cancel all remaining orders for trade
+          this.cancelTradeOrders(tradeId);
+          break;
+        } else {
+          // Target limit order triggered -> Update protective stop order quantity to remaining open position size
+          const remainingOrders = Array.from(this.orders.values()).filter(
+            (o) => o.tradeId === tradeId && o.status === 'PENDING',
+          );
+          if (remainingOrders.length === 0) break;
+
+          const slOrder = remainingOrders.find((o) => o.orderType === 'STOP');
+          if (slOrder) {
+            const initialQty = (slOrder as any)._initialQty || slOrder.quantity;
+            const totalExitFilledQty = this.fills
+              .filter((f) => f.tradeId === tradeId && f.exitTarget !== 'ENTRY')
+              .reduce((sum, f) => sum + f.quantity, 0);
+            const remainingPosQty = Math.max(0, initialQty - totalExitFilledQty);
+
+            if (remainingPosQty > 0) {
+              slOrder.quantity = remainingPosQty;
+              slOrder.remainingQuantity = remainingPosQty;
+            } else {
+              this.cancelTradeOrders(tradeId);
+              break;
+            }
           }
         }
+
+        currentOrders = Array.from(this.orders.values()).filter(
+          (o) => o.tradeId === tradeId && o.status === 'PENDING',
+        );
       }
     }
 

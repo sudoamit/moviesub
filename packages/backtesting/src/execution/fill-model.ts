@@ -176,9 +176,10 @@ export class FillModelEngine {
     if (model === FillModel.NEXT_BAR_MARKET) {
       if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
       const rawPrice = nextCandle.open;
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(
         rawPrice,
-        order.quantity,
+        fillQty,
         order.side,
         'MARKET',
         nextCandle,
@@ -189,7 +190,7 @@ export class FillModelEngine {
       const fee = FeeModel.calculateFees(
         order.symbol,
         finalPrice,
-        order.quantity,
+        fillQty,
         order.side,
         false,
       );
@@ -203,7 +204,7 @@ export class FillModelEngine {
         symbol: order.symbol,
         side: order.side,
         price: Number(finalPrice.toFixed(4)),
-        quantity: order.quantity,
+        quantity: fillQty,
         fee,
         slippage: slip.slippageAmount,
         timestamp: fillTime,
@@ -233,9 +234,10 @@ export class FillModelEngine {
         basePrice = currentCandle.open; // Gap up open price
       }
 
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(
         basePrice,
-        order.quantity,
+        fillQty,
         order.side,
         'MARKET',
         currentCandle,
@@ -246,7 +248,7 @@ export class FillModelEngine {
       const fee = FeeModel.calculateFees(
         order.symbol,
         finalPrice,
-        order.quantity,
+        fillQty,
         order.side,
         false,
       );
@@ -258,7 +260,7 @@ export class FillModelEngine {
         symbol: order.symbol,
         side: order.side,
         price: Number(finalPrice.toFixed(4)),
-        quantity: order.quantity,
+        quantity: fillQty,
         fee,
         slippage: slip.slippageAmount,
         timestamp: candleTime,
@@ -286,11 +288,12 @@ export class FillModelEngine {
         rawPrice = currentCandle.open; // Gap down open price
       }
 
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip =
         model === FillModel.LIMIT_WITH_SLIPPAGE
           ? SlippageModel.calculateSlippage(
               rawPrice,
-              order.quantity,
+              fillQty,
               order.side,
               'LIMIT',
               currentCandle,
@@ -300,7 +303,7 @@ export class FillModelEngine {
       const fee = FeeModel.calculateFees(
         order.symbol,
         slip.executedPrice,
-        order.quantity,
+        fillQty,
         order.side,
         true,
       );
@@ -312,7 +315,7 @@ export class FillModelEngine {
         symbol: order.symbol,
         side: order.side,
         price: Number(slip.executedPrice.toFixed(4)),
-        quantity: order.quantity,
+        quantity: fillQty,
         fee,
         slippage: slip.slippageAmount,
         timestamp: candleTime,
@@ -325,9 +328,10 @@ export class FillModelEngine {
     // 5. Default Market Order Model
     if (order.orderType === 'MARKET') {
       const rawPrice = currentCandle.open;
+      const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(
         rawPrice,
-        order.quantity,
+        fillQty,
         order.side,
         'MARKET',
         currentCandle,
@@ -338,7 +342,7 @@ export class FillModelEngine {
       const fee = FeeModel.calculateFees(
         order.symbol,
         finalPrice,
-        order.quantity,
+        fillQty,
         order.side,
         false,
       );
@@ -350,7 +354,7 @@ export class FillModelEngine {
         symbol: order.symbol,
         side: order.side,
         price: Number(finalPrice.toFixed(4)),
-        quantity: order.quantity,
+        quantity: fillQty,
         fee,
         slippage: slip.slippageAmount,
         timestamp: candleTime,
