@@ -3,7 +3,7 @@ import { FillModelEngine } from '../execution/fill-model';
 import { FillModel, SameCandleAmbiguityMode } from '../execution/types';
 import { OHLCPathCursor } from '../execution/ohlc-path-cursor';
 import { TradeLifecycleManager } from '@quant/risk-engine';
-import { Direction, ICandle, SignalState } from '@quant/shared';
+import { Direction, ICandle, MockMarketDataProvider, SignalState } from '@quant/shared';
 import { BacktestSimulator } from '../backtest-simulator';
 
 describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exit Ledger)', () => {
@@ -2054,5 +2054,137 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(totalFees).toBeGreaterThan(0);
     expect(netPnL).toBeGreaterThan(0);
     expect(finalCash).toBeGreaterThan(initialCapital);
+  });
+
+  // 48a. Real BacktestSimulator.runSimulation() Long E2E Test
+  test('48a. Real BacktestSimulator.runSimulation() Long E2E test asserts actual trades, direction, PnL, fees, and equity invariants', async () => {
+    const provider = new MockMarketDataProvider({ seed: 100 });
+    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 200);
+
+    const result = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      candles,
+      initialCapital: 100000,
+      riskPerTradePercent: 2.0,
+      minScore: 50,
+      warmupBars: 0,
+      minimumCandles: 10,
+    });
+
+    expect(result).toBeDefined();
+    expect(result.trades.length).toBeGreaterThan(0);
+    const longTrades = result.trades.filter((t) => t.direction === Direction.BULLISH);
+    expect(longTrades.length).toBeGreaterThan(0);
+
+    for (const trade of longTrades) {
+      expect(trade.direction).toBe(Direction.BULLISH);
+      expect(trade.entryPrice).toBeGreaterThan(0);
+      expect(trade.exitPrice).toBeGreaterThan(0);
+      expect(trade.positionSize).toBeGreaterThan(0);
+      expect(trade.entryFees).toBeGreaterThan(0);
+      expect(trade.exitFees).toBeGreaterThan(0);
+      expect(trade.grossPnL).toBeDefined();
+      expect(trade.netPnL).toBeCloseTo(trade.grossPnL! - trade.entryFees! - trade.exitFees!, 2);
+      expect(trade.exitReason).toBeDefined();
+    }
+
+    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL, 2);
+  });
+
+  // 48b. Real BacktestSimulator.runSimulation() Short E2E Test
+  test('48b. Real BacktestSimulator.runSimulation() Short E2E test asserts actual trades, direction, PnL, fees, and equity invariants', async () => {
+    const provider = new MockMarketDataProvider({ seed: 6 });
+    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 300);
+
+    const result = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      candles,
+      initialCapital: 100000,
+      riskPerTradePercent: 2.0,
+      minScore: 40,
+      warmupBars: 0,
+      minimumCandles: 10,
+    });
+
+    expect(result).toBeDefined();
+    expect(result.trades.length).toBeGreaterThan(0);
+    const shortTrades = result.trades.filter((t) => t.direction === Direction.BEARISH);
+    expect(shortTrades.length).toBeGreaterThan(0);
+
+    for (const trade of shortTrades) {
+      expect(trade.direction).toBe(Direction.BEARISH);
+      expect(trade.entryPrice).toBeGreaterThan(0);
+      expect(trade.exitPrice).toBeGreaterThan(0);
+      expect(trade.positionSize).toBeGreaterThan(0);
+      expect(trade.entryFees).toBeGreaterThan(0);
+      expect(trade.exitFees).toBeGreaterThan(0);
+      expect(trade.grossPnL).toBeDefined();
+      expect(trade.netPnL).toBeCloseTo(trade.grossPnL! - trade.entryFees! - trade.exitFees!, 2);
+      expect(trade.exitReason).toBeDefined();
+    }
+
+    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL, 2);
+  });
+
+  // 49. MARKET Order Behavior under OHLC_PATH and LOWER_TIMEFRAME Models
+  test('49. MARKET orders execute immediately on current segment / bar open with correct spread and slippage', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    const marketOrder = execSim.submitOrder({
+      tradeId: 't_mkt_eval',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 1.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 100.0,
+      high: 105.0,
+      low: 99.0,
+      close: 104.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+    expect(fill.orderId).toBe(marketOrder.orderId);
+    expect(fill.price).toBeGreaterThan(100.0); // BUY MARKET has spread & slippage added
+    expect(marketOrder.status).toBe('FILLED');
+  });
+
+  // 50. Deterministic ID Generation without Non-Deterministic Drift
+  test('50. Two identical BacktestSimulator runs produce identical deterministic IDs and results', async () => {
+    const provider = new MockMarketDataProvider({ seed: 42 });
+    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 100);
+
+    const res1 = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      candles,
+      initialCapital: 100000,
+      warmupBars: 0,
+      minimumCandles: 5,
+    });
+
+    const res2 = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      candles,
+      initialCapital: 100000,
+      warmupBars: 0,
+      minimumCandles: 5,
+    });
+
+    expect(res1.runId).toBe(res2.runId);
+    expect(res1.trades.length).toBe(res2.trades.length);
+    expect(res1.finalEquity).toBe(res2.finalEquity);
   });
 });

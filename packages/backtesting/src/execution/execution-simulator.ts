@@ -97,33 +97,7 @@ export class ExecutionSimulator {
     return order;
   }
 
-  private selectNextTrigger(
-    triggered: { order: IOrder; fill: IFill }[],
-    candle: ICandle,
-    nextCandle?: ICandle,
-    lowerTfCandles?: ICandle[],
-    parentDurationMs?: number,
-  ): { order: IOrder; fill: IFill } | undefined {
-    if (triggered.length === 0) return undefined;
-    if (triggered.length === 1) return triggered[0];
 
-    const orders = triggered.map((t) => t.order);
-    const resolved = FillModelEngine.resolveSameCandleConflict(
-      orders,
-      candle,
-      nextCandle,
-      this.fillModel,
-      this.ambiguityMode,
-      lowerTfCandles,
-      parentDurationMs,
-    );
-
-    if (resolved.winningOrder && resolved.winningFill) {
-      return { order: resolved.winningOrder, fill: resolved.winningFill };
-    }
-
-    return triggered[0];
-  }
 
   /**
    * Processes execution logic against a single candle/bar (non-recursive primitive).
