@@ -80,50 +80,106 @@ export class ExecutionSimulator {
     const newFills: IFill[] = [];
     const newEvents: IExecutionEvent[] = [];
 
-    for (const [orderId, order] of this.orders.entries()) {
+    // Group pending orders by tradeId
+    const pendingByTrade = new Map<string, IOrder[]>();
+    for (const order of this.orders.values()) {
       if (order.status !== 'PENDING') continue;
+      const list = pendingByTrade.get(order.tradeId) || [];
+      list.push(order);
+      pendingByTrade.set(order.tradeId, list);
+    }
 
-      const fillResult = FillModelEngine.evaluateFill(
-        order,
-        candle,
-        nextCandle,
-        this.fillModel,
-        lowerTfCandles,
-      );
+    for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
+      if (tradeOrders.length === 1) {
+        const order = tradeOrders[0];
+        const res = FillModelEngine.evaluateFill(
+          order,
+          candle,
+          nextCandle,
+          this.fillModel,
+          lowerTfCandles,
+        );
 
-      if (fillResult.isFilled && fillResult.fill) {
-        this.fillCounter++;
-        const fill = fillResult.fill;
-        fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+        if (res.isFilled && res.fill) {
+          this.fillCounter++;
+          const fill = res.fill;
+          fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
 
-        order.status = 'FILLED';
-        order.filledAt = fill.timestamp;
-        order.avgFillPrice = fill.price;
-        order.fees = fill.fee;
-        order.slippage = fill.slippage;
-        order.remainingQuantity = 0;
+          order.status = 'FILLED';
+          order.filledAt = fill.timestamp;
+          order.avgFillPrice = fill.price;
+          order.fees = fill.fee;
+          order.slippage = fill.slippage;
+          order.remainingQuantity = 0;
 
-        this.fills.push(fill);
-        newFills.push(fill);
+          this.fills.push(fill);
+          newFills.push(fill);
 
-        this.eventCounter++;
-        const fillEvent: IExecutionEvent = {
-          eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
-          tradeId: order.tradeId,
-          orderId,
-          symbol: order.symbol,
-          eventType: 'ENTRY_FILLED',
-          timestamp: fill.timestamp,
-          price: fill.price,
-          quantity: fill.quantity,
-          remainingQuantity: 0,
-          fees: fill.fee,
-          slippage: fill.slippage,
-          reason: `Order ${orderId} filled at ${fill.price}`,
-        };
+          this.eventCounter++;
+          const fillEvent: IExecutionEvent = {
+            eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
+            tradeId: order.tradeId,
+            orderId: order.orderId,
+            symbol: order.symbol,
+            eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
+            timestamp: fill.timestamp,
+            price: fill.price,
+            quantity: fill.quantity,
+            remainingQuantity: 0,
+            fees: fill.fee,
+            slippage: fill.slippage,
+            reason: `Order ${order.orderId} filled at ${fill.price}`,
+          };
 
-        this.events.push(fillEvent);
-        newEvents.push(fillEvent);
+          this.events.push(fillEvent);
+          newEvents.push(fillEvent);
+        }
+      } else {
+        // Multiple pending orders for trade -> Centralized Ambiguity Conflict Resolution
+        const conflictRes = FillModelEngine.resolveSameCandleConflict(
+          tradeOrders,
+          candle,
+          nextCandle,
+          this.fillModel,
+          this.ambiguityMode,
+          lowerTfCandles,
+        );
+
+        if (conflictRes.winningFill && conflictRes.winningOrder) {
+          const order = conflictRes.winningOrder;
+          this.fillCounter++;
+          const fill = conflictRes.winningFill;
+          fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+
+          order.status = 'FILLED';
+          order.filledAt = fill.timestamp;
+          order.avgFillPrice = fill.price;
+          order.fees = fill.fee;
+          order.slippage = fill.slippage;
+          order.remainingQuantity = 0;
+
+          this.fills.push(fill);
+          newFills.push(fill);
+
+          this.eventCounter++;
+          const fillEvent: IExecutionEvent = {
+            eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
+            tradeId: order.tradeId,
+            orderId: order.orderId,
+            symbol: order.symbol,
+            eventType: order.orderType === 'STOP' ? 'STOP_FILLED' : 'ENTRY_FILLED',
+            timestamp: fill.timestamp,
+            price: fill.price,
+            quantity: fill.quantity,
+            remainingQuantity: 0,
+            fees: fill.fee,
+            slippage: fill.slippage,
+            reason: `Order ${order.orderId} filled at ${fill.price} (${conflictRes.reason})`,
+          };
+
+          this.events.push(fillEvent);
+          newEvents.push(fillEvent);
+        }
       }
     }
 
@@ -137,6 +193,17 @@ export class ExecutionSimulator {
       return true;
     }
     return false;
+  }
+
+  cancelTradeOrders(tradeId: string): number {
+    let count = 0;
+    for (const order of this.orders.values()) {
+      if (order.tradeId === tradeId && order.status === 'PENDING') {
+        order.status = 'CANCELLED';
+        count++;
+      }
+    }
+    return count;
   }
 
   getOrder(orderId: string): IOrder | undefined {

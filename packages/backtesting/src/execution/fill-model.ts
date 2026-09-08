@@ -6,6 +6,131 @@ import { SpreadModel } from './spread-model';
 
 export class FillModelEngine {
   /**
+   * Validates lower timeframe sub-bars strictly against parent candle range and chronological ordering
+   */
+  static validateSubBars(
+    parentCandle: ICandle,
+    lowerTfCandles?: ICandle[],
+  ): { isValid: boolean; reason?: string } {
+    if (!lowerTfCandles || lowerTfCandles.length === 0) {
+      return { isValid: false, reason: 'MISSING_LOWER_TF_DATA' };
+    }
+
+    const parentOpenTime =
+      parentCandle.timestamp instanceof Date
+        ? parentCandle.timestamp.getTime()
+        : new Date(parentCandle.timestamp).getTime();
+
+    let prevTime = -1;
+    for (const sub of lowerTfCandles) {
+      const subTime =
+        sub.timestamp instanceof Date
+          ? sub.timestamp.getTime()
+          : new Date(sub.timestamp).getTime();
+
+      // Check sub-bar belongs to current parent candle start boundary
+      if (subTime < parentOpenTime) {
+        return { isValid: false, reason: 'SUBBAR_OUT_OF_BOUNDS_PAST' };
+      }
+
+      // Check strict ascending chronological order
+      if (prevTime >= 0 && subTime <= prevTime) {
+        return { isValid: false, reason: 'SUBBARS_OUT_OF_ORDER' };
+      }
+      prevTime = subTime;
+    }
+
+    return { isValid: true };
+  }
+
+  /**
+   * Authoritative centralized Same-Candle Ambiguity Conflict Resolver
+   */
+  static resolveSameCandleConflict(
+    orders: IOrder[],
+    currentCandle: ICandle,
+    nextCandle?: ICandle,
+    model: FillModel = FillModel.OHLC_PATH,
+    ambiguityMode: SameCandleAmbiguityMode = SameCandleAmbiguityMode.CONSERVATIVE,
+    lowerTfCandles?: ICandle[],
+  ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
+    // Evaluate fills for all orders against candle
+    const triggered: { order: IOrder; fill: IFill }[] = [];
+
+    for (const order of orders) {
+      const res = this.evaluateFill(order, currentCandle, nextCandle, model, lowerTfCandles);
+      if (res.isFilled && res.fill) {
+        triggered.push({ order, fill: res.fill });
+      }
+    }
+
+    if (triggered.length === 0) {
+      return {};
+    }
+
+    if (triggered.length === 1) {
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    }
+
+    // Multiple orders triggered on same candle -> Resolve via Ambiguity Mode
+    if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
+      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+      if (stopTrigger) {
+        return { winningFill: stopTrigger.fill, winningOrder: stopTrigger.order, reason: 'CONSERVATIVE_STOP_FIRST' };
+      }
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    }
+
+    if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
+      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
+      if (limitTrigger) {
+        return { winningFill: limitTrigger.fill, winningOrder: limitTrigger.order, reason: 'OPTIMISTIC_TARGET_FIRST' };
+      }
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    }
+
+    if (ambiguityMode === SameCandleAmbiguityMode.OHLC_PATH) {
+      const isBullish = currentCandle.close >= currentCandle.open;
+      const isLong = triggered[0].order.side === 'SELL'; // Long position exit order side is SELL
+
+      if (isBullish) {
+        // Bullish candle path: Open -> Low -> High -> Close
+        // Low touched first
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
+        const winner = isLong ? (stopTrigger || limitTrigger) : (limitTrigger || stopTrigger);
+        return { winningFill: winner?.fill, winningOrder: winner?.order, reason: 'OHLC_PATH_BULLISH' };
+      } else {
+        // Bearish candle path: Open -> High -> Low -> Close
+        // High touched first
+        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+        const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
+        const winner = isLong ? (limitTrigger || stopTrigger) : (stopTrigger || limitTrigger);
+        return { winningFill: winner?.fill, winningOrder: winner?.order, reason: 'OHLC_PATH_BEARISH' };
+      }
+    }
+
+    if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
+      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles);
+      if (!subValidation.isValid) {
+        return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
+      }
+
+      for (const m1 of lowerTfCandles!) {
+        for (const t of triggered) {
+          const res = this.evaluateFill(t.order, m1, undefined, FillModel.OHLC_PATH);
+          if (res.isFilled && res.fill) {
+            return { winningFill: res.fill, winningOrder: t.order, reason: 'LOWER_TIMEFRAME_SUBBAR_MATCH' };
+          }
+        }
+      }
+      return { reason: 'MISSING_LOWER_TF_DATA' };
+    }
+
+    return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+  }
+
+  /**
    * Evaluates order against current candle using configured FillModel
    */
   static evaluateFill(
@@ -26,12 +151,13 @@ export class FillModelEngine {
           ? currentCandle.timestamp
           : Date.now();
 
-    // 1. Lower Timeframe Resolution (1m sub-bars) - FAIL CLOSED IF MISSING
+    // 1. Lower Timeframe Resolution (1m sub-bars) - FAIL CLOSED IF MISSING/INVALID
     if (model === FillModel.LOWER_TIMEFRAME || order.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
-      if (!lowerTfCandles || lowerTfCandles.length === 0) {
-        return { isFilled: false, reason: 'MISSING_LOWER_TF_DATA' };
+      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles);
+      if (!subValidation.isValid) {
+        return { isFilled: false, reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
       }
-      for (const m1 of lowerTfCandles) {
+      for (const m1 of lowerTfCandles!) {
         const res = this.evaluateFill(order, m1, undefined, FillModel.OHLC_PATH);
         if (res.isFilled) return res;
       }

@@ -27,6 +27,8 @@ export class TradeLifecycleManager {
     quantity: number,
     executionTime: number,
     orderId?: string,
+    entryFee = 0,
+    entrySlippage = 0,
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
     const riskDistance = Math.abs(executionPrice - signal.stopLoss);
@@ -53,8 +55,8 @@ export class TradeLifecycleManager {
       price: executionPrice,
       quantity,
       remainingQuantity: quantity,
-      fees: 0,
-      slippage: 0,
+      fees: entryFee,
+      slippage: entrySlippage,
       reason: `Executed ${signal.direction} @ ${executionPrice}`,
     };
 
@@ -67,8 +69,8 @@ export class TradeLifecycleManager {
       remainingQuantity: quantity,
       realizedPnl: 0,
       realizedR: 0,
-      fee: 0,
-      slippage: 0,
+      fee: entryFee,
+      slippage: entrySlippage,
     };
 
     return {

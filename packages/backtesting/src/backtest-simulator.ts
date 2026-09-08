@@ -14,7 +14,6 @@ import {
   DEFAULT_PARTIAL_EXIT_POLICY,
   PositionLot,
   IExecutionEvent,
-  IPartialFillRecord,
 } from '@quant/risk-engine';
 import {
   IBacktestOptions,
@@ -43,10 +42,94 @@ export class BacktestSimulator {
     return 15 * 60 * 1000;
   }
 
+  private static submitRestingExitOrders(
+    execSim: ExecutionSimulator,
+    lot: PositionLot,
+    symbol: string,
+    policy = DEFAULT_PARTIAL_EXIT_POLICY,
+    timestamp: number,
+  ) {
+    const isLong = lot.direction === Direction.BULLISH;
+    const exitSide = isLong ? 'SELL' : 'BUY';
+    const remainingQty = lot.remainingQuantity;
+
+    if (remainingQty <= 0) return;
+
+    // 1. Resting Stop Loss Order
+    execSim.submitOrder({
+      tradeId: lot.tradeId,
+      symbol,
+      side: exitSide,
+      orderType: 'STOP',
+      stopPrice: lot.currentStopLoss,
+      quantity: remainingQty,
+      timestamp,
+    });
+
+    // 2. Resting Target Orders (TP1, TP2, TP3)
+    const hasAlreadyTp1 = lot.partialFills.some((f) => f.targetType === 'TP1');
+    const hasAlreadyTp2 = lot.partialFills.some((f) => f.targetType === 'TP2');
+
+    if (!hasAlreadyTp1 && policy.tp1Ratio > 0) {
+      const tp1Qty = Math.min(
+        remainingQty,
+        Math.round(lot.initialQuantity * policy.tp1Ratio),
+      );
+      if (tp1Qty > 0) {
+        execSim.submitOrder({
+          tradeId: lot.tradeId,
+          symbol,
+          side: exitSide,
+          orderType: 'LIMIT',
+          price: lot.tp1,
+          quantity: tp1Qty,
+          timestamp,
+        });
+      }
+    }
+
+    if (!hasAlreadyTp2 && policy.tp2Ratio > 0) {
+      const targetRatio = policy.tp3Ratio > 0 ? policy.tp2Ratio : 1.0;
+      const tp2Qty = Math.min(
+        remainingQty,
+        Math.round(lot.initialQuantity * targetRatio),
+      );
+      if (tp2Qty > 0) {
+        execSim.submitOrder({
+          tradeId: lot.tradeId,
+          symbol,
+          side: exitSide,
+          orderType: 'LIMIT',
+          price: lot.tp2,
+          quantity: tp2Qty,
+          timestamp,
+        });
+      }
+    }
+
+    if (policy.tp3Ratio > 0) {
+      const tp3Qty = Math.min(
+        remainingQty,
+        Math.round(lot.initialQuantity * policy.tp3Ratio),
+      );
+      if (tp3Qty > 0) {
+        execSim.submitOrder({
+          tradeId: lot.tradeId,
+          symbol,
+          side: exitSide,
+          orderType: 'LIMIT',
+          price: lot.tp3,
+          quantity: tp3Qty,
+          timestamp,
+        });
+      }
+    }
+  }
+
   /**
    * Simulates strategy historical execution candle-by-candle with zero look-ahead bias,
-   * authoritative ExecutionSimulator order/fill pipeline, gap handling, fail-closed sizing,
-   * and bar-by-bar equity tracking.
+   * authoritative ExecutionSimulator order/fill pipeline, resting exit orders, gap handling,
+   * fail-closed sizing, and bar-by-bar equity tracking.
    */
   static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
     const symbol = options.symbol.toUpperCase();
@@ -114,7 +197,7 @@ export class BacktestSimulator {
     if (!executionCandles || executionCandles.length < 50) {
       const emptyMetrics = MetricsCalculator.calculateMetrics([], initialCapital, equityCurve);
       return {
-        id: `bt-${Date.now()}`,
+        id: `${runId}_res`,
         symbol,
         timeframe,
         initialCapital,
@@ -130,7 +213,6 @@ export class BacktestSimulator {
     let activeLot: PositionLot | null = null;
     let pendingEntryOrder: IOrder | null = null;
     let pendingEntrySignal: ISignalSetup | null = null;
-    let activeExitOrders: Map<string, { order: IOrder; targetType: string }> = new Map();
 
     let cumulativeFees = 0;
     let cumulativeSlippage = 0;
@@ -178,16 +260,21 @@ export class BacktestSimulator {
             pendingEntryOrder = null;
             pendingEntrySignal = null;
           } else {
-            // Create Position Lot strictly from actual IFill result
+            // Create Position Lot strictly from actual IFill result, preserving entry fee & slippage
             activeLot = TradeLifecycleManager.createPositionLot(
               pendingEntrySignal,
               fill.price,
               fill.quantity,
               fill.timestamp,
               pendingEntryOrder.orderId,
+              fill.fee,
+              fill.slippage,
             );
             cumulativeFees += fill.fee;
             cumulativeSlippage += fill.slippage;
+
+            // Immediately create RESTING exit orders for the position before next candle is processed
+            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
 
             pendingEntryOrder = null;
             pendingEntrySignal = null;
@@ -195,7 +282,7 @@ export class BacktestSimulator {
         }
       }
 
-      // 3. Handle Active Position Lot Exits & Trailing Stops
+      // 3. Handle Active Position Lot Exits & Fills
       if (activeLot && activeLot.status !== 'CLOSED') {
         const isLong = activeLot.direction === Direction.BULLISH;
         const low = currentCandle.low;
@@ -216,131 +303,62 @@ export class BacktestSimulator {
         const unitDiff = isLong ? close - activeLot.entryPrice : activeLot.entryPrice - close;
         activeLot.unrealizedPnl = Number((unitDiff * activeLot.remainingQuantity).toFixed(2));
 
-        // Process Exit Order Fills
-        for (const [orderId, exitInfo] of activeExitOrders.entries()) {
-          const fill = simResult.fills.find((f) => f.orderId === orderId);
-          if (fill) {
-            const fillQty = fill.quantity;
-            const chunkDiff = isLong
-              ? fill.price - activeLot.entryPrice
-              : activeLot.entryPrice - fill.price;
-            const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
-            const initialRiskPerUnit = Math.max(
-              0.0001,
-              Math.abs(activeLot.entryPrice - activeLot.initialStopLoss),
-            );
-            const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
+        // Process Exit Order Fills returned from ExecutionSimulator
+        const exitFill = simResult.fills.find((f) => f.tradeId === activeLot!.tradeId);
+        if (exitFill) {
+          const fillQty = exitFill.quantity;
+          const chunkDiff = isLong
+            ? exitFill.price - activeLot.entryPrice
+            : activeLot.entryPrice - exitFill.price;
+          const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
+          const initialRiskPerUnit = Math.max(
+            0.0001,
+            Math.abs(activeLot.entryPrice - activeLot.initialStopLoss),
+          );
+          const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
 
-            activeLot.realizedPnl = Number((activeLot.realizedPnl + grossPnl).toFixed(2));
-            activeLot.remainingQuantity = Number(
-              Math.max(0, activeLot.remainingQuantity - fillQty).toFixed(4),
-            );
-            cumulativeFees += fill.fee;
-            cumulativeSlippage += fill.slippage;
+          activeLot.realizedPnl = Number((activeLot.realizedPnl + grossPnl).toFixed(2));
+          activeLot.remainingQuantity = Number(
+            Math.max(0, activeLot.remainingQuantity - fillQty).toFixed(4),
+          );
+          cumulativeFees += exitFill.fee;
+          cumulativeSlippage += exitFill.slippage;
 
-            activeLot.partialFills.push({
-              fillId: fill.fillId,
-              targetType: exitInfo.targetType as any,
-              timestamp: fill.timestamp,
-              price: fill.price,
-              quantity: fillQty,
-              remainingQuantity: activeLot.remainingQuantity,
-              realizedPnl: grossPnl,
-              realizedR: chunkR,
-              fee: fill.fee,
-              slippage: fill.slippage,
-            });
+          const filledOrder = execSim.getOrder(exitFill.orderId);
+          const targetType =
+            filledOrder?.orderType === 'STOP'
+              ? activeLot.currentStopLoss === activeLot.entryPrice
+                ? 'TRAILING_STOP'
+                : 'STOP_LOSS'
+              : 'TP1';
 
-            if (activeLot.remainingQuantity <= 0) {
-              activeLot.status = 'CLOSED';
-              activeLot.closedAt = fill.timestamp;
-              activeLot.unrealizedPnl = 0;
-            } else {
-              activeLot.status = 'PARTIALLY_CLOSED';
-              if (exitInfo.targetType === 'TP1' && partialPolicy.moveStopToBreakevenOnTp1) {
-                activeLot.currentStopLoss = activeLot.entryPrice;
-              } else if (exitInfo.targetType === 'TP2' && partialPolicy.trailStopOnTp2) {
-                activeLot.currentStopLoss = activeLot.tp1;
-              }
+          activeLot.partialFills.push({
+            fillId: exitFill.fillId,
+            targetType: targetType as any,
+            timestamp: exitFill.timestamp,
+            price: exitFill.price,
+            quantity: fillQty,
+            remainingQuantity: activeLot.remainingQuantity,
+            realizedPnl: grossPnl,
+            realizedR: chunkR,
+            fee: exitFill.fee,
+            slippage: exitFill.slippage,
+          });
+
+          // Cancel Sibling Resting Orders for trade
+          execSim.cancelTradeOrders(activeLot.tradeId);
+
+          if (activeLot.remainingQuantity <= 0) {
+            activeLot.status = 'CLOSED';
+            activeLot.closedAt = exitFill.timestamp;
+            activeLot.unrealizedPnl = 0;
+          } else {
+            activeLot.status = 'PARTIALLY_CLOSED';
+            if (partialPolicy.moveStopToBreakevenOnTp1) {
+              activeLot.currentStopLoss = activeLot.entryPrice;
             }
-
-            activeExitOrders.delete(orderId);
-          }
-        }
-
-        // Check Exit Condition Triggers and Submit Exit Orders to ExecutionSimulator
-        if (activeLot.status !== 'CLOSED' && activeExitOrders.size === 0) {
-          const exitSide = isLong ? 'SELL' : 'BUY';
-          const isStopHit = isLong ? low <= activeLot.currentStopLoss : high >= activeLot.currentStopLoss;
-          const isTp3Hit = isLong ? high >= activeLot.tp3 : low <= activeLot.tp3;
-          const isTp2Hit = isLong ? high >= activeLot.tp2 : low <= activeLot.tp2;
-          const isTp1Hit = isLong ? high >= activeLot.tp1 : low <= activeLot.tp1;
-
-          if (isStopHit) {
-            const exitOrder = execSim.submitOrder({
-              tradeId: activeLot.tradeId,
-              symbol,
-              side: exitSide,
-              orderType: 'STOP',
-              stopPrice: activeLot.currentStopLoss,
-              quantity: activeLot.remainingQuantity,
-              timestamp: candleTime,
-            });
-            activeExitOrders.set(exitOrder.orderId, {
-              order: exitOrder,
-              targetType:
-                activeLot.currentStopLoss === activeLot.entryPrice
-                  ? 'TRAILING_STOP'
-                  : 'STOP_LOSS',
-            });
-          } else if (isTp3Hit) {
-            const exitOrder = execSim.submitOrder({
-              tradeId: activeLot.tradeId,
-              symbol,
-              side: exitSide,
-              orderType: 'LIMIT',
-              price: activeLot.tp3,
-              quantity: activeLot.remainingQuantity,
-              timestamp: candleTime,
-            });
-            activeExitOrders.set(exitOrder.orderId, { order: exitOrder, targetType: 'TP3' });
-          } else if (isTp2Hit && !activeLot.partialFills.some((f) => f.targetType === 'TP2')) {
-            const targetRatio = partialPolicy.tp3Ratio > 0 ? partialPolicy.tp2Ratio : 1.0;
-            const scaleQty = Math.max(
-              1,
-              Math.min(
-                activeLot.remainingQuantity,
-                Math.round(activeLot.initialQuantity * targetRatio),
-              ),
-            );
-            const exitOrder = execSim.submitOrder({
-              tradeId: activeLot.tradeId,
-              symbol,
-              side: exitSide,
-              orderType: 'LIMIT',
-              price: activeLot.tp2,
-              quantity: scaleQty,
-              timestamp: candleTime,
-            });
-            activeExitOrders.set(exitOrder.orderId, { order: exitOrder, targetType: 'TP2' });
-          } else if (isTp1Hit && !activeLot.partialFills.some((f) => f.targetType === 'TP1')) {
-            const scaleQty = Math.max(
-              1,
-              Math.min(
-                activeLot.remainingQuantity,
-                Math.round(activeLot.initialQuantity * partialPolicy.tp1Ratio),
-              ),
-            );
-            const exitOrder = execSim.submitOrder({
-              tradeId: activeLot.tradeId,
-              symbol,
-              side: exitSide,
-              orderType: 'LIMIT',
-              price: activeLot.tp1,
-              quantity: scaleQty,
-              timestamp: candleTime,
-            });
-            activeExitOrders.set(exitOrder.orderId, { order: exitOrder, targetType: 'TP1' });
+            // Submit updated resting exit orders for remaining quantity
+            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, exitFill.timestamp);
           }
         }
 
@@ -359,7 +377,7 @@ export class BacktestSimulator {
 
           const initialRiskDist = Math.abs(activeLot.entryPrice - activeLot.initialStopLoss);
           const tradeRecord: IBacktestTrade = {
-            id: `tr_${trades.length + 1}`,
+            id: `${runId}_tr_${trades.length + 1}`,
             direction: activeLot.direction,
             entryTime: new Date(activeLot.openedAt),
             entryPrice: activeLot.entryPrice,
@@ -406,7 +424,6 @@ export class BacktestSimulator {
           positionLots.push(activeLot);
 
           activeLot = null;
-          activeExitOrders.clear();
         }
 
         // Record Bar-by-bar Snapshot
