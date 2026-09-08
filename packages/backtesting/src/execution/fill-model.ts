@@ -300,6 +300,30 @@ export class FillModelEngine {
   }
 
   /**
+   * Helper to calculate gap-through base price for STOP orders
+   */
+  static calculateStopBasePrice(side: OrderSide, stopPrice: number, referencePrice: number): number {
+    if (side === 'SELL' && referencePrice <= stopPrice) {
+      return referencePrice; // Gap down open / start price
+    } else if (side === 'BUY' && referencePrice >= stopPrice) {
+      return referencePrice; // Gap up open / start price
+    }
+    return stopPrice;
+  }
+
+  /**
+   * Helper to calculate gap-through base price for LIMIT orders
+   */
+  static calculateLimitBasePrice(side: OrderSide, targetPrice: number, referencePrice: number): number {
+    if (side === 'SELL' && referencePrice >= targetPrice) {
+      return referencePrice; // Gap up open / start price
+    } else if (side === 'BUY' && referencePrice <= targetPrice) {
+      return referencePrice; // Gap down open / start price
+    }
+    return targetPrice;
+  }
+
+  /**
    * Evaluates an order against a specific intra-candle segment (e.g. Open -> Low, Low -> High, High -> Close)
    */
   static evaluateSegmentFill(
@@ -322,12 +346,7 @@ export class FillModelEngine {
 
       if (!isTriggered) return { isFilled: false };
 
-      let basePrice = stopPrice;
-      if (order.side === 'SELL' && segStart <= stopPrice) {
-        basePrice = segStart;
-      } else if (order.side === 'BUY' && segStart >= stopPrice) {
-        basePrice = segStart;
-      }
+      const basePrice = this.calculateStopBasePrice(order.side, stopPrice, segStart);
 
       const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(basePrice, fillQty, order.side, 'STOP');
@@ -361,12 +380,7 @@ export class FillModelEngine {
 
       if (!isTouch) return { isFilled: false };
 
-      let rawPrice = targetPrice;
-      if (order.side === 'SELL' && segStart >= targetPrice) {
-        rawPrice = segStart;
-      } else if (order.side === 'BUY' && segStart <= targetPrice) {
-        rawPrice = segStart;
-      }
+      const rawPrice = this.calculateLimitBasePrice(order.side, targetPrice, segStart);
 
       const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(rawPrice, fillQty, order.side, 'LIMIT');
@@ -446,12 +460,7 @@ export class FillModelEngine {
       }
 
       // Gap-through-stop pricing
-      let basePrice = stopPrice;
-      if (order.side === 'SELL' && currentCandle.open <= stopPrice) {
-        basePrice = currentCandle.open; // Gap down open price
-      } else if (order.side === 'BUY' && currentCandle.open >= stopPrice) {
-        basePrice = currentCandle.open; // Gap up open price
-      }
+      const basePrice = this.calculateStopBasePrice(order.side, stopPrice, currentCandle.open);
 
       const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip = SlippageModel.calculateSlippage(
@@ -500,12 +509,7 @@ export class FillModelEngine {
       }
 
       // Gap-through-TP pricing
-      let rawPrice = targetPrice;
-      if (order.side === 'SELL' && currentCandle.open >= targetPrice) {
-        rawPrice = currentCandle.open; // Gap up open price
-      } else if (order.side === 'BUY' && currentCandle.open <= targetPrice) {
-        rawPrice = currentCandle.open; // Gap down open price
-      }
+      const rawPrice = this.calculateLimitBasePrice(order.side, targetPrice, currentCandle.open);
 
       const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
       const slip =

@@ -125,11 +125,12 @@ export class ExecutionSimulator {
     return triggered[0];
   }
 
-  processCandle(
-    candle: ICandle,
+  /**
+   * Processes execution logic against a single candle/bar (non-recursive primitive).
+   */
+  processSingleExecutionBar(
+    bar: ICandle,
     nextCandle?: ICandle,
-    lowerTfCandles?: ICandle[],
-    parentDurationMs?: number,
   ): { fills: IFill[]; events: IExecutionEvent[] } {
     const newFills: IFill[] = [];
     const newEvents: IExecutionEvent[] = [];
@@ -144,31 +145,11 @@ export class ExecutionSimulator {
     }
 
     const candleTime =
-      candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
-
-    // P1-E: LOWER_TIMEFRAME sub-bar evaluation mode
-    const isLowerTfMode =
-      (this.fillModel === FillModel.LOWER_TIMEFRAME ||
-        this.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) &&
-      lowerTfCandles !== undefined &&
-      lowerTfCandles.length > 0;
-
-    if (isLowerTfMode) {
-      const subValidation = FillModelEngine.validateSubBars(candle, lowerTfCandles, parentDurationMs);
-      if (!subValidation.isValid) {
-        return { fills: [], events: [] };
-      }
-      for (const m1 of lowerTfCandles!) {
-        const subRes = this.processCandle(m1);
-        newFills.push(...subRes.fills);
-        newEvents.push(...subRes.events);
-      }
-      return { fills: newFills, events: newEvents };
-    }
+      bar.timestamp instanceof Date ? bar.timestamp.getTime() : new Date(bar.timestamp).getTime();
 
     for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
       // P0/P1-1: OHLCPathCursor for progressive segment evaluation
-      const cursor = new OHLCPathCursor(candle);
+      const cursor = new OHLCPathCursor(bar);
 
       while (!cursor.isFinished) {
         const seg = cursor.currentSegment;
@@ -188,11 +169,9 @@ export class ExecutionSimulator {
             if (this.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
               res = FillModelEngine.evaluateFill(
                 order,
-                candle,
+                bar,
                 nextCandle,
                 this.fillModel,
-                lowerTfCandles,
-                parentDurationMs,
               );
             } else {
               res = FillModelEngine.evaluateSegmentFill(
@@ -292,7 +271,7 @@ export class ExecutionSimulator {
 
           if (order.orderType === 'STOP') {
             // Protective stop triggered -> Full exit, cancel all remaining orders for trade
-            this.cancelTradeOrders(tradeId);
+            this.cancelTradeOrders(order.tradeId);
             break;
           } else {
             // Target limit order triggered -> Update protective stop order quantity to remaining open position size
@@ -330,6 +309,40 @@ export class ExecutionSimulator {
     }
 
     return { fills: newFills, events: newEvents };
+  }
+
+  /**
+   * Orchestrates candle processing across parent duration or lower-TF sub-bar series
+   */
+  processCandle(
+    candle: ICandle,
+    nextCandle?: ICandle,
+    lowerTfCandles?: ICandle[],
+    parentDurationMs?: number,
+  ): { fills: IFill[]; events: IExecutionEvent[] } {
+    // P1-E: LOWER_TIMEFRAME sub-bar evaluation mode
+    const isLowerTfMode =
+      (this.fillModel === FillModel.LOWER_TIMEFRAME ||
+        this.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) &&
+      lowerTfCandles !== undefined &&
+      lowerTfCandles.length > 0;
+
+    if (isLowerTfMode) {
+      const subValidation = FillModelEngine.validateSubBars(candle, lowerTfCandles, parentDurationMs);
+      if (!subValidation.isValid) {
+        return { fills: [], events: [] };
+      }
+      const newFills: IFill[] = [];
+      const newEvents: IExecutionEvent[] = [];
+      for (const m1 of lowerTfCandles!) {
+        const subRes = this.processSingleExecutionBar(m1);
+        newFills.push(...subRes.fills);
+        newEvents.push(...subRes.events);
+      }
+      return { fills: newFills, events: newEvents };
+    }
+
+    return this.processSingleExecutionBar(candle, nextCandle);
   }
 
   cancelOrder(orderId: string): boolean {
