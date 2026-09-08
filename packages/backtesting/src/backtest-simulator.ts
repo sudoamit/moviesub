@@ -174,7 +174,8 @@ export class BacktestSimulator {
     let currentCash = initialCapital;
     let currentEquity = initialCapital;
 
-    const runId = `sim_${Date.now()}`;
+    const runId =
+      options.runId || `bt_${symbol}_${timeframe}_${options.strategyMode || 'SMC'}`;
 
     const trades: IBacktestTrade[] = [];
     const positionLots: PositionLot[] = [];
@@ -194,6 +195,7 @@ export class BacktestSimulator {
     if (!executionCandles || executionCandles.length < minimumCandles) {
       const emptyMetrics = MetricsCalculator.calculateMetrics([], initialCapital, equityCurve);
       return {
+        runId,
         id: `${runId}_res`,
         symbol,
         timeframe,
@@ -587,6 +589,7 @@ export class BacktestSimulator {
     );
 
     return {
+      runId,
       id: `${runId}_res`,
       symbol,
       timeframe,

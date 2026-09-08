@@ -25,6 +25,16 @@ export class FillModelEngine {
 
     const parentCloseTime = parentOpenTime + parentDurationMs;
 
+    const firstTime =
+      lowerTfCandles[0].timestamp instanceof Date
+        ? lowerTfCandles[0].timestamp.getTime()
+        : new Date(lowerTfCandles[0].timestamp).getTime();
+
+    // Check first bar starts at parent open time
+    if (firstTime !== parentOpenTime && !allowPartial) {
+      return { isValid: false, reason: 'SUBBAR_START_TIME_MISMATCH' };
+    }
+
     let prevTime = -1;
     for (const sub of lowerTfCandles) {
       const subTime =
@@ -42,8 +52,13 @@ export class FillModelEngine {
         return { isValid: false, reason: 'SUBBAR_OUT_OF_BOUNDS_FUTURE' };
       }
 
+      // Check duplicate timestamps
+      if (prevTime >= 0 && subTime === prevTime) {
+        return { isValid: false, reason: 'SUBBAR_DUPLICATE_TIMESTAMP' };
+      }
+
       // Check strict ascending chronological order
-      if (prevTime >= 0 && subTime <= prevTime) {
+      if (prevTime >= 0 && subTime < prevTime) {
         return { isValid: false, reason: 'SUBBARS_OUT_OF_ORDER' };
       }
       prevTime = subTime;
@@ -57,11 +72,6 @@ export class FillModelEngine {
     }
 
     // Check lower-TF completeness & coverage
-    const firstTime =
-      lowerTfCandles[0].timestamp instanceof Date
-        ? lowerTfCandles[0].timestamp.getTime()
-        : new Date(lowerTfCandles[0].timestamp).getTime();
-
     const lastTime =
       lowerTfCandles[lowerTfCandles.length - 1].timestamp instanceof Date
         ? lowerTfCandles[lowerTfCandles.length - 1].timestamp.getTime()
@@ -109,6 +119,7 @@ export class FillModelEngine {
    * For orders triggered within the SAME path segment (segStart -> segEnd), computes distance along vector:
    * distance = Math.abs(triggerPrice - segStart)
    * The order with the smallest distance was encountered FIRST along the segment vector!
+   * Ambiguity policies (CONSERVATIVE / OPTIMISTIC) act ONLY as tie-breakers when distances are identical.
    */
   static resolveSegmentConflict(
     triggered: { order: IOrder; fill: IFill }[],
@@ -119,41 +130,43 @@ export class FillModelEngine {
     if (triggered.length === 0) return {};
     if (triggered.length === 1) return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
 
-    if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
-      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-      if (stopTrigger) {
-        return { winningFill: stopTrigger.fill, winningOrder: stopTrigger.order, reason: 'CONSERVATIVE_STOP_FIRST' };
-      }
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
-      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
-      if (limitTrigger) {
-        return { winningFill: limitTrigger.fill, winningOrder: limitTrigger.order, reason: 'OPTIMISTIC_TARGET_FIRST' };
-      }
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    // Default OHLC_PATH / Intra-segment Vector Distance Resolution:
-    // Compute distance along segment from segStart to each order's trigger/price level.
-    // Smallest distance means encountered FIRST along the segment trajectory!
-    let bestWinner = triggered[0];
-    let minDistance = Infinity;
-
-    for (const item of triggered) {
+    // Calculate distance along segment vector (segStart -> segEnd) for each triggered order
+    const withDistance = triggered.map((item) => {
       const trigPrice =
         item.order.orderType === 'STOP' && item.order.stopPrice !== undefined
           ? item.order.stopPrice
           : item.order.price ?? segStart;
       const dist = Math.abs(trigPrice - segStart);
-      if (dist < minDistance) {
-        minDistance = dist;
-        bestWinner = item;
+      return { item, dist };
+    });
+
+    // Sort ascending by distance along segment vector
+    withDistance.sort((a, b) => a.dist - b.dist);
+
+    const minDist = withDistance[0].dist;
+    // Find all candidates that share the minimum distance (within small numerical tolerance)
+    const minCandidates = withDistance.filter((x) => Math.abs(x.dist - minDist) < 1e-6).map((x) => x.item);
+
+    if (minCandidates.length === 1) {
+      return { winningFill: minCandidates[0].fill, winningOrder: minCandidates[0].order, reason: 'SEGMENT_VECTOR_DISTANCE_ORDERED' };
+    }
+
+    // Tie-breaker when multiple orders share the EXACT same distance along the segment:
+    if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
+      const stopTrigger = minCandidates.find((t) => t.order.orderType === 'STOP');
+      if (stopTrigger) {
+        return { winningFill: stopTrigger.fill, winningOrder: stopTrigger.order, reason: 'CONSERVATIVE_STOP_FIRST' };
       }
     }
 
-    return { winningFill: bestWinner.fill, winningOrder: bestWinner.order, reason: 'SEGMENT_VECTOR_DISTANCE_ORDERED' };
+    if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
+      const limitTrigger = minCandidates.find((t) => t.order.orderType === 'LIMIT');
+      if (limitTrigger) {
+        return { winningFill: limitTrigger.fill, winningOrder: limitTrigger.order, reason: 'OPTIMISTIC_TARGET_FIRST' };
+      }
+    }
+
+    return { winningFill: minCandidates[0].fill, winningOrder: minCandidates[0].order, reason: 'SEGMENT_VECTOR_DISTANCE_ORDERED' };
   }
 
   /**

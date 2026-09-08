@@ -65,6 +65,7 @@ export interface IQuantitativeMetrics {
 }
 
 export interface IBacktestOptions {
+  runId?: string;
   symbol: string;
   candles: ICandle[];
   htf1Candles?: ICandle[];
@@ -194,6 +195,7 @@ export interface IBacktestSimulationResult
       | 'averageR'
     >,
     IQuantitativeMetrics {
+  runId?: string;
   symbol: string;
   timeframe: string;
   initialCapital: number;

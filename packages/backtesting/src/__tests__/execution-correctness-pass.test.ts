@@ -446,7 +446,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     // Sub-bar at 10:16 (past 15m boundary -> future data)
     const invalidFutureSubBars: ICandle[] = [
-      { timestamp: new Date(parentOpen + 60000), open: 100, high: 102, low: 99, close: 101, volume: 10 },
+      { timestamp: new Date(parentOpen), open: 100, high: 102, low: 99, close: 101, volume: 10 },
       { timestamp: new Date(parentClose + 60000), open: 105, high: 108, low: 104, close: 107, volume: 10 }, // 10:16 - Future!
     ];
 
@@ -712,8 +712,8 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     const slSub = simSub.submitOrder({ tradeId: 'c4', symbol: 'BTCUSDT', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: 1700000000000 });
     const tpSub = simSub.submitOrder({ tradeId: 'c4', symbol: 'BTCUSDT', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 30, timestamp: 1700000000000 });
     const subBars: ICandle[] = [
-      { timestamp: new Date(1700000070000), open: 100, high: 112, low: 99, close: 111, volume: 10 }, // TP1 touched first!
-      { timestamp: new Date(1700000080000), open: 111, high: 111, low: 92, close: 93, volume: 10 },  // SL touched second
+      { timestamp: new Date(1700000060000), open: 100, high: 112, low: 99, close: 111, volume: 10 }, // TP1 touched first!
+      { timestamp: new Date(1700000090000), open: 111, high: 111, low: 92, close: 93, volume: 10 },  // SL touched second
     ];
     const resSub = simSub.processCandle(candle, undefined, subBars, 60 * 1000);
     expect(resSub.fills[0].orderId).toBe(tpSub.orderId);
@@ -1526,5 +1526,227 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     });
     expect(resActive).toBeDefined();
     expect(resActive.equityCurve.length).toBeGreaterThan(1);
+  });
+
+  // 36. Intra-Segment Vector Distance Resolution: Descending Segment
+  test('36. resolveSegmentConflict selects TP at 110 (dist=10) before SL at 95 (dist=25) along segment 120 -> 90', () => {
+    const slOrder: any = {
+      orderId: 'sl_desc_1',
+      tradeId: 't_desc',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100,
+      remainingQuantity: 100,
+      status: 'PENDING',
+    };
+
+    const tpOrder: any = {
+      orderId: 'tp_desc_1',
+      tradeId: 't_desc',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30,
+      remainingQuantity: 30,
+      status: 'PENDING',
+    };
+
+    const triggered = [
+      { order: slOrder, fill: { fillId: 'f1', price: 95.0, quantity: 100 } as any },
+      { order: tpOrder, fill: { fillId: 'f2', price: 110.0, quantity: 30 } as any },
+    ];
+
+    // Segment starts at 120.0 and ends at 90.0 (price falls from 120 to 90)
+    // Distance for TP at 110 from 120 = |110 - 120| = 10
+    // Distance for SL at 95 from 120 = |95 - 120| = 25
+    const res = FillModelEngine.resolveSegmentConflict(triggered, 120.0, 90.0, SameCandleAmbiguityMode.OHLC_PATH);
+    expect(res.winningOrder?.orderId).toBe('tp_desc_1');
+    expect(res.reason).toBe('SEGMENT_VECTOR_DISTANCE_ORDERED');
+  });
+
+  // 37. Intra-Segment Conflict: Equal Distances rely on Ambiguity Policy Tie-breaker
+  test('37. resolveSegmentConflict uses ambiguity mode as tie-breaker when distances are equal', () => {
+    const order1: any = { orderId: 'o1', orderType: 'STOP', stopPrice: 105.0 };
+    const order2: any = { orderId: 'o2', orderType: 'LIMIT', price: 105.0 };
+
+    const triggered = [
+      { order: order1, fill: { fillId: 'f1', price: 105.0 } as any },
+      { order: order2, fill: { fillId: 'f2', price: 105.0 } as any },
+    ];
+
+    // CONSERVATIVE policy prefers STOP order (o1)
+    const resCons = FillModelEngine.resolveSegmentConflict(triggered, 100.0, 110.0, SameCandleAmbiguityMode.CONSERVATIVE);
+    expect(resCons.winningOrder?.orderId).toBe('o1');
+
+    // OPTIMISTIC policy prefers LIMIT order (o2)
+    const resOpt = FillModelEngine.resolveSegmentConflict(triggered, 100.0, 110.0, SameCandleAmbiguityMode.OPTIMISTIC);
+    expect(resOpt.winningOrder?.orderId).toBe('o2');
+  });
+
+  // 38. Strict Sub-bar Boundary & Duplicate Timestamp Validation
+  test('38. validateSubBars detects start time mismatch and duplicate sub-bar timestamps', () => {
+    const parentCandle: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 100, high: 110, low: 95, close: 105, volume: 1000,
+    };
+
+    // Sub-bar start time does not match parent open time
+    const subBarsShifted: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(1700000060000 + i * 60000), // starts 1 minute late
+      open: 100, high: 101, low: 99, close: 100, volume: 10,
+    }));
+    const valShifted = FillModelEngine.validateSubBars(parentCandle, subBarsShifted, 15 * 60 * 1000, false);
+    expect(valShifted.isValid).toBe(false);
+    expect(valShifted.reason).toBe('SUBBAR_START_TIME_MISMATCH');
+
+    // Sub-bars with duplicate timestamp
+    const subBarsDup: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(1700000000000 + (i === 5 ? 4 * 60000 : i * 60000)), // bar 5 has same time as bar 4
+      open: 100, high: 101, low: 99, close: 100, volume: 10,
+    }));
+    const valDup = FillModelEngine.validateSubBars(parentCandle, subBarsDup, 15 * 60 * 1000, false);
+    expect(valDup.isValid).toBe(false);
+    expect(valDup.reason).toBe('SUBBAR_DUPLICATE_TIMESTAMP');
+  });
+
+  // 39. Deterministic Long E2E Simulation
+  test('39. Deterministic Long E2E Backtest Simulation with Execution Simulator', () => {
+    const execSim = new ExecutionSimulator();
+    const startTime = 1700000000000;
+
+    // Entry order (BUY LIMIT @ 100)
+    execSim.submitOrder({
+      tradeId: 't_long_e2e',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 1.0,
+      timestamp: startTime,
+    });
+
+    // Candle 1 fills entry
+    const c1: ICandle = { timestamp: new Date(startTime + 60000), open: 102, high: 103, low: 99, close: 101, volume: 100 };
+    const res1 = execSim.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].side).toBe('BUY');
+    expect(res1.fills[0].price).toBeCloseTo(100.005, 3);
+
+    // Submit SL @ 95 and TP @ 110
+    execSim.submitOrder({
+      tradeId: 't_long_e2e',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 1.0,
+      timestamp: startTime + 60000,
+      exitTarget: 'SL',
+    });
+
+    execSim.submitOrder({
+      tradeId: 't_long_e2e',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 1.0,
+      timestamp: startTime + 60000,
+      exitTarget: 'TP1',
+    });
+
+    // Candle 2 hits TP1 @ 110
+    const c2: ICandle = { timestamp: new Date(startTime + 120000), open: 101, high: 112, low: 100, close: 111, volume: 100 };
+    const res2 = execSim.processCandle(c2);
+    expect(res2.fills).toHaveLength(1);
+    expect(res2.fills[0].exitTarget).toBe('TP1');
+    expect(res2.fills[0].price).toBeCloseTo(109.995, 2);
+  });
+
+  // 40. Deterministic Short E2E Simulation
+  test('40. Deterministic Short E2E Backtest Simulation with Execution Simulator', () => {
+    const execSim = new ExecutionSimulator();
+    const startTime = 1700000000000;
+
+    // Entry order (SELL LIMIT @ 100)
+    execSim.submitOrder({
+      tradeId: 't_short_e2e',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 1.0,
+      timestamp: startTime,
+    });
+
+    // Candle 1 fills short entry
+    const c1: ICandle = { timestamp: new Date(startTime + 60000), open: 98, high: 101, low: 97, close: 99, volume: 100 };
+    const res1 = execSim.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].side).toBe('SELL');
+    expect(res1.fills[0].price).toBeCloseTo(99.995, 2);
+
+    // Submit SL @ 105 and TP @ 90 for short position
+    execSim.submitOrder({
+      tradeId: 't_short_e2e',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 1.0,
+      timestamp: startTime + 60000,
+      exitTarget: 'SL',
+    });
+
+    execSim.submitOrder({
+      tradeId: 't_short_e2e',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 90.0,
+      quantity: 1.0,
+      timestamp: startTime + 60000,
+      exitTarget: 'TP1',
+    });
+
+    // Candle 2 hits TP1 @ 90
+    const c2: ICandle = { timestamp: new Date(startTime + 120000), open: 99, high: 100, low: 88, close: 91, volume: 100 };
+    const res2 = execSim.processCandle(c2);
+    expect(res2.fills).toHaveLength(1);
+    expect(res2.fills[0].exitTarget).toBe('TP1');
+    expect(res2.fills[0].price).toBeCloseTo(90.005, 2);
+  });
+
+  // 41. Deterministic Backtest Run ID Generation
+  test('41. BacktestSimulator generates deterministic runId when not explicitly provided', () => {
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'ETHUSDT',
+      timeframe: '15m',
+      strategyMode: 'SMC',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
+      ],
+      warmupBars: 0,
+      minimumCandles: 2,
+    });
+
+    expect(res.runId).toBe('bt_ETHUSDT_15m_SMC');
+
+    const resCustom = BacktestSimulator.runSimulation({
+      symbol: 'ETHUSDT',
+      runId: 'custom_run_123',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
+      ],
+      warmupBars: 0,
+      minimumCandles: 2,
+    });
+
+    expect(resCustom.runId).toBe('custom_run_123');
   });
 });
