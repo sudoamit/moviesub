@@ -103,7 +103,7 @@ export class LearningEngine {
 
     // 9. Validation Pipeline for each generated Candidate
     for (const cand of candidates) {
-      // 9a. Historical Simulation on Validation slice
+      // 9a. Historical Simulation on Validation slice of development dataset
       const valEval = CandidateEvaluator.evaluate(cand, valSlice.length > 0 ? valSlice : trainSlice);
       if (!valEval.passed) {
         cand.status = 'REJECTED';
@@ -112,8 +112,9 @@ export class LearningEngine {
         continue;
       }
 
-      // 9b. Walk-Forward Purged & Embargo Validation
-      const wfEval = WalkForwardValidator.validate(cand, experiences);
+      // 9b. Walk-Forward Purged & Embargo Validation on Development Dataset
+      const devExperiences = [...trainSlice, ...valSlice];
+      const wfEval = WalkForwardValidator.validate(cand, devExperiences.length >= 18 ? devExperiences : experiences);
 
       // 9c. Robustness & Transaction Costs
       const costEval = RobustnessEngine.evaluateCosts(cand, valSlice.length > 0 ? valSlice : trainSlice);
@@ -123,23 +124,27 @@ export class LearningEngine {
         valEval.simulatedRMultiples && valEval.simulatedRMultiples.length > 0
           ? valEval.simulatedRMultiples
           : valSlice.map((e) => e.outcome.pnlR);
+
       const mcEval = MonteCarloEngine.simulate(candRMultiples, { seed: 42 });
+
+      // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset
+      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice.length > 0 ? oosSlice : valSlice);
 
       cand.validationMetrics = {
         inSampleExpectancy: wfEval.meanInSampleExpectancy || valEval.candidateExpectancy,
         walkForwardExpectancy: wfEval.meanOutOfSampleExpectancy || valEval.candidateExpectancy,
-        outOfSampleExpectancy: wfEval.meanOutOfSampleExpectancy || valEval.candidateExpectancy,
-        profitFactor: valEval.profitFactor,
-        maxDrawdownPercent: valEval.maxDrawdownPercent,
+        outOfSampleExpectancy: finalOosEval.candidateExpectancy || wfEval.meanOutOfSampleExpectancy,
+        profitFactor: finalOosEval.profitFactor || valEval.profitFactor,
+        maxDrawdownPercent: finalOosEval.maxDrawdownPercent || valEval.maxDrawdownPercent,
         monteCarloRuinProb: mcEval.probabilityOfRuin,
         transactionCostSurvived: costEval.survivedDoubleCosts,
       };
 
-      // 9e. Candidate enters Shadow state (must undergo observation period before promotion)
+      // 9f. Candidate enters Shadow state (must undergo observation period before promotion)
       cand.status = 'SHADOW';
       ShadowTradingEngine.activateCandidate(cand);
 
-      // 9f. Evaluate candidate against promotion gate
+      // 9g. Promotion Gate evaluates ONLY candidates with completed shadow periods
       const promoResult = PromotionGate.evaluateCandidate(cand, {
         ...PromotionGate.DEFAULT_CRITERIA,
         allowAutoPromotion: !!options.autoPromote,

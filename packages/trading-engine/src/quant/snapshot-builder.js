@@ -1,0 +1,221 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.SnapshotBuilder = void 0;
+const shared_1 = require("@quant/shared");
+const smc_analyzer_1 = require("../smc-analyzer");
+const quant_feature_engine_1 = require("./quant-feature-engine");
+const regime_clustering_engine_1 = require("./regime-clustering-engine");
+const volatility_engine_1 = require("./volatility-engine");
+const multi_horizon_engine_1 = require("./multi-horizon-engine");
+const quant_smc_scorer_1 = require("./quant-smc-scorer");
+const canonical_ml_v2_1 = require("./canonical-ml-v2");
+const llm_context_layer_1 = require("./llm-context-layer");
+const candle_normalizer_1 = require("../candle-normalizer");
+class SnapshotBuilder {
+    /**
+     * Constructs a canonical, immutable PointInTimeMarketSnapshot without lookahead.
+     */
+    static buildSnapshot(options) {
+        const symbol = options.symbol.toUpperCase();
+        const rawCandles = candle_normalizer_1.CandleNormalizer.normalize(options.executionCandles);
+        const executionTimeframe = options.executionTimeframe || shared_1.Timeframe.M15;
+        const htf1Timeframe = options.htf1Timeframe || shared_1.Timeframe.H1;
+        const htf2Timeframe = options.htf2Timeframe || shared_1.Timeframe.H4;
+        // 1. Determine decision timestamp
+        let timestamp;
+        if (options.asOfTimestamp) {
+            timestamp = options.asOfTimestamp;
+        }
+        else {
+            const closedCandles = rawCandles.filter((c) => c.isClosed !== false);
+            const lastClosed = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : null;
+            timestamp = lastClosed
+                ? candle_normalizer_1.CandleNormalizer.getCandleCloseTimestamp(lastClosed, executionTimeframe)
+                : new Date();
+        }
+        // 2. Strict point-in-time candle slicing for execution and HTF datasets using decision timestamp
+        const execCandles = candle_normalizer_1.CandleNormalizer.getClosedCandlesAsOf(rawCandles, executionTimeframe, timestamp);
+        const htf1Candles = options.htf1Candles
+            ? candle_normalizer_1.CandleNormalizer.getClosedCandlesAsOf(options.htf1Candles, htf1Timeframe, timestamp)
+            : undefined;
+        const htf2Candles = options.htf2Candles
+            ? candle_normalizer_1.CandleNormalizer.getClosedCandlesAsOf(options.htf2Candles, htf2Timeframe, timestamp)
+            : undefined;
+        const n = execCandles.length;
+        const lastCandle = n > 0 ? execCandles[n - 1] : null;
+        const marketPrice = lastCandle ? lastCandle.close : 0;
+        // 1. Determine Asset Type & Metadata
+        const isCrypto = symbol.includes('BTC') || symbol.includes('ETH') || symbol.includes('USDT');
+        const isIndex = symbol === 'NIFTY' || symbol === 'BANKNIFTY' || symbol === 'FINNIFTY';
+        const assetType = options.instrument?.assetType ||
+            (isCrypto ? shared_1.AssetType.CRYPTO : isIndex ? shared_1.AssetType.INDEX : shared_1.AssetType.EQUITY);
+        const instrument = {
+            symbol,
+            assetType,
+            exchange: isCrypto ? 'BINANCE' : 'NSE',
+            currency: isCrypto ? 'USDT' : 'INR',
+            lotSize: symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : isCrypto ? 0.01 : 1,
+            tickSize: isCrypto ? 0.1 : 0.05,
+            ...options.instrument,
+        };
+        // 2. SMC Analysis (strictly point-in-time)
+        const smc = smc_analyzer_1.SMCAnalyzer.analyze(execCandles, { asOfTimestamp: timestamp });
+        // 3. Quant Features & Normalization
+        const quant = quant_feature_engine_1.QuantFeatureEngine.extractQuantState(symbol, execCandles, smc);
+        // 4. Regime Clustering
+        const allSwings = smc.confirmedSwingHighs.concat(smc.confirmedSwingLows);
+        const regime = regime_clustering_engine_1.RegimeClusteringEngine.classifyRegime(execCandles, allSwings);
+        // 5. Volatility State
+        const volatility = volatility_engine_1.VolatilityEngine.computeVolatilityState(execCandles);
+        // 6. Multi-Horizon Engine
+        const multiHorizon = multi_horizon_engine_1.MultiHorizonEngine.evaluateMultiHorizon(execCandles, htf1Candles, htf2Candles, {
+            asOfTimestamp: timestamp,
+            executionTimeframe: options.executionTimeframe || shared_1.Timeframe.M15,
+            htfTimeframe: options.htf1Timeframe || shared_1.Timeframe.H1,
+            macroTimeframe: options.htf2Timeframe || shared_1.Timeframe.H4,
+        });
+        // 7. Determine Candidate Direction without fabricating a directional fallback.
+        let candidateDir = multiHorizon.higherTimeframe.trend;
+        if (candidateDir === shared_1.Direction.NEUTRAL && smc.currentTrend !== shared_1.Direction.NEUTRAL) {
+            candidateDir = smc.currentTrend;
+        }
+        const isBull = candidateDir === shared_1.Direction.BULLISH;
+        // Check SMC Components
+        const hasSweep = smc.liquiditySweeps.length > 0;
+        const hasBOS = smc.breaksOfStructure.some((b) => b.direction === candidateDir);
+        const hasCHOCH = smc.changesOfCharacter.some((c) => c.direction === candidateDir);
+        const activeOB = smc.activeOrderBlocks.find((ob) => ob.direction === candidateDir) || null;
+        const activeFVG = smc.activeFVGs.find((fvg) => fvg.direction === candidateDir) || null;
+        let inCorrectEquilibrium = true;
+        if (smc.dealingRange) {
+            if (isBull && marketPrice > smc.dealingRange.equilibrium * 1.01)
+                inCorrectEquilibrium = false;
+            if (!isBull && marketPrice < smc.dealingRange.equilibrium * 0.99)
+                inCorrectEquilibrium = false;
+        }
+        // Measure structure strength and risk/reward ratio dynamically
+        const structureStrength = (hasBOS ? 40 : 0) + (hasCHOCH ? 30 : 0) + (hasSweep ? 30 : 0);
+        let riskRewardRatio = 2.0;
+        if (smc.dealingRange) {
+            const target = isBull ? smc.dealingRange.high : smc.dealingRange.low;
+            const riskRef = isBull
+                ? (activeOB ? activeOB.low : (smc.confirmedSwingLows[smc.confirmedSwingLows.length - 1]?.price || marketPrice * 0.99))
+                : (activeOB ? activeOB.high : (smc.confirmedSwingHighs[smc.confirmedSwingHighs.length - 1]?.price || marketPrice * 1.01));
+            const rewardDist = Math.abs(target - marketPrice);
+            const riskDist = Math.max(1e-4, Math.abs(marketPrice - riskRef));
+            riskRewardRatio = Math.max(1.0, Math.min(5.0, rewardDist / riskDist));
+        }
+        // 8. 10-Pillar Quant + SMC Confluence Score
+        const score = quant_smc_scorer_1.QuantSMCScorer.score({
+            direction: candidateDir,
+            hasBOS,
+            hasCHOCH,
+            structureStrength,
+            mtfAlignment: multiHorizon.alignment,
+            mtfConfluenceScore: multiHorizon.confluenceScore,
+            hasLiquiditySweep: hasSweep,
+            hasOrderBlock: activeOB !== null,
+            obStrength: activeOB ? Math.min(100, activeOB.strength * 40) : 0,
+            hasFVG: activeFVG !== null,
+            relativeVolume: quant.momentum.relativeVolume,
+            rsiValue: quant.momentum.rsi14,
+            regime: regime.regime,
+            volatilityPercentile: volatility.volatilityPercentile,
+            riskRewardRatio,
+            inCorrectEquilibriumZone: inCorrectEquilibrium,
+        });
+        // 9. Decision Trace Construction
+        const whyThisTradeRanked = score.rankingRationale;
+        const invalidationRisks = [];
+        if (!inCorrectEquilibrium) {
+            invalidationRisks.push(`Price is outside optimal discount/premium dealing range.`);
+        }
+        if (multiHorizon.alignment === 'CONFLICTED') {
+            invalidationRisks.push(`Macro vs Execution timeframe trend mismatch.`);
+        }
+        if (regime.regime === 'HIGH_VOLATILITY') {
+            invalidationRisks.push(`Elevated volatility percentile (${volatility.volatilityPercentile}%) requires wider stop.`);
+        }
+        const trace = {
+            timestamp,
+            symbol,
+            timeframe: String(options.executionTimeframe || '15m'),
+            smc: {
+                bias: candidateDir,
+                bos: hasBOS ? 'CONFIRMED' : 'NONE',
+                choch: hasCHOCH ? 'DETECTED' : 'NONE',
+                liquidity: hasSweep ? 'SWEPT' : 'POOLS_PRESENT',
+                ob: activeOB ? `VALID [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]` : 'NONE',
+                fvg: activeFVG
+                    ? `VALID [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]`
+                    : 'NONE',
+            },
+            quant: {
+                regime: regime.regime,
+                volatility: volatility.volatilityBucket,
+                forecastVol: volatility.forecastVolatility,
+                momentum: quant.momentum.rsi14,
+                relativeVolume: quant.momentum.relativeVolume,
+            },
+            ml: {
+                probability: null,
+                expectedR: null,
+                confidence: null,
+            },
+            multiHorizon: {
+                alignment: multiHorizon.alignment,
+                confluenceScore: multiHorizon.confluenceScore,
+            },
+            risk: {
+                approved: score.totalScore >= 60 && multiHorizon.alignment !== 'CONFLICTED',
+                positionSizeMultiplier: regime.regime === 'HIGH_VOLATILITY' ? 0.5 : 1.0,
+                reasons: invalidationRisks.length === 0
+                    ? ['All deterministic and risk gates passed.']
+                    : invalidationRisks,
+            },
+            finalDecision: score.totalScore >= 75 && multiHorizon.alignment !== 'CONFLICTED'
+                ? isBull
+                    ? 'BUY'
+                    : 'SELL'
+                : score.totalScore >= 50
+                    ? 'WAIT'
+                    : 'NO_TRADE',
+            whyThisTradeRanked,
+            invalidationRisks,
+        };
+        // 10. Assemble Snapshot
+        const snapshot = {
+            instrument,
+            timestamp,
+            marketPrice,
+            candles: [
+                {
+                    timeframe: String(options.executionTimeframe || '15m'),
+                    lastClosedTimestamp: timestamp,
+                    candlesUsed: execCandles.length,
+                },
+            ],
+            smc,
+            quant,
+            regime,
+            volatility,
+            multiHorizon,
+            score,
+            trace,
+        };
+        // 11. Run Canonical ML v2 prediction
+        const mlFeatures = canonical_ml_v2_1.CanonicalMLEngineV2.extractFeatures(snapshot);
+        const mlPrediction = canonical_ml_v2_1.CanonicalMLEngineV2.predict(mlFeatures, null);
+        snapshot.ml = mlPrediction;
+        snapshot.trace.ml = {
+            probability: mlPrediction.probabilityWin,
+            expectedR: mlPrediction.expectedR,
+            confidence: mlPrediction.confidence,
+        };
+        // 12. Optional LLM contextual assessment
+        snapshot.trace.llmAssessment = llm_context_layer_1.LLMContextLayer.getDeterministicFallback(snapshot);
+        return snapshot;
+    }
+}
+exports.SnapshotBuilder = SnapshotBuilder;
+//# sourceMappingURL=snapshot-builder.js.map

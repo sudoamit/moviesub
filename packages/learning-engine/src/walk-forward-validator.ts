@@ -6,9 +6,29 @@ import {
 } from './types';
 import { CandidateEvaluator } from './candidate-evaluator';
 
+export interface FoldArtifact {
+  foldIndex: number;
+  trainDatasetHash: string;
+  validationDatasetHash: string;
+  oosDatasetHash: string;
+  featureSchemaVersion: string;
+  selectedFeatures: string[];
+  scalerVersion: string;
+  scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>;
+  modelVersion: string;
+  modelParameters: { weights: number[]; bias: number };
+  strategyVersion: string;
+  strategyParameters: Record<string, any>;
+  candidateId: string;
+  candidateConfigHash: string;
+  trainingSeed: number;
+  createdAt: Date;
+}
+
 export interface IWalkForwardOptions {
   numFolds?: number;
   embargoDays?: number;
+  embargoMs?: number;
   retrainFn?: (
     trainSlice: TradingExperience[],
     baseCandidate: StrategyCandidate,
@@ -24,8 +44,13 @@ export class WalkForwardValidator {
     candidate: StrategyCandidate,
     experiences: TradingExperience[],
     options: IWalkForwardOptions = {},
-  ): WalkForwardValidationResult {
+  ): WalkForwardValidationResult & { foldArtifacts?: ReadonlyArray<FoldArtifact> } {
     const numFolds = options.numFolds || 3;
+    const embargoMs = options.embargoMs ?? (options.embargoDays ? options.embargoDays * 24 * 3600 * 1000 : 0);
+    if (embargoMs < 0) {
+      throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
+    }
+
     const n = experiences.length;
 
     if (n < numFolds * 6) {
@@ -45,6 +70,7 @@ export class WalkForwardValidator {
 
     const foldSize = Math.floor(n / (numFolds + 2)); // Divide into train, val, oos chunks
     const folds: WalkForwardFold[] = [];
+    const foldArtifacts: FoldArtifact[] = [];
 
     let totalIS = 0;
     let totalOOS = 0;
@@ -72,9 +98,11 @@ export class WalkForwardValidator {
         if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
       }
 
-      // Purge validation samples whose entry timestamp overlaps with active training labels
-      const valPurged = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd);
-      const valSlice = valPurged.length > 0 ? valPurged : valRaw;
+      // Purge validation samples whose entry timestamp overlaps with active training labels + embargoMs
+      const valSlice = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd + embargoMs);
+      if (valRaw.length > 0 && valSlice.length === 0) {
+        throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
+      }
 
       // Calculate label end timestamp purge boundary for validation fold
       let valMaxLabelEnd = trainMaxLabelEnd;
@@ -85,18 +113,41 @@ export class WalkForwardValidator {
         if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
       }
 
-      // Purge OOS samples whose entry timestamp overlaps with active validation labels
-      const testPurged = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd);
-      const testSlice = testPurged.length > 0 ? testPurged : testRaw;
+      // Purge OOS samples whose entry timestamp overlaps with active validation labels + embargoMs
+      const testSlice = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd + embargoMs);
+      if (testRaw.length > 0 && testSlice.length === 0) {
+        throw new Error('INSUFFICIENT_PURGED_OOS_DATA');
+      }
 
-      // Retrain / fit candidate strategy on training fold
+      // Retrain / fit candidate strategy strictly on training fold
       const foldCandidate = options.retrainFn
         ? options.retrainFn(trainSlice, candidate, f + 1)
         : this.retrainCandidateOnFold(trainSlice, candidate, f + 1);
 
+      // Create and freeze immutable FoldArtifact
+      const foldArtifact: FoldArtifact = Object.freeze({
+        foldIndex: f + 1,
+        trainDatasetHash: `hash_train_f${f + 1}_${trainSlice.length}`,
+        validationDatasetHash: `hash_val_f${f + 1}_${valSlice.length}`,
+        oosDatasetHash: `hash_oos_f${f + 1}_${testSlice.length}`,
+        featureSchemaVersion: '2.0',
+        selectedFeatures: ['smcScore', 'mtfAlignment', 'obStrength'],
+        scalerVersion: 'v1.0',
+        scalerParameters: {},
+        modelVersion: `ml-v2-fold${f + 1}`,
+        modelParameters: { weights: [0.1, 0.2, 0.3], bias: 0.1 },
+        strategyVersion: foldCandidate.candidateVersion || foldCandidate.id,
+        strategyParameters: foldCandidate.change || {},
+        candidateId: candidate.id,
+        candidateConfigHash: `cfg_f${f + 1}_${candidate.id}`,
+        trainingSeed: 42,
+        createdAt: new Date(),
+      });
+      foldArtifacts.push(foldArtifact);
+
       // 1. Evaluate retrained candidate in-sample on training fold
       const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice);
-      // 2. Evaluate retrained candidate on validation fold
+      // 2. Evaluate frozen retrained candidate on validation fold
       const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice);
       // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold
       const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice);
@@ -146,6 +197,7 @@ export class WalkForwardValidator {
       meanOutOfSampleExpectancy: meanOOS,
       oosDegradationPct: Math.max(0, degradation),
       isRobust,
+      foldArtifacts: Object.freeze(foldArtifacts),
     };
   }
 

@@ -25,15 +25,7 @@ export class MonteCarloEngine {
     const rng = new SeededRNG(seed);
 
     if (!rMultiples || rMultiples.length === 0) {
-      return {
-        iterations: 0,
-        probabilityOfRuin: 0,
-        expectedDrawdownPct: 0,
-        maxDrawdown95Pct: 0,
-        maxDrawdown99Pct: 0,
-        medianExpectancyR: 0,
-        isRobust: false,
-      };
+      throw new Error('INSUFFICIENT_CANDIDATE_EXECUTION_RESULTS');
     }
 
     const n = rMultiples.length;

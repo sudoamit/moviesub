@@ -116,14 +116,19 @@ export class DatasetManager {
 
   /**
    * Partitions a time-series dataset into strict sequential Train, Validation, and OOS splits
-   * with label end timestamp purging to prevent temporal overlap leakage.
+   * with label end timestamp purging and time-based embargo to prevent temporal overlap leakage.
    */
   splitDataset(
     datasetId: string,
     trainRatio = 0.6,
     valRatio = 0.2,
     oosRatio = 0.2,
+    embargoMs = 0,
   ): IDatasetSplits {
+    if (embargoMs < 0) {
+      throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
+    }
+
     const record = this.datasets.get(datasetId);
     if (!record) {
       throw new Error(`Dataset '${datasetId}' not found`);
@@ -144,8 +149,11 @@ export class DatasetManager {
       if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
     }
 
-    // Purge validation samples whose start timestamp is before/during active train label horizon
-    const valPurged = valRaw.filter((s) => s.timestamp > trainMaxLabelEnd);
+    // Purge validation samples starting before/during active train label horizon + embargoMs
+    const valPurged = valRaw.filter((s) => s.timestamp > trainMaxLabelEnd + embargoMs);
+    if (valRaw.length > 0 && valPurged.length === 0) {
+      throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
+    }
 
     // Calculate maximum label end timestamp in validation partition
     let valMaxLabelEnd = trainMaxLabelEnd;
@@ -154,13 +162,16 @@ export class DatasetManager {
       if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
     }
 
-    // Purge OOS samples whose start timestamp is before/during active validation label horizon
-    const oosPurged = oosRaw.filter((s) => s.timestamp > valMaxLabelEnd);
+    // Purge OOS samples starting before/during active validation label horizon + embargoMs
+    const oosPurged = oosRaw.filter((s) => s.timestamp > valMaxLabelEnd + embargoMs);
+    if (oosRaw.length > 0 && oosPurged.length === 0) {
+      throw new Error('INSUFFICIENT_PURGED_OOS_DATA');
+    }
 
     return {
       train: Object.freeze(trainRaw),
-      validation: Object.freeze(valPurged.length > 0 ? valPurged : valRaw),
-      outOfSample: Object.freeze(oosPurged.length > 0 ? oosPurged : oosRaw),
+      validation: Object.freeze(valPurged),
+      outOfSample: Object.freeze(oosPurged),
       metadata: record.metadata,
     };
   }

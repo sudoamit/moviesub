@@ -600,5 +600,42 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
     const wfRes = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 3 });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.folds[0].passed).toBe(true);
+    expect(wfRes.foldArtifacts).toBeDefined();
+    expect(wfRes.foldArtifacts?.length).toBeGreaterThan(0);
+    expect(Object.isFrozen(wfRes.foldArtifacts)).toBe(true);
+  });
+
+  // Test 21 — Monte Carlo empty R-multiples fail-closed
+  test('Test 21: MonteCarloEngine throws INSUFFICIENT_CANDIDATE_EXECUTION_RESULTS on empty R-multiples', () => {
+    expect(() => {
+      MonteCarloEngine.simulate([]);
+    }).toThrow('INSUFFICIENT_CANDIDATE_EXECUTION_RESULTS');
+  });
+
+  // Test 22 — Empty purged validation dataset fail-closed
+  test('Test 22: DatasetManager throws INSUFFICIENT_PURGED_VALIDATION_DATA when all validation samples overlap', () => {
+    const ds = new DatasetManager();
+    const overlappingSamples = [
+      { sampleId: 's1', timestamp: 1000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's2', timestamp: 2000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+
+    const rec = ds.createDataset('BTCUSDT', '15m', overlappingSamples);
+    expect(() => {
+      ds.splitDataset(rec.metadata.datasetId, 0.5, 0.5, 0.0);
+    }).toThrow('INSUFFICIENT_PURGED_VALIDATION_DATA');
+  });
+
+  // Test 23 — Invalid embargo duration fail-closed
+  test('Test 23: DatasetManager throws INVALID_EMBARGO_DURATION on negative embargoMs', () => {
+    const ds = new DatasetManager();
+    const samples = [
+      { sampleId: 's1', timestamp: 1000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+    ];
+    const rec = ds.createDataset('BTCUSDT', '15m', samples);
+
+    expect(() => {
+      ds.splitDataset(rec.metadata.datasetId, 0.5, 0.5, 0.0, -100);
+    }).toThrow('INVALID_EMBARGO_DURATION:-100');
   });
 });

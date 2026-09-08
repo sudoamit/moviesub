@@ -9,6 +9,7 @@ import {
 } from '@quant/shared';
 import { IPartialExitPolicy, PositionLot, IExecutionEvent } from '@quant/risk-engine';
 import { FillModel, SameCandleAmbiguityMode } from './execution/types';
+export { FillModel, SameCandleAmbiguityMode };
 
 export interface IEquityPoint {
   timestamp: Date;
