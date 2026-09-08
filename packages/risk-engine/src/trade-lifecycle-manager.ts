@@ -100,8 +100,8 @@ export class TradeLifecycleManager {
   }
 
   /**
-   * Evaluates a candle against an active PositionLot with partial scale-outs,
-   * MAE/MFE tracking, and explicit execution events.
+   * @deprecated Synthetic lifecycle tick evaluation is disabled for backtesting.
+   * Backtesting MUST use ExecutionSimulator and FillModelEngine directly for authoritative order execution.
    */
   static evaluateLotTick(
     lot: PositionLot,
@@ -112,12 +112,18 @@ export class TradeLifecycleManager {
       : typeof candle.timestamp === 'number'
         ? candle.timestamp
         : Date.now(),
+    forBacktest: boolean = false,
   ): {
     lot: PositionLot;
     events: IExecutionEvent[];
     isClosed: boolean;
     state: SignalState;
   } {
+    if (forBacktest) {
+      throw new Error(
+        'Synthetic lifecycle evaluation (evaluateLotTick) is deprecated and disabled for backtesting. Backtests must use ExecutionSimulator.',
+      );
+    }
     const isLong = lot.direction === Direction.BULLISH;
     const high = candle.high;
     const low = candle.low;

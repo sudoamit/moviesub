@@ -43,6 +43,8 @@ export interface IOrder {
   maxRiskDrift?: number;
   signalTimestamp?: number;
   ambiguityMode?: SameCandleAmbiguityMode;
+  exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+  ocoGroupId?: string;
 }
 
 export interface IFill {
@@ -57,6 +59,7 @@ export interface IFill {
   slippage: number;
   timestamp: number;
   isPartial: boolean;
+  exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
 }
 
 export interface ISlippageConfig {

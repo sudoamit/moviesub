@@ -11,6 +11,7 @@ export class FillModelEngine {
   static validateSubBars(
     parentCandle: ICandle,
     lowerTfCandles?: ICandle[],
+    parentDurationMs: number = 60 * 60 * 1000,
   ): { isValid: boolean; reason?: string } {
     if (!lowerTfCandles || lowerTfCandles.length === 0) {
       return { isValid: false, reason: 'MISSING_LOWER_TF_DATA' };
@@ -20,6 +21,8 @@ export class FillModelEngine {
       parentCandle.timestamp instanceof Date
         ? parentCandle.timestamp.getTime()
         : new Date(parentCandle.timestamp).getTime();
+
+    const parentCloseTime = parentOpenTime + parentDurationMs;
 
     let prevTime = -1;
     for (const sub of lowerTfCandles) {
@@ -31,6 +34,11 @@ export class FillModelEngine {
       // Check sub-bar belongs to current parent candle start boundary
       if (subTime < parentOpenTime) {
         return { isValid: false, reason: 'SUBBAR_OUT_OF_BOUNDS_PAST' };
+      }
+
+      // Check sub-bar does not exceed parent candle end boundary
+      if (subTime >= parentCloseTime) {
+        return { isValid: false, reason: 'SUBBAR_OUT_OF_BOUNDS_FUTURE' };
       }
 
       // Check strict ascending chronological order
@@ -200,6 +208,7 @@ export class FillModelEngine {
         slippage: slip.slippageAmount,
         timestamp: fillTime,
         isPartial: false,
+        exitTarget: order.exitTarget,
       };
       return { isFilled: true, fill };
     }
@@ -254,6 +263,7 @@ export class FillModelEngine {
         slippage: slip.slippageAmount,
         timestamp: candleTime,
         isPartial: false,
+        exitTarget: order.exitTarget,
       };
       return { isFilled: true, fill };
     }
@@ -307,6 +317,7 @@ export class FillModelEngine {
         slippage: slip.slippageAmount,
         timestamp: candleTime,
         isPartial: false,
+        exitTarget: order.exitTarget,
       };
       return { isFilled: true, fill };
     }
@@ -344,6 +355,7 @@ export class FillModelEngine {
         slippage: slip.slippageAmount,
         timestamp: candleTime,
         isPartial: false,
+        exitTarget: order.exitTarget,
       };
       return { isFilled: true, fill };
     }

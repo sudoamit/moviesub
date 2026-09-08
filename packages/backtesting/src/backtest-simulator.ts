@@ -55,6 +55,8 @@ export class BacktestSimulator {
 
     if (remainingQty <= 0) return;
 
+    const ocoGroupId = `oco_${lot.tradeId}_${timestamp}`;
+
     // 1. Resting Stop Loss Order
     execSim.submitOrder({
       tradeId: lot.tradeId,
@@ -64,6 +66,8 @@ export class BacktestSimulator {
       stopPrice: lot.currentStopLoss,
       quantity: remainingQty,
       timestamp,
+      exitTarget: lot.currentStopLoss === lot.entryPrice ? 'TRAILING_STOP' : 'SL',
+      ocoGroupId,
     });
 
     // 2. Resting Target Orders (TP1, TP2, TP3)
@@ -84,6 +88,8 @@ export class BacktestSimulator {
           price: lot.tp1,
           quantity: tp1Qty,
           timestamp,
+          exitTarget: 'TP1',
+          ocoGroupId,
         });
       }
     }
@@ -103,6 +109,8 @@ export class BacktestSimulator {
           price: lot.tp2,
           quantity: tp2Qty,
           timestamp,
+          exitTarget: 'TP2',
+          ocoGroupId,
         });
       }
     }
@@ -121,6 +129,8 @@ export class BacktestSimulator {
           price: lot.tp3,
           quantity: tp3Qty,
           timestamp,
+          exitTarget: 'TP3',
+          ocoGroupId,
         });
       }
     }
@@ -517,6 +527,7 @@ export class BacktestSimulator {
               maxRiskDrift: 0.25,
               signalTimestamp: mtfData.timestamp,
               ambiguityMode,
+              exitTarget: 'ENTRY',
             });
           }
         }

@@ -41,7 +41,15 @@ export class ExecutionSimulator {
     maxRiskDrift?: number;
     signalTimestamp?: number;
     ambiguityMode?: SameCandleAmbiguityMode;
+    exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+    ocoGroupId?: string;
   }): IOrder {
+    if (params.signalTimestamp && params.timestamp < params.signalTimestamp) {
+      throw new Error(
+        `Order creation timestamp (${params.timestamp}) cannot precede signal timestamp (${params.signalTimestamp})`,
+      );
+    }
+
     this.orderCounter++;
     const orderId = `${this.runId}_ord_${this.orderCounter}`;
     const clientOrderId = params.clientOrderId || `${this.runId}_cl_${this.orderCounter}`;
@@ -66,6 +74,8 @@ export class ExecutionSimulator {
       maxRiskDrift: params.maxRiskDrift,
       signalTimestamp: params.signalTimestamp,
       ambiguityMode: params.ambiguityMode || this.ambiguityMode,
+      exitTarget: params.exitTarget,
+      ocoGroupId: params.ocoGroupId,
     };
 
     this.orders.set(orderId, order);
@@ -133,6 +143,10 @@ export class ExecutionSimulator {
 
           this.events.push(fillEvent);
           newEvents.push(fillEvent);
+
+          if (order.ocoGroupId) {
+            this.cancelOcoGroup(order.ocoGroupId, order.orderId);
+          }
         }
       } else {
         // Multiple pending orders for trade -> Centralized Ambiguity Conflict Resolution
@@ -179,6 +193,10 @@ export class ExecutionSimulator {
 
           this.events.push(fillEvent);
           newEvents.push(fillEvent);
+
+          if (order.ocoGroupId) {
+            this.cancelOcoGroup(order.ocoGroupId, order.orderId);
+          }
         }
       }
     }
@@ -199,6 +217,21 @@ export class ExecutionSimulator {
     let count = 0;
     for (const order of this.orders.values()) {
       if (order.tradeId === tradeId && order.status === 'PENDING') {
+        order.status = 'CANCELLED';
+        count++;
+      }
+    }
+    return count;
+  }
+
+  cancelOcoGroup(ocoGroupId: string, exceptOrderId?: string): number {
+    let count = 0;
+    for (const order of this.orders.values()) {
+      if (
+        order.ocoGroupId === ocoGroupId &&
+        order.orderId !== exceptOrderId &&
+        order.status === 'PENDING'
+      ) {
         order.status = 'CANCELLED';
         count++;
       }
