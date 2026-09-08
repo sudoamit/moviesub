@@ -280,6 +280,8 @@ export interface IEntryExecutionSnapshot {
   slippage: number;
   signalTimestamp: number;
   executionTimestamp: number;
+  orderCreatedAt?: number;
+  orderSubmittedAt?: number;
   orderId?: string;
   clientOrderId?: string;
   side: 'BUY' | 'SELL';
@@ -313,6 +315,9 @@ export interface IBacktestTrade {
   entryFees?: number;
   entrySlippage?: number;
   exitOrderTimestamp?: Date;
+  exitOrderCreatedAt?: Date;
+  exitOrderSubmittedAt?: Date;
+  exitTriggerTimestamp?: Date;
   exitFillTimestamp?: Date;
   exitFillPrice?: number;
   exitFees?: number;

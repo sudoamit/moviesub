@@ -21,6 +21,8 @@ export interface IEntryExecutionSnapshot {
   slippage: number;
   signalTimestamp: number;
   executionTimestamp: number;
+  orderCreatedAt?: number;
+  orderSubmittedAt?: number;
   orderId?: string;
   clientOrderId?: string;
   side: 'BUY' | 'SELL';
@@ -48,6 +50,10 @@ export interface IExecutionEvent {
   exitClientOrderId?: string;
   triggerPrice?: number;
   executedPrice?: number;
+  exitOrderCreatedAt?: number;
+  exitOrderSubmittedAt?: number;
+  exitTriggerTimestamp?: number;
+  exitFillTimestamp?: number;
 }
 
 export interface IPartialFillRecord {
@@ -65,6 +71,10 @@ export interface IPartialFillRecord {
   exitClientOrderId?: string;
   triggerPrice?: number;
   executedPrice?: number;
+  exitOrderCreatedAt?: number;
+  exitOrderSubmittedAt?: number;
+  exitTriggerTimestamp?: number;
+  exitFillTimestamp?: number;
 }
 
 export interface IPartialExitPolicy {

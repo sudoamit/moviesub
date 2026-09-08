@@ -2,6 +2,7 @@ import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCan
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
+import { OHLCPathCursor } from './ohlc-path-cursor';
 
 export class ExecutionSimulator {
   private orders: Map<string, IOrder> = new Map();
@@ -48,6 +49,19 @@ export class ExecutionSimulator {
       throw new Error(
         `Order creation timestamp (${params.timestamp}) cannot precede signal timestamp (${params.signalTimestamp})`,
       );
+    }
+
+    // P1-5: Prevent duplicate active orders per exit target (TP1, TP2, TP3, SL) for a trade
+    if (params.exitTarget && ['TP1', 'TP2', 'TP3', 'SL', 'TRAILING_STOP'].includes(params.exitTarget)) {
+      for (const existingOrder of this.orders.values()) {
+        if (
+          existingOrder.tradeId === params.tradeId &&
+          existingOrder.exitTarget === params.exitTarget &&
+          existingOrder.status === 'PENDING'
+        ) {
+          existingOrder.status = 'CANCELLED';
+        }
+      }
     }
 
     this.orderCounter++;
@@ -129,109 +143,176 @@ export class ExecutionSimulator {
       pendingByTrade.set(order.tradeId, list);
     }
 
-    for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
-      let currentOrders = [...tradeOrders];
+    const candleTime =
+      candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
 
-      while (currentOrders.length > 0) {
-        const triggered: { order: IOrder; fill: IFill }[] = [];
-        for (const order of currentOrders) {
-          if (order.status !== 'PENDING') continue;
-          const res = FillModelEngine.evaluateFill(
-            order,
+    // P1-E: LOWER_TIMEFRAME sub-bar evaluation mode
+    const isLowerTfMode =
+      (this.fillModel === FillModel.LOWER_TIMEFRAME ||
+        this.ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) &&
+      lowerTfCandles !== undefined &&
+      lowerTfCandles.length > 0;
+
+    if (isLowerTfMode) {
+      const subValidation = FillModelEngine.validateSubBars(candle, lowerTfCandles, parentDurationMs);
+      if (!subValidation.isValid) {
+        return { fills: [], events: [] };
+      }
+      for (const m1 of lowerTfCandles!) {
+        const subRes = this.processCandle(m1);
+        newFills.push(...subRes.fills);
+        newEvents.push(...subRes.events);
+      }
+      return { fills: newFills, events: newEvents };
+    }
+
+    for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
+      // P0/P1-1: OHLCPathCursor for progressive segment evaluation
+      const cursor = new OHLCPathCursor(candle);
+
+      while (!cursor.isFinished) {
+        const seg = cursor.currentSegment;
+        if (!seg) break;
+
+        let segHasTrigger = false;
+        let currentOrders = Array.from(this.orders.values()).filter(
+          (o) => o.tradeId === tradeId && o.status === 'PENDING',
+        );
+
+        while (currentOrders.length > 0) {
+          const triggered: { order: IOrder; fill: IFill }[] = [];
+          for (const order of currentOrders) {
+            if (order.status !== 'PENDING') continue;
+
+            let res: { isFilled: boolean; fill?: IFill };
+            if (this.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
+              res = FillModelEngine.evaluateFill(
+                order,
+                candle,
+                nextCandle,
+                this.fillModel,
+                lowerTfCandles,
+                parentDurationMs,
+              );
+            } else {
+              res = FillModelEngine.evaluateSegmentFill(
+                order,
+                seg.start,
+                seg.end,
+                candleTime,
+                order.symbol,
+              );
+            }
+
+            if (res.isFilled && res.fill) {
+              triggered.push({ order, fill: res.fill });
+            }
+          }
+
+          if (triggered.length === 0) break;
+
+          const nextTrigger = this.selectNextTrigger(
+            triggered,
             candle,
             nextCandle,
-            this.fillModel,
             lowerTfCandles,
             parentDurationMs,
           );
-          if (res.isFilled && res.fill) {
-            triggered.push({ order, fill: res.fill });
-          }
-        }
+          if (!nextTrigger) break;
 
-        if (triggered.length === 0) break;
+          const { order, fill } = nextTrigger;
+          segHasTrigger = true;
 
-        const nextTrigger = this.selectNextTrigger(triggered, candle, nextCandle, lowerTfCandles, parentDurationMs);
-        if (!nextTrigger) break;
+          this.fillCounter++;
+          fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+          fill.orderCreatedAt = order.createdAt;
+          fill.orderSubmittedAt = order.submittedAt;
+          fill.exitOrderCreatedAt = order.createdAt;
+          fill.exitOrderSubmittedAt = order.submittedAt;
+          fill.exitTriggerTimestamp = fill.timestamp;
+          fill.exitFillTimestamp = fill.timestamp;
 
-        const { order, fill } = nextTrigger;
+          order.status = 'FILLED';
+          order.filledAt = fill.timestamp;
+          order.avgFillPrice = fill.price;
+          order.fees = fill.fee;
+          order.slippage = fill.slippage;
+          order.remainingQuantity = 0;
 
-        this.fillCounter++;
-        fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
+          this.fills.push(fill);
+          newFills.push(fill);
 
-        order.status = 'FILLED';
-        order.filledAt = fill.timestamp;
-        order.avgFillPrice = fill.price;
-        order.fees = fill.fee;
-        order.slippage = fill.slippage;
-        order.remainingQuantity = 0;
+          const eventType =
+            order.exitTarget === 'ENTRY'
+              ? 'ENTRY_FILLED'
+              : order.orderType === 'STOP'
+                ? 'STOP_FILLED'
+                : 'TP_FILLED';
 
-        this.fills.push(fill);
-        newFills.push(fill);
+          this.eventCounter++;
+          const fillEvent: IExecutionEvent = {
+            eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
+            tradeId: order.tradeId,
+            orderId: order.orderId,
+            symbol: order.symbol,
+            eventType: eventType as any,
+            timestamp: fill.timestamp,
+            price: fill.price,
+            quantity: fill.quantity,
+            remainingQuantity: 0,
+            fees: fill.fee,
+            slippage: fill.slippage,
+            reason: `Order ${order.orderId} filled at ${fill.price}`,
+            exitTarget: fill.exitTarget || order.exitTarget,
+            exitOrderId: order.orderId,
+            exitClientOrderId: order.clientOrderId,
+            triggerPrice: order.stopPrice || order.price,
+            executedPrice: fill.price,
+            exitOrderCreatedAt: order.createdAt,
+            exitOrderSubmittedAt: order.submittedAt,
+            exitTriggerTimestamp: fill.timestamp,
+            exitFillTimestamp: fill.timestamp,
+          };
 
-        const eventType =
-          order.exitTarget === 'ENTRY'
-            ? 'ENTRY_FILLED'
-            : order.orderType === 'STOP'
-              ? 'STOP_FILLED'
-              : 'TP_FILLED';
+          this.events.push(fillEvent);
+          newEvents.push(fillEvent);
 
-        this.eventCounter++;
-        const fillEvent: IExecutionEvent = {
-          eventId: `${this.runId}_evt_fill_${this.eventCounter}`,
-          tradeId: order.tradeId,
-          orderId: order.orderId,
-          symbol: order.symbol,
-          eventType: eventType as any,
-          timestamp: fill.timestamp,
-          price: fill.price,
-          quantity: fill.quantity,
-          remainingQuantity: 0,
-          fees: fill.fee,
-          slippage: fill.slippage,
-          reason: `Order ${order.orderId} filled at ${fill.price}`,
-          exitTarget: fill.exitTarget || order.exitTarget,
-          exitOrderId: order.orderId,
-          exitClientOrderId: order.clientOrderId,
-          triggerPrice: order.stopPrice || order.price,
-          executedPrice: fill.price,
-        };
+          if (order.orderType === 'STOP') {
+            // Protective stop triggered -> Full exit, cancel all remaining orders for trade
+            this.cancelTradeOrders(tradeId);
+            break;
+          } else {
+            // Target limit order triggered -> Update protective stop order quantity to remaining open position size
+            const remainingOrders = Array.from(this.orders.values()).filter(
+              (o) => o.tradeId === tradeId && o.status === 'PENDING',
+            );
+            if (remainingOrders.length === 0) break;
 
-        this.events.push(fillEvent);
-        newEvents.push(fillEvent);
+            const slOrder = remainingOrders.find((o) => o.orderType === 'STOP');
+            if (slOrder) {
+              const initialQty = (slOrder as any)._initialQty || slOrder.quantity;
+              const totalExitFilledQty = this.fills
+                .filter((f) => f.tradeId === tradeId && f.exitTarget !== 'ENTRY')
+                .reduce((sum, f) => sum + f.quantity, 0);
+              const remainingPosQty = Math.max(0, initialQty - totalExitFilledQty);
 
-        if (order.orderType === 'STOP') {
-          // Protective stop triggered -> Full exit, cancel all remaining orders for trade
-          this.cancelTradeOrders(tradeId);
-          break;
-        } else {
-          // Target limit order triggered -> Update protective stop order quantity to remaining open position size
-          const remainingOrders = Array.from(this.orders.values()).filter(
-            (o) => o.tradeId === tradeId && o.status === 'PENDING',
-          );
-          if (remainingOrders.length === 0) break;
-
-          const slOrder = remainingOrders.find((o) => o.orderType === 'STOP');
-          if (slOrder) {
-            const initialQty = (slOrder as any)._initialQty || slOrder.quantity;
-            const totalExitFilledQty = this.fills
-              .filter((f) => f.tradeId === tradeId && f.exitTarget !== 'ENTRY')
-              .reduce((sum, f) => sum + f.quantity, 0);
-            const remainingPosQty = Math.max(0, initialQty - totalExitFilledQty);
-
-            if (remainingPosQty > 0) {
-              slOrder.quantity = remainingPosQty;
-              slOrder.remainingQuantity = remainingPosQty;
-            } else {
-              this.cancelTradeOrders(tradeId);
-              break;
+              if (remainingPosQty > 0) {
+                slOrder.quantity = remainingPosQty;
+                slOrder.remainingQuantity = remainingPosQty;
+              } else {
+                this.cancelTradeOrders(tradeId);
+                break;
+              }
             }
           }
+
+          currentOrders = Array.from(this.orders.values()).filter(
+            (o) => o.tradeId === tradeId && o.status === 'PENDING',
+          );
         }
 
-        currentOrders = Array.from(this.orders.values()).filter(
-          (o) => o.tradeId === tradeId && o.status === 'PENDING',
-        );
+        // Advance cursor to next segment along path
+        cursor.advance();
       }
     }
 

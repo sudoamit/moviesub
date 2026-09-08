@@ -344,6 +344,11 @@ export class BacktestSimulator {
             realizedR: chunkR,
             fee: exitFill.fee,
             slippage: exitFill.slippage,
+            exitOrderId: exitFill.orderId,
+            exitOrderCreatedAt: exitFill.exitOrderCreatedAt,
+            exitOrderSubmittedAt: exitFill.exitOrderSubmittedAt,
+            exitTriggerTimestamp: exitFill.exitTriggerTimestamp,
+            exitFillTimestamp: exitFill.exitFillTimestamp,
           });
 
           if (activeLot.remainingQuantity <= 0) {
@@ -413,10 +418,10 @@ export class BacktestSimulator {
               activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
             ),
             orderCreatedAt: new Date(
-              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+              activeLot.entrySnapshot?.orderCreatedAt || activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
             ),
             orderSubmittedAt: new Date(
-              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
+              activeLot.entrySnapshot?.orderSubmittedAt || activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
             ),
             entryFillTimestamp: new Date(
               activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt,
@@ -428,6 +433,9 @@ export class BacktestSimulator {
             entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
             entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
             exitOrderTimestamp: new Date(lastFill?.timestamp || candleTime),
+            exitOrderCreatedAt: lastFill?.exitOrderCreatedAt ? new Date(lastFill.exitOrderCreatedAt) : new Date(lastFill?.timestamp || candleTime),
+            exitOrderSubmittedAt: lastFill?.exitOrderSubmittedAt ? new Date(lastFill.exitOrderSubmittedAt) : new Date(lastFill?.timestamp || candleTime),
+            exitTriggerTimestamp: lastFill?.exitTriggerTimestamp ? new Date(lastFill.exitTriggerTimestamp) : new Date(lastFill?.timestamp || candleTime),
             exitFillTimestamp: new Date(lastFill?.timestamp || candleTime),
             exitFillPrice: lastFill?.price || activeLot.entryPrice,
             exitFees: totalFees - (firstFill?.fee || 0),

@@ -60,6 +60,12 @@ export interface IFill {
   timestamp: number;
   isPartial: boolean;
   exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+  orderCreatedAt?: number;
+  orderSubmittedAt?: number;
+  exitOrderCreatedAt?: number;
+  exitOrderSubmittedAt?: number;
+  exitTriggerTimestamp?: number;
+  exitFillTimestamp?: number;
 }
 
 export interface ISlippageConfig {
