@@ -26,5 +26,8 @@ export * from './learning-scheduler';
 export * from './learning-engine';
 export * from './counterfactual-analyzer';
 export * from './dataset-manager';
+export * from './point-in-time-validator';
+export * from './feature-scaler';
+export * from './seeded-rng';
 export * from './experiments';
 export * from './research';

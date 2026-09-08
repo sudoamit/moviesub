@@ -36,7 +36,7 @@ export class CandidateGenerator {
         evidence: {
           sampleSize: pat.sampleSize,
           expectancyBefore: pat.expectancy,
-          expectancyAfterHistorical: Number((pat.expectancy * -0.5).toFixed(2)),
+          expectancyAfterHistorical: pat.expectancy, // Initialized to baseline prior to actual simulation
           confidenceInterval: pat.confidenceInterval,
           pValue: pat.pVal,
         },
@@ -83,7 +83,7 @@ export class CandidateGenerator {
           evidence: {
             sampleSize: driver.count,
             expectancyBefore: driver.averageR,
-            expectancyAfterHistorical: Number((driver.averageR + 0.35).toFixed(2)),
+            expectancyAfterHistorical: driver.averageR, // Initialized to baseline prior to actual simulation
           },
           status: 'GENERATED',
           createdAt: new Date(),
@@ -108,7 +108,7 @@ export class CandidateGenerator {
         evidence: {
           sampleSize: pat.sampleSize,
           expectancyBefore: pat.expectancy,
-          expectancyAfterHistorical: Number((pat.expectancy * 1.15).toFixed(2)),
+          expectancyAfterHistorical: pat.expectancy, // Initialized to baseline prior to actual simulation
           confidenceInterval: pat.confidenceInterval,
           pValue: pat.pVal,
         },

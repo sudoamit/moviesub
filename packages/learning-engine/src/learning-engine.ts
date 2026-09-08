@@ -80,9 +80,12 @@ export class LearningEngine {
       // 7c. Robustness & Transaction Costs
       const costEval = RobustnessEngine.evaluateCosts(cand, experiences);
 
-      // 7d. Monte Carlo Stress Simulation
-      const rMultiples = experiences.map((e) => e.outcome.pnlR);
-      const mcEval = MonteCarloEngine.simulate(rMultiples);
+      // 7d. Candidate-Specific Seeded Monte Carlo Stress Simulation
+      const candRMultiples =
+        histEval.simulatedRMultiples && histEval.simulatedRMultiples.length > 0
+          ? histEval.simulatedRMultiples
+          : experiences.map((e) => e.outcome.pnlR);
+      const mcEval = MonteCarloEngine.simulate(candRMultiples, { seed: 42 });
 
       cand.validationMetrics = {
         inSampleExpectancy: wfEval.meanInSampleExpectancy || histEval.candidateExpectancy,

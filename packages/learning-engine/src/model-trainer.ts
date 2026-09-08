@@ -15,12 +15,14 @@ export interface ITrainedModelArtifact {
   trainedAt: Date;
 }
 
+import { IDatasetSample } from './dataset-manager';
+
 export class ModelTrainer {
   /**
-   * Trains a canonical 28-dimensional logistic model on historical trading experiences with L2 regularization.
+   * Trains a canonical 28-dimensional logistic model on an EXPLICIT temporal training dataset slice.
    */
   public static trainModel(
-    experiences: TradingExperience[],
+    trainingDataset: (TradingExperience | IDatasetSample)[],
     epochs = 50,
     learningRate = 0.05,
     l2Lambda = 0.01,
@@ -30,7 +32,7 @@ export class ModelTrainer {
     );
     let bias = 0.1;
 
-    if (experiences.length === 0) {
+    if (!trainingDataset || trainingDataset.length === 0) {
       return {
         modelVersion: `ml-v2-${Date.now()}`,
         weights,
@@ -43,13 +45,14 @@ export class ModelTrainer {
     }
 
     const samples: { features: number[]; label: number }[] = [];
-    for (const exp of experiences) {
+    for (const exp of trainingDataset) {
       const featVector: number[] = [];
+      const feats = 'features' in exp ? exp.features : exp.marketState?.quant;
       for (const name of CANONICAL_FEATURE_NAMES_V2) {
-        const val = exp.marketState?.quant?.[name] ?? 0.5;
+        const val = feats?.[name] ?? 0.5;
         featVector.push(typeof val === 'number' ? val : 0.5);
       }
-      const label = exp.outcome.status === 'WIN' ? 1.0 : 0.0;
+      const label = 'labelBinary' in exp ? exp.labelBinary : (exp.outcome?.status === 'WIN' ? 1.0 : 0.0);
       samples.push({ features: featVector, label });
     }
 

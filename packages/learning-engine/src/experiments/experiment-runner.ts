@@ -105,7 +105,7 @@ export class ExperimentRunner {
   }
 
   private static evaluatePartition(
-    samples: import('../dataset-manager').IDatasetSample[],
+    samples: ReadonlyArray<import('../dataset-manager').IDatasetSample>,
   ): IExperimentMetrics {
     if (!samples || samples.length === 0) {
       return {
@@ -164,7 +164,7 @@ export class ExperimentRunner {
   }
 
   private static simulateMonteCarlo(
-    samples: import('../dataset-manager').IDatasetSample[],
+    samples: ReadonlyArray<import('../dataset-manager').IDatasetSample>,
     seed: number,
   ): { ruinProb: number; maxDD95: number } {
     if (!samples || samples.length === 0) {

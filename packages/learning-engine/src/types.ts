@@ -45,6 +45,10 @@ export interface TradingExperience {
   tradeId: string;
   signalId?: string;
   timestamp: Date;
+  decisionTimestamp?: number;
+  featureTimestamp?: number;
+  labelStartTimestamp?: number;
+  labelEndTimestamp?: number;
   instrument: {
     symbol: string;
     assetType: string;
@@ -99,6 +103,17 @@ export interface TradingExperience {
   modelVersion?: string;
   featureSchemaVersion: string;
   createdAt: Date;
+}
+
+export interface DeploymentBundle {
+  bundleId: string;
+  strategyVersion: string;
+  modelVersion: string;
+  featureSchemaVersion: string;
+  riskConfigVersion: string;
+  executionConfigVersion: string;
+  deployedAt: Date;
+  status: 'ACTIVE' | 'PREVIOUS' | 'ROLLED_BACK';
 }
 
 export interface IFailureModeStats {

@@ -48,8 +48,10 @@ export class ModelRegistry {
   public static promoteModel(modelVersion: string): void {
     const current = this.models.get(this.activeModelVersion);
     if (current) {
-      current.status = 'RETIRED';
-      current.retiredAt = new Date();
+      this.models.set(
+        this.activeModelVersion,
+        Object.freeze({ ...current, status: 'RETIRED', retiredAt: new Date() }),
+      );
     }
 
     const candidate = this.models.get(modelVersion);
@@ -57,8 +59,10 @@ export class ModelRegistry {
       throw new Error(`Model version ${modelVersion} not found in registry.`);
     }
 
-    candidate.status = 'ACTIVE';
-    candidate.promotedAt = new Date();
+    this.models.set(
+      modelVersion,
+      Object.freeze({ ...candidate, status: 'ACTIVE', promotedAt: new Date() }),
+    );
     this.activeModelVersion = modelVersion;
   }
 
@@ -68,8 +72,10 @@ export class ModelRegistry {
   public static rollbackModel(targetModelVersion: string): void {
     const current = this.models.get(this.activeModelVersion);
     if (current) {
-      current.status = 'ROLLED_BACK';
-      current.retiredAt = new Date();
+      this.models.set(
+        this.activeModelVersion,
+        Object.freeze({ ...current, status: 'ROLLED_BACK', retiredAt: new Date() }),
+      );
     }
 
     const target = this.models.get(targetModelVersion);
@@ -77,7 +83,7 @@ export class ModelRegistry {
       throw new Error(`Target model version ${targetModelVersion} not found in registry.`);
     }
 
-    target.status = 'ACTIVE';
+    this.models.set(targetModelVersion, Object.freeze({ ...target, status: 'ACTIVE' }));
     this.activeModelVersion = targetModelVersion;
   }
 

@@ -1,4 +1,5 @@
 import { TradingExperience } from './types';
+import { PointInTimeValidator } from './point-in-time-validator';
 
 export interface IExperienceFilter {
   symbol?: string;
@@ -25,7 +26,21 @@ export class ExperienceStore {
         `TradingExperience with id ${exp.id} already exists (Immutability Violation).`,
       );
     }
-    const frozen = Object.freeze({ ...exp });
+
+    const valResult = PointInTimeValidator.validatePointInTimeExperience(exp);
+    if (!valResult.isValid) {
+      throw new Error(`Point-In-Time Experience Invariant Violation: ${valResult.reason}`);
+    }
+
+    const prepared: TradingExperience = {
+      ...exp,
+      decisionTimestamp: valResult.decisionTimestamp,
+      featureTimestamp: valResult.featureTimestamp,
+      labelStartTimestamp: valResult.labelStartTimestamp,
+      labelEndTimestamp: valResult.labelEndTimestamp,
+    };
+
+    const frozen = Object.freeze(prepared);
     this.experiences.set(exp.id, frozen);
     return frozen;
   }
@@ -36,7 +51,17 @@ export class ExperienceStore {
   public static loadExperiences(exps: TradingExperience[]): void {
     for (const exp of exps) {
       if (!this.experiences.has(exp.id)) {
-        this.experiences.set(exp.id, Object.freeze({ ...exp }));
+        const valResult = PointInTimeValidator.validatePointInTimeExperience(exp);
+        if (valResult.isValid) {
+          const prepared: TradingExperience = {
+            ...exp,
+            decisionTimestamp: valResult.decisionTimestamp,
+            featureTimestamp: valResult.featureTimestamp,
+            labelStartTimestamp: valResult.labelStartTimestamp,
+            labelEndTimestamp: valResult.labelEndTimestamp,
+          };
+          this.experiences.set(exp.id, Object.freeze(prepared));
+        }
       }
     }
   }

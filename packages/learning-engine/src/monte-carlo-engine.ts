@@ -1,14 +1,17 @@
 import { MonteCarloSimulationResult } from './types';
+import { SeededRNG } from './seeded-rng';
 
 export interface IMonteCarloOptions {
   iterations?: number;
   ruinThresholdDrawdownR?: number; // default 20R drawdown = ruin
   slippageNoiseStdDevR?: number;
+  seed?: number;
 }
 
 export class MonteCarloEngine {
   /**
-   * Performs randomized Monte Carlo simulations (trade order reshuffling, slippage noise, win/loss sequencing).
+   * Performs candidate-specific Monte Carlo simulations (trade order reshuffling, slippage noise, win/loss sequencing)
+   * using a deterministic seeded PRNG.
    */
   public static simulate(
     rMultiples: number[],
@@ -17,6 +20,9 @@ export class MonteCarloEngine {
     const iterations = options.iterations || 1000;
     const ruinThreshold = options.ruinThresholdDrawdownR || 20.0;
     const noiseStd = options.slippageNoiseStdDevR || 0.05;
+    const seed = options.seed !== undefined ? options.seed : 42;
+
+    const rng = new SeededRNG(seed);
 
     if (!rMultiples || rMultiples.length === 0) {
       return {
@@ -36,15 +42,15 @@ export class MonteCarloEngine {
     let ruinCount = 0;
 
     for (let iter = 0; iter < iterations; iter++) {
-      // Reshuffle sample with replacement (Bootstrap) + apply Gaussian slippage noise
+      // Reshuffle sample with replacement (Bootstrap) + apply Gaussian slippage noise via SeededRNG
       let runningR = 0;
       let peakR = 0;
       let maxDD = 0;
 
       for (let i = 0; i < n; i++) {
-        const randIdx = Math.floor(Math.random() * n);
+        const randIdx = rng.nextInt(0, n - 1);
         const baseR = rMultiples[randIdx];
-        const noise = (Math.random() - 0.5) * 2 * noiseStd;
+        const noise = rng.nextGaussian(0, noiseStd);
         const noisyR = baseR + noise;
 
         runningR += noisyR;

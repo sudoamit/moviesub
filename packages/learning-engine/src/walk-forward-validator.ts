@@ -38,7 +38,7 @@ export class WalkForwardValidator {
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
-    const foldSize = Math.floor(n / (numFolds + 1));
+    const foldSize = Math.floor(n / (numFolds + 2)); // Divide into train, val, oos chunks
     const folds: WalkForwardFold[] = [];
 
     let totalIS = 0;
@@ -47,13 +47,22 @@ export class WalkForwardValidator {
     for (let f = 0; f < numFolds; f++) {
       const trainStart = 0;
       const trainEnd = (f + 1) * foldSize;
-      const testStart = trainEnd + 1; // 1-bar embargo
+      const valStart = trainEnd + 1; // 1-bar embargo
+      const valEnd = Math.min(n - 1, valStart + Math.max(1, Math.floor(foldSize / 2)));
+      const testStart = valEnd + 1; // 1-bar embargo
       const testEnd = Math.min(n - 1, testStart + foldSize);
 
       const trainSlice = sorted.slice(trainStart, trainEnd);
+      const valSlice = sorted.slice(valStart, valEnd + 1);
       const testSlice = sorted.slice(testStart, testEnd + 1);
 
+      if (trainSlice.length === 0 || testSlice.length === 0) continue;
+
+      // 1. Train fold: evaluate candidate on expanding training window
       const isEval = CandidateEvaluator.evaluate(candidate, trainSlice);
+      // 2. Validation fold: validate tuning
+      const valEval = CandidateEvaluator.evaluate(candidate, valSlice.length > 0 ? valSlice : trainSlice);
+      // 3. OOS fold: evaluate frozen candidate out-of-sample
       const oosEval = CandidateEvaluator.evaluate(candidate, testSlice);
 
       const isExp = isEval.candidateExpectancy;
@@ -62,7 +71,7 @@ export class WalkForwardValidator {
       const winRate =
         testSlice.length > 0 ? Number(((wins / testSlice.length) * 100).toFixed(1)) : 50;
 
-      const passed = oosExp > 0 && oosExp >= isExp * 0.5; // OOS must retain at least 50% of IS expectancy
+      const passed = oosExp > 0 && oosExp >= isExp * 0.5 && oosEval.totalSimulatedTrades > 0;
 
       folds.push({
         foldIndex: f + 1,
@@ -71,8 +80,8 @@ export class WalkForwardValidator {
           new Date(trainSlice[trainSlice.length - 1].timestamp),
         ],
         validateRange: [
-          new Date(testSlice[0].timestamp),
-          new Date(testSlice[testSlice.length - 1].timestamp),
+          new Date(valSlice[0]?.timestamp || trainSlice[0].timestamp),
+          new Date(valSlice[valSlice.length - 1]?.timestamp || trainSlice[trainSlice.length - 1].timestamp),
         ],
         testRange: [
           new Date(testSlice[0].timestamp),
@@ -88,11 +97,12 @@ export class WalkForwardValidator {
       totalOOS += oosExp;
     }
 
-    const meanIS = Number((totalIS / numFolds).toFixed(2));
-    const meanOOS = Number((totalOOS / numFolds).toFixed(2));
+    const effectiveFolds = folds.length || 1;
+    const meanIS = Number((totalIS / effectiveFolds).toFixed(2));
+    const meanOOS = Number((totalOOS / effectiveFolds).toFixed(2));
     const degradation = meanIS > 0 ? Number((((meanIS - meanOOS) / meanIS) * 100).toFixed(1)) : 0;
     const isRobust =
-      meanOOS > 0.05 && folds.filter((f) => f.passed).length >= Math.ceil(numFolds * 0.65);
+      meanOOS > 0.05 && folds.filter((f) => f.passed).length >= Math.ceil(effectiveFolds * 0.65);
 
     return {
       folds,

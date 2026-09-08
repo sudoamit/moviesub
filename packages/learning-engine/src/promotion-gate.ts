@@ -78,20 +78,26 @@ export class PromotionGate {
       );
     }
 
-    // 5. Shadow Trading Validation
-    if (candidate.shadowMetrics) {
-      if (candidate.shadowMetrics.shadowTradeCount >= criteria.minShadowTrades) {
-        if (candidate.shadowMetrics.shadowExpectancy < expBefore) {
-          rejectionDetails.push(
-            `Shadow trading expectancy (${candidate.shadowMetrics.shadowExpectancy}R) underperformed baseline (${expBefore}R).`,
-          );
-          score -= 35;
-        } else {
-          reasons.push(
-            `Live shadow trading performance confirmed (+${candidate.shadowMetrics.shadowExpectancy}R).`,
-          );
-        }
-      }
+    // 5. Shadow Trading Validation (Mandatory for promotion)
+    if (!candidate.shadowMetrics) {
+      rejectionDetails.push(
+        `Insufficient shadow evidence: shadowMetrics is missing. Candidate cannot be promoted without shadow evidence.`,
+      );
+      score -= 40;
+    } else if (candidate.shadowMetrics.shadowTradeCount < criteria.minShadowTrades) {
+      rejectionDetails.push(
+        `Insufficient shadow trade volume (${candidate.shadowMetrics.shadowTradeCount} trades < required ${criteria.minShadowTrades}).`,
+      );
+      score -= 40;
+    } else if (candidate.shadowMetrics.shadowExpectancy < expBefore) {
+      rejectionDetails.push(
+        `Shadow trading expectancy (${candidate.shadowMetrics.shadowExpectancy}R) underperformed baseline (${expBefore}R).`,
+      );
+      score -= 35;
+    } else {
+      reasons.push(
+        `Live shadow trading performance confirmed (+${candidate.shadowMetrics.shadowExpectancy}R across ${candidate.shadowMetrics.shadowTradeCount} trades).`,
+      );
     }
 
     const approved = rejectionDetails.length === 0 && score >= 70;

@@ -51,7 +51,10 @@ export class StrategyRegistry {
   public static promoteStrategy(strategyVersion: string): void {
     const current = this.strategies.get(this.activeStrategyVersion);
     if (current) {
-      current.status = 'RETIRED';
+      this.strategies.set(
+        this.activeStrategyVersion,
+        Object.freeze({ ...current, status: 'RETIRED' }),
+      );
     }
 
     const candidate = this.strategies.get(strategyVersion);
@@ -59,8 +62,10 @@ export class StrategyRegistry {
       throw new Error(`Strategy version ${strategyVersion} not found in registry.`);
     }
 
-    candidate.status = 'ACTIVE';
-    candidate.promotedAt = new Date();
+    this.strategies.set(
+      strategyVersion,
+      Object.freeze({ ...candidate, status: 'ACTIVE', promotedAt: new Date() }),
+    );
     this.activeStrategyVersion = strategyVersion;
   }
 
@@ -70,7 +75,10 @@ export class StrategyRegistry {
   public static rollbackStrategy(targetVersion: string): void {
     const current = this.strategies.get(this.activeStrategyVersion);
     if (current) {
-      current.status = 'ROLLED_BACK';
+      this.strategies.set(
+        this.activeStrategyVersion,
+        Object.freeze({ ...current, status: 'ROLLED_BACK' }),
+      );
     }
 
     const target = this.strategies.get(targetVersion);
@@ -78,7 +86,7 @@ export class StrategyRegistry {
       throw new Error(`Target strategy version ${targetVersion} not found in registry.`);
     }
 
-    target.status = 'ACTIVE';
+    this.strategies.set(targetVersion, Object.freeze({ ...target, status: 'ACTIVE' }));
     this.activeStrategyVersion = targetVersion;
   }
 

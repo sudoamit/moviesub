@@ -46,9 +46,64 @@ export class CounterfactualAnalyzer {
 
     const mfe = exp.outcome?.maxFavorableExcursion || 0;
 
-    // Scenario 1: TP1 Fixed Exit (1.5R)
-    const tp1Reached = mfe >= 1.5;
-    const tp1PnLR = tp1Reached ? 1.5 : actualPnLR < 0 ? -1.0 : actualPnLR;
+    const candles = (exp as any).candlesDuringTrade || [];
+    let tp1PnLR = actualPnLR;
+    let tp2PnLR = actualPnLR;
+    let tp3PnLR = actualPnLR;
+    let bePnLR = actualPnLR;
+
+    if (candles && candles.length > 0 && riskDistance > 0) {
+      // Evaluate sequential candle-by-candle trajectory
+      let reachedTp1 = false;
+      let reachedTp2 = false;
+      let reachedTp3 = false;
+      let stoppedOut = false;
+
+      for (const c of candles) {
+        if (stoppedOut) break;
+        const high = c.high;
+        const low = c.low;
+
+        // Check SL breach
+        const slHit = isBuy ? low <= exp.risk.stopLoss : high >= exp.risk.stopLoss;
+        if (slHit) {
+          stoppedOut = true;
+          if (!reachedTp1) tp1PnLR = -1.0;
+          if (!reachedTp2) tp2PnLR = -1.0;
+          if (!reachedTp3) tp3PnLR = reachedTp1 ? 0.0 : -1.0;
+          if (!reachedTp1) bePnLR = -1.0;
+          break;
+        }
+
+        // Check TP targets
+        if (isBuy ? high >= target1 : low <= target1) {
+          reachedTp1 = true;
+          tp1PnLR = 1.5;
+        }
+        if (isBuy ? high >= target2 : low <= target2) {
+          reachedTp2 = true;
+          tp2PnLR = 2.5;
+        }
+        if (isBuy ? high >= target3 : low <= target3) {
+          reachedTp3 = true;
+          tp3PnLR = 4.0;
+        }
+      }
+    } else {
+      // Fallback: evaluate using realized trade outcome status and targets
+      if (exp.outcome?.status === 'WIN') {
+        tp1PnLR = 1.5;
+        tp2PnLR = exp.outcome.pnlR >= 2.5 ? 2.5 : 1.5;
+        tp3PnLR = exp.outcome.pnlR >= 4.0 ? 4.0 : 1.5;
+        bePnLR = Math.max(0.0, actualPnLR);
+      } else if (exp.outcome?.status === 'LOSS') {
+        tp1PnLR = -1.0;
+        tp2PnLR = -1.0;
+        tp3PnLR = -1.0;
+        bePnLR = -1.0;
+      }
+    }
+
     const tp1Scenario: CounterfactualExitScenario = {
       scenarioName: 'TP1_FIXED',
       simulatedExitPrice: target1,
@@ -57,9 +112,6 @@ export class CounterfactualAnalyzer {
       wasSuperiorToActual: tp1PnLR > actualPnLR,
     };
 
-    // Scenario 2: TP2 Standard Exit (2.5R)
-    const tp2Reached = mfe >= 2.5;
-    const tp2PnLR = tp2Reached ? 2.5 : actualPnLR < 0 ? -1.0 : actualPnLR;
     const tp2Scenario: CounterfactualExitScenario = {
       scenarioName: 'TP2_STANDARD',
       simulatedExitPrice: target2,
@@ -68,9 +120,6 @@ export class CounterfactualAnalyzer {
       wasSuperiorToActual: tp2PnLR > actualPnLR,
     };
 
-    // Scenario 3: TP3 Runner Exit (4.0R)
-    const tp3Reached = mfe >= 4.0;
-    const tp3PnLR = tp3Reached ? 4.0 : tp1Reached ? 0.0 : -1.0; // trailing to BE after TP1
     const tp3Scenario: CounterfactualExitScenario = {
       scenarioName: 'TP3_RUNNER',
       simulatedExitPrice: target3,
@@ -79,8 +128,6 @@ export class CounterfactualAnalyzer {
       wasSuperiorToActual: tp3PnLR > actualPnLR,
     };
 
-    // Scenario 4: Trailing Breakeven (0.0R on pullback if +1.5R MFE reached)
-    const bePnLR = tp1Reached ? Math.max(0.0, actualPnLR) : actualPnLR;
     const beScenario: CounterfactualExitScenario = {
       scenarioName: 'TRAILING_BREAKEVEN',
       simulatedExitPrice: entryPrice,

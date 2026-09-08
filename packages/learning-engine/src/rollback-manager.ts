@@ -42,15 +42,23 @@ export class RollbackManager {
 
     let previousStable = 'v2.0-smc-quant';
     const all = StrategyRegistry.getAllStrategies();
-    const prev = all.find((s) => s.strategyVersion !== activeVersion && s.status === 'RETIRED');
+    const prev = all.find((s) => s.strategyVersion !== activeVersion && (s.status === 'RETIRED' || s.status === 'ACTIVE'));
     if (prev) previousStable = prev.strategyVersion;
+
+    let previousModelVersion = 'v2.0-ml-canonical';
+    const activeModel = ModelRegistry.getActiveModel();
+    const allModels = ModelRegistry.getAllModels();
+    const prevModel = allModels.find(
+      (m) => m.modelVersion !== activeModel?.modelVersion && (m.status === 'RETIRED' || m.status === 'ACTIVE'),
+    );
+    if (prevModel) previousModelVersion = prevModel.modelVersion;
 
     if (isDegraded && activeVersion !== previousStable) {
       const reason = `Performance degradation detected. Recent expectancy (${recentExpR}R) dropped significantly below baseline (${baselineR}R) across ${count} trades.`;
 
-      // Execute rollback in registries
+      // Execute atomic rollback in registries for strategy and model bundle
       StrategyRegistry.rollbackStrategy(previousStable);
-      ModelRegistry.rollbackModel('v2.0-ml-canonical');
+      ModelRegistry.rollbackModel(previousModelVersion);
 
       return {
         shouldRollback: true,

@@ -26,9 +26,9 @@ export interface IDatasetSample {
 }
 
 export interface IDatasetSplits {
-  train: IDatasetSample[];
-  validation: IDatasetSample[];
-  outOfSample: IDatasetSample[];
+  train: ReadonlyArray<IDatasetSample>;
+  validation: ReadonlyArray<IDatasetSample>;
+  outOfSample: ReadonlyArray<IDatasetSample>;
   metadata: IDatasetMetadata;
 }
 
@@ -37,7 +37,8 @@ export class DatasetManager {
     new Map();
 
   /**
-   * Registers and hashes an immutable training dataset
+   * Registers and hashes an immutable training dataset.
+   * Rejects duplicate sample IDs and sorts strictly chronologically.
    */
   createDataset(
     symbol: string,
@@ -45,25 +46,38 @@ export class DatasetManager {
     samples: IDatasetSample[],
     featureVersion = '2.0',
     strategyVersion = '2.0.0',
+    randomSeed = 42,
   ): { metadata: IDatasetMetadata; samples: IDatasetSample[] } {
     if (!samples || samples.length === 0) {
       throw new Error('Cannot create dataset with empty samples');
     }
 
+    // Deduplicate sample IDs
+    const seenIds = new Set<string>();
+    const deduplicated: IDatasetSample[] = [];
+
+    for (const sample of samples) {
+      if (seenIds.has(sample.sampleId)) {
+        continue; // Drop duplicate sample ID
+      }
+      seenIds.add(sample.sampleId);
+      deduplicated.push(sample);
+    }
+
     // Sort strictly by timestamp (chronological time-series order)
-    const sorted = [...samples].sort((a, b) => a.timestamp - b.timestamp);
+    const sorted = [...deduplicated].sort((a, b) => a.timestamp - b.timestamp);
     const startDate = new Date(sorted[0].timestamp).toISOString();
     const endDate = new Date(sorted[sorted.length - 1].timestamp).toISOString();
 
     const sampleFeatures = Object.keys(sorted[0].features || {});
-    const contentString = `${symbol}_${timeframe}_${startDate}_${endDate}_${sorted.length}_${sampleFeatures.join(',')}`;
+    const contentString = `${symbol}_${timeframe}_${startDate}_${endDate}_${sorted.length}_${sampleFeatures.join(',')}_seed${randomSeed}`;
     const dataHash = crypto
       .createHash('sha256')
       .update(contentString)
       .digest('hex')
       .substring(0, 16);
 
-    const datasetVersion = `v_${Date.now()}`;
+    const datasetVersion = `v_${dataHash}`;
     const datasetId = `ds_${symbol}_${timeframe}_${dataHash}`;
 
     const metadata: IDatasetMetadata = {
@@ -81,7 +95,7 @@ export class DatasetManager {
       featuresList: sampleFeatures,
     };
 
-    const record = { metadata, samples: sorted };
+    const record = { metadata, samples: Object.freeze(sorted) as IDatasetSample[] };
     this.datasets.set(datasetId, record);
     return record;
   }
@@ -105,9 +119,9 @@ export class DatasetManager {
     const trainEnd = Math.floor(total * trainRatio);
     const valEnd = Math.floor(total * (trainRatio + valRatio));
 
-    const train = record.samples.slice(0, trainEnd);
-    const validation = record.samples.slice(trainEnd, valEnd);
-    const outOfSample = record.samples.slice(valEnd);
+    const train = Object.freeze(record.samples.slice(0, trainEnd));
+    const validation = Object.freeze(record.samples.slice(trainEnd, valEnd));
+    const outOfSample = Object.freeze(record.samples.slice(valEnd));
 
     return {
       train,
@@ -121,3 +135,6 @@ export class DatasetManager {
     return this.datasets.get(datasetId);
   }
 }
+
+export const TemporalDatasetBuilder = DatasetManager;
+export type TemporalDatasetBuilder = DatasetManager;
