@@ -2207,8 +2207,21 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     if (res1.executionEvents && res2.executionEvents) {
       expect(res1.executionEvents.length).toBe(res2.executionEvents.length);
       for (let i = 0; i < res1.executionEvents.length; i++) {
-        expect(res1.executionEvents[i].eventId).toBe(res2.executionEvents[i].eventId);
-        expect(res1.executionEvents[i].orderId).toBe(res2.executionEvents[i].orderId);
+        const e1 = res1.executionEvents[i];
+        const e2 = res2.executionEvents[i];
+        expect(e1.eventId).toBe(e2.eventId);
+        expect(e1.orderId).toBe(e2.orderId);
+        expect(e1.exitClientOrderId).toBe(e2.exitClientOrderId);
+        expect(e1.eventType).toBe(e2.eventType);
+        expect(e1.timestamp).toBe(e2.timestamp);
+        expect(e1.price).toBe(e2.price);
+        expect(e1.quantity).toBe(e2.quantity);
+        expect(e1.fees).toBe(e2.fees);
+        expect(e1.slippage).toBe(e2.slippage);
+        expect(e1.triggerPrice).toBe(e2.triggerPrice);
+        expect(e1.exitTarget).toBe(e2.exitTarget);
+        expect(e1.segmentIndex).toBe(e2.segmentIndex);
+        expect(e1.segmentType).toBe(e2.segmentType);
       }
     }
   });
@@ -2505,6 +2518,56 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(fill.orderId).toBe(stopOrder.orderId);
     expect(fill.price).toBeGreaterThanOrEqual(110.0); // Filled at or above 110.0 gap open, NOT 105.0!
     expect(stopOrder.status).toBe('FILLED');
+  });
+
+  // 55. FillModelEngine.requireCandleTimestamp Strict Validation
+  test('55. requireCandleTimestamp validates Date, numeric, and string timestamps, and throws deterministically on invalid timestamps', () => {
+    const epochMs = 1700000000000;
+
+    // 1. Valid Date object
+    const candleDate: ICandle = {
+      timestamp: new Date(epochMs),
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 102,
+      volume: 100,
+    };
+    expect(FillModelEngine.requireCandleTimestamp(candleDate)).toBe(epochMs);
+
+    // 2. Valid numeric timestamp
+    const candleNumeric = {
+      timestamp: epochMs,
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 102,
+      volume: 100,
+    } as unknown as ICandle;
+    expect(FillModelEngine.requireCandleTimestamp(candleNumeric)).toBe(epochMs);
+
+    // 3. Valid parseable string timestamp
+    const candleString = {
+      timestamp: new Date(epochMs).toISOString(),
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 102,
+      volume: 100,
+    } as unknown as ICandle;
+    expect(FillModelEngine.requireCandleTimestamp(candleString)).toBe(epochMs);
+
+    // 4. Missing / null / undefined timestamp
+    const candleMissing = { open: 100, high: 105, low: 99, close: 102, volume: 100 } as unknown as ICandle;
+    expect(() => FillModelEngine.requireCandleTimestamp(candleMissing)).toThrow('Invalid candle: missing timestamp');
+
+    // 5. Invalid NaN / non-finite numeric timestamp
+    const candleNaN = { timestamp: NaN, open: 100, high: 105, low: 99, close: 102, volume: 100 } as unknown as ICandle;
+    expect(() => FillModelEngine.requireCandleTimestamp(candleNaN)).toThrow('Invalid non-finite candle timestamp value');
+
+    // 6. Invalid unparseable string timestamp
+    const candleBadStr = { timestamp: 'invalid-date-string', open: 100, high: 105, low: 99, close: 102, volume: 100 } as unknown as ICandle;
+    expect(() => FillModelEngine.requireCandleTimestamp(candleBadStr)).toThrow('Invalid non-finite candle timestamp value');
   });
 });
 

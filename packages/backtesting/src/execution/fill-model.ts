@@ -7,6 +7,34 @@ import { OHLCPathCursor } from './ohlc-path-cursor';
 
 export class FillModelEngine {
   /**
+   * Authoritative deterministic timestamp extractor and validator for candles.
+   * Accepts Date, numeric timestamps, and parseable date strings.
+   * Throws an explicit Error for invalid, NaN, or non-finite values. Never uses Date.now().
+   */
+  static requireCandleTimestamp(candle: ICandle): number {
+    if (!candle || candle.timestamp === undefined || candle.timestamp === null) {
+      throw new Error('Invalid candle: missing timestamp');
+    }
+
+    let timeMs: number;
+    if (candle.timestamp instanceof Date) {
+      timeMs = candle.timestamp.getTime();
+    } else if (typeof candle.timestamp === 'number') {
+      timeMs = candle.timestamp;
+    } else if (typeof candle.timestamp === 'string') {
+      timeMs = new Date(candle.timestamp).getTime();
+    } else {
+      throw new Error(`Unsupported candle timestamp format: ${typeof candle.timestamp}`);
+    }
+
+    if (Number.isNaN(timeMs) || !Number.isFinite(timeMs)) {
+      throw new Error(`Invalid non-finite candle timestamp value: ${candle.timestamp}`);
+    }
+
+    return timeMs;
+  }
+
+  /**
    * Validates lower timeframe sub-bars strictly against parent candle range and chronological ordering
    */
   static validateSubBars(
@@ -19,17 +47,9 @@ export class FillModelEngine {
       return { isValid: false, reason: 'MISSING_LOWER_TF_DATA' };
     }
 
-    const parentOpenTime =
-      parentCandle.timestamp instanceof Date
-        ? parentCandle.timestamp.getTime()
-        : new Date(parentCandle.timestamp).getTime();
-
+    const parentOpenTime = this.requireCandleTimestamp(parentCandle);
     const parentCloseTime = parentOpenTime + parentDurationMs;
-
-    const firstTime =
-      lowerTfCandles[0].timestamp instanceof Date
-        ? lowerTfCandles[0].timestamp.getTime()
-        : new Date(lowerTfCandles[0].timestamp).getTime();
+    const firstTime = this.requireCandleTimestamp(lowerTfCandles[0]);
 
     // Check first bar starts at parent open time
     if (firstTime !== parentOpenTime && !allowPartial) {
@@ -38,10 +58,7 @@ export class FillModelEngine {
 
     let prevTime = -1;
     for (const sub of lowerTfCandles) {
-      const subTime =
-        sub.timestamp instanceof Date
-          ? sub.timestamp.getTime()
-          : new Date(sub.timestamp).getTime();
+      const subTime = this.requireCandleTimestamp(sub);
 
       // Check sub-bar belongs to current parent candle start boundary
       if (subTime < parentOpenTime) {
@@ -85,16 +102,11 @@ export class FillModelEngine {
     }
 
     // Check lower-TF completeness & coverage
-    const lastTime =
-      lowerTfCandles[lowerTfCandles.length - 1].timestamp instanceof Date
-        ? lowerTfCandles[lowerTfCandles.length - 1].timestamp.getTime()
-        : new Date(lowerTfCandles[lowerTfCandles.length - 1].timestamp).getTime();
+    const lastTime = this.requireCandleTimestamp(lowerTfCandles[lowerTfCandles.length - 1]);
 
     const subStepMs =
       lowerTfCandles.length >= 2
-        ? (lowerTfCandles[1].timestamp instanceof Date
-            ? lowerTfCandles[1].timestamp.getTime()
-            : new Date(lowerTfCandles[1].timestamp).getTime()) - firstTime
+        ? this.requireCandleTimestamp(lowerTfCandles[1]) - firstTime
         : 60 * 1000;
 
     // Check start boundary coverage
@@ -113,10 +125,7 @@ export class FillModelEngine {
     // Check internal sub-bar gaps
     let prevSubTime = firstTime;
     for (let i = 1; i < lowerTfCandles.length; i++) {
-      const currTime =
-        lowerTfCandles[i].timestamp instanceof Date
-          ? lowerTfCandles[i].timestamp.getTime()
-          : new Date(lowerTfCandles[i].timestamp).getTime();
+      const currTime = this.requireCandleTimestamp(lowerTfCandles[i]);
 
       if (currTime - prevSubTime > Math.max(subStepMs * 1.5, 90000)) {
         return { isValid: false, reason: 'SUBBAR_COVERAGE_INCOMPLETE' };
@@ -197,12 +206,11 @@ export class FillModelEngine {
   ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
     if (orders.length === 0) return {};
 
-    const candleTime =
-      currentCandle.timestamp instanceof Date
-        ? currentCandle.timestamp.getTime()
-        : typeof currentCandle.timestamp === 'number'
-          ? currentCandle.timestamp
-          : new Date(currentCandle.timestamp).getTime();
+    if (model === FillModel.LOWER_TIMEFRAME) {
+      return { reason: 'LOWER_TIMEFRAME_REQUIRES_EXECUTION_SIMULATOR' };
+    }
+
+    const candleTime = this.requireCandleTimestamp(currentCandle);
 
     const cursor = new OHLCPathCursor(currentCandle);
     for (const seg of cursor.segments) {
@@ -412,12 +420,7 @@ export class FillModelEngine {
       return { isFilled: false, reason: 'LOWER_TIMEFRAME_REQUIRES_EXECUTION_SIMULATOR' };
     }
 
-    const candleTime =
-      currentCandle.timestamp instanceof Date
-        ? currentCandle.timestamp.getTime()
-        : typeof currentCandle.timestamp === 'number'
-          ? currentCandle.timestamp
-          : new Date(currentCandle.timestamp).getTime();
+    const candleTime = this.requireCandleTimestamp(currentCandle);
 
     // 1. STOP Orders (Stop Loss / Trailing Stop) with Gap-Through-Stop Execution
     if (order.orderType === 'STOP' && order.stopPrice !== undefined) {
@@ -451,8 +454,7 @@ export class FillModelEngine {
     if (model === FillModel.NEXT_BAR_MARKET) {
       if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
       const rawPrice = nextCandle.open;
-      const fillTime =
-        nextCandle.timestamp instanceof Date ? nextCandle.timestamp.getTime() : candleTime;
+      const fillTime = this.requireCandleTimestamp(nextCandle);
       const fill = this.buildFill(order, rawPrice, fillTime, order.symbol, 'MARKET', nextCandle, model);
       return { isFilled: true, fill };
     }
