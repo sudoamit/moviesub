@@ -105,6 +105,58 @@ export class FillModelEngine {
   }
 
   /**
+   * Authoritative Segment-Aware Intra-Segment Conflict Resolver
+   * For orders triggered within the SAME path segment (segStart -> segEnd), computes distance along vector:
+   * distance = Math.abs(triggerPrice - segStart)
+   * The order with the smallest distance was encountered FIRST along the segment vector!
+   */
+  static resolveSegmentConflict(
+    triggered: { order: IOrder; fill: IFill }[],
+    segStart: number,
+    segEnd: number,
+    ambiguityMode: SameCandleAmbiguityMode = SameCandleAmbiguityMode.OHLC_PATH,
+  ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
+    if (triggered.length === 0) return {};
+    if (triggered.length === 1) return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+
+    if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
+      const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
+      if (stopTrigger) {
+        return { winningFill: stopTrigger.fill, winningOrder: stopTrigger.order, reason: 'CONSERVATIVE_STOP_FIRST' };
+      }
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    }
+
+    if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
+      const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
+      if (limitTrigger) {
+        return { winningFill: limitTrigger.fill, winningOrder: limitTrigger.order, reason: 'OPTIMISTIC_TARGET_FIRST' };
+      }
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
+    }
+
+    // Default OHLC_PATH / Intra-segment Vector Distance Resolution:
+    // Compute distance along segment from segStart to each order's trigger/price level.
+    // Smallest distance means encountered FIRST along the segment trajectory!
+    let bestWinner = triggered[0];
+    let minDistance = Infinity;
+
+    for (const item of triggered) {
+      const trigPrice =
+        item.order.orderType === 'STOP' && item.order.stopPrice !== undefined
+          ? item.order.stopPrice
+          : item.order.price ?? segStart;
+      const dist = Math.abs(trigPrice - segStart);
+      if (dist < minDistance) {
+        minDistance = dist;
+        bestWinner = item;
+      }
+    }
+
+    return { winningFill: bestWinner.fill, winningOrder: bestWinner.order, reason: 'SEGMENT_VECTOR_DISTANCE_ORDERED' };
+  }
+
+  /**
    * Authoritative centralized Same-Candle Ambiguity Conflict Resolver
    */
   static resolveSameCandleConflict(

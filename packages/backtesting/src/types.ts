@@ -86,6 +86,8 @@ export interface IBacktestOptions {
   lowerTfCandles?: ICandle[];
   strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
   asOfTimestamp?: Date | number;
+  warmupBars?: number;
+  minimumCandles?: number;
 }
 
 export type AblationVariant =

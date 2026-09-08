@@ -73,8 +73,10 @@ export class BacktestSimulator {
     });
 
     // 2. Resting Target Limit Orders (TP1, TP2, TP3)
-    const hasAlreadyTp1 = lot.partialFills.some((f) => f.targetType === 'TP1');
-    const hasAlreadyTp2 = lot.partialFills.some((f) => f.targetType === 'TP2');
+    const existingOrders = execSim.getTradeOrders(lot.tradeId);
+    const hasAlreadyTp1 = existingOrders.some((o: any) => o.exitTarget === 'TP1');
+    const hasAlreadyTp2 = existingOrders.some((o: any) => o.exitTarget === 'TP2');
+    const hasAlreadyTp3 = existingOrders.some((o: any) => o.exitTarget === 'TP3');
 
     const tp1Qty = Math.round(lot.initialQuantity * policy.tp1Ratio);
     const tp2Qty =
@@ -109,7 +111,7 @@ export class BacktestSimulator {
       });
     }
 
-    if (tp3Qty > 0) {
+    if (!hasAlreadyTp3 && tp3Qty > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -158,25 +160,21 @@ export class BacktestSimulator {
     }
 
     const router = new MarketDataRouter({
-      executionCandles: inputCandles,
-      htf1Candles: options.htf1Candles,
-      htf2Candles: options.htf2Candles,
       executionTimeframe: timeframe,
       htf1Timeframe: options.htf1Timeframe || '1h',
       htf2Timeframe: options.htf2Timeframe || '4h',
+      executionCandles: inputCandles,
+      htf1Candles: options.htf1Candles,
+      htf2Candles: options.htf2Candles,
     });
 
     const executionCandles = router.getExecutionCandles();
+    const execSim = new ExecutionSimulator(fillModel, ambiguityMode);
+
     let currentCash = initialCapital;
     let currentEquity = initialCapital;
 
-    const runId = `bt_${symbol.toLowerCase()}_${timeframe}`;
-    const execSim = new ExecutionSimulator(
-      fillModel,
-      ambiguityMode,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      runId,
-    );
+    const runId = `sim_${Date.now()}`;
 
     const trades: IBacktestTrade[] = [];
     const positionLots: PositionLot[] = [];
@@ -192,7 +190,8 @@ export class BacktestSimulator {
     ];
     const equitySnapshots: IEquitySnapshot[] = [];
 
-    if (!executionCandles || executionCandles.length < 50) {
+    const minimumCandles = options.minimumCandles !== undefined ? options.minimumCandles : 50;
+    if (!executionCandles || executionCandles.length < minimumCandles) {
       const emptyMetrics = MetricsCalculator.calculateMetrics([], initialCapital, equityCurve);
       return {
         id: `${runId}_res`,
@@ -214,7 +213,7 @@ export class BacktestSimulator {
 
     let cumulativeFees = 0;
     let cumulativeSlippage = 0;
-    const warmupBars = 40;
+    const warmupBars = options.warmupBars !== undefined ? options.warmupBars : 40;
 
     for (let i = warmupBars; i < executionCandles.length; i++) {
       const currentCandle = executionCandles[i];

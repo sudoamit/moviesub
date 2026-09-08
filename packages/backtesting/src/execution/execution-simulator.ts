@@ -211,13 +211,22 @@ export class ExecutionSimulator {
 
           if (triggered.length === 0) break;
 
-          const nextTrigger = this.selectNextTrigger(
-            triggered,
-            candle,
-            nextCandle,
-            lowerTfCandles,
-            parentDurationMs,
-          );
+          let nextTrigger: { order: IOrder; fill: IFill } | undefined;
+          if (triggered.length === 1) {
+            nextTrigger = triggered[0];
+          } else {
+            const segResolved = FillModelEngine.resolveSegmentConflict(
+              triggered,
+              seg.start,
+              seg.end,
+              this.ambiguityMode,
+            );
+            if (segResolved.winningOrder && segResolved.winningFill) {
+              nextTrigger = { order: segResolved.winningOrder, fill: segResolved.winningFill };
+            } else {
+              nextTrigger = triggered[0];
+            }
+          }
           if (!nextTrigger) break;
 
           const { order, fill } = nextTrigger;
@@ -356,6 +365,12 @@ export class ExecutionSimulator {
 
   getOrder(orderId: string): IOrder | undefined {
     return this.orders.get(orderId);
+  }
+
+  getTradeOrders(tradeId: string): IOrder[] {
+    return Array.from(this.orders.values()).filter(
+      (o) => o.tradeId === tradeId && o.status === 'PENDING',
+    );
   }
 
   getAllFills(): IFill[] {

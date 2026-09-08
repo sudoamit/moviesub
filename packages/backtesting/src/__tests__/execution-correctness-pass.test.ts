@@ -1393,4 +1393,138 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(expectedFinalCash).toBeGreaterThan(initialCapital);
     expect(slOrder.status).toBe('CANCELLED'); // Remaining SL cancelled!
   });
+
+  // 32. P0 — Intra-Segment Vector Distance Resolution
+  test('32. resolveSegmentConflict selects SL at 95 (dist=5) before TP at 110 (dist=20) along segment 90 -> 120', () => {
+    const timestamp = 1700000000000;
+    const slOrder: any = {
+      orderId: 'sl_1',
+      tradeId: 't1',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100,
+      remainingQuantity: 100,
+      status: 'PENDING',
+    };
+
+    const tpOrder: any = {
+      orderId: 'tp_1',
+      tradeId: 't1',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30,
+      remainingQuantity: 30,
+      status: 'PENDING',
+    };
+
+    const triggered = [
+      { order: slOrder, fill: { fillId: 'f1', price: 95.0, quantity: 100 } as any },
+      { order: tpOrder, fill: { fillId: 'f2', price: 110.0, quantity: 30 } as any },
+    ];
+
+    // Segment starts at 90.0 and ends at 120.0 (price rises from 90 to 120)
+    // Distance for SL at 95 from 90 = |95 - 90| = 5
+    // Distance for TP at 110 from 90 = |110 - 90| = 20
+    const res = FillModelEngine.resolveSegmentConflict(triggered, 90.0, 120.0, SameCandleAmbiguityMode.OHLC_PATH);
+    expect(res.winningOrder?.orderId).toBe('sl_1');
+    expect(res.reason).toBe('SEGMENT_VECTOR_DISTANCE_ORDERED');
+  });
+
+  // 33. P1 — Immutable 4-Timestamp Entry & Exit Provenance
+  test('33. ExecutionSimulator & trade records preserve 4 distinct entry and exit timestamps', () => {
+    const execSim = new ExecutionSimulator();
+    const timestamp = 1700000000000;
+
+    const order = execSim.submitOrder({
+      tradeId: 't_prov_4ts',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 50.0,
+      timestamp,
+      signalTimestamp: timestamp - 5000,
+      exitTarget: 'TP1',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 105.0,
+      high: 112.0,
+      low: 104.0,
+      close: 111.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+
+    expect(order.signalTimestamp).toBe(timestamp - 5000);
+    expect(order.createdAt).toBe(timestamp);
+    expect(order.submittedAt).toBe(timestamp + 15);
+    expect(fill.timestamp).toBe(timestamp + 60000);
+
+    expect(fill.exitOrderCreatedAt).toBe(timestamp);
+    expect(fill.exitOrderSubmittedAt).toBe(timestamp + 15);
+    expect(fill.exitTriggerTimestamp).toBe(timestamp + 60000);
+    expect(fill.exitFillTimestamp).toBe(timestamp + 60000);
+  });
+
+  // 34. P1 — True BacktestSimulator E2E Portfolio Ledger Invariants
+  test('34. E2E BacktestSimulator Invariant: finalEquity = initialCapital + grossPnL - totalFees', () => {
+    const initialCapital = 100000.0;
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
+        { timestamp: new Date(1700001800000), open: 112, high: 125, low: 110, close: 122, volume: 100 },
+      ],
+      initialCapital,
+      riskPerTradePercent: 2.0,
+      warmupBars: 0,
+      minimumCandles: 2,
+    });
+
+    expect(res).toBeDefined();
+    expect(res.initialCapital).toBe(initialCapital);
+    expect(res.finalEquity).toBeCloseTo(initialCapital + res.netPnL, 2);
+
+    for (const trade of res.trades) {
+      // Assert ledger accounting invariants on trade
+      expect(trade.grossPnL! - trade.entryFees! - trade.exitFees!).toBeCloseTo(trade.netPnL!, 2);
+    }
+  });
+
+  // 35. P1 — Configurable Warmup Bars and Minimum Candles
+  test('35. BacktestSimulator respects configurable warmupBars=0 and minimumCandles=2', () => {
+    const candles: ICandle[] = [
+      { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
+      { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
+      { timestamp: new Date(1700001800000), open: 112, high: 125, low: 110, close: 122, volume: 100 },
+    ];
+
+    // With minimumCandles=50, 3 candles returns empty
+    const resEmpty = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      candles,
+      minimumCandles: 50,
+    });
+    expect(resEmpty.trades).toHaveLength(0);
+
+    // With minimumCandles=2 and warmupBars=0, simulation processes from candle 0
+    const resActive = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      candles,
+      warmupBars: 0,
+      minimumCandles: 2,
+    });
+    expect(resActive).toBeDefined();
+    expect(resActive.equityCurve.length).toBeGreaterThan(1);
+  });
 });
