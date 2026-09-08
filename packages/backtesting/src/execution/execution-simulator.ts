@@ -154,6 +154,7 @@ export class ExecutionSimulator {
                 seg.end,
                 candleTime,
                 order.symbol,
+                this.fillModel,
               );
             }
 

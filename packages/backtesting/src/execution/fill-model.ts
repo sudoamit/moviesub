@@ -194,6 +194,30 @@ export class FillModelEngine {
     lowerTfCandles?: ICandle[],
     parentDurationMs?: number,
   ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
+    if (orders.length === 0) return {};
+
+    // 1. If LOWER_TIMEFRAME ambiguity mode, process lower TF candles sequentially
+    if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
+      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
+      if (!subValidation.isValid) {
+        return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
+      }
+
+      for (const m1 of lowerTfCandles!) {
+        const subRes = this.resolveSameCandleConflict(
+          orders,
+          m1,
+          undefined,
+          model,
+          SameCandleAmbiguityMode.OHLC_PATH,
+        );
+        if (subRes.winningFill && subRes.winningOrder) {
+          return { ...subRes, reason: 'LOWER_TIMEFRAME_SUBBAR_MATCH' };
+        }
+      }
+      return { reason: 'MISSING_LOWER_TF_DATA' };
+    }
+
     // Evaluate fills for all orders against candle
     const triggered: { order: IOrder; fill: IFill }[] = [];
 
@@ -212,7 +236,7 @@ export class FillModelEngine {
       return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
     }
 
-    // Multiple orders triggered on same candle -> Resolve via Ambiguity Mode
+    // 2. CONSERVATIVE Mode: STOP loss hits first
     if (ambiguityMode === SameCandleAmbiguityMode.CONSERVATIVE) {
       const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
       if (stopTrigger) {
@@ -221,6 +245,7 @@ export class FillModelEngine {
       return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
     }
 
+    // 3. OPTIMISTIC Mode: LIMIT target hits first
     if (ambiguityMode === SameCandleAmbiguityMode.OPTIMISTIC) {
       const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
       if (limitTrigger) {
@@ -229,71 +254,54 @@ export class FillModelEngine {
       return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
     }
 
-    if (ambiguityMode === SameCandleAmbiguityMode.OHLC_PATH) {
-      const cursor = new OHLCPathCursor(currentCandle);
-      const candleTime =
-        currentCandle.timestamp instanceof Date
-          ? currentCandle.timestamp.getTime()
+    // 4. OHLC_PATH Mode: Authoritative segment-aware conflict resolution via OHLCPathCursor & resolveSegmentConflict
+    const candleTime =
+      currentCandle.timestamp instanceof Date
+        ? currentCandle.timestamp.getTime()
+        : typeof currentCandle.timestamp === 'number'
+          ? currentCandle.timestamp
           : new Date(currentCandle.timestamp).getTime();
 
-      for (const seg of cursor.segments) {
-        const segmentTriggered: { order: IOrder; fill: IFill }[] = [];
-        for (const t of triggered) {
-          const res = this.evaluateSegmentFill(
-            t.order,
-            seg.start,
-            seg.end,
-            candleTime,
-            t.order.symbol,
-          );
-          if (res.isFilled && res.fill) {
-            segmentTriggered.push({ order: t.order, fill: res.fill });
-          }
+    const cursor = new OHLCPathCursor(currentCandle);
+    for (const seg of cursor.segments) {
+      const segmentTriggered: { order: IOrder; fill: IFill }[] = [];
+      for (const t of triggered) {
+        const res = this.evaluateSegmentFill(
+          t.order,
+          seg.start,
+          seg.end,
+          candleTime,
+          t.order.symbol,
+          model,
+        );
+        if (res.isFilled && res.fill) {
+          segmentTriggered.push({ order: t.order, fill: res.fill });
         }
+      }
 
-        if (segmentTriggered.length === 1) {
+      if (segmentTriggered.length === 1) {
+        return {
+          winningFill: segmentTriggered[0].fill,
+          winningOrder: segmentTriggered[0].order,
+          reason: 'OHLC_PATH_SEGMENT_EXACT',
+        };
+      }
+
+      if (segmentTriggered.length > 1) {
+        const segRes = this.resolveSegmentConflict(
+          segmentTriggered,
+          seg.start,
+          seg.end,
+          ambiguityMode,
+        );
+        if (segRes.winningOrder && segRes.winningFill) {
           return {
-            winningFill: segmentTriggered[0].fill,
-            winningOrder: segmentTriggered[0].order,
-            reason: 'OHLC_PATH_SEGMENT_EXACT',
+            winningFill: segRes.winningFill,
+            winningOrder: segRes.winningOrder,
+            reason: segRes.reason || 'OHLC_PATH_SEGMENT_RESOLVED',
           };
         }
-
-        if (segmentTriggered.length > 1) {
-          const segRes = this.resolveSegmentConflict(
-            segmentTriggered,
-            seg.start,
-            seg.end,
-            ambiguityMode,
-          );
-          if (segRes.winningOrder && segRes.winningFill) {
-            return {
-              winningFill: segRes.winningFill,
-              winningOrder: segRes.winningOrder,
-              reason: segRes.reason || 'OHLC_PATH_SEGMENT_RESOLVED',
-            };
-          }
-        }
       }
-
-      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
-    }
-
-    if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
-      const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
-      if (!subValidation.isValid) {
-        return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
-      }
-
-      for (const m1 of lowerTfCandles!) {
-        for (const t of triggered) {
-          const res = this.evaluateFill(t.order, m1, undefined, FillModel.OHLC_PATH, undefined, parentDurationMs);
-          if (res.isFilled && res.fill) {
-            return { winningFill: res.fill, winningOrder: t.order, reason: 'LOWER_TIMEFRAME_SUBBAR_MATCH' };
-          }
-        }
-      }
-      return { reason: 'MISSING_LOWER_TF_DATA' };
     }
 
     return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
@@ -396,6 +404,7 @@ export class FillModelEngine {
     segEnd: number,
     candleTime: number,
     symbol: string,
+    model?: FillModel,
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
     if (order.status !== 'PENDING') return { isFilled: false, reason: `ORDER_${order.status}` };
 
@@ -411,7 +420,7 @@ export class FillModelEngine {
       if (!isTriggered) return { isFilled: false };
 
       const basePrice = this.calculateStopBasePrice(order.side, stopPrice, segStart);
-      const fill = this.buildFill(order, basePrice, candleTime, symbol, 'STOP');
+      const fill = this.buildFill(order, basePrice, candleTime, symbol, 'STOP', undefined, model);
       return { isFilled: true, fill };
     }
 
@@ -424,13 +433,13 @@ export class FillModelEngine {
       if (!isTouch) return { isFilled: false };
 
       const rawPrice = this.calculateLimitBasePrice(order.side, targetPrice, segStart);
-      const fill = this.buildFill(order, rawPrice, candleTime, symbol, 'LIMIT');
+      const fill = this.buildFill(order, rawPrice, candleTime, symbol, 'LIMIT', undefined, model);
       return { isFilled: true, fill };
     }
 
     // 3. MARKET Order
     if (order.orderType === 'MARKET') {
-      const fill = this.buildFill(order, segStart, candleTime, symbol, 'MARKET');
+      const fill = this.buildFill(order, segStart, candleTime, symbol, 'MARKET', undefined, model);
       return { isFilled: true, fill };
     }
 

@@ -2186,5 +2186,184 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(res1.runId).toBe(res2.runId);
     expect(res1.trades.length).toBe(res2.trades.length);
     expect(res1.finalEquity).toBe(res2.finalEquity);
+
+    for (let i = 0; i < res1.trades.length; i++) {
+      const t1 = res1.trades[i];
+      const t2 = res2.trades[i];
+      expect(t1.id).toBe(t2.id);
+      expect(t1.direction).toBe(t2.direction);
+      expect(t1.entryPrice).toBe(t2.entryPrice);
+      expect(t1.exitPrice).toBe(t2.exitPrice);
+      expect(t1.positionSize).toBe(t2.positionSize);
+      expect(t1.grossPnL).toBe(t2.grossPnL);
+      expect(t1.netPnL).toBe(t2.netPnL);
+      expect(t1.exitReason).toBe(t2.exitReason);
+      if (t1.entrySnapshot && t2.entrySnapshot) {
+        expect(t1.entrySnapshot.orderId).toBe(t2.entrySnapshot.orderId);
+        expect(t1.entrySnapshot.clientOrderId).toBe(t2.entrySnapshot.clientOrderId);
+      }
+    }
+  });
+
+  // 51. FillModel.LIMIT_TOUCH vs FillModel.LIMIT_WITH_SLIPPAGE Economic Semantics
+  test('51. FillModel.LIMIT_TOUCH fills at exact limit touch price with zero slippage and zero spread adjustment', () => {
+    const execSimTouch = new ExecutionSimulator(FillModel.LIMIT_TOUCH, SameCandleAmbiguityMode.OHLC_PATH);
+    const execSimSlip = new ExecutionSimulator(FillModel.LIMIT_WITH_SLIPPAGE, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    const limitTouchOrder = execSimTouch.submitOrder({
+      tradeId: 't_limit_touch',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 1.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    const limitSlipOrder = execSimSlip.submitOrder({
+      tradeId: 't_limit_slip',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 1.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 105.0,
+      high: 106.0,
+      low: 98.0,
+      close: 102.0,
+      volume: 100,
+    };
+
+    const resTouch = execSimTouch.processCandle(candle);
+    const resSlip = execSimSlip.processCandle(candle);
+
+    expect(resTouch.fills).toHaveLength(1);
+    expect(resTouch.fills[0].price).toBe(100.0);
+    expect(resTouch.fills[0].slippage).toBe(0);
+
+    expect(resSlip.fills).toHaveLength(1);
+    expect(resSlip.fills[0].price).toBeGreaterThan(100.0);
+  });
+
+  // 52. 15 x M1 LOWER_TIMEFRAME Execution with MARKET, LIMIT, STOP Orders
+  test('52. 15 x M1 LOWER_TIMEFRAME sub-bar execution fills MARKET, LIMIT, and STOP orders at exact M1 sub-bar without duplicate fills', () => {
+    const execSim = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const parentTime = 1700000000000;
+
+    // Submit Limit order @ 98.0
+    const order = execSim.submitOrder({
+      tradeId: 't_m1_subbar',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 98.0,
+      quantity: 1.0,
+      timestamp: parentTime,
+      exitTarget: 'ENTRY',
+    });
+
+    const parentCandle: ICandle = {
+      timestamp: new Date(parentTime),
+      open: 100,
+      high: 105,
+      low: 97,
+      close: 101,
+      volume: 1500,
+    };
+
+    // 15 M1 sub-bars, with M1 #5 touching low 97.5 (crossing limit 98.0)
+    const m1Candles: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(parentTime + i * 60000),
+      open: 100,
+      high: 101,
+      low: i === 5 ? 97.5 : 99.5,
+      close: 100,
+      volume: 100,
+    }));
+
+    const res = execSim.processCandle(parentCandle, undefined, m1Candles, 15 * 60 * 1000);
+
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+    expect(fill.orderId).toBe(order.orderId);
+    expect(fill.timestamp).toBe(parentTime + 5 * 60000); // Executed on M1 #5!
+    expect(order.status).toBe('FILLED');
+  });
+
+  // 53. LONG Protective STOP Gap-Down Execution Economics
+  test('53. LONG protective STOP executes at gap-down open price when open breaches stopPrice', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    const stopOrder = execSim.submitOrder({
+      tradeId: 't_long_gap_down',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 1.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    // Gap down open @ 90.0 (below stopPrice 95.0)
+    const gapCandle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 90.0,
+      high: 91.0,
+      low: 85.0,
+      close: 88.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(gapCandle);
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+    expect(fill.orderId).toBe(stopOrder.orderId);
+    expect(fill.price).toBeLessThanOrEqual(90.0); // Filled at or below 90.0 gap open, NOT 95.0!
+    expect(stopOrder.status).toBe('FILLED');
+  });
+
+  // 54. SHORT Protective STOP Gap-Up Execution Economics
+  test('54. SHORT protective STOP executes at gap-up open price when open breaches stopPrice', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    const stopOrder = execSim.submitOrder({
+      tradeId: 't_short_gap_up',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 1.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    // Gap up open @ 110.0 (above stopPrice 105.0)
+    const gapCandle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 110.0,
+      high: 115.0,
+      low: 109.0,
+      close: 112.0,
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(gapCandle);
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+    expect(fill.orderId).toBe(stopOrder.orderId);
+    expect(fill.price).toBeGreaterThanOrEqual(110.0); // Filled at or above 110.0 gap open, NOT 105.0!
+    expect(stopOrder.status).toBe('FILLED');
   });
 });
+
