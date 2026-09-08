@@ -2253,14 +2253,59 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(resSlip.fills[0].price).toBeGreaterThan(100.0);
   });
 
-  // 52. 15 x M1 LOWER_TIMEFRAME Execution with MARKET, LIMIT, STOP Orders
-  test('52. 15 x M1 LOWER_TIMEFRAME sub-bar execution fills MARKET, LIMIT, and STOP orders at exact M1 sub-bar without duplicate fills', () => {
+  // 52a. LOWER_TIMEFRAME MARKET Order Execution
+  test('52a. LOWER_TIMEFRAME MARKET execution: fills immediately on M1 #0 open with correct price, timestamp, quantity, fee, slippage, and zero duplicates', () => {
     const execSim = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
     const parentTime = 1700000000000;
 
-    // Submit Limit order @ 98.0
-    const order = execSim.submitOrder({
-      tradeId: 't_m1_subbar',
+    const marketOrder = execSim.submitOrder({
+      tradeId: 't_m1_mkt',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 1.0,
+      timestamp: parentTime,
+      exitTarget: 'ENTRY',
+    });
+
+    const parentCandle: ICandle = {
+      timestamp: new Date(parentTime),
+      open: 100,
+      high: 105,
+      low: 97,
+      close: 101,
+      volume: 1500,
+    };
+
+    const m1Candles: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(parentTime + i * 60000),
+      open: 100 + i * 0.1,
+      high: 101 + i * 0.1,
+      low: 99 + i * 0.1,
+      close: 100.5 + i * 0.1,
+      volume: 100,
+    }));
+
+    const res = execSim.processCandle(parentCandle, undefined, m1Candles, 15 * 60 * 1000);
+
+    expect(res.fills).toHaveLength(1);
+    const fill = res.fills[0];
+    expect(fill.orderId).toBe(marketOrder.orderId);
+    expect(fill.timestamp).toBe(parentTime); // M1 #0 timestamp
+    expect(fill.price).toBeGreaterThan(100.0); // Open 100 + spread/slippage
+    expect(fill.quantity).toBe(1.0);
+    expect(fill.fee).toBeGreaterThan(0);
+    expect(fill.slippage).toBeGreaterThanOrEqual(0);
+    expect(marketOrder.status).toBe('FILLED');
+  });
+
+  // 52b. LOWER_TIMEFRAME LIMIT Order Execution
+  test('52b. LOWER_TIMEFRAME LIMIT execution: fills on exact M1 sub-bar where limit price is touched', () => {
+    const execSim = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const parentTime = 1700000000000;
+
+    const limitOrder = execSim.submitOrder({
+      tradeId: 't_m1_limit',
       symbol: 'BTCUSDT',
       side: 'BUY',
       orderType: 'LIMIT',
@@ -2279,7 +2324,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       volume: 1500,
     };
 
-    // 15 M1 sub-bars, with M1 #5 touching low 97.5 (crossing limit 98.0)
+    // M1 #5 low touches 97.5 (crosses limit 98.0)
     const m1Candles: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
       timestamp: new Date(parentTime + i * 60000),
       open: 100,
@@ -2293,9 +2338,97 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     expect(res.fills).toHaveLength(1);
     const fill = res.fills[0];
-    expect(fill.orderId).toBe(order.orderId);
-    expect(fill.timestamp).toBe(parentTime + 5 * 60000); // Executed on M1 #5!
-    expect(order.status).toBe('FILLED');
+    expect(fill.orderId).toBe(limitOrder.orderId);
+    expect(fill.timestamp).toBe(parentTime + 5 * 60000); // M1 #5
+    expect(limitOrder.status).toBe('FILLED');
+  });
+
+  // 52c. LOWER_TIMEFRAME STOP Order Execution (Long & Short Protective Stops)
+  test('52c. LOWER_TIMEFRAME STOP execution: triggers on exact M1 sub-bar for both Long (SELL STOP) and Short (BUY STOP) positions', () => {
+    // Part 1: Long protective STOP (SELL STOP @ 95.0)
+    const execSimLong = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const parentTime = 1700000000000;
+
+    const stopOrderLong = execSimLong.submitOrder({
+      tradeId: 't_m1_stop_long',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 1.0,
+      timestamp: parentTime,
+      exitTarget: 'SL',
+    });
+
+    const parentCandleLong: ICandle = {
+      timestamp: new Date(parentTime),
+      open: 100,
+      high: 101,
+      low: 92,
+      close: 93,
+      volume: 1500,
+    };
+
+    // M1 #7 low drops to 94.0 (crosses stop 95.0)
+    const m1CandlesLong: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(parentTime + i * 60000),
+      open: 100,
+      high: 101,
+      low: i === 7 ? 94.0 : 96.0,
+      close: 99,
+      volume: 100,
+    }));
+
+    const resLong = execSimLong.processCandle(parentCandleLong, undefined, m1CandlesLong, 15 * 60 * 1000);
+
+    expect(resLong.fills).toHaveLength(1);
+    const fillLong = resLong.fills[0];
+    expect(fillLong.orderId).toBe(stopOrderLong.orderId);
+    expect(fillLong.timestamp).toBe(parentTime + 7 * 60000); // M1 #7
+    expect(fillLong.price).toBeLessThanOrEqual(95.0);
+    expect(stopOrderLong.status).toBe('FILLED');
+
+    // Part 2: Short protective STOP (BUY STOP @ 105.0)
+    const execSimShort = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+
+    const stopOrderShort = execSimShort.submitOrder({
+      tradeId: 't_m1_stop_short',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 1.0,
+      timestamp: parentTime,
+      exitTarget: 'SL',
+    });
+
+    const parentCandleShort: ICandle = {
+      timestamp: new Date(parentTime),
+      open: 100,
+      high: 108,
+      low: 99,
+      close: 107,
+      volume: 1500,
+    };
+
+    // M1 #8 high rises to 106.0 (crosses stop 105.0)
+    const m1CandlesShort: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(parentTime + i * 60000),
+      open: 100,
+      high: i === 8 ? 106.0 : 104.0,
+      low: 99,
+      close: 101,
+      volume: 100,
+    }));
+
+    const resShort = execSimShort.processCandle(parentCandleShort, undefined, m1CandlesShort, 15 * 60 * 1000);
+
+    expect(resShort.fills).toHaveLength(1);
+    const fillShort = resShort.fills[0];
+    expect(fillShort.orderId).toBe(stopOrderShort.orderId);
+    expect(fillShort.timestamp).toBe(parentTime + 8 * 60000); // M1 #8
+    expect(fillShort.price).toBeGreaterThanOrEqual(105.0);
+    expect(stopOrderShort.status).toBe('FILLED');
   });
 
   // 53. LONG Protective STOP Gap-Down Execution Economics

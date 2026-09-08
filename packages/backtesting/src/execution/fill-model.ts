@@ -183,7 +183,8 @@ export class FillModelEngine {
   }
 
   /**
-   * Authoritative centralized Same-Candle Ambiguity Conflict Resolver
+   * Thin compatibility wrapper for Same-Candle Ambiguity Conflict Resolution.
+   * Delegates evaluation directly to OHLCPathCursor & resolveSegmentConflict.
    */
   static resolveSameCandleConflict(
     orders: IOrder[],
@@ -196,26 +197,12 @@ export class FillModelEngine {
   ): { winningFill?: IFill; winningOrder?: IOrder; reason?: string } {
     if (orders.length === 0) return {};
 
-    // 1. If LOWER_TIMEFRAME ambiguity mode, process lower TF candles sequentially
+    // Validate sub-bars if LOWER_TIMEFRAME ambiguity mode is passed
     if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
       const subValidation = this.validateSubBars(currentCandle, lowerTfCandles, parentDurationMs);
       if (!subValidation.isValid) {
         return { reason: subValidation.reason || 'MISSING_LOWER_TF_DATA' };
       }
-
-      for (const m1 of lowerTfCandles!) {
-        const subRes = this.resolveSameCandleConflict(
-          orders,
-          m1,
-          undefined,
-          model,
-          SameCandleAmbiguityMode.OHLC_PATH,
-        );
-        if (subRes.winningFill && subRes.winningOrder) {
-          return { ...subRes, reason: 'LOWER_TIMEFRAME_SUBBAR_MATCH' };
-        }
-      }
-      return { reason: 'MISSING_LOWER_TF_DATA' };
     }
 
     // Evaluate fills for all orders against candle
