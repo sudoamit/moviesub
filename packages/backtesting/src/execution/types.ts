@@ -66,6 +66,8 @@ export interface IFill {
   exitOrderSubmittedAt?: number;
   exitTriggerTimestamp?: number;
   exitFillTimestamp?: number;
+  segmentIndex?: number;
+  segmentType?: string;
 }
 
 export interface ISlippageConfig {

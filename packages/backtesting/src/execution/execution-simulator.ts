@@ -240,6 +240,8 @@ export class ExecutionSimulator {
           fill.exitOrderSubmittedAt = order.submittedAt;
           fill.exitTriggerTimestamp = fill.timestamp;
           fill.exitFillTimestamp = fill.timestamp;
+          fill.segmentIndex = cursor.segmentIndex;
+          fill.segmentType = seg.type;
 
           order.status = 'FILLED';
           order.filledAt = fill.timestamp;
@@ -281,6 +283,8 @@ export class ExecutionSimulator {
             exitOrderSubmittedAt: order.submittedAt,
             exitTriggerTimestamp: fill.timestamp,
             exitFillTimestamp: fill.timestamp,
+            segmentIndex: cursor.segmentIndex,
+            segmentType: seg.type,
           };
 
           this.events.push(fillEvent);

@@ -54,6 +54,8 @@ export interface IExecutionEvent {
   exitOrderSubmittedAt?: number;
   exitTriggerTimestamp?: number;
   exitFillTimestamp?: number;
+  segmentIndex?: number;
+  segmentType?: string;
 }
 
 export interface IPartialFillRecord {
@@ -75,6 +77,8 @@ export interface IPartialFillRecord {
   exitOrderSubmittedAt?: number;
   exitTriggerTimestamp?: number;
   exitFillTimestamp?: number;
+  segmentIndex?: number;
+  segmentType?: string;
 }
 
 export interface IPartialExitPolicy {

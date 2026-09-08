@@ -1749,4 +1749,225 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     expect(resCustom.runId).toBe('custom_run_123');
   });
+
+  // 42. P0 — resolveSameCandleConflict OHLC_PATH Cursor Authority
+  test('42. resolveSameCandleConflict under OHLC_PATH delegates to OHLCPathCursor and resolveSegmentConflict', () => {
+    // Bullish candle: Open 100 -> Low 90 -> High 120 -> Close 115
+    const candle: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 100.0,
+      high: 120.0,
+      low: 90.0,
+      close: 115.0,
+      volume: 100,
+    };
+
+    const slOrder: any = {
+      orderId: 'sl_c42',
+      tradeId: 't42',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100,
+      remainingQuantity: 100,
+      status: 'PENDING',
+    };
+
+    const tpOrder: any = {
+      orderId: 'tp_c42',
+      tradeId: 't42',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30,
+      remainingQuantity: 30,
+      status: 'PENDING',
+    };
+
+    const orders = [slOrder, tpOrder];
+
+    // Segment 1 (Open 100 -> Low 90) touches SL @ 95 FIRST before Segment 2 touches TP @ 110
+    const res = FillModelEngine.resolveSameCandleConflict(orders, candle, undefined, FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    expect(res.winningOrder?.orderId).toBe('sl_c42');
+    expect(res.reason).toBe('OHLC_PATH_SEGMENT_EXACT');
+  });
+
+  // 43. P1 — Strict M15 -> M1 Sub-bar Interval Regularity Validation
+  test('43. validateSubBars detects irregular sub-bar interval gaps', () => {
+    const parentCandle: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 100, high: 110, low: 95, close: 105, volume: 1000,
+    };
+
+    // 15 sub-bars, but with a 2-minute gap between bar 4 and bar 5
+    const subBarsIrregular: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(1700000000000 + (i >= 5 ? (i + 1) * 60000 : i * 60000)),
+      open: 100, high: 101, low: 99, close: 100, volume: 10,
+    }));
+
+    const valRes = FillModelEngine.validateSubBars(parentCandle, subBarsIrregular, 15 * 60 * 1000, false);
+    expect(valRes.isValid).toBe(false);
+    expect(valRes.reason).toBe('SUBBAR_INTERVAL_MISMATCH');
+  });
+
+  // 44. P1 — Complete M15 -> M1 Lifecycle Execution without Duplicate Fills or Events
+  test('44. Complete M15 -> M1 sub-bar lifecycle produces exactly 1 fill per trigger and zero duplicate events', () => {
+    const execSim = new ExecutionSimulator(FillModel.LOWER_TIMEFRAME, SameCandleAmbiguityMode.LOWER_TIMEFRAME);
+    const parentTime = 1700000000000;
+
+    const order = execSim.submitOrder({
+      tradeId: 't_m15_m1_lifecycle',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 50.0,
+      timestamp: parentTime,
+      exitTarget: 'TP1',
+    });
+
+    const parentCandle: ICandle = {
+      timestamp: new Date(parentTime),
+      open: 100, high: 115, low: 99, close: 112, volume: 1000,
+    };
+
+    // Exactly 15 M1 sub-bars, bar index 10 touches limit price 110
+    const m1SubBars: ICandle[] = Array.from({ length: 15 }, (_, i) => ({
+      timestamp: new Date(parentTime + i * 60000),
+      open: 100 + i,
+      high: i === 10 ? 112 : 100 + i + 1,
+      low: 99 + i,
+      close: 100 + i,
+      volume: 10,
+    }));
+
+    const res = execSim.processCandle(parentCandle, undefined, m1SubBars, 15 * 60 * 1000);
+    expect(res.fills).toHaveLength(1);
+    expect(res.events).toHaveLength(1);
+    expect(res.fills[0].orderId).toBe(order.orderId);
+    expect(order.status).toBe('FILLED');
+  });
+
+  // 45. P1 — Gap-Through Execution Audit along Segment Path
+  test('45. Audit gap-through execution through segment path for Long gap-down SL & Short gap-up SL', () => {
+    // Long position: SL at 95. Segment starts at Open=90 (gap down past stopPrice 95) -> Low=85
+    const candleLongGap: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 90.0, // Gapped down below stopPrice 95.0
+      high: 92.0,
+      low: 85.0,
+      close: 88.0,
+      volume: 100,
+    };
+
+    const slLong: any = {
+      orderId: 'sl_long_gap',
+      tradeId: 't_gap',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 10.0,
+      remainingQuantity: 10.0,
+      status: 'PENDING',
+    };
+
+    const resLong = FillModelEngine.evaluateSegmentFill(slLong, candleLongGap.open, candleLongGap.low, 1700000000000, 'BTCUSDT');
+    expect(resLong.isFilled).toBe(true);
+    // Fill price must gap down to open price 90.0 minus half-spread
+    expect(resLong.fill?.price).toBeLessThanOrEqual(90.0);
+
+    // Short position: SL at 105. Segment starts at Open=110 (gap up past stopPrice 105) -> High=115
+    const candleShortGap: ICandle = {
+      timestamp: new Date(1700000000000),
+      open: 110.0, // Gapped up above stopPrice 105.0
+      high: 115.0,
+      low: 108.0,
+      close: 112.0,
+      volume: 100,
+    };
+
+    const slShort: any = {
+      orderId: 'sl_short_gap',
+      tradeId: 't_gap_short',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 10.0,
+      remainingQuantity: 10.0,
+      status: 'PENDING',
+    };
+
+    const resShort = FillModelEngine.evaluateSegmentFill(slShort, candleShortGap.open, candleShortGap.high, 1700000000000, 'BTCUSDT');
+    expect(resShort.isFilled).toBe(true);
+    // Fill price must gap up to open price 110.0 plus half-spread
+    expect(resShort.fill?.price).toBeGreaterThanOrEqual(110.0);
+  });
+
+  // 46. P1 — OHLC Segment Execution Metadata Presence
+  test('46. ExecutionSimulator attaches segmentIndex and segmentType metadata on fills and events', () => {
+    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH);
+    const timestamp = 1700000000000;
+
+    const order = execSim.submitOrder({
+      tradeId: 't_seg_meta',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'SL',
+    });
+
+    const candle: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 100.0,
+      high: 120.0,
+      low: 90.0,
+      close: 115.0, // Segment 0 (OPEN_LOW) touches SL @ 95
+      volume: 100,
+    };
+
+    const res = execSim.processCandle(candle);
+    expect(res.fills).toHaveLength(1);
+    expect(res.fills[0].segmentIndex).toBe(0);
+    expect(res.fills[0].segmentType).toBe('OPEN_LOW');
+
+    expect(res.events).toHaveLength(1);
+    expect(res.events[0].segmentIndex).toBe(0);
+    expect(res.events[0].segmentType).toBe('OPEN_LOW');
+  });
+
+  // 47. P1 — True BacktestSimulator -> Portfolio Ledger E2E Invariant Test
+  test('47. BacktestSimulator E2E Portfolio Ledger test verifies full accounting invariants across Long and Short trades', () => {
+    const initialCapital = 100000.0;
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      strategyMode: 'SMC',
+      candles: [
+        { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 1000 },
+        { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 1000 },
+        { timestamp: new Date(1700001800000), open: 112, high: 125, low: 110, close: 122, volume: 1000 },
+      ],
+      initialCapital,
+      warmupBars: 0,
+      minimumCandles: 2,
+    });
+
+    expect(res).toBeDefined();
+    expect(res.initialCapital).toBe(initialCapital);
+
+    // Verify portfolio ledger equation: finalEquity = initialCapital + netPnL
+    expect(res.finalEquity).toBeCloseTo(initialCapital + res.netPnL, 2);
+
+    for (const snapshot of res.equitySnapshots || []) {
+      // Equity snapshot invariant: equity = cash + unrealizedPnL
+      expect(snapshot.equity).toBeCloseTo(snapshot.cash + snapshot.unrealizedPnL, 2);
+    }
+  });
 });

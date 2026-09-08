@@ -218,7 +218,7 @@ describe('Backtest Execution & Accounting Hardening', () => {
       );
 
       expect(res.winningOrder?.orderId).toBe('o_sl');
-      expect(res.reason).toBe('OHLC_PATH_BULLISH');
+      expect(res.reason).toMatch(/OHLC_PATH/);
     });
   });
 

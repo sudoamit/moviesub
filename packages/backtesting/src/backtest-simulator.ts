@@ -350,6 +350,8 @@ export class BacktestSimulator {
             exitOrderSubmittedAt: exitFill.exitOrderSubmittedAt,
             exitTriggerTimestamp: exitFill.exitTriggerTimestamp,
             exitFillTimestamp: exitFill.exitFillTimestamp,
+            segmentIndex: exitFill.segmentIndex,
+            segmentType: exitFill.segmentType,
           });
 
           if (activeLot.remainingQuantity <= 0) {

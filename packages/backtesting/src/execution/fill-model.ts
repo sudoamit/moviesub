@@ -3,6 +3,7 @@ import { ICandle } from '@quant/shared';
 import { SlippageModel } from './slippage-model';
 import { FeeModel } from './fee-model';
 import { SpreadModel } from './spread-model';
+import { OHLCPathCursor } from './ohlc-path-cursor';
 
 export class FillModelEngine {
   /**
@@ -61,6 +62,18 @@ export class FillModelEngine {
       if (prevTime >= 0 && subTime < prevTime) {
         return { isValid: false, reason: 'SUBBARS_OUT_OF_ORDER' };
       }
+
+      // Check sub-bar interval regularity for 15m M1 series (must be exactly 60,000ms apart)
+      if (
+        prevTime >= 0 &&
+        parentDurationMs === 15 * 60 * 1000 &&
+        lowerTfCandles.length === 15 &&
+        !allowPartial &&
+        subTime - prevTime !== 60000
+      ) {
+        return { isValid: false, reason: 'SUBBAR_INTERVAL_MISMATCH' };
+      }
+
       prevTime = subTime;
     }
 
@@ -217,24 +230,53 @@ export class FillModelEngine {
     }
 
     if (ambiguityMode === SameCandleAmbiguityMode.OHLC_PATH) {
-      const isBullish = currentCandle.close >= currentCandle.open;
-      const isLong = triggered[0].order.side === 'SELL'; // Long position exit order side is SELL
+      const cursor = new OHLCPathCursor(currentCandle);
+      const candleTime =
+        currentCandle.timestamp instanceof Date
+          ? currentCandle.timestamp.getTime()
+          : new Date(currentCandle.timestamp).getTime();
 
-      if (isBullish) {
-        // Bullish candle path: Open -> Low -> High -> Close
-        // Low touched first
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
-        const winner = isLong ? (stopTrigger || limitTrigger) : (limitTrigger || stopTrigger);
-        return { winningFill: winner?.fill, winningOrder: winner?.order, reason: 'OHLC_PATH_BULLISH' };
-      } else {
-        // Bearish candle path: Open -> High -> Low -> Close
-        // High touched first
-        const stopTrigger = triggered.find((t) => t.order.orderType === 'STOP');
-        const limitTrigger = triggered.find((t) => t.order.orderType === 'LIMIT');
-        const winner = isLong ? (limitTrigger || stopTrigger) : (stopTrigger || limitTrigger);
-        return { winningFill: winner?.fill, winningOrder: winner?.order, reason: 'OHLC_PATH_BEARISH' };
+      for (const seg of cursor.segments) {
+        const segmentTriggered: { order: IOrder; fill: IFill }[] = [];
+        for (const t of triggered) {
+          const res = this.evaluateSegmentFill(
+            t.order,
+            seg.start,
+            seg.end,
+            candleTime,
+            t.order.symbol,
+          );
+          if (res.isFilled && res.fill) {
+            segmentTriggered.push({ order: t.order, fill: res.fill });
+          }
+        }
+
+        if (segmentTriggered.length === 1) {
+          return {
+            winningFill: segmentTriggered[0].fill,
+            winningOrder: segmentTriggered[0].order,
+            reason: 'OHLC_PATH_SEGMENT_EXACT',
+          };
+        }
+
+        if (segmentTriggered.length > 1) {
+          const segRes = this.resolveSegmentConflict(
+            segmentTriggered,
+            seg.start,
+            seg.end,
+            ambiguityMode,
+          );
+          if (segRes.winningOrder && segRes.winningFill) {
+            return {
+              winningFill: segRes.winningFill,
+              winningOrder: segRes.winningOrder,
+              reason: segRes.reason || 'OHLC_PATH_SEGMENT_RESOLVED',
+            };
+          }
+        }
       }
+
+      return { winningFill: triggered[0].fill, winningOrder: triggered[0].order };
     }
 
     if (ambiguityMode === SameCandleAmbiguityMode.LOWER_TIMEFRAME) {
