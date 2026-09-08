@@ -145,7 +145,10 @@ export class TradeLifecycleManager {
     // 1. Check Stop Loss / Trailing Stop first (conservative risk principle)
     const isStopHit = isLong ? low <= lot.currentStopLoss : high >= lot.currentStopLoss;
     if (isStopHit) {
-      const exitPrice = lot.currentStopLoss;
+      // Gap-aware exit price
+      const exitPrice = isLong
+        ? Math.min(lot.currentStopLoss, candle.open)
+        : Math.max(lot.currentStopLoss, candle.open);
       const fillQty = lot.remainingQuantity;
       const chunkDiff = isLong ? exitPrice - lot.entryPrice : lot.entryPrice - exitPrice;
       const chunkPnl = Number((chunkDiff * fillQty).toFixed(2));
@@ -220,7 +223,9 @@ export class TradeLifecycleManager {
     const isTp3Hit = isLong ? high >= lot.tp3 : low <= lot.tp3;
 
     if (isTp3Hit) {
-      const exitPrice = lot.tp3;
+      const exitPrice = isLong
+        ? Math.max(lot.tp3, candle.open)
+        : Math.min(lot.tp3, candle.open);
       const fillQty = lot.remainingQuantity;
       const chunkDiff = isLong ? exitPrice - lot.entryPrice : lot.entryPrice - exitPrice;
       const chunkPnl = Number((chunkDiff * fillQty).toFixed(2));
@@ -285,7 +290,9 @@ export class TradeLifecycleManager {
     // 3. Check Target 2 (Secondary Scale Out / Full Exit if TP3 not enabled)
     const isTp2Hit = isLong ? high >= lot.tp2 : low <= lot.tp2;
     if (isTp2Hit && !hasAlreadyTp2) {
-      const exitPrice = lot.tp2;
+      const exitPrice = isLong
+        ? Math.max(lot.tp2, candle.open)
+        : Math.min(lot.tp2, candle.open);
       const targetRatio = policy.tp3Ratio > 0 ? policy.tp2Ratio : 1.0;
       const scaleQty = Math.max(
         1,
@@ -387,7 +394,9 @@ export class TradeLifecycleManager {
     // 4. Check Target 1 (Partial scale out & breakeven stop adjustment)
     const isTp1Hit = isLong ? high >= lot.tp1 : low <= lot.tp1;
     if (isTp1Hit && !hasAlreadyTp1) {
-      const exitPrice = lot.tp1;
+      const exitPrice = isLong
+        ? Math.max(lot.tp1, candle.open)
+        : Math.min(lot.tp1, candle.open);
       const scaleQty = Math.max(
         1,
         Math.min(lot.remainingQuantity, Math.round(lot.initialQuantity * policy.tp1Ratio)),

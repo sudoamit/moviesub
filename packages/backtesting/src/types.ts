@@ -85,6 +85,7 @@ export interface IBacktestOptions {
   partialExitPolicy?: IPartialExitPolicy;
   lowerTfCandles?: ICandle[];
   strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
+  asOfTimestamp?: Date | number;
 }
 
 export type AblationVariant =
