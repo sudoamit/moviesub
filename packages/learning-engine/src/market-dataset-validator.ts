@@ -127,9 +127,9 @@ export class MarketDatasetValidator {
         const delta = rawTs - prevTs;
         if (delta !== expectedIntervalMs) {
           gapCount++;
-          if (gapCount > maxAllowedGapCount && delta > expectedIntervalMs * 3) {
+          if (gapCount > maxAllowedGapCount) {
             throw new Error(
-              `INVALID_MARKET_DATA_GAP: Detected unexplained gap of ${delta}ms (expected ${expectedIntervalMs}ms) at index ${i}`,
+              `MARKET_DATA_NOT_CONTINUOUS: INVALID_MARKET_DATA_GAP: Detected unexplained gap of ${delta}ms (expected ${expectedIntervalMs}ms) between index ${i - 1} (${prevTs}) and index ${i} (${rawTs})`,
             );
           }
         }

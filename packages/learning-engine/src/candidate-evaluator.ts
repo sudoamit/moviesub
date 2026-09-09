@@ -7,6 +7,8 @@ export interface ICandidateEvaluationOptions {
   dataset?: CandidateMarketDataset;
   marketDataset?: CandidateMarketDataset;
   candles?: ICandle[];
+  evaluationStartTimestamp?: number;
+  evaluationEndTimestamp?: number;
   costPerTradeR?: number;
   minimumCandles?: number;
   warmupBars?: number;
@@ -56,10 +58,12 @@ export class CandidateEvaluator {
    */
   public static evaluateCandidateOnMarketData(
     candidate: StrategyCandidate | CandidateArtifact,
-    marketData: { dataset?: CandidateMarketDataset; candles?: ICandle[] } | ICandle[],
+    marketData: { dataset?: CandidateMarketDataset; candles?: ICandle[]; evaluationStartTimestamp?: number; evaluationEndTimestamp?: number } | ICandle[],
     options?: {
       baselineCandidate?: StrategyCandidate | CandidateArtifact;
       costPerTradeR?: number;
+      evaluationStartTimestamp?: number;
+      evaluationEndTimestamp?: number;
       minimumCandles?: number;
       warmupBars?: number;
       symbol?: string;
@@ -70,6 +74,8 @@ export class CandidateEvaluator {
     const baseStrategyVersion = 'artifactId' in candidate ? candidate.strategyVersion : candidate.baseStrategyVersion;
     const candles = Array.isArray(marketData) ? marketData : marketData.candles;
     const dataset = Array.isArray(marketData) ? undefined : marketData.dataset;
+    const evaluationStartTimestamp = options?.evaluationStartTimestamp ?? (Array.isArray(marketData) ? undefined : marketData.evaluationStartTimestamp);
+    const evaluationEndTimestamp = options?.evaluationEndTimestamp ?? (Array.isArray(marketData) ? undefined : marketData.evaluationEndTimestamp);
 
     const minimumCandles = options?.minimumCandles ?? 50;
     if ((!candles || candles.length < minimumCandles) && !dataset) {
@@ -92,6 +98,8 @@ export class CandidateEvaluator {
     const baselineRes = CandidateBacktestRunner.runCandidateBacktest(baselineCandidate, {
       dataset,
       candles,
+      evaluationStartTimestamp,
+      evaluationEndTimestamp,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
       symbol: options?.symbol,
@@ -104,6 +112,8 @@ export class CandidateEvaluator {
     const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, {
       dataset,
       candles,
+      evaluationStartTimestamp,
+      evaluationEndTimestamp,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
       symbol: options?.symbol,
@@ -155,62 +165,35 @@ export class CandidateEvaluator {
    * Orchestrates candidate strategy evaluation against a formal baseline strategy benchmark
    * using continuous market candles and authoritative execution engine (BacktestSimulator).
    *
-   * Pure Market-Data Execution: Can be invoked cleanly with (candidate, options) without any
-   * TradingExperience[] parameter to guarantee no historical experience or label leakage into execution.
+   * Pure Market-Data Execution: Accepts exclusively (candidate, options: ICandidateEvaluationOptions).
+   * For test fixtures using deterministic historical experiences, use evaluateDeterministicTestFixture().
    */
   public static evaluate(
     candidate: StrategyCandidate | CandidateArtifact,
-    optionsOrExperiences?: ICandidateEvaluationOptions | TradingExperience[],
-    costPerTradeR = 0.05,
-    legacyOptions?: ICandidateEvaluationOptions,
+    options?: ICandidateEvaluationOptions,
   ): ICandidateEvaluationResult {
-    const isExperienceArray = Array.isArray(optionsOrExperiences);
-    const options: ICandidateEvaluationOptions =
-      optionsOrExperiences && !isExperienceArray
-        ? optionsOrExperiences
-        : {
-            ...(legacyOptions || {}),
-            costPerTradeR: costPerTradeR ?? legacyOptions?.costPerTradeR ?? 0.05,
-          };
+    const opts = options || {};
+    const marketDataset = opts.marketDataset || opts.dataset;
+    const candles = opts.candles;
 
-    const marketDataset = options.marketDataset || options.dataset;
-    const candles = options.candles;
-
-    if (candles || marketDataset) {
-      return this.evaluateCandidateOnMarketData(
-        candidate,
-        { dataset: marketDataset, candles },
-        {
-          baselineCandidate: options.baselineCandidate,
-          costPerTradeR: options.costPerTradeR ?? 0.05,
-          minimumCandles: options.minimumCandles,
-          warmupBars: options.warmupBars,
-          symbol: options.symbol,
-          timeframe: options.timeframe,
-        },
-      );
+    if (!candles && !marketDataset) {
+      throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: Missing market data for backtest execution');
     }
 
-    const totalTrades = isExperienceArray ? optionsOrExperiences.length : 0;
-    const candidateId = 'artifactId' in candidate ? candidate.candidateId : candidate.id;
-
-    if (totalTrades < 5) {
-      return {
-        candidateId,
-        passed: false,
-        baselineExpectancy: 0,
-        candidateExpectancy: 0,
-        expectancyDelta: 0,
-        profitFactor: 0,
-        maxDrawdownPercent: 0,
-        totalSimulatedTrades: 0,
-        simulatedRMultiples: [],
-        rejectionReason: 'Insufficient historical experiences for candidate evaluation.',
-      };
-    }
-
-    // Must have market data for execution
-    throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: Missing market data for backtest execution');
+    return this.evaluateCandidateOnMarketData(
+      candidate,
+      { dataset: marketDataset, candles },
+      {
+        baselineCandidate: opts.baselineCandidate,
+        costPerTradeR: opts.costPerTradeR ?? 0.05,
+        evaluationStartTimestamp: opts.evaluationStartTimestamp,
+        evaluationEndTimestamp: opts.evaluationEndTimestamp,
+        minimumCandles: opts.minimumCandles,
+        warmupBars: opts.warmupBars,
+        symbol: opts.symbol,
+        timeframe: opts.timeframe,
+      },
+    );
   }
 
   /**

@@ -530,9 +530,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
     const evalResult = CandidateEvaluator.evaluate(
       cand,
-      new Array(10).fill(null).map((_, i) => ({ id: `exp_${i}`, outcome: { pnlR: 0.5 } } as any)),
-      0.05,
-      { candles: continuousCandles },
+      { candles: continuousCandles, costPerTradeR: 0.05 },
     );
 
     expect(evalResult).toBeDefined();
@@ -703,25 +701,14 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
   // Test 19 — Candidate parameter optimization on training fold
   test('Test 19: Parameter optimization selects optimal candidate parameter via backtester grid search', () => {
-    const trainData: TradingExperience[] = [];
-    for (let i = 0; i < 25; i++) {
-      const isGoodScore = i % 2 === 0;
-      trainData.push({
-        id: `train_${i}`,
-        tradeId: `t_${i}`,
-        timestamp: new Date(baseTime + i * 60000),
-        decisionTimestamp: baseTime + i * 60000,
-        labelStartTimestamp: baseTime + i * 60000 + 1000,
-        labelEndTimestamp: baseTime + (i + 1) * 60000,
-        decision: { action: 'BUY', score: isGoodScore ? 75 : 55 },
-        execution: { entryPrice: 100, entryTime: new Date(baseTime + i * 60000) },
-        risk: { stopLoss: 95, target1: 110 },
-        outcome: { status: isGoodScore ? 'WIN' : 'LOSS', pnlR: isGoodScore ? 2.0 : -1.0 },
-        candlesDuringTrade: [
-          { timestamp: new Date(baseTime + i * 60000), open: 100, high: isGoodScore ? 112 : 101, low: isGoodScore ? 99 : 93, close: isGoodScore ? 111 : 94, volume: 100 },
-        ],
-      } as any);
-    }
+    const trainCandles: ICandle[] = Array.from({ length: 50 }, (_, i) => ({
+      timestamp: new Date(baseTime + i * 60000),
+      open: 100,
+      high: i % 2 === 0 ? 112 : 101,
+      low: i % 2 === 0 ? 99 : 93,
+      close: i % 2 === 0 ? 111 : 94,
+      volume: 100,
+    }));
 
     const candidate: StrategyCandidate = {
       id: 'cand_param_opt',
@@ -735,7 +722,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
-    const fitted = WalkForwardValidator.retrainCandidateOnFold(trainData, candidate, 1);
+    const fitted = WalkForwardValidator.retrainCandidateOnFold(trainCandles, candidate, 1);
     expect(fitted.change?.fittedValue).toBeDefined();
     expect(typeof fitted.change?.fittedValue).toBe('number');
   });
@@ -861,9 +848,12 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
   test('Test 27: WalkForwardValidator performs candidate retraining and fold evaluation on continuous market candles', async () => {
     const provider = new MockMarketDataProvider({ seed: 42 });
     const continuousCandles = await provider.getHistoricalCandles('BTCUSDT', '15m', 300);
+    const candleStartTs = continuousCandles[0].timestamp instanceof Date
+      ? continuousCandles[0].timestamp.getTime()
+      : new Date(continuousCandles[0].timestamp).getTime();
 
     const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
-      const t = baseTime + i * 300000;
+      const t = candleStartTs + i * 15 * 60000;
       return {
         id: `exp_wfv_market_${i}`,
         tradeId: `t_${i}`,

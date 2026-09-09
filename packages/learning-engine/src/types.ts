@@ -235,14 +235,33 @@ export interface StrategyCandidate {
   promotedAt?: Date;
 }
 
-export interface CandidateMarketDataset {
+export interface ExperienceDataset {
+  experiences: TradingExperience[];
+  datasetId?: string;
+  datasetHash: string;
+  featureSchemaVersion: string;
+  labelMetadata?: Record<string, unknown>;
+  startTimestamp: number;
+  endTimestamp: number;
+}
+
+export interface MarketDataset {
+  symbol?: string;
+  timeframe: string;
   executionCandles: ICandle[];
   higherTimeframeCandles?: Record<string, ICandle[]>;
   startTimestamp: number;
   endTimestamp: number;
-  timeframe: string;
   datasetHash: string;
+  marketDataHash?: string;
+  continuityMetadata?: {
+    isContinuous: boolean;
+    intervalMs: number;
+    candleCount: number;
+  };
 }
+
+export interface CandidateMarketDataset extends MarketDataset {}
 
 export interface HistoricalExperienceOutcome {
   readonly _brand: 'HistoricalExperienceOutcome';

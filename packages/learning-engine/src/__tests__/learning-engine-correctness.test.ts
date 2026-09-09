@@ -16,6 +16,7 @@ import {
   TradingExperience,
   WalkForwardValidator,
   sliceContinuousCandles,
+  sliceContinuousMarketWindow,
   MarketDatasetValidator,
   CandidateBacktestRunner,
   DEFAULT_LEARNING_SEED,
@@ -825,10 +826,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       createdAt: new Date(),
     };
 
-    const sixExps = Array.from({ length: 6 }, (_, i) => ({ ...expNoCandles, id: `exp_nc_${i}`, tradeId: `t_nc_${i}` }));
-
     expect(() => {
-      CandidateEvaluator.evaluate(cand, sixExps);
+      CandidateEvaluator.evaluate(cand);
     }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
   });
 
@@ -863,7 +862,7 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   });
 
   // Test 27 — MarketDatasetValidator candle continuity
-  test('Test 27: MarketDatasetValidator strictly validates candle continuity and rejects duplicates/out-of-order', () => {
+  test('Test 27: MarketDatasetValidator strictly validates candle continuity and rejects duplicates and gaps', () => {
     const baseTs = 1700000000000;
     const duplicateCandles = [
       { timestamp: new Date(baseTs), open: 100, high: 105, low: 95, close: 102, volume: 1000 },
@@ -873,6 +872,15 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
     expect(() => {
       MarketDatasetValidator.validateCandles(duplicateCandles, '1m');
     }).toThrow('INVALID_MARKET_DATA_DUPLICATE_TIMESTAMP');
+
+    const gapCandles = [
+      { timestamp: new Date(baseTs), open: 100, high: 105, low: 95, close: 102, volume: 1000 },
+      { timestamp: new Date(baseTs + 120000), open: 100, high: 105, low: 95, close: 102, volume: 1000 }, // 2m gap when expecting 1m
+    ];
+
+    expect(() => {
+      MarketDatasetValidator.validateCandles(gapCandles, '1m');
+    }).toThrow('INVALID_MARKET_DATA_GAP');
   });
 
   // Test 28 — WFV decision market data boundary vs label horizon
@@ -1132,6 +1140,86 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
 
     const customArtifact = CandidateBacktestRunner.createCandidateArtifact(cand, 'dataset_hash_seed', 9999);
     expect(customArtifact.trainingSeed).toBe(9999);
+  });
+
+  // Test 33: WFV fails closed when market window contains zero training labels
+  test('Test 33: WalkForwardValidator fails closed with INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW when no experiences fall into training market window', () => {
+    const baseTs = 1700000000000;
+    // Experiences far in the future compared to market candles
+    const experiences: TradingExperience[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `exp_future_${i}`,
+      tradeId: `t_fut_${i}`,
+      timestamp: new Date(baseTs + (500 + i) * 60000), // far in the future
+      decisionTimestamp: baseTs + (500 + i) * 60000,
+      featureTimestamp: baseTs + (500 + i) * 60000,
+      labelStartTimestamp: baseTs + (500 + i) * 60000 + 1000,
+      labelEndTimestamp: baseTs + (500 + i) * 60000 + 30000,
+      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      marketState: { quant: { smcScore: 70 } },
+      decision: { action: 'BUY', score: 70 },
+      execution: { entryPrice: 100, entryTime: new Date(baseTs + (500 + i) * 60000) },
+      risk: { stopLoss: 95 },
+      prediction: {},
+      outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.0, maxAdverseExcursion: 0.1, holdingTimeSeconds: 60 },
+      marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+      outcomeClassification: 'GOOD_TRADE_WIN',
+      reasons: [],
+      failureReasons: [],
+      strategyVersion: 'v2.0',
+      featureSchemaVersion: '2.0',
+      createdAt: new Date(),
+      candlesDuringTrade: [],
+    }));
+
+    const cand: StrategyCandidate = {
+      id: 'cand_empty_label_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-empty-lbl',
+      type: 'THRESHOLD',
+      description: 'Empty label test candidate',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const candles = Array.from({ length: 40 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 102,
+      volume: 1000,
+    }));
+
+    expect(() => {
+      WalkForwardValidator.validate(cand, experiences, {
+        numFolds: 2,
+        candles,
+      });
+    }).toThrow('INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW');
+  });
+
+  // Test 34: MarketExecutionWindow structures warmup vs evaluation data
+  test('Test 34: sliceContinuousMarketWindow clearly separates warmupCandles from evaluationCandles', () => {
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 102,
+      volume: 1000,
+    }));
+
+    const window = sliceContinuousMarketWindow(candles, baseTs + 20 * 60000, baseTs + 40 * 60000, 10);
+    expect(window).toBeDefined();
+    expect(window!.warmupCandles.length).toBe(10);
+    expect(window!.evaluationCandles.length).toBe(21);
+    expect(window!.allCandles.length).toBe(31);
+    expect(window!.warmupStartTimestamp).toBe(baseTs + 10 * 60000);
+    expect(window!.evaluationStartTimestamp).toBe(baseTs + 20 * 60000);
+    expect(window!.evaluationEndTimestamp).toBe(baseTs + 40 * 60000);
   });
 });
 

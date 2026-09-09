@@ -8,6 +8,7 @@ import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
 export interface CandidateExecutionConfig {
   candidateId: string;
   candidateVersion: string;
+  strategyVersion?: string;
   configHash: string;
   minMtfScore?: number;
   stopLossAtrMultiplier?: number;
@@ -37,7 +38,10 @@ export interface CandidateExecutionResult {
 
 export interface ICandidateBacktestOptions {
   dataset?: CandidateMarketDataset;
+  marketDataset?: CandidateMarketDataset;
   candles?: ICandle[];
+  evaluationStartTimestamp?: number;
+  evaluationEndTimestamp?: number;
   minimumCandles?: number;
   warmupBars?: number;
   symbol?: string;
@@ -223,6 +227,7 @@ export class CandidateBacktestRunner {
     return {
       candidateId: candidate.id,
       candidateVersion: candidate.candidateVersion || candidate.id,
+      strategyVersion: candidate.baseStrategyVersion || '1.0.0',
       configHash,
       minMtfScore,
       stopLossAtrMultiplier,
@@ -242,19 +247,32 @@ export class CandidateBacktestRunner {
    * using continuous market candles and the immutable CandidateArtifact as the single source of truth.
    *
    * PRODUCTION EXECUTION: Always evaluates candidates via SignalGenerator continuous replay.
+   * Strictly requires continuous market data (CandidateMarketDataset | ICandle[]).
    */
   public static runCandidateBacktest(
     candidateOrArtifact: StrategyCandidate | CandidateArtifact,
-    experiencesOrOptions?: TradingExperience[] | ICandidateBacktestOptions,
-    maybeOptions?: ICandidateBacktestOptions,
+    options: ICandidateBacktestOptions,
+  ): CandidateExecutionResult;
+  public static runCandidateBacktest(
+    candidateOrArtifact: StrategyCandidate | CandidateArtifact,
+    legacyExperiences: TradingExperience[],
+    options?: ICandidateBacktestOptions,
+  ): CandidateExecutionResult;
+  public static runCandidateBacktest(
+    candidateOrArtifact: StrategyCandidate | CandidateArtifact,
+    optionsOrExperiences?: ICandidateBacktestOptions | TradingExperience[],
+    legacyOptions?: ICandidateBacktestOptions,
   ): CandidateExecutionResult {
-    const options: ICandidateBacktestOptions | undefined = Array.isArray(experiencesOrOptions)
-      ? maybeOptions
-      : (experiencesOrOptions as ICandidateBacktestOptions);
+    let options: ICandidateBacktestOptions;
+    if (Array.isArray(optionsOrExperiences)) {
+      options = legacyOptions || {};
+    } else {
+      options = (optionsOrExperiences as ICandidateBacktestOptions) || {};
+    }
 
     // 1. Resolve or construct immutable CandidateArtifact
     const artifact: CandidateArtifact =
-      'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
+      candidateOrArtifact && 'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
         ? (candidateOrArtifact as CandidateArtifact)
         : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate);
 
@@ -283,7 +301,8 @@ export class CandidateBacktestRunner {
     }
 
     // 3. Collect and validate continuous market candles
-    const candles: ICandle[] = options?.dataset?.executionCandles || options?.candles || [];
+    const dataset = options?.marketDataset || options?.dataset;
+    const candles: ICandle[] = dataset?.executionCandles || options?.candles || [];
 
     if (!candles || candles.length === 0) {
       throw new Error(
@@ -311,7 +330,7 @@ export class CandidateBacktestRunner {
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: (options as any)?.symbol || 'BTCUSDT',
-      timeframe: options?.dataset?.timeframe || (options as any)?.timeframe || '15m',
+      timeframe: dataset?.timeframe || (options as any)?.timeframe || '15m',
       candles,
       initialCapital: options?.initialCapital,
       minimumCandles,
@@ -333,20 +352,43 @@ export class CandidateBacktestRunner {
 
     // Invoke authoritative BacktestSimulator engine directly
     const simResult = BacktestSimulator.runSimulation(backtestOptions);
-    const trades = simResult.trades || [];
+    const rawTrades = simResult.trades || [];
+    const evaluationStartTimestamp = options?.evaluationStartTimestamp;
+    const evaluationEndTimestamp = options?.evaluationEndTimestamp;
+
+    // Filter out any trades that occurred exclusively during the warmup period
+    const trades = rawTrades.filter((t) => {
+      const entryTs = t.entryTime instanceof Date ? t.entryTime.getTime() : new Date(t.entryTime).getTime();
+      if (evaluationStartTimestamp !== undefined && entryTs < evaluationStartTimestamp) {
+        return false;
+      }
+      if (evaluationEndTimestamp !== undefined && entryTs > evaluationEndTimestamp) {
+        return false;
+      }
+      return true;
+    });
+
     const rMultiples = trades.map((t) => t.pnlRMultiple || 0);
+    const winningTrades = trades.filter((t) => t.pnl > 0);
+    const losingTrades = trades.filter((t) => t.pnl < 0);
+    const grossProfit = winningTrades.reduce((sum, t) => sum + t.pnl, 0);
+    const grossLoss = losingTrades.reduce((sum, t) => sum + Math.abs(t.pnl), 0);
+    const totalPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
+    const winRate = trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0;
+    const expectancyR = trades.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / trades.length : 0;
+    const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? 10 : 1) : Number((grossProfit / grossLoss).toFixed(2));
 
     return {
       candidateId,
-      totalTrades: simResult.totalTrades,
+      totalTrades: trades.length,
       trades,
       rMultiples,
-      netPnL: simResult.netPnL,
-      grossProfit: simResult.trades.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0),
-      grossLoss: simResult.trades.filter((t) => t.pnl < 0).reduce((sum, t) => sum + Math.abs(t.pnl), 0),
-      winRate: simResult.winRate,
-      expectancyR: simResult.averageR,
-      profitFactor: simResult.profitFactor,
+      netPnL: totalPnL,
+      grossProfit,
+      grossLoss,
+      winRate: Number(winRate.toFixed(1)),
+      expectancyR: Number(expectancyR.toFixed(2)),
+      profitFactor,
       maxDrawdownR: simResult.maxDrawdownPercent,
     };
   }
