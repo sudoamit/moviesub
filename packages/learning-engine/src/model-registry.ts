@@ -63,6 +63,7 @@ const VALID_STATUS_TRANSITIONS: Record<CandidateStatus, CandidateStatus[]> = {
 };
 
 export class ModelRegistry {
+  public static readonly SUPPORTED_SCHEMA_VERSION = '2.0';
   private static persistencePath: string | null = null;
   private static artifacts: Map<string, CandidateArtifact> = new Map();
   private static events: ModelRegistryEvent[] = [];
@@ -187,6 +188,7 @@ export class ModelRegistry {
 
       // Mandatory top-level schema validation
       const mandatoryFields = [
+        'version',
         'artifacts',
         'promotionEvidences',
         'productionState',
@@ -198,6 +200,12 @@ export class ModelRegistry {
         if (!(field in data)) {
           throw new Error(`Missing mandatory top-level registry field: '${field}'`);
         }
+      }
+
+      if (data.version !== this.SUPPORTED_SCHEMA_VERSION) {
+        throw new Error(
+          `UNSUPPORTED_REGISTRY_SCHEMA_VERSION: Schema version '${data.version}' is not supported (expected '${this.SUPPORTED_SCHEMA_VERSION}')`,
+        );
       }
 
       if (!Array.isArray(data.artifacts)) {

@@ -1178,7 +1178,22 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         ModelRegistry.loadFromFile(corruptFilePath);
       }).toThrow('MODEL_REGISTRY_CORRUPT');
 
+      const unsupportedVersionData = {
+        version: '1.0',
+        artifacts: [],
+        promotionEvidences: [],
+        productionState: [],
+        events: [],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
+      };
+      fs.writeFileSync(corruptFilePath, JSON.stringify(unsupportedVersionData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
       const partialData = {
+        version: '2.0',
         artifacts: [],
         productionState: [],
         // missing promotionEvidences, events, models, activeModelVersion
