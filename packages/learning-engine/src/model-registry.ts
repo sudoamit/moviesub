@@ -55,8 +55,9 @@ const VALID_STATUS_TRANSITIONS: Record<CandidateStatus, CandidateStatus[]> = {
   SHADOW_ACTIVE: ['PROMOTION_ELIGIBLE', 'REJECTED'],
   PROMOTION_ELIGIBLE: ['PROMOTED', 'REJECTED'],
   PROMOTED: ['RETIRED', 'ROLLED_BACK'],
-  RETIRED: ['PROMOTED'], // Permitted for rollback reactivation
-  ROLLED_BACK: ['PROMOTED'], // Permitted for rollback reactivation
+  REACTIVATED: ['RETIRED', 'ROLLED_BACK'],
+  RETIRED: ['REACTIVATED', 'PROMOTED'], // Rollback reactivation
+  ROLLED_BACK: ['REACTIVATED', 'PROMOTED'], // Rollback reactivation
   REJECTED: [],
 };
 
@@ -288,6 +289,10 @@ export class ModelRegistry {
     }
 
     const previousStatus = existing.status;
+    if (previousStatus === newStatus) {
+      return existing;
+    }
+
     const allowed = VALID_STATUS_TRANSITIONS[previousStatus] || [];
     if (!allowed.includes(newStatus)) {
       throw new Error(
@@ -305,7 +310,7 @@ export class ModelRegistry {
     let eventType: ModelRegistryEventType = 'OOS_VALIDATED';
     if (newStatus === 'SHADOW_PENDING' || newStatus === 'SHADOW_ACTIVE') eventType = 'SHADOW_STARTED';
     else if (newStatus === 'PROMOTION_ELIGIBLE') eventType = 'PROMOTION_ELIGIBLE';
-    else if (newStatus === 'PROMOTED') eventType = 'PRODUCTION_ACTIVATED';
+    else if (newStatus === 'PROMOTED' || newStatus === 'REACTIVATED') eventType = 'PRODUCTION_ACTIVATED';
     else if (newStatus === 'REJECTED') eventType = 'PROMOTION_REJECTED';
     else if (newStatus === 'ROLLED_BACK') eventType = 'PRODUCTION_ROLLED_BACK';
     else if (newStatus === 'RETIRED') eventType = 'CANDIDATE_RETIRED';
@@ -376,6 +381,37 @@ export class ModelRegistry {
    */
   public static recordPromotionEvidence(evidence: PromotionEvidence): void {
     this.savePromotionEvidence(evidence);
+  }
+
+  /**
+   * Atomically records promotion evidence and updates candidate status to PROMOTION_ELIGIBLE or REJECTED.
+   */
+  public static recordPromotionOutcome(
+    candidateId: string,
+    evidence: PromotionEvidence,
+    decision: any,
+  ): void {
+    this.executeTransaction(
+      () => {
+        this.savePromotionEvidence(evidence);
+
+        if (
+          decision.decision === 'PROMOTE' ||
+          (decision.rejectionReasons?.length === 1 &&
+            decision.rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED'))
+        ) {
+          const candidate = this.artifacts.get(candidateId);
+          if (candidate && candidate.status !== 'PROMOTED' && candidate.status !== 'REACTIVATED') {
+            this.updateCandidateStatus(
+              candidateId,
+              'PROMOTION_ELIGIBLE',
+              'Candidate passed all shadow validation criteria',
+            );
+          }
+        }
+      },
+      { requirePersistence: this.persistencePath !== null },
+    );
   }
 
   /**

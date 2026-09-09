@@ -204,6 +204,7 @@ export type CandidateStatus =
   | 'SHADOW_ACTIVE'
   | 'PROMOTION_ELIGIBLE'
   | 'PROMOTED'
+  | 'REACTIVATED'
   | 'REJECTED'
   | 'ROLLED_BACK'
   | 'RETIRED'

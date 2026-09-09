@@ -201,10 +201,10 @@ export class ProductionModelActivator {
           }
         }
 
-        // Mark target candidate as PROMOTED (reactivated)
+        // Mark target candidate as REACTIVATED (reactivated via rollback)
         ModelRegistry.updateCandidateStatus(
           targetCandidateId,
-          'PROMOTED',
+          'REACTIVATED',
           `Reactivated via rollback from ${currentState.activeCandidateId}. Reason: ${options.reason}`,
         );
 

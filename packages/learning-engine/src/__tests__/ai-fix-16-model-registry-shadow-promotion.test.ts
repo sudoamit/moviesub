@@ -866,7 +866,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(rollbackState.activeCandidateId).toBe('cand-rb-A');
       expect(rollbackState.previousCandidateId).toBe('cand-rb-B');
       expect(ModelRegistry.getCandidateArtifact('cand-rb-B')?.status).toBe('ROLLED_BACK');
-      expect(ModelRegistry.getCandidateArtifact('cand-rb-A')?.status).toBe('PROMOTED');
+      expect(ModelRegistry.getCandidateArtifact('cand-rb-A')?.status).toBe('REACTIVATED');
     });
   });
 

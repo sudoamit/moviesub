@@ -163,31 +163,7 @@ export class PromotionGate {
       evaluatedAt,
     };
 
-    try {
-      if (ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId)) {
-        ModelRegistry.savePromotionEvidence(evidence);
-      }
-    } catch {
-      // Best-effort registry recording for standalone evaluation
-    }
-
-    // Update candidate status to PROMOTION_ELIGIBLE if metrics criteria passed
-    if (rejectionReasons.length === 0 || (rejectionReasons.length === 1 && rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED'))) {
-      try {
-        const currentArtifact = ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId);
-        if (currentArtifact && currentArtifact.status !== 'PROMOTED') {
-          ModelRegistry.updateCandidateStatus(
-            candidateArtifact.candidateId,
-            'PROMOTION_ELIGIBLE',
-            'Candidate passed all shadow validation criteria',
-          );
-        }
-      } catch {
-        // Best-effort status update
-      }
-    }
-
-    return {
+    const resultDecision: PromotionDecision = {
       decision,
       candidateId: candidateArtifact.candidateId,
       evidenceId,
@@ -197,6 +173,16 @@ export class PromotionGate {
       metrics,
       policyVersion,
     };
+
+    try {
+      if (ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId)) {
+        ModelRegistry.recordPromotionOutcome(candidateArtifact.candidateId, evidence, resultDecision);
+      }
+    } catch {
+      // Best-effort registry recording for standalone evaluation
+    }
+
+    return resultDecision;
   }
 
   /**
