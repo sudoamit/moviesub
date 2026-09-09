@@ -372,21 +372,22 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
         symbol: 'BTCUSDT',
         timeframe: '15m',
         candles: generateContinuousCandles(60),
-        failClosedOnMissingFeatures: true,
+        strategyConfig: {
+          deterministicSignals: [
+            {
+              id: 'exp_missing',
+              direction: 'BULLISH',
+              score: 80,
+              features: incompleteFeatures,
+              entryPrice: 50000,
+              timestamp: new Date(baseTime + 55 * 15 * 60 * 1000),
+            },
+          ],
+        },
         modelArtifact: {
           weights: new Array(28).fill(0.1),
           bias: 0,
-          failClosedOnMissingFeatures: true,
         },
-        experiences: [
-          {
-            id: 'exp_missing',
-            tradeId: 't_missing',
-            timestamp: new Date(baseTime + 55 * 15 * 60 * 1000),
-            features: incompleteFeatures,
-            execution: { entryPrice: 50000, entryTime: new Date() },
-          } as any,
-        ],
       });
     }).toThrow(/MISSING_REQUIRED_MODEL_FEATURE/);
   });
@@ -854,5 +855,147 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       .filter((f) => f.includes('/src/') && (f.endsWith('.js') || f.endsWith('.js.map') || f.endsWith('.d.ts') || f.endsWith('.tsbuildinfo')));
 
     expect(invalidArtifacts).toEqual([]);
+  });
+
+  // Test 27 — WalkForwardValidator operates on continuous market candles without default deterministic signal replay
+  test('Test 27: WalkForwardValidator performs candidate retraining and fold evaluation on continuous market candles', async () => {
+    const provider = new MockMarketDataProvider({ seed: 42 });
+    const continuousCandles = await provider.getHistoricalCandles('BTCUSDT', '15m', 300);
+
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = baseTime + i * 300000;
+      return {
+        id: `exp_wfv_market_${i}`,
+        tradeId: `t_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 60000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 70 + (i % 15) } },
+        decision: { action: 'BUY', score: 70 + (i % 15) },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: {
+          status: i % 2 === 0 ? 'WIN' : 'LOSS',
+          pnl: 100,
+          pnlR: i % 2 === 0 ? 1.5 : -1.0,
+          maxFavorableExcursion: 1.5,
+          maxAdverseExcursion: 0.2,
+          holdingTimeSeconds: 600,
+        },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [],
+      };
+    });
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_wfv_continuous',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-wfv-cont',
+      type: 'THRESHOLD',
+      description: 'WFV continuous candidate',
+      change: { parameter: 'minMtfScore', value: 65 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    // Run WFV with continuous candles without passing testOnlyDeterministicSignals (defaults to false / continuous replay)
+    const wfvRes = WalkForwardValidator.validate(candidate, experiences, {
+      numFolds: 2,
+      candles: continuousCandles,
+    });
+
+    expect(wfvRes).toBeDefined();
+    expect(wfvRes.folds.length).toBe(2);
+    expect(wfvRes.foldArtifacts).toBeDefined();
+    expect(wfvRes.foldArtifacts!.length).toBe(2);
+    expect(wfvRes.foldArtifacts![0].strategyParameters.fittedValue).toBeDefined();
+  });
+
+  // Test 28 — Model features strictly derive from market data, never from historical experiences
+  test('Test 28: Model evaluation on continuous candles derives canonical features strictly from market snapshots without querying historical experiences', () => {
+    const continuousCandles = generateContinuousCandles(80);
+    const weights = new Array(28).fill(0.1);
+    weights[0] = 2.0;
+
+    const testModelArtifact = {
+      modelVersion: 'ml-v2-market-only',
+      weights,
+      bias: 0,
+      featureSchemaVersion: '2.0',
+      sampleCount: 100,
+      trainLoss: 0.1,
+      trainedAt: new Date(0),
+    };
+
+    const candWithModel: StrategyCandidate = {
+      id: 'cand_market_feat_only',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-market-model',
+      type: 'MODEL',
+      description: 'Market feature only candidate',
+      change: {
+        modelArtifact: testModelArtifact,
+        minProbability: 0.4,
+      },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    // Run without experiences (pure market data)
+    const pureMarketResult = CandidateBacktestRunner.runCandidateBacktest(candWithModel, [], {
+      candles: continuousCandles,
+    });
+
+    // Run with experiences containing fake/corrupt features that should be completely ignored
+    const corruptExperiences: TradingExperience[] = [
+      {
+        id: 'exp_corrupt_1',
+        tradeId: 't_corrupt_1',
+        timestamp: continuousCandles[50].timestamp,
+        decisionTimestamp: continuousCandles[50].timestamp.getTime(),
+        featureTimestamp: continuousCandles[50].timestamp.getTime(),
+        labelStartTimestamp: continuousCandles[50].timestamp.getTime() + 1000,
+        labelEndTimestamp: continuousCandles[50].timestamp.getTime() + 60000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: -999999, obStrength: -999999 } },
+        decision: { action: 'BUY', score: 10 },
+        execution: { entryPrice: 100, entryTime: continuousCandles[50].timestamp },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'LOSS', pnl: -100, pnlR: -1.0, maxFavorableExcursion: 0, maxAdverseExcursion: 1, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BEARISH', volatilityRegime: 'HIGH', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'BAD_TRADE_LOSS',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [],
+      },
+    ];
+
+    const withCorruptExpResult = CandidateBacktestRunner.runCandidateBacktest(candWithModel, corruptExperiences, {
+      candles: continuousCandles,
+    });
+
+    // The results must be 100% identical because features derive purely from market data, not experiences!
+    expect(withCorruptExpResult.totalTrades).toBe(pureMarketResult.totalTrades);
+    expect(withCorruptExpResult.trades.length).toBe(pureMarketResult.trades.length);
+    if (pureMarketResult.trades.length > 0) {
+      expect(withCorruptExpResult.trades[0].entryPrice).toBe(pureMarketResult.trades[0].entryPrice);
+      expect(withCorruptExpResult.trades[0].entryTime).toEqual(pureMarketResult.trades[0].entryTime);
+    }
   });
 });

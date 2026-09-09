@@ -10,7 +10,7 @@ import { VolatilityPerformanceAnalyzer } from './volatility-performance-analyzer
 import { StrategyPerformanceAnalyzer } from './strategy-performance-analyzer';
 import { CandidateGenerator } from './candidate-generator';
 import { CandidateEvaluator } from './candidate-evaluator';
-import { WalkForwardValidator } from './walk-forward-validator';
+import { WalkForwardValidator, sliceContinuousCandles } from './walk-forward-validator';
 import { RobustnessEngine } from './robustness-engine';
 import { MonteCarloEngine } from './monte-carlo-engine';
 import { ShadowTradingEngine } from './shadow-trading-engine';
@@ -19,7 +19,8 @@ import { RollbackManager } from './rollback-manager';
 import { DriftDetector } from './drift-detector';
 import { LearningMemory } from './learning-memory';
 import { LearningScheduler } from './learning-scheduler';
-import { LearningRunReport, StrategyCandidate } from './types';
+import { ICandle } from '@quant/shared';
+import { CandidateMarketDataset, LearningRunReport, StrategyCandidate } from './types';
 
 /**
  * Centrally defined temporal validation policy for the autonomous learning pipeline:
@@ -34,6 +35,9 @@ export interface ILearningCycleOptions {
   baseStrategyVersion?: string;
   autoPromote?: boolean;
   embargoMs?: number;
+  dataset?: CandidateMarketDataset;
+  candles?: ICandle[];
+  testOnlyDeterministicSignals?: boolean;
 }
 
 export class LearningEngine {
@@ -136,8 +140,23 @@ export class LearningEngine {
         throw new Error('INSUFFICIENT_FINAL_OOS_DATA');
       }
 
+      const valStartTime = new Date(valSlice[0].timestamp).getTime();
+      const valEndTime = Math.max(...valSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
+      const oosStartTime = new Date(oosSlice[0].timestamp).getTime();
+      const oosEndTime = Math.max(...oosSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
+      const devStartTime = new Date(trainSlice[0].timestamp).getTime();
+      const devEndTime = valEndTime;
+
+      const valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime);
+      const devCandles = sliceContinuousCandles(options.candles, devStartTime, devEndTime);
+      const oosCandles = sliceContinuousCandles(options.candles, oosStartTime, oosEndTime);
+
       // 9a. Historical Simulation on Validation slice of development dataset
-      const valEval = CandidateEvaluator.evaluate(cand, valSlice);
+      const valEval = CandidateEvaluator.evaluate(cand, valSlice, 0.05, {
+        dataset: options.dataset,
+        candles: valCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
       if (!valEval.passed) {
         cand.status = 'REJECTED';
         cand.rejectionReason = valEval.rejectionReason || 'Validation evaluation failed.';
@@ -147,7 +166,12 @@ export class LearningEngine {
 
       // 9b. Walk-Forward Purged & Embargo Validation on Development Dataset
       const devExperiences = [...trainSlice, ...valSlice];
-      const wfEval = WalkForwardValidator.validate(cand, devExperiences, { embargoMs });
+      const wfEval = WalkForwardValidator.validate(cand, devExperiences, {
+        embargoMs,
+        dataset: options.dataset,
+        candles: devCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
 
       // 9c. Robustness & Transaction Costs
       const costEval = RobustnessEngine.evaluateCosts(cand, valSlice);
@@ -159,7 +183,11 @@ export class LearningEngine {
       const mcEval = MonteCarloEngine.simulate(valEval.simulatedRMultiples, { seed: 42 });
 
       // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset
-      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice);
+      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice, 0.05, {
+        dataset: options.dataset,
+        candles: oosCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
 
       cand.validationMetrics = {
         inSampleExpectancy: wfEval.meanInSampleExpectancy || valEval.candidateExpectancy,

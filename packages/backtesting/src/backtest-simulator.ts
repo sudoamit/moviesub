@@ -660,63 +660,38 @@ export class BacktestSimulator {
               // Extract the REAL 28-dimensional canonical feature vector
               let featureVector: number[] | undefined;
 
-              // 1. From signal.features or deterministic setup or matching experience
-              const matchingExp = options.experiences?.find(
-                (e) =>
-                  Math.abs(
-                    (e.timestamp instanceof Date ? e.timestamp.getTime() : new Date(e.timestamp).getTime()) -
-                      candleTime,
-                  ) <= 1000,
-              );
-
+              // 1. Check if signal contains explicit feature vector/map (e.g. from deterministic signal fixture)
               const candidateFeatures =
                 (signal as any).features ||
                 (signal as any).quantSnapshot?.features ||
                 (signal as any).marketState?.quant ||
-                (signal as any).marketState?.features ||
-                (matchingExp as any)?.features ||
-                matchingExp?.marketState?.quant ||
-                matchingExp?.marketState?.features ||
-                (options.experiences && options.experiences.length === 1
-                  ? (options.experiences[0] as any).features ||
-                    options.experiences[0]?.marketState?.quant ||
-                    options.experiences[0]?.marketState?.features
-                  : undefined);
+                (signal as any).marketState?.features;
 
-              const failClosedOnMissing =
-                (model as any)?.failClosedOnMissingFeatures ||
-                (options.candidateArtifact as any)?.failClosedOnMissingFeatures ||
-                (options as any)?.failClosedOnMissingFeatures;
-
-              if (failClosedOnMissing) {
-                if (!candidateFeatures) {
-                  throw new Error('MISSING_REQUIRED_MODEL_FEATURE: No candidate feature vector available');
-                }
-                if (typeof candidateFeatures === 'object' && !Array.isArray(candidateFeatures)) {
+              if (candidateFeatures) {
+                if (Array.isArray(candidateFeatures)) {
+                  if (
+                    candidateFeatures.length !== CANONICAL_V2_DIMENSION ||
+                    candidateFeatures.some((v) => typeof v !== 'number' || isNaN(v))
+                  ) {
+                    throw new Error(
+                      `MISSING_REQUIRED_MODEL_FEATURE: Feature vector dimension must be ${CANONICAL_V2_DIMENSION} with valid numeric values`,
+                    );
+                  }
+                  featureVector = candidateFeatures;
+                } else if (typeof candidateFeatures === 'object') {
                   for (const name of CANONICAL_FEATURE_NAMES_V2) {
                     if (typeof candidateFeatures[name] !== 'number' || isNaN(candidateFeatures[name])) {
-                      throw new Error(`MISSING_REQUIRED_MODEL_FEATURE: Required feature '${name}' is missing`);
+                      throw new Error(`MISSING_REQUIRED_MODEL_FEATURE: Required feature '${name}' is missing or invalid`);
                     }
                   }
+                  featureVector = CANONICAL_FEATURE_NAMES_V2.map((name) => candidateFeatures[name]);
                 }
-              }
-
-              if (Array.isArray(candidateFeatures)) {
-                featureVector = candidateFeatures;
-              } else if (candidateFeatures && typeof candidateFeatures === 'object') {
-                featureVector = CANONICAL_FEATURE_NAMES_V2.map((name) => {
-                  let val = candidateFeatures[name];
-                  if (typeof val === 'number') {
-                    if (!scalerParams && val > 1.0 && val <= 100.0) val = val / 100.0;
-                    return val;
-                  }
-                  return 0.5;
-                });
               } else if ((signal as any).quantSnapshot) {
+                // 2. Extract canonical features directly from the live signal's quantSnapshot
                 const feats = CanonicalMLEngineV2.extractFeatures((signal as any).quantSnapshot);
                 featureVector = CanonicalMLEngineV2.toArray(feats);
               } else if (mtfData.executionSlice.length >= 20) {
-                // Build snapshot from execution and HTF candles if sufficient history exists
+                // 3. Build live snapshot directly from continuous market data
                 try {
                   const snap = SnapshotBuilder.buildSnapshot({
                     symbol,
@@ -735,30 +710,23 @@ export class BacktestSimulator {
                 }
               }
 
-              if (!featureVector) {
-                // Fallback: derive approximate canonical vector from available signal data
-                featureVector = CANONICAL_FEATURE_NAMES_V2.map((name) => {
-                  if (name === 'smcScore') return (signal.score || 50) / 100.0;
-                  if (name === 'riskRewardRatio') return Math.min(1.0, (signal.riskRewardRatios?.rr1 || 1.5) / 5.0);
-                  if (name === 'mtfAlignment') return signal.score >= 75 ? 1.0 : signal.score >= 60 ? 0.6 : 0.2;
-                  return 0.5;
-                });
+              if (!featureVector || featureVector.length !== CANONICAL_V2_DIMENSION || featureVector.some((v) => typeof v !== 'number' || isNaN(v))) {
+                throw new Error(
+                  `MISSING_REQUIRED_MODEL_FEATURE: Required ${CANONICAL_V2_DIMENSION}-dimensional canonical feature vector is missing or incomplete for model execution`,
+                );
               }
 
               // Evaluate against actual experience/market feature vector using scalerArtifact if present
               let z = (model as any).bias;
               for (let j = 0; j < (model as any).weights.length; j++) {
                 const featName = CANONICAL_FEATURE_NAMES_V2[j];
-                const rawFeatVal =
-                  featureVector && j < featureVector.length && typeof featureVector[j] === 'number'
-                    ? featureVector[j]
-                    : 0.5;
+                const rawFeatVal = featureVector[j];
                 const scaledVal =
                   scalerParams && featName && scalerParams[featName]
                     ? scalerParams[featName].std < 1e-5
                       ? 0
                       : (rawFeatVal - scalerParams[featName].mean) / scalerParams[featName].std
-                    : rawFeatVal - 0.5;
+                    : rawFeatVal;
                 z += (model as any).weights[j] * scaledVal;
               }
               const prob = 1.0 / (1.0 + Math.exp(-Math.max(-15, Math.min(15, z))));

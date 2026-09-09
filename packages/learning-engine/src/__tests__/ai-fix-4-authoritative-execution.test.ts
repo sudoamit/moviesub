@@ -10,12 +10,29 @@ import { DatasetManager } from '../dataset-manager';
 import { ExperienceStore } from '../experience-store';
 import { TemporalFeatureScaler } from '../feature-scaler';
 import { LearningEngine, DEFAULT_LEARNING_EMBARGO_MS } from '../learning-engine';
-import { ModelTrainer } from '../model-trainer';
+import { ModelTrainer, CANONICAL_FEATURE_NAMES_V2 } from '../model-trainer';
 import { MonteCarloEngine } from '../monte-carlo-engine';
 import { PointInTimeValidator } from '../point-in-time-validator';
 import { PromotionGate } from '../promotion-gate';
 import { StrategyCandidate, TradingExperience } from '../types';
 import { WalkForwardValidator } from '../walk-forward-validator';
+
+function generateContinuousCandles(count: number = 30): ICandle[] {
+  const candles: ICandle[] = [];
+  const baseT = 1700000000000;
+  for (let i = 0; i < count; i++) {
+    const t = baseT + i * 60000;
+    candles.push({
+      timestamp: new Date(t),
+      open: 100 + (i % 5) * 0.1,
+      high: 101 + (i % 5) * 0.1,
+      low: 99 + (i % 5) * 0.1,
+      close: 100.5 + (i % 5) * 0.1,
+      volume: 1000,
+    });
+  }
+  return candles;
+}
 
 describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Tests A - AE)', () => {
   const baseTime = 1700000000000;
@@ -106,6 +123,13 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
     const candles = [candle0, candle1, candle2];
 
+    const quant: Record<string, number> = {};
+    for (const name of CANONICAL_FEATURE_NAMES_V2) {
+      quant[name] = 0.5;
+    }
+    quant.smcScore = 80;
+    quant.mtfAlignment = 0.85;
+
     const exp: TradingExperience = {
       id: 'exp_authoritative_fixture',
       tradeId: 'tr_authoritative_fixture',
@@ -115,7 +139,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       labelStartTimestamp: baseTime + 1000,
       labelEndTimestamp: baseTime + 180000,
       instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
-      marketState: { quant: { smcScore: 80, mtfAlignment: 0.85 } },
+      marketState: { quant },
       decision: { action: isShort ? 'SELL' : 'BUY', score: 80 },
       execution: { entryPrice, entryTime: new Date(baseTime) },
       risk: { stopLoss, target1: tp1, target2: tp2, target3: tp3 },
@@ -175,7 +199,10 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     });
 
     // Method B: Run through CandidateEvaluator (which calls CandidateBacktestRunner -> BacktestSimulator)
-    const candResult = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles });
+    const candResult = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], {
+      candles,
+      testOnlyDeterministicSignals: true,
+    });
 
     expect(candResult.totalTrades).toBe(simResult.totalTrades);
     expect(candResult.trades.length).toBe(simResult.trades.length);
@@ -207,9 +234,10 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
   });
 
   // Test B — Complete trade lifecycle: TP1 → BE → TP2 → trailing → TP3
+  // Test B — Complete trade lifecycle: TP1 → BE → TP2 → trailing → TP3
   test('Test B: Complete trade lifecycle: TP1 → BE → TP2 → trailing → TP3', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
-    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(res.totalTrades).toBe(1);
     const trade = res.trades[0];
@@ -219,8 +247,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test C — Complete trade lifecycle: TP1 → BE → SL
   test('Test C: Complete trade lifecycle: TP1 → BE → SL', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ hitTp1BeSl: true });
-    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ hitTp1BeSl: true });
+    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(res.totalTrades).toBe(1);
     const trade = res.trades[0];
@@ -231,8 +259,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test D — Long gap-through SL
   test('Test D: Long gap-through SL fills at gap price with authoritative slippage', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ isShort: false, gapSl: true });
-    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ isShort: false, gapSl: true });
+    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(res.totalTrades).toBe(1);
     const trade = res.trades[0];
@@ -244,8 +272,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test E — Short gap-through SL
   test('Test E: Short gap-through SL fills at gap price with authoritative slippage', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ isShort: true, gapSl: true });
-    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ isShort: true, gapSl: true });
+    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(res.totalTrades).toBe(1);
     const trade = res.trades[0];
@@ -257,8 +285,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test F — Gap-through TP
   test('Test F: Gap-through TP fills at gap open price', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ isShort: false, gapTp: true });
-    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ isShort: false, gapTp: true });
+    const res = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(res.totalTrades).toBe(1);
     const trade = res.trades[0];
@@ -277,7 +305,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       minimumCandles: 1,
       warmupBars: 0,
     });
-    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles });
+    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(candRes.trades[0].positionSize).toBe(simRes.trades[0].positionSize);
     expect(candRes.trades[0].positionSize).toBe(200);
@@ -294,7 +322,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       minimumCandles: 1,
       warmupBars: 0,
     });
-    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles });
+    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(candRes.trades[0].entryFees).toBe(simRes.trades[0].entryFees);
     expect(candRes.trades[0].exitFees).toBe(simRes.trades[0].exitFees);
@@ -312,7 +340,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       minimumCandles: 1,
       warmupBars: 0,
     });
-    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles });
+    const candRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(candRes.trades[0].entrySlippage).toBe(simRes.trades[0].entrySlippage);
     expect(candRes.trades[0].exitSlippage).toBe(simRes.trades[0].exitSlippage);
@@ -320,7 +348,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test J — Candidate sizing actually changes production position size
   test('Test J: Candidate sizing actually changes production position size', () => {
-    const { exp } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const { exp, candles } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     const baseCand: StrategyCandidate = {
       id: 'cand_base_size',
       baseStrategyVersion: 'v2.0',
@@ -340,8 +368,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       change: { parameter: 'sizingMultiplier', value: 2.0 },
     };
 
-    const baseRes = CandidateBacktestRunner.runCandidateBacktest(baseCand, [exp]);
-    const doubleRes = CandidateBacktestRunner.runCandidateBacktest(doubleSizeCand, [exp]);
+    const baseRes = CandidateBacktestRunner.runCandidateBacktest(baseCand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const doubleRes = CandidateBacktestRunner.runCandidateBacktest(doubleSizeCand, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(doubleRes.trades[0].positionSize).toBe(baseRes.trades[0].positionSize * 2);
     expect(doubleRes.trades[0].positionSize).toBe(400);
@@ -349,7 +377,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test K — Candidate stop multiplier changes actual production stop
   test('Test K: Candidate stop multiplier changes actual production stop', () => {
-    const { exp } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const { exp, candles } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     const normalStopCand: StrategyCandidate = {
       id: 'cand_normal_stop',
       baseStrategyVersion: 'v2.0',
@@ -369,8 +397,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       change: { parameter: 'stopLossAtrMultiplier', value: 2.0 }, // 2x wider stop distance (10 pts vs 5 pts)
     };
 
-    const normalRes = CandidateBacktestRunner.runCandidateBacktest(normalStopCand, [exp]);
-    const wideRes = CandidateBacktestRunner.runCandidateBacktest(wideStopCand, [exp]);
+    const normalRes = CandidateBacktestRunner.runCandidateBacktest(normalStopCand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const wideRes = CandidateBacktestRunner.runCandidateBacktest(wideStopCand, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(normalRes.trades[0].stopLoss).toBe(95);
     expect(wideRes.trades[0].stopLoss).toBe(90); // 100 - (5 * 2) = 90
@@ -378,7 +406,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test L — Candidate threshold changes actual signal generation
   test('Test L: Candidate threshold changes actual signal generation', () => {
-    const { exp } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const { exp, candles } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     // Experience decision score is 80
     const passCand: StrategyCandidate = {
       id: 'cand_pass_thresh',
@@ -400,8 +428,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       change: { parameter: 'minMtfScore', value: 85 },
     };
 
-    const passRes = CandidateBacktestRunner.runCandidateBacktest(passCand, [exp]);
-    const filterRes = CandidateBacktestRunner.runCandidateBacktest(filterCand, [exp]);
+    const passRes = CandidateBacktestRunner.runCandidateBacktest(passCand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const filterRes = CandidateBacktestRunner.runCandidateBacktest(filterCand, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(passRes.totalTrades).toBe(1);
     expect(filterRes.totalTrades).toBe(0);
@@ -487,16 +515,14 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       CandidateBacktestRunner.runCandidateBacktest(candidate, [expNoCandles]);
     }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
   });
-
-  // Test O — Historical outcome.pnlR cannot affect candidate result
   test('Test O: Historical outcome.pnlR cannot affect candidate result', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
 
     const exp1 = { ...exp, outcome: { ...exp.outcome, pnl: 9999, pnlR: 100.0 } };
     const exp2 = { ...exp, outcome: { ...exp.outcome, pnl: -9999, pnlR: -100.0 } };
 
-    const res1 = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp1]);
-    const res2 = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp2]);
+    const res1 = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp1], { candles, testOnlyDeterministicSignals: true });
+    const res2 = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp2], { candles, testOnlyDeterministicSignals: true });
 
     expect(res1.trades[0].pnlRMultiple).toBe(res2.trades[0].pnlRMultiple);
     expect(res1.trades[0].pnl).toBe(res2.trades[0].pnl);
@@ -556,7 +582,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(candidate, experiences, { numFolds: 2 });
+    const wfRes = WalkForwardValidator.validate(candidate, experiences, {
+      numFolds: 2,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfRes.foldArtifacts).toBeDefined();
     expect(wfRes.foldArtifacts!.length).toBe(2);
 
@@ -621,7 +651,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(candidate, experiences, { numFolds: 1 });
+    const wfRes = WalkForwardValidator.validate(candidate, experiences, {
+      numFolds: 1,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     const fold = wfRes.foldArtifacts![0];
 
     // Real SHA-256 hashes must be hex strings of non-zero length and derived from content
@@ -729,7 +763,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const resOriginal = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 1 });
+    const resOriginal = WalkForwardValidator.validate(baseCand, experiences, {
+      numFolds: 1,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
 
     // Mutate the final OOS items with completely different feature values and outcome
     const experiencesMutated = experiences.map((e, idx) => {
@@ -743,7 +781,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       return e;
     });
 
-    const resMutated = WalkForwardValidator.validate(baseCand, experiencesMutated, { numFolds: 1 });
+    const resMutated = WalkForwardValidator.validate(baseCand, experiencesMutated, {
+      numFolds: 1,
+      candles: experiencesMutated.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
 
     // Training fold artifacts must be 100% identical
     expect(resOriginal.foldArtifacts![0].trainDatasetHash).toBe(resMutated.foldArtifacts![0].trainDatasetHash);
@@ -754,8 +796,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test U — Monte Carlo input comes exclusively from actual candidate execution trades
   test('Test U: Monte Carlo input comes exclusively from actual candidate execution trades', () => {
-    const { exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
-    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp]);
+    const { exp, candles, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
+    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, [exp], { candles, testOnlyDeterministicSignals: true });
 
     expect(backtestRes.rMultiples).toHaveLength(1);
     expect(backtestRes.rMultiples[0]).toBeGreaterThan(2.0);
@@ -942,7 +984,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test AB — Model scoring evaluates against actual 28-dimensional canonical feature vector, not static constants
   test('Test AB: Model scoring evaluates against actual 28-dimensional canonical feature vector, not static constants', () => {
-    const { exp: expBase, candidate } = createDeterministicTradeFixture();
+    const { exp: expBase, candles, candidate } = createDeterministicTradeFixture();
 
     // Model with selective weights: strongly positive on feature 0 (smcScore), strongly negative on feature 3 (mtfAlignment)
     const weights = new Array(28).fill(0);
@@ -960,29 +1002,34 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       trainedAt: new Date(0),
     };
 
-    // Experience 1: High smcScore (0.9), Low mtfAlignment (0.1) -> z = 10*(0.4) - 10*(-0.4) = +8.0 -> prob ~ 0.999 -> score 100
+    const featHigh: Record<string, number> = {};
+    const featLow: Record<string, number> = {};
+    for (const name of CANONICAL_FEATURE_NAMES_V2) {
+      featHigh[name] = 0.5;
+      featLow[name] = 0.5;
+    }
+    featHigh.smcScore = 0.9;
+    featHigh.mtfAlignment = 0.1;
+    featLow.smcScore = 0.1;
+    featLow.mtfAlignment = 0.9;
+
+    // Experience 1: High smcScore (0.9), Low mtfAlignment (0.1) -> z = 10*(0.9) - 10*(0.1) = +8.0 -> prob ~ 0.999 -> score 100
     const expHighFavorable: TradingExperience = {
       ...expBase,
       id: 'exp_high_fav',
       tradeId: 't_high_fav',
       marketState: {
-        quant: {
-          smcScore: 0.9,
-          mtfAlignment: 0.1,
-        },
+        quant: featHigh,
       },
     };
 
-    // Experience 2: Low smcScore (0.1), High mtfAlignment (0.9) -> z = 10*(-0.4) - 10*(0.4) = -8.0 -> prob ~ 0.0003 -> score 0
+    // Experience 2: Low smcScore (0.1), High mtfAlignment (0.9) -> z = 10*(0.1) - 10*(0.9) = -8.0 -> prob ~ 0.0003 -> score 0
     const expLowUnfavorable: TradingExperience = {
       ...expBase,
       id: 'exp_low_unfav',
       tradeId: 't_low_unfav',
       marketState: {
-        quant: {
-          smcScore: 0.1,
-          mtfAlignment: 0.9,
-        },
+        quant: featLow,
       },
     };
 
@@ -996,17 +1043,13 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       },
     };
 
-    // Under the old bug where features were hardcoded to 0.1:
-    // z would be 10*(0.1) - 10*(0.1) = 0 for BOTH experiences, resulting in score 50 (both rejected).
-    // Under real canonical feature evaluation:
-    // expHighFavorable receives score ~100 and passes.
-    // expLowUnfavorable receives score ~0 and is rejected.
-
     const simHigh = CandidateBacktestRunner.runCandidateBacktest(candWithModel, [expHighFavorable], {
-      candles: expHighFavorable.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
     const simLow = CandidateBacktestRunner.runCandidateBacktest(candWithModel, [expLowUnfavorable], {
-      candles: expLowUnfavorable.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
 
     expect(simHigh.totalTrades).toBe(1);
@@ -1015,7 +1058,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test AC — minProbability is passed into BacktestSimulator and filters trades without requiring a custom modelArtifact
   test('Test AC: minProbability is passed into BacktestSimulator and filters trades without requiring custom modelArtifact', () => {
-    const { exp, candidate } = createDeterministicTradeFixture();
+    const { exp, candles, candidate } = createDeterministicTradeFixture();
     const expWithProb: TradingExperience = {
       ...exp,
       prediction: { probabilityWin: 0.65 },
@@ -1038,10 +1081,12 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     };
 
     const resPermissive = CandidateBacktestRunner.runCandidateBacktest(candPermissive, [expWithProb], {
-      candles: expWithProb.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
     const resStrict = CandidateBacktestRunner.runCandidateBacktest(candStrict, [expWithProb], {
-      candles: expWithProb.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
 
     expect(resPermissive.totalTrades).toBe(1);
@@ -1050,7 +1095,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
   // Test AD — CandidateArtifact is the authoritative object executed by CandidateBacktestRunner
   test('Test AD: CandidateArtifact is the authoritative object executed and mutations to candidate after creation have zero effect', () => {
-    const { exp, candidate } = createDeterministicTradeFixture();
+    const { exp, candles, candidate } = createDeterministicTradeFixture();
 
     // Create frozen CandidateArtifact
     const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate);
@@ -1059,7 +1104,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
     // Directly execute the CandidateArtifact
     const resArtifact = CandidateBacktestRunner.runCandidateBacktest(artifact, [exp], {
-      candles: exp.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
     expect(resArtifact.totalTrades).toBe(1);
 
@@ -1069,7 +1115,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     (candidate.change as any).value = 999;
 
     const resFromFrozenArtifact = CandidateBacktestRunner.runCandidateBacktest(artifact, [exp], {
-      candles: exp.candlesDuringTrade!,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
     expect(resFromFrozenArtifact.totalTrades).toBe(1);
   });
@@ -1120,7 +1167,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 2 });
+    const wfRes = WalkForwardValidator.validate(baseCand, experiences, {
+      numFolds: 2,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfRes.folds.length).toBe(2);
     expect(wfRes.foldArtifacts).toBeDefined();
 
@@ -1177,7 +1228,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     };
 
     expect(() => {
-      WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+      WalkForwardValidator.validate(cand, experiences, { numFolds: 2, candles: generateContinuousCandles(30) });
     }).toThrow('INSUFFICIENT_PURGED_VALIDATION_DATA');
   });
 
@@ -1226,7 +1277,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     };
 
     expect(() => {
-      WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+      WalkForwardValidator.validate(cand, experiences, { numFolds: 2, candles: generateContinuousCandles(30) });
     }).toThrow('INSUFFICIENT_PURGED_OOS_DATA');
   });
 
@@ -1250,7 +1301,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       labelEndTimestamp: 1700000000000 + i * 60000 + 30000,
     }));
     expect(() => {
-      WalkForwardValidator.validate(cand, expsWithoutStart as any, { numFolds: 2 });
+      WalkForwardValidator.validate(cand, expsWithoutStart as any, { numFolds: 2, candles: generateContinuousCandles(30) });
     }).toThrow('MISSING_LABEL_START_TIMESTAMP');
 
     const expsWithoutEnd: any[] = Array.from({ length: 30 }, (_, i) => ({
@@ -1259,7 +1310,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       labelStartTimestamp: 1700000000000 + i * 60000 + 1000,
     }));
     expect(() => {
-      WalkForwardValidator.validate(cand, expsWithoutEnd as any, { numFolds: 2 });
+      WalkForwardValidator.validate(cand, expsWithoutEnd as any, { numFolds: 2, candles: generateContinuousCandles(30) });
     }).toThrow('MISSING_LABEL_END_TIMESTAMP');
   });
 
@@ -1428,7 +1479,10 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const evalResult = CandidateEvaluator.evaluate(filterCand, experiences);
+    const evalResult = CandidateEvaluator.evaluate(filterCand, experiences, 0.05, {
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
 
     // Baseline expectancy MUST NOT be 999.0 (the bogus DB logged pnlR); it must be the authoritative simulated baseline expectancy (~0.86R)
     expect(evalResult.baselineExpectancy).not.toBe(999.0);
@@ -1445,6 +1499,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const customBaseline: StrategyCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0');
     const customEvalResult = CandidateEvaluator.evaluate(filterCand, experiences, 0.05, {
       baselineCandidate: customBaseline,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
     });
     expect(customEvalResult.baselineExpectancy).toBeCloseTo(evalResult.baselineExpectancy, 1);
     expect(customEvalResult.passed).toBe(true);
@@ -1513,6 +1569,14 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const rawExperiences: TradingExperience[] = Array.from({ length: 20 }, (_, i) => {
       const isWin = i % 2 === 0;
       const t = 1700000000000 + i * 300000;
+      const feat: Record<string, number> = {};
+      for (const name of CANONICAL_FEATURE_NAMES_V2) {
+        feat[name] = 50;
+      }
+      feat.smcScore = isWin ? 180 : 110;
+      feat.mtfAlignment = isWin ? 95 : 15;
+      feat.volatilityAtr = isWin ? 50 : 250;
+
       return {
         id: `exp_scaler_test_${i}`,
         tradeId: `t_sc_${i}`,
@@ -1522,12 +1586,9 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
         labelStartTimestamp: t + 1000,
         labelEndTimestamp: t + 180000,
         instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        features: feat,
         marketState: {
-          quant: {
-            smcScore: isWin ? 180 : 110, // Non-unit range
-            mtfAlignment: isWin ? 95 : 15,
-            volatilityAtr: isWin ? 50 : 250,
-          },
+          quant: feat,
         },
         decision: { action: 'BUY', score: 80 },
         execution: { entryPrice: 100, entryTime: new Date(t) },
@@ -1598,7 +1659,10 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(modelCand, rawExperiences);
+    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(modelCand, rawExperiences, {
+      candles: rawExperiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     expect(backtestRes).toBeDefined();
     // Model correctly filtered low-probability loss setups using scaled features
     expect(backtestRes.winRate).toBeGreaterThan(0.5);
@@ -1650,7 +1714,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     };
 
     // 1. Default seed (42) produces content-derived scalerVersion
-    const wfResDefault = WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+    const wfResDefault = WalkForwardValidator.validate(cand, experiences, {
+      numFolds: 2,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfResDefault.foldArtifacts).toBeDefined();
     expect(wfResDefault.foldArtifacts!.length).toBe(2);
 
@@ -1660,7 +1728,12 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     expect(fold1.trainingSeed).toBe(42);
 
     // 2. Custom seed (1337) is recorded in fold artifacts
-    const wfResCustomSeed = WalkForwardValidator.validate(cand, experiences, { numFolds: 2, seed: 1337 });
+    const wfResCustomSeed = WalkForwardValidator.validate(cand, experiences, {
+      numFolds: 2,
+      seed: 1337,
+      candles: experiences.flatMap((e) => e.candlesDuringTrade || []),
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfResCustomSeed.foldArtifacts![0].trainingSeed).toBe(1337);
   });
 

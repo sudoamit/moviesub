@@ -4,6 +4,12 @@ import {
   CANONICAL_V2_DIMENSION,
   CanonicalTradeFeatureVectorV2,
 } from '@quant/trading-engine';
+
+export {
+  CANONICAL_FEATURE_NAMES_V2,
+  CANONICAL_V2_DIMENSION,
+  CanonicalTradeFeatureVectorV2,
+};
 import { NoTradePrediction, TradingExperience } from './types';
 import { IDatasetSample } from './dataset-manager';
 import { TemporalFeatureScaler } from './feature-scaler';

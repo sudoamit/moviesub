@@ -219,7 +219,11 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       };
     });
 
-    const result = CandidateEvaluator.evaluate(baseCandidate, experiences);
+    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const result = CandidateEvaluator.evaluate(baseCandidate, experiences, 0.05, {
+      candles,
+      testOnlyDeterministicSignals: true,
+    });
     expect(result.totalSimulatedTrades).toBe(5); // 5 HTF_CONFLICT loss trades filtered out!
     expect(result.candidateExpectancy).toBeGreaterThan(result.baselineExpectancy);
   });
@@ -291,7 +295,11 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       };
     });
 
-    const result = CandidateEvaluator.evaluate(candidate, experiences);
+    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const result = CandidateEvaluator.evaluate(candidate, experiences, 0.05, {
+      candles,
+      testOnlyDeterministicSignals: true,
+    });
     expect(result.totalSimulatedTrades).toBe(6);
     expect(result.simulatedRMultiples).toHaveLength(6);
   });
@@ -505,7 +513,12 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(cand, experiences, { numFolds: 3 });
+    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+      numFolds: 3,
+      candles,
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.folds[0].trainRange[0].getTime()).toBeLessThan(wfRes.folds[wfRes.folds.length - 1].testRange[0].getTime());
   });
@@ -716,7 +729,12 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 3 });
+    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const wfRes = WalkForwardValidator.validate(baseCand, experiences, {
+      numFolds: 3,
+      candles,
+      testOnlyDeterministicSignals: true,
+    });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.folds[0].passed).toBe(true);
     expect(wfRes.foldArtifacts).toBeDefined();

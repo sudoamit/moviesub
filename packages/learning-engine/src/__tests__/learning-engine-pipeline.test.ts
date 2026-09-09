@@ -1,6 +1,7 @@
 import { ExperienceStore } from '../experience-store';
 import { LearningEngine } from '../learning-engine';
 import { TradingExperience } from '../types';
+import { CANONICAL_FEATURE_NAMES_V2 } from '../model-trainer';
 
 describe('LearningEngine Pipeline', () => {
   beforeEach(() => {
@@ -10,6 +11,14 @@ describe('LearningEngine Pipeline', () => {
   const createMockDataset = (count = 40): TradingExperience[] => {
     return Array.from({ length: count }, (_, i) => {
       const isWin = i % 3 !== 0;
+      const quant: Record<string, number> = {};
+      for (const name of CANONICAL_FEATURE_NAMES_V2) {
+        quant[name] = 0.5;
+      }
+      quant.smcScore = 0.8;
+      quant.mtfAlignment = 0.9;
+      quant.obStrength = 0.85;
+
       return {
         id: `exp-${i}`,
         tradeId: `tr-${i}`,
@@ -20,7 +29,7 @@ describe('LearningEngine Pipeline', () => {
         labelEndTimestamp: 1700000000000 + i * 3600000 + 1801000,
         instrument: { symbol: 'NIFTY', assetType: 'INDEX' },
         marketState: {
-          quant: { smcScore: 0.8, mtfAlignment: 0.9, obStrength: 0.85 },
+          quant,
           multiHorizon: { alignment: isWin ? 'ALIGNED' : 'CONFLICTED' },
           smc: { liquiditySweeps: isWin ? [{ id: '1' }] : [] },
         },
@@ -78,9 +87,12 @@ describe('LearningEngine Pipeline', () => {
     const dataset = createMockDataset(45);
     ExperienceStore.loadExperiences(dataset);
 
+    const candles = dataset.flatMap((e: any) => e.candlesDuringTrade || []);
     const report = await LearningEngine.runLearningCycle({
       baseStrategyVersion: 'v2.0-smc-quant',
       autoPromote: false,
+      candles,
+      testOnlyDeterministicSignals: true,
     });
 
     expect(report.experiencesUsed).toBe(45);

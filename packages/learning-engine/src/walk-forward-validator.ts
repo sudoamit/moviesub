@@ -49,6 +49,25 @@ export interface IWalkForwardOptions {
   ) => StrategyCandidate;
 }
 
+export function sliceContinuousCandles(
+  candles: ICandle[] | undefined,
+  startTime: number,
+  endTime: number,
+  warmupBars: number = 40,
+): ICandle[] | undefined {
+  if (!candles || candles.length === 0) return undefined;
+  const startIdx = candles.findIndex(
+    (c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()) >= startTime,
+  );
+  if (startIdx === -1) return candles;
+  const warmupStartIdx = Math.max(0, startIdx - warmupBars);
+  const endIdx = candles.findIndex(
+    (c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()) > endTime,
+  );
+  const slice = endIdx === -1 ? candles.slice(warmupStartIdx) : candles.slice(warmupStartIdx, endIdx);
+  return slice.length > 0 ? slice : candles;
+}
+
 export class WalkForwardValidator {
   /**
    * Performs chronological purged and embargoed walk-forward validation with genuine candidate retraining per fold.
@@ -162,10 +181,26 @@ export class WalkForwardValidator {
       const valDatasetHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
       const oosDatasetHash = DatasetManager.computeCanonicalDatasetHash(testSlice);
 
-      // Retrain candidate strategy on fold using trained ML artifacts
+      // Extract fold-specific continuous candle slices with warmup bars
+      const trainStartTime = new Date(trainSlice[0].timestamp).getTime();
+      const trainEndTime = trainMaxLabelEnd;
+      const valStartTime = valSlice.length > 0 ? new Date(valSlice[0].timestamp).getTime() : trainEndTime;
+      const valEndTime = valMaxLabelEnd;
+      const testStartTime = new Date(testSlice[0].timestamp).getTime();
+      const testEndTime = Math.max(...testSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
+
+      const trainCandles = sliceContinuousCandles(options.candles, trainStartTime, trainEndTime);
+      const valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime);
+      const testCandles = sliceContinuousCandles(options.candles, testStartTime, testEndTime);
+
+      // Retrain candidate strategy on fold using trained ML artifacts and fold-specific market data
       const foldCandidate = options.retrainFn
         ? options.retrainFn(trainSlice, candidate, f + 1)
-        : this.retrainCandidateOnFold(trainSlice, candidate, f + 1, modelArtifact, foldSelection.retainedFeatures);
+        : this.retrainCandidateOnFold(trainSlice, candidate, f + 1, modelArtifact, foldSelection.retainedFeatures, {
+            dataset: options.dataset,
+            candles: trainCandles || options.candles,
+            testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+          });
 
       const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate).configHash;
       const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
@@ -192,18 +227,24 @@ export class WalkForwardValidator {
       });
       foldArtifacts.push(foldArtifact);
 
-      const evalOptions = {
+      // 1. Evaluate retrained candidate in-sample on training fold market data
+      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice, 0.05, {
         dataset: options.dataset,
-        candles: options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals ?? true,
-      };
-
-      // 1. Evaluate retrained candidate in-sample on training fold
-      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice, 0.05, evalOptions);
-      // 2. Evaluate frozen retrained candidate on validation fold
-      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice, 0.05, evalOptions);
-      // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold
-      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice, 0.05, evalOptions);
+        candles: trainCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
+      // 2. Evaluate frozen retrained candidate on validation fold market data
+      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice, 0.05, {
+        dataset: options.dataset,
+        candles: valCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
+      // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold market data
+      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice, 0.05, {
+        dataset: options.dataset,
+        candles: testCandles || options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+      });
 
       const isExp = isEval.candidateExpectancy;
       const oosExp = oosEval.candidateExpectancy;
@@ -263,6 +304,11 @@ export class WalkForwardValidator {
     foldIndex: number,
     modelArtifact?: ITrainedModelArtifact,
     selectedFeatures?: string[],
+    options?: {
+      candles?: ICandle[];
+      dataset?: CandidateMarketDataset;
+      testOnlyDeterministicSignals?: boolean;
+    },
   ): StrategyCandidate {
     const paramName =
       (baseCandidate.change as any)?.parameter ||
@@ -322,7 +368,9 @@ export class WalkForwardValidator {
 
       try {
         const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, trainSlice, {
-          testOnlyDeterministicSignals: true,
+          dataset: options?.dataset,
+          candles: options?.candles,
+          testOnlyDeterministicSignals: options?.testOnlyDeterministicSignals,
         });
         if (evalRes.totalTrades > 0) {
           // Objective: Maximize trade expectancy penalized for low sample count

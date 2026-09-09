@@ -220,30 +220,20 @@ export class CandidateBacktestRunner {
     }
 
     // 3. Collect and validate continuous market candles
-    let candles: ICandle[] = options?.dataset?.executionCandles || options?.candles || [];
+    const candles: ICandle[] = options?.dataset?.executionCandles || options?.candles || [];
 
     if (!candles || candles.length === 0) {
-      if (experiences && experiences.length > 0) {
-        candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
-      }
-      if (!candles || candles.length === 0) {
-        throw new Error(
-          'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candidate evaluation requires continuous market dataset',
-        );
-      }
+      throw new Error(
+        'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candidate evaluation requires continuous market dataset',
+      );
     }
-
-    const hasExplicitMarketData =
-      (Boolean(options?.dataset?.executionCandles) && (options?.dataset?.executionCandles?.length ?? 0) > 0) ||
-      (Boolean(options?.candles) && (options?.candles?.length ?? 0) >= PRODUCTION_DEFAULT_MINIMUM_CANDLES);
 
     // Isolated test-only deterministic signal fixture support
     const isDeterministicSignalMode =
       Boolean(options?.testOnlyDeterministicSignals) ||
       Boolean((artifact.strategyConfig as any)?.TEST_ONLY_deterministicSignals) ||
       Boolean((artifact.strategyConfig as any)?.deterministicSignals) ||
-      Boolean((artifact.strategyConfig as any)?.deterministicSignal) ||
-      (!hasExplicitMarketData && Boolean(experiences && experiences.length > 0));
+      Boolean((artifact.strategyConfig as any)?.deterministicSignal);
 
     const testOnlyDeterministicSignals =
       (artifact.strategyConfig as any)?.TEST_ONLY_deterministicSignals ||
@@ -283,14 +273,14 @@ export class CandidateBacktestRunner {
     const minimumCandles =
       options?.minimumCandles !== undefined
         ? options.minimumCandles
-        : testOnlyDeterministicSignals && testOnlyDeterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+        : isDeterministicSignalMode
           ? Math.max(1, Math.min(candles.length, 1))
           : PRODUCTION_DEFAULT_MINIMUM_CANDLES;
 
     const warmupBars =
       options?.warmupBars !== undefined
         ? options.warmupBars
-        : testOnlyDeterministicSignals && testOnlyDeterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+        : isDeterministicSignalMode
           ? 0
           : PRODUCTION_DEFAULT_WARMUP_BARS;
 
