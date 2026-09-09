@@ -750,33 +750,50 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       endTimestamp: experiencesB[experiencesB.length - 1].timestamp.getTime(),
     };
 
-    let marketHashA: string | null = null;
-    let marketHashB: string | null = null;
+    let trainMarketCandlesA: ICandle[] | null = null;
+    let trainMarketCandlesB: ICandle[] | null = null;
 
-    WalkForwardValidator.validate(candidate, {
+    const resA = WalkForwardValidator.validate(candidate, {
       experienceDataset: expDatasetA,
       marketDataset,
       numFolds: 2,
       fitCandidateParametersOnMarketDataset: (c, m) => {
-        if (!marketHashA) marketHashA = m.datasetHash;
+        if (!trainMarketCandlesA) trainMarketCandlesA = m.executionCandles;
         return c;
       },
     });
 
-    WalkForwardValidator.validate(candidate, {
+    const resB = WalkForwardValidator.validate(candidate, {
       experienceDataset: expDatasetB,
       marketDataset,
       numFolds: 2,
       fitCandidateParametersOnMarketDataset: (c, m) => {
-        if (!marketHashB) marketHashB = m.datasetHash;
+        if (!trainMarketCandlesB) trainMarketCandlesB = m.executionCandles;
         return c;
       },
     });
 
-    expect(marketHashA).toBeDefined();
-    expect(marketHashB).toBeDefined();
-    // Market hashes are determined strictly by market candles, not experience timestamps
-    expect(marketHashA).toBe(marketHashB);
+    expect(trainMarketCandlesA).toBeDefined();
+    expect(trainMarketCandlesB).toBeDefined();
+    // Compare exact timestamps of train market execution window
+    const tsArrayA = trainMarketCandlesA!.map((c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()));
+    const tsArrayB = trainMarketCandlesB!.map((c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()));
+    expect(tsArrayA).toEqual(tsArrayB);
+
+    // Verify fold artifacts exist and have identical market execution hashes across all folds
+    expect(resA.foldArtifacts).toBeDefined();
+    expect(resB.foldArtifacts).toBeDefined();
+    expect(resA.foldArtifacts!.length).toBe(resB.foldArtifacts!.length);
+
+    for (let i = 0; i < resA.foldArtifacts!.length; i++) {
+      const artA = resA.foldArtifacts![i];
+      const artB = resB.foldArtifacts![i];
+      expect(artA.trainMarketDatasetHash).toBe(artB.trainMarketDatasetHash);
+      expect(artA.validationMarketDatasetHash).toBe(artB.validationMarketDatasetHash);
+      expect(artA.oosMarketDatasetHash).toBe(artB.oosMarketDatasetHash);
+      // Experience hashes must differ because experiences were shifted
+      expect(artA.trainExperienceDatasetHash).not.toBe(artB.trainExperienceDatasetHash);
+    }
   });
 
   // Test P — Fail-closed on insufficient or unavailable fold market windows (no whole-dataset fallback)

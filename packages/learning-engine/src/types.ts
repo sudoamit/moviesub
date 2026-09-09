@@ -337,6 +337,7 @@ export interface WalkForwardValidationResult {
   meanOutOfSampleExpectancy: number;
   oosDegradationPct: number;
   isRobust: boolean;
+  foldArtifacts?: ReadonlyArray<any>;
 }
 
 export interface MonteCarloSimulationResult {

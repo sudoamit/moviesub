@@ -20,6 +20,12 @@ export interface FoldArtifact {
   trainDatasetHash: string;
   validationDatasetHash: string;
   oosDatasetHash: string;
+  trainExperienceDatasetHash: string;
+  validationExperienceDatasetHash: string;
+  oosExperienceDatasetHash: string;
+  trainMarketDatasetHash: string;
+  validationMarketDatasetHash: string;
+  oosMarketDatasetHash: string;
   featureSchemaVersion: string;
   selectedFeatures: string[];
   scalerVersion: string;
@@ -99,17 +105,12 @@ export function sliceContinuousMarketWindow(
     throw new Error('EMPTY_MARKET_DATA_WINDOW');
   }
 
-  MarketDatasetValidator.validateCandles(allCandles);
-
-  const warmupStartTimestamp = (warmupCandles[0]?.timestamp || evaluationCandles[0].timestamp) instanceof Date
-    ? ((warmupCandles[0]?.timestamp || evaluationCandles[0].timestamp) as Date).getTime()
-    : new Date(warmupCandles[0]?.timestamp || evaluationCandles[0].timestamp).getTime();
-  const evaluationStartTimestamp = evaluationCandles[0].timestamp instanceof Date
-    ? evaluationCandles[0].timestamp.getTime()
-    : new Date(evaluationCandles[0].timestamp).getTime();
-  const evaluationEndTimestamp = evaluationCandles[evaluationCandles.length - 1].timestamp instanceof Date
-    ? evaluationCandles[evaluationCandles.length - 1].timestamp.getTime()
-    : new Date(evaluationCandles[evaluationCandles.length - 1].timestamp).getTime();
+  const warmupStartTimestamp =
+    warmupCandles.length > 0
+      ? (warmupCandles[0].timestamp instanceof Date ? warmupCandles[0].timestamp.getTime() : new Date(warmupCandles[0].timestamp).getTime())
+      : (evaluationCandles[0].timestamp instanceof Date ? evaluationCandles[0].timestamp.getTime() : new Date(evaluationCandles[0].timestamp).getTime());
+  const evaluationStartTimestamp = evaluationCandles[0].timestamp instanceof Date ? evaluationCandles[0].timestamp.getTime() : new Date(evaluationCandles[0].timestamp).getTime();
+  const evaluationEndTimestamp = evaluationCandles[evaluationCandles.length - 1].timestamp instanceof Date ? evaluationCandles[evaluationCandles.length - 1].timestamp.getTime() : new Date(evaluationCandles[evaluationCandles.length - 1].timestamp).getTime();
 
   return {
     warmupCandles,
@@ -134,19 +135,32 @@ export function sliceContinuousCandles(
 
 export class WalkForwardValidator {
   /**
-   * Performs chronological purged and embargoed walk-forward validation with genuine candidate retraining per fold.
-   * STRICT DATASET BOUNDARY: Exclusively accepts (candidate, options: IWalkForwardOptions).
+   * Performs walk-forward validation with strict cryptographic dataset boundaries,
+   * purged temporal cross-validation, and execution on continuous market datasets.
    */
   public static validate(
     candidate: StrategyCandidate,
     options: IWalkForwardOptions,
-  ): WalkForwardValidationResult & { foldArtifacts?: ReadonlyArray<FoldArtifact> } {
-    if (!options || !options.experienceDataset || !options.marketDataset) {
-      throw new Error('INVALID_WALK_FORWARD_OPTIONS: WalkForwardValidator strictly requires experienceDataset and marketDataset');
+  ): WalkForwardValidationResult {
+    // 0. Strict Dataset Boundary & Input Validation (Fail Closed)
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error(
+        'INVALID_WALK_FORWARD_OPTIONS: WalkForwardValidator requires an IWalkForwardOptions configuration object',
+      );
+    }
+    if (!options.experienceDataset || !Array.isArray(options.experienceDataset.experiences)) {
+      throw new Error('INVALID_EXPERIENCE_DATASET: options.experienceDataset with experiences array is required');
+    }
+    if (!options.marketDataset || !Array.isArray(options.marketDataset.executionCandles)) {
+      throw new Error('INVALID_MARKET_DATASET: options.marketDataset with continuous executionCandles is required');
     }
 
-    const numFolds = options.numFolds || 3;
-    const embargoMs = options.embargoMs ?? (options.embargoDays ? options.embargoDays * 24 * 3600 * 1000 : 0);
+    const numFolds = options.numFolds || 4;
+    const embargoMs = options.embargoMs ?? (options.embargoDays !== undefined ? options.embargoDays * 24 * 60 * 60 * 1000 : 0);
+
+    if (numFolds < 1) {
+      throw new Error(`INVALID_NUM_FOLDS:${numFolds}`);
+    }
     if (embargoMs < 0) {
       throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
     }
@@ -203,6 +217,8 @@ export class WalkForwardValidator {
     let totalIS = 0;
     let totalOOS = 0;
 
+    const warmupBars = options.warmupBars ?? 40;
+
     for (let f = 0; f < numFolds; f++) {
       // 1. Authoritative Market Timeline Partitioning
       const trainStartIdx = 0;
@@ -229,9 +245,10 @@ export class WalkForwardValidator {
       const testStartTs = new Date(candles[testStartIdx].timestamp).getTime();
       const testEndTs = new Date(candles[testEndIdx - 1].timestamp).getTime();
 
-      const trainWindow = sliceContinuousMarketWindow(candles, trainStartTs, trainEndTs, 0);
-      const valWindow = sliceContinuousMarketWindow(candles, valStartTs, valEndTs, 40);
-      const testWindow = sliceContinuousMarketWindow(candles, testStartTs, testEndTs, 40);
+      // P1 #10: Apply warmup bars across train, validation, and OOS windows identically for equivalent indicator & state initialization
+      const trainWindow = sliceContinuousMarketWindow(candles, trainStartTs, trainEndTs, warmupBars);
+      const valWindow = sliceContinuousMarketWindow(candles, valStartTs, valEndTs, warmupBars);
+      const testWindow = sliceContinuousMarketWindow(candles, testStartTs, testEndTs, warmupBars);
 
       if (!trainWindow || !trainWindow.allCandles || trainWindow.allCandles.length === 0) {
         throw new Error('TRAIN_MARKET_WINDOW_NOT_FOUND');
@@ -246,6 +263,11 @@ export class WalkForwardValidator {
       const trainCandles = trainWindow.allCandles;
       const valCandles = valWindow.allCandles;
       const testCandles = testWindow.allCandles;
+
+      // P1 #11: Validate sliced continuous market candles before setting isContinuous
+      MarketDatasetValidator.validateCandles(trainCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
+      MarketDatasetValidator.validateCandles(valCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
+      MarketDatasetValidator.validateCandles(testCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
 
       const trainRange: [Date, Date] = [new Date(trainStartTs), new Date(trainEndTs)];
       const validateRange: [Date, Date] = [new Date(valStartTs), new Date(valEndTs)];
@@ -318,11 +340,12 @@ export class WalkForwardValidator {
         throw new Error('INVALID_MODEL_ARTIFACT: Model artifact must contain a valid modelVersion');
       }
 
-      // 6. Distinct Cryptographic Hashes for Experience vs Market Datasets
+      // 6. Distinct Cryptographic Hashes for Experience vs Market Datasets (P1 #15 & #16)
       const trainExpDatasetHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
       const valExpDatasetHash = valSlice.length > 0 ? DatasetManager.computeCanonicalDatasetHash(valSlice) : 'canonical_empty_exp_hash';
       const oosExpDatasetHash = testSlice.length > 0 ? DatasetManager.computeCanonicalDatasetHash(testSlice) : 'canonical_empty_exp_hash';
 
+      // Market dataset hash represents complete market execution input (warmup + evaluation)
       const trainMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(trainCandles, options.marketDataset.timeframe || '15m');
       const valMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(valCandles, options.marketDataset.timeframe || '15m');
       const oosMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(testCandles, options.marketDataset.timeframe || '15m');
@@ -393,12 +416,18 @@ export class WalkForwardValidator {
       const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
       const trainingSeed = options.seed ?? DEFAULT_LEARNING_SEED;
 
-      // Create and freeze immutable, real FoldArtifact
+      // Create and freeze immutable, real FoldArtifact with explicit hashes
       const foldArtifact: FoldArtifact = Object.freeze({
         foldIndex: f + 1,
         trainDatasetHash: trainExpDatasetHash,
         validationDatasetHash: valExpDatasetHash,
         oosDatasetHash: oosExpDatasetHash,
+        trainExperienceDatasetHash: trainExpDatasetHash,
+        validationExperienceDatasetHash: valExpDatasetHash,
+        oosExperienceDatasetHash: oosExpDatasetHash,
+        trainMarketDatasetHash,
+        validationMarketDatasetHash: valMarketDatasetHash,
+        oosMarketDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         selectedFeatures: foldSelection.retainedFeatures,
         scalerVersion,

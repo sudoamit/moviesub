@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { ICandle } from '@quant/shared';
 
 export interface IDatasetMetadata {
   datasetId: string;
@@ -248,17 +249,17 @@ export class DatasetManager {
     return crypto.createHash('sha256').update(canonicalSamplesString).digest('hex').substring(0, 16);
   }
 
-  public static computeCanonicalMarketDatasetHash(candles: any[], timeframe = '15m'): string {
+  public static computeCanonicalMarketDatasetHash(candles: ICandle[], timeframe = '15m'): string {
     if (!candles || candles.length === 0) return 'canonical_empty_market_hash';
     const sorted = [...candles].sort((a, b) => {
-      const ta = typeof a.timestamp === 'number' ? a.timestamp : new Date(a.timestamp || 0).getTime();
-      const tb = typeof b.timestamp === 'number' ? b.timestamp : new Date(b.timestamp || 0).getTime();
+      const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp || 0).getTime();
+      const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp || 0).getTime();
       return ta - tb;
     });
 
     const canonicalCandlesString = sorted
       .map((c) => {
-        const ts = typeof c.timestamp === 'number' ? c.timestamp : new Date(c.timestamp || 0).getTime();
+        const ts = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
         return `${ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume || 0}`;
       })
       .join('\n');
@@ -268,6 +269,13 @@ export class DatasetManager {
       .update(`${timeframe}\n${canonicalCandlesString}`)
       .digest('hex')
       .substring(0, 16);
+  }
+
+  public static requireCanonicalMarketDatasetHash(candles: ICandle[], timeframe = '15m'): string {
+    if (!candles || candles.length === 0) {
+      throw new Error('EMPTY_MARKET_DATA: Cannot compute canonical market dataset hash for empty candle array');
+    }
+    return this.computeCanonicalMarketDatasetHash(candles, timeframe);
   }
 }
 

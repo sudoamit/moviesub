@@ -1285,7 +1285,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       startTimestamp: continuousCandles[0].timestamp.getTime(),
       endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
       isContinuous: true,
-      expectedIntervalMs: 300000,
+      expectedIntervalMs: 15 * 60 * 1000,
     };
 
     const wfRes = WalkForwardValidator.validate(baseCand, {

@@ -204,15 +204,15 @@ export class LearningEngine {
       };
 
       const devExecutionCandles = devCandles || options.candles || [];
-      if (devExecutionCandles.length > 0) {
-        MarketDatasetValidator.validateCandles(devExecutionCandles, devTimeframe, { expectedIntervalMs: devIntervalMs });
+      if (!devExecutionCandles || devExecutionCandles.length === 0) {
+        throw new Error('INSUFFICIENT_MARKET_DATA: LearningEngine cycle requires continuous market candles');
       }
 
-      const devMktStart = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[0].timestamp).getTime() : 0;
-      const devMktEnd = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[devExecutionCandles.length - 1].timestamp).getTime() : 0;
-      const devMarketHash = devExecutionCandles.length > 0
-        ? DatasetManager.computeCanonicalMarketDatasetHash(devExecutionCandles, devTimeframe)
-        : (options.dataset?.datasetHash || 'canonical_empty_market_hash');
+      MarketDatasetValidator.validateCandles(devExecutionCandles, devTimeframe, { expectedIntervalMs: devIntervalMs });
+
+      const devMktStart = new Date(devExecutionCandles[0].timestamp).getTime();
+      const devMktEnd = new Date(devExecutionCandles[devExecutionCandles.length - 1].timestamp).getTime();
+      const devMarketHash = DatasetManager.requireCanonicalMarketDatasetHash(devExecutionCandles, devTimeframe);
 
       const devMarketDataset: CandidateMarketDataset = {
         executionCandles: devExecutionCandles,
