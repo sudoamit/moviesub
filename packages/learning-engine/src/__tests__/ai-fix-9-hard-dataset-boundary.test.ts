@@ -775,10 +775,20 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
 
     expect(trainMarketCandlesA).toBeDefined();
     expect(trainMarketCandlesB).toBeDefined();
-    // Compare exact timestamps of train market execution window
-    const tsArrayA = trainMarketCandlesA!.map((c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()));
-    const tsArrayB = trainMarketCandlesB!.map((c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()));
-    expect(tsArrayA).toEqual(tsArrayB);
+    // Compare exact timestamps & OHLCV across complete market execution window
+    expect(trainMarketCandlesA!.length).toBe(trainMarketCandlesB!.length);
+    for (let i = 0; i < trainMarketCandlesA!.length; i++) {
+      const cA = trainMarketCandlesA![i];
+      const cB = trainMarketCandlesB![i];
+      expect(cA.open).toBe(cB.open);
+      expect(cA.high).toBe(cB.high);
+      expect(cA.low).toBe(cB.low);
+      expect(cA.close).toBe(cB.close);
+      expect(cA.volume).toBe(cB.volume);
+      const tA = cA.timestamp instanceof Date ? cA.timestamp.getTime() : new Date(cA.timestamp).getTime();
+      const tB = cB.timestamp instanceof Date ? cB.timestamp.getTime() : new Date(cB.timestamp).getTime();
+      expect(tA).toBe(tB);
+    }
 
     // Verify fold artifacts exist and have identical market execution hashes across all folds
     expect(resA.foldArtifacts).toBeDefined();
@@ -791,6 +801,9 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       expect(artA.trainMarketDatasetHash).toBe(artB.trainMarketDatasetHash);
       expect(artA.validationMarketDatasetHash).toBe(artB.validationMarketDatasetHash);
       expect(artA.oosMarketDatasetHash).toBe(artB.oosMarketDatasetHash);
+      expect(artA.trainMarketExecutionInputHash).toBe(artB.trainMarketExecutionInputHash);
+      expect(artA.validationMarketExecutionInputHash).toBe(artB.validationMarketExecutionInputHash);
+      expect(artA.oosMarketExecutionInputHash).toBe(artB.oosMarketExecutionInputHash);
       // Experience hashes must differ because experiences were shifted
       expect(artA.trainExperienceDatasetHash).not.toBe(artB.trainExperienceDatasetHash);
     }
@@ -842,5 +855,77 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
         numFolds: 4,
       });
     }).toThrow(/INSUFFICIENT_CONTINUOUS_MARKET_DATA/);
+  });
+
+  // Test Q — requireCanonicalMarketDatasetHash strictly validates candle continuity and OHLC sanity before hashing
+  test('Test Q: requireCanonicalMarketDatasetHash fails closed on empty, non-continuous, or corrupted OHLC candles', () => {
+    expect(() => {
+      DatasetManager.requireCanonicalMarketDatasetHash([], '15m');
+    }).toThrow('EMPTY_MARKET_DATA');
+
+    const corruptedOHLC: ICandle[] = [
+      {
+        timestamp: new Date(baseTime),
+        open: 100,
+        high: 90, // high < open (invalid)
+        low: 80,
+        close: 95,
+        volume: 1000,
+      },
+    ];
+    expect(() => {
+      DatasetManager.requireCanonicalMarketDatasetHash(corruptedOHLC, '15m');
+    }).toThrow(/INVALID_MARKET_DATA_OHLC/);
+  });
+
+  // Test R — WalkForwardValidator and sliceContinuousMarketWindow validate warmupBars
+  test('Test R: WalkForwardValidator and sliceContinuousMarketWindow throw INVALID_WARMUP_BARS on negative or non-integer warmup', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
+    const experiences = generateExperiences(30, baseTime, 15 * 60 * 1000);
+
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_r',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_r',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_r',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-r',
+      type: 'THRESHOLD',
+      description: 'Test R candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    expect(() => {
+      sliceContinuousMarketWindow(candles, baseTime, baseTime + 100000, -5);
+    }).toThrow('INVALID_WARMUP_BARS:-5');
+
+    expect(() => {
+      WalkForwardValidator.validate(candidate, {
+        experienceDataset: expDataset,
+        marketDataset,
+        warmupBars: -1,
+      });
+    }).toThrow('INVALID_WARMUP_BARS:-1');
   });
 });

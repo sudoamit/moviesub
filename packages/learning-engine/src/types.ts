@@ -331,13 +331,47 @@ export interface WalkForwardFold {
   simulatedTrades?: IBacktestTrade[];
 }
 
+export interface FoldArtifact {
+  readonly foldIndex: number;
+  // Explicit experience dataset hashes
+  readonly trainExperienceDatasetHash: string;
+  readonly validationExperienceDatasetHash: string;
+  readonly oosExperienceDatasetHash: string;
+  // Explicit market execution input hashes (warmup + evaluation)
+  readonly trainMarketExecutionInputHash: string;
+  readonly validationMarketExecutionInputHash: string;
+  readonly oosMarketExecutionInputHash: string;
+  // Market dataset aliases
+  readonly trainMarketDatasetHash: string;
+  readonly validationMarketDatasetHash: string;
+  readonly oosMarketDatasetHash: string;
+  // Optional legacy aliases for backwards compatibility
+  readonly trainDatasetHash?: string;
+  readonly validationDatasetHash?: string;
+  readonly oosDatasetHash?: string;
+
+  readonly featureSchemaVersion: string;
+  readonly selectedFeatures: string[];
+  readonly scalerVersion: string;
+  readonly scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>;
+  readonly modelVersion: string;
+  readonly modelParameters: { weights: number[]; bias: number };
+  readonly strategyVersion: string;
+  readonly candidateId: string;
+  readonly candidateVersion: string;
+  readonly strategyParameters: Record<string, any>;
+  readonly candidateConfigHash: string;
+  readonly trainingSeed: number;
+  readonly createdAt: Date;
+}
+
 export interface WalkForwardValidationResult {
   folds: WalkForwardFold[];
   meanInSampleExpectancy: number;
   meanOutOfSampleExpectancy: number;
   oosDegradationPct: number;
   isRobust: boolean;
-  foldArtifacts?: ReadonlyArray<any>;
+  readonly foldArtifacts?: ReadonlyArray<FoldArtifact>;
 }
 
 export interface MonteCarloSimulationResult {

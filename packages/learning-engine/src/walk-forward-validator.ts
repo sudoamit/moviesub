@@ -2,6 +2,7 @@ import { ICandle } from '@quant/shared';
 import {
   CandidateMarketDataset,
   ExperienceDataset,
+  FoldArtifact,
   StrategyCandidate,
   TradingExperience,
   WalkForwardFold,
@@ -15,31 +16,7 @@ import { ModelTrainer, ITrainedModelArtifact } from './model-trainer';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { MarketDatasetValidator } from './market-dataset-validator';
 
-export interface FoldArtifact {
-  foldIndex: number;
-  trainDatasetHash: string;
-  validationDatasetHash: string;
-  oosDatasetHash: string;
-  trainExperienceDatasetHash: string;
-  validationExperienceDatasetHash: string;
-  oosExperienceDatasetHash: string;
-  trainMarketDatasetHash: string;
-  validationMarketDatasetHash: string;
-  oosMarketDatasetHash: string;
-  featureSchemaVersion: string;
-  selectedFeatures: string[];
-  scalerVersion: string;
-  scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>;
-  modelVersion: string;
-  modelParameters: { weights: number[]; bias: number };
-  strategyVersion: string;
-  candidateId: string;
-  candidateVersion: string;
-  strategyParameters: Record<string, any>;
-  candidateConfigHash: string;
-  trainingSeed: number;
-  createdAt: Date;
-}
+export { FoldArtifact };
 
 export interface MarketExecutionWindow {
   warmupCandles: ICandle[];
@@ -80,6 +57,9 @@ export function sliceContinuousMarketWindow(
 ): MarketExecutionWindow {
   if (!candles || candles.length === 0) {
     throw new Error('MARKET_DATA_WINDOW_NOT_FOUND: No candles provided for market window slicing');
+  }
+  if (!Number.isInteger(warmupBars) || warmupBars < 0) {
+    throw new Error(`INVALID_WARMUP_BARS:${warmupBars}`);
   }
   const firstTs = candles[0].timestamp instanceof Date ? candles[0].timestamp.getTime() : new Date(candles[0].timestamp).getTime();
   const lastTs = candles[candles.length - 1].timestamp instanceof Date ? candles[candles.length - 1].timestamp.getTime() : new Date(candles[candles.length - 1].timestamp).getTime();
@@ -157,6 +137,7 @@ export class WalkForwardValidator {
 
     const numFolds = options.numFolds || 4;
     const embargoMs = options.embargoMs ?? (options.embargoDays !== undefined ? options.embargoDays * 24 * 60 * 60 * 1000 : 0);
+    const warmupBars = options.warmupBars ?? 40;
 
     if (numFolds < 1) {
       throw new Error(`INVALID_NUM_FOLDS:${numFolds}`);
@@ -164,12 +145,17 @@ export class WalkForwardValidator {
     if (embargoMs < 0) {
       throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
     }
+    if (!Number.isInteger(warmupBars) || warmupBars < 0) {
+      throw new Error(`INVALID_WARMUP_BARS:${warmupBars}`);
+    }
 
     // Market dataset is authoritative for the entire temporal validation timeline
     const candles = options.marketDataset.executionCandles || [];
-    if (candles.length < Math.max(20, (numFolds + 2) * 5)) {
+    const minFoldIntervalSize = 5;
+    const minMarketCandlesRequired = Math.max(20, (numFolds + 2) * minFoldIntervalSize);
+    if (candles.length < minMarketCandlesRequired) {
       throw new Error(
-        `INSUFFICIENT_CONTINUOUS_MARKET_DATA: Market dataset requires at least ${Math.max(20, (numFolds + 2) * 5)} continuous executionCandles for ${numFolds} folds, got ${candles.length}`,
+        `INSUFFICIENT_CONTINUOUS_MARKET_DATA: Market dataset requires at least ${minMarketCandlesRequired} continuous executionCandles for ${numFolds} folds (warmup and fold geometry), got ${candles.length}`,
       );
     }
 
@@ -216,8 +202,6 @@ export class WalkForwardValidator {
 
     let totalIS = 0;
     let totalOOS = 0;
-
-    const warmupBars = options.warmupBars ?? 40;
 
     for (let f = 0; f < numFolds; f++) {
       // 1. Authoritative Market Timeline Partitioning
@@ -419,15 +403,18 @@ export class WalkForwardValidator {
       // Create and freeze immutable, real FoldArtifact with explicit hashes
       const foldArtifact: FoldArtifact = Object.freeze({
         foldIndex: f + 1,
-        trainDatasetHash: trainExpDatasetHash,
-        validationDatasetHash: valExpDatasetHash,
-        oosDatasetHash: oosExpDatasetHash,
         trainExperienceDatasetHash: trainExpDatasetHash,
         validationExperienceDatasetHash: valExpDatasetHash,
         oosExperienceDatasetHash: oosExpDatasetHash,
+        trainMarketExecutionInputHash: trainMarketDatasetHash,
+        validationMarketExecutionInputHash: valMarketDatasetHash,
+        oosMarketExecutionInputHash: oosMarketDatasetHash,
         trainMarketDatasetHash,
         validationMarketDatasetHash: valMarketDatasetHash,
         oosMarketDatasetHash,
+        trainDatasetHash: trainExpDatasetHash,
+        validationDatasetHash: valExpDatasetHash,
+        oosDatasetHash: oosExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         selectedFeatures: foldSelection.retainedFeatures,
         scalerVersion,

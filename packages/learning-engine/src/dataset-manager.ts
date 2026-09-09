@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { ICandle } from '@quant/shared';
+import { MarketDatasetValidator } from './market-dataset-validator';
 
 export interface IDatasetMetadata {
   datasetId: string;
@@ -275,6 +276,8 @@ export class DatasetManager {
     if (!candles || candles.length === 0) {
       throw new Error('EMPTY_MARKET_DATA: Cannot compute canonical market dataset hash for empty candle array');
     }
+    // Hard production boundary: Validate monotonic timestamps, OHLC sanity, and continuity before hashing
+    MarketDatasetValidator.validateCandles(candles, timeframe);
     return this.computeCanonicalMarketDatasetHash(candles, timeframe);
   }
 }
