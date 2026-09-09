@@ -931,7 +931,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
     const promoRes = PromotionGate.evaluateCandidate(shadowCandidate);
     expect(promoRes.approved).toBe(false);
-    expect(promoRes.rejectionDetails?.some((r) => r.includes('shadowMetrics is missing'))).toBe(true);
+    expect(promoRes.rejectionDetails?.some((r: string) => r.includes('shadowMetrics is missing'))).toBe(true);
   });
 
   // Test W — Promotion succeeds only after persisted shadow evidence meets requirements

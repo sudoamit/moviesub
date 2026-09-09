@@ -4,6 +4,7 @@ import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
 import { CandidateArtifact, CandidateMarketDataset, CandidateStatus, StrategyCandidate, TradingExperience } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
+import { DatasetManager } from './dataset-manager';
 
 export interface CandidateExecutionConfig {
   candidateId: string;
@@ -51,6 +52,8 @@ export interface ICandidateBacktestOptions {
 
 export interface IDeterministicTestFixtureOptions {
   candles: ICandle[];
+  dataset?: CandidateMarketDataset;
+  marketDataset?: CandidateMarketDataset;
   experiences?: TradingExperience[];
   signals?: any[];
   minimumCandles?: number;
@@ -98,21 +101,27 @@ export class CandidateBacktestRunner {
       datasetHash && datasetHash !== 'canonical_default_hash'
         ? datasetHash
         : ((candidate.change?.datasetHash as string) ||
+          (candidate.change?.marketDatasetHash as string) ||
           (candidate.evidence as any)?.datasetHash ||
-          createHash('sha256').update(candidate.id + '_' + (candidate.candidateVersion || candidate.id)).digest('hex').slice(0, 16));
+          (candidate.evidence as any)?.validationDatasetHash ||
+          (provenance?.marketDatasetHash as string) ||
+          createHash('sha256').update(`canonical_dataset_${candidate.id}`).digest('hex'));
 
     const trainingDatasetHash =
       provenance?.trainingDatasetHash ||
       (candidate.change?.trainingDatasetHash as string) ||
       resolvedDatasetHash;
+
     const validationDatasetHash =
       provenance?.validationDatasetHash ||
       (candidate.change?.validationDatasetHash as string) ||
       resolvedDatasetHash;
+
     const oosDatasetHash =
       provenance?.oosDatasetHash ||
       (candidate.change?.oosDatasetHash as string) ||
       resolvedDatasetHash;
+
     const marketDatasetHash =
       provenance?.marketDatasetHash ||
       (candidate.change?.marketDatasetHash as string) ||
@@ -123,7 +132,9 @@ export class CandidateBacktestRunner {
       (candidate.change?.modelArtifact as any)?.scalerArtifact?.scalerParameters;
     const scalerHash = scalerParams
       ? TemporalFeatureScaler.computeScalerHash(scalerParams)
-      : ((candidate.change?.modelArtifact as any)?.scalerHash || createHash('sha256').update('no_scaler').digest('hex').slice(0, 16));
+      : ((candidate.change?.modelArtifact as any)?.scalerHash ||
+        (candidate.change?.scalerHash as string) ||
+        createHash('sha256').update('canonical_baseline_scaler_v2').digest('hex'));
 
     const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
     const featureSchemaHash =
@@ -131,10 +142,13 @@ export class CandidateBacktestRunner {
       createHash('sha256').update(`canonical_schema_${featureSchemaVersion}`).digest('hex');
 
     const selectedFeatures = [...((candidate.change?.selectedFeatures as string[]) || [])];
-    const selectedFeatureHash =
-      selectedFeatures.length > 0
-        ? createHash('sha256').update(selectedFeatures.join(',')).digest('hex')
-        : ((candidate.change?.modelArtifact as any)?.selectedFeatureHash || createHash('sha256').update('all_features').digest('hex').slice(0, 16));
+    if (selectedFeatures.length === 0 && (candidate.change?.modelArtifact as any)?.selectedFeatures) {
+      selectedFeatures.push(...((candidate.change?.modelArtifact as any)?.selectedFeatures as string[]));
+    }
+    if (selectedFeatures.length === 0) {
+      selectedFeatures.push('smcScore', 'mtfAlignment', 'rvol');
+    }
+    const selectedFeatureHash = createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
 
     const modelArtifact = candidate.change?.modelArtifact as any;
     const modelHash =
@@ -144,7 +158,9 @@ export class CandidateBacktestRunner {
               `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
             )
             .digest('hex')
-        : (modelArtifact?.modelHash || createHash('sha256').update('no_model').digest('hex').slice(0, 16));
+        : (modelArtifact?.modelHash ||
+          (candidate.change?.modelHash as string) ||
+          createHash('sha256').update('canonical_baseline_model_v2').digest('hex'));
 
     const modelId = modelArtifact?.modelId || `model-${candidate.id}`;
     const modelVersion = modelArtifact?.modelVersion || candidate.baseStrategyVersion || 'ml-v2-0';
@@ -396,11 +412,21 @@ export class CandidateBacktestRunner {
       options = (optionsOrExperiences as ICandidateBacktestOptions) || {};
     }
 
+    const resolvedHash =
+      options?.marketDataset?.datasetHash ||
+      options?.dataset?.datasetHash ||
+      (options?.candles && options.candles.length > 0
+        ? DatasetManager.requireCanonicalMarketDatasetHash(
+            options.candles,
+            options.timeframe || options.marketDataset?.timeframe || options.dataset?.timeframe,
+          )
+        : undefined);
+
     // 1. Resolve or construct immutable CandidateArtifact
     const artifact: CandidateArtifact =
       candidateOrArtifact && 'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
         ? (candidateOrArtifact as CandidateArtifact)
-        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate);
+        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate, resolvedHash);
 
     const config: CandidateExecutionConfig = artifact.executionConfig as any;
     const riskConfig = artifact.riskConfig;
@@ -548,22 +574,37 @@ export class CandidateBacktestRunner {
     candidateOrArtifact: StrategyCandidate | CandidateArtifact,
     fixture: IDeterministicTestFixtureOptions,
   ): CandidateExecutionResult {
-    // 1. Resolve or construct immutable CandidateArtifact
-    const artifact: CandidateArtifact =
-      'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
-        ? (candidateOrArtifact as CandidateArtifact)
-        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate);
-
-    const config: CandidateExecutionConfig = artifact.executionConfig as any;
-    const riskConfig = artifact.riskConfig;
-    const candidateId = artifact.candidateId;
-
     const candles: ICandle[] = fixture.candles || [];
     if (!candles || candles.length === 0) {
       throw new Error(
         'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Test fixture requires candles',
       );
     }
+
+    let fixtureHash: string | undefined = fixture.dataset?.datasetHash || fixture.marketDataset?.datasetHash;
+    if (!fixtureHash && candles.length > 0) {
+      try {
+        fixtureHash = DatasetManager.requireCanonicalMarketDatasetHash(
+          candles,
+          fixture.timeframe || fixture.dataset?.timeframe || fixture.marketDataset?.timeframe,
+        );
+      } catch {
+        fixtureHash = DatasetManager.computeCanonicalMarketDatasetHash(
+          candles,
+          fixture.timeframe || fixture.dataset?.timeframe || fixture.marketDataset?.timeframe || '15m',
+        );
+      }
+    }
+
+    // 1. Resolve or construct immutable CandidateArtifact
+    const artifact: CandidateArtifact =
+      'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
+        ? (candidateOrArtifact as CandidateArtifact)
+        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate, fixtureHash);
+
+    const config: CandidateExecutionConfig = artifact.executionConfig as any;
+    const riskConfig = artifact.riskConfig;
+    const candidateId = artifact.candidateId;
 
     const fixtureSignals =
       fixture.signals ||

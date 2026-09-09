@@ -40,6 +40,22 @@ export class MarketDatasetValidator {
   }
 
   /**
+   * Infers timeframe string from candle interval.
+   */
+  public static inferTimeframe(candles: ICandle[]): string {
+    const intervalMs = this.inferIntervalMs(candles);
+    if (intervalMs === 60 * 1000) return '1m';
+    if (intervalMs === 3 * 60 * 1000) return '3m';
+    if (intervalMs === 5 * 60 * 1000) return '5m';
+    if (intervalMs === 15 * 60 * 1000) return '15m';
+    if (intervalMs === 30 * 60 * 1000) return '30m';
+    if (intervalMs === 60 * 60 * 1000) return '1h';
+    if (intervalMs === 4 * 60 * 60 * 1000) return '4h';
+    if (intervalMs === 24 * 60 * 60 * 1000) return '1d';
+    return `${Math.max(1, Math.round(intervalMs / 60000))}m`;
+  }
+
+  /**
    * Validates continuous candle sequence for strictly monotonic increasing timestamps, OHLC sanity, and continuity.
    */
   public static validateCandles(
@@ -50,10 +66,10 @@ export class MarketDatasetValidator {
     if (!candles || candles.length === 0) {
       throw new Error('INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candle array is empty');
     }
+    const resolvedTf = timeframe || this.inferTimeframe(candles);
     const expectedIntervalMs =
-      options?.expectedIntervalMs ||
-      (timeframe ? this.resolveTimeframeIntervalMs(timeframe) : this.inferIntervalMs(candles));
-    this.validateAndCreateDataset(candles, timeframe || '15m', undefined, {
+      options?.expectedIntervalMs || this.resolveTimeframeIntervalMs(resolvedTf);
+    this.validateAndCreateDataset(candles, resolvedTf, undefined, {
       ...options,
       expectedIntervalMs,
     });
@@ -69,7 +85,7 @@ export class MarketDatasetValidator {
    */
   public static validateAndCreateDataset(
     candles: ICandle[],
-    timeframe = '15m',
+    timeframe?: string,
     higherTimeframeCandles?: Record<string, ICandle[]>,
     options?: IValidateMarketDatasetOptions,
   ): CandidateMarketDataset {
@@ -77,8 +93,9 @@ export class MarketDatasetValidator {
       throw new Error('INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candle array is empty');
     }
 
+    const resolvedTimeframe = timeframe || this.inferTimeframe(candles);
     const expectedIntervalMs =
-      options?.expectedIntervalMs || this.resolveTimeframeIntervalMs(timeframe);
+      options?.expectedIntervalMs || this.resolveTimeframeIntervalMs(resolvedTimeframe);
     const maxAllowedGapCount = options?.maxAllowedGapCount ?? 0;
 
     let gapCount = 0;
@@ -214,7 +231,7 @@ export class MarketDatasetValidator {
       higherTimeframeCandles: Object.keys(validatedHtf).length > 0 ? validatedHtf : undefined,
       startTimestamp,
       endTimestamp,
-      timeframe,
+      timeframe: resolvedTimeframe,
       datasetHash,
     };
   }

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import {
   CandidateArtifact,
   CandidateStatus,
@@ -25,6 +26,7 @@ export interface IModelRegistryEntry {
 }
 
 export class ModelRegistry {
+  private static persistencePath: string | null = null;
   private static artifacts: Map<string, CandidateArtifact> = new Map();
   private static events: ModelRegistryEvent[] = [];
   private static promotionEvidences: Map<string, PromotionEvidence> = new Map();
@@ -36,6 +38,10 @@ export class ModelRegistry {
   private static activeModelVersion = 'v2.0-ml-canonical';
 
   static {
+    this.initDefaultState();
+  }
+
+  private static initDefaultState(): void {
     // Register initial canonical active model
     const initial: IModelRegistryEntry = {
       modelId: 'model-canon-2.0',
@@ -67,8 +73,96 @@ export class ModelRegistry {
   }
 
   /**
+   * Sets or overrides the authoritative persistence file path.
+   */
+  public static setPersistencePath(filePath: string | null): void {
+    this.persistencePath = filePath;
+    if (filePath && fs.existsSync(filePath)) {
+      this.loadFromFile(filePath);
+    }
+  }
+
+  /**
+   * Returns current persistence file path.
+   */
+  public static getPersistencePath(): string | null {
+    return this.persistencePath;
+  }
+
+  /**
+   * Atomically flushes the registry to disk if a persistence path is configured.
+   */
+  private static autoPersist(): void {
+    if (!this.persistencePath) return;
+
+    try {
+      const dir = path.dirname(this.persistencePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      const tempFile = `${this.persistencePath}.${Date.now()}.${Math.floor(Math.random() * 10000)}.tmp`;
+      const snapshot = this.exportSnapshot();
+      fs.writeFileSync(tempFile, JSON.stringify(snapshot, null, 2), 'utf-8');
+      fs.renameSync(tempFile, this.persistencePath);
+
+      // Verify persistence on disk immediately
+      const readBack = fs.readFileSync(this.persistencePath, 'utf-8');
+      JSON.parse(readBack);
+    } catch (err: any) {
+      throw new Error(`REGISTRY_PERSISTENCE_FAILED: Failed to persist model registry state to disk: ${err.message}`);
+    }
+  }
+
+  /**
+   * Exports an in-memory snapshot.
+   */
+  private static exportSnapshot(): Record<string, unknown> {
+    return {
+      artifacts: Array.from(this.artifacts.entries()),
+      events: this.events,
+      promotionEvidences: Array.from(this.promotionEvidences.entries()),
+      productionState: Array.from(this.productionState.entries()),
+      models: Array.from(this.models.entries()),
+      activeModelVersion: this.activeModelVersion,
+    };
+  }
+
+  /**
+   * Restores an in-memory snapshot.
+   */
+  private static restoreSnapshot(snapshot: any): void {
+    if (snapshot.artifacts) this.artifacts = new Map(snapshot.artifacts);
+    if (snapshot.events) this.events = [...snapshot.events];
+    if (snapshot.promotionEvidences) this.promotionEvidences = new Map(snapshot.promotionEvidences);
+    if (snapshot.productionState) this.productionState = new Map(snapshot.productionState);
+    if (snapshot.models) this.models = new Map(snapshot.models);
+    if (snapshot.activeModelVersion) this.activeModelVersion = snapshot.activeModelVersion;
+  }
+
+  /**
+   * Executes a transactional compound operation with automatic snapshot rollback on failure.
+   */
+  public static executeTransaction<T>(operation: () => T): T {
+    const snapshot = this.exportSnapshot();
+    try {
+      const result = operation();
+      this.autoPersist();
+      return result;
+    } catch (err: any) {
+      this.restoreSnapshot(snapshot);
+      try {
+        this.autoPersist();
+      } catch {
+        // Rollback persistence best-effort
+      }
+      throw new Error(`TRANSACTION_FAILED: ${err.message}`);
+    }
+  }
+
+  /**
    * Registers an immutable CandidateArtifact into the registry.
-   * Performs cryptographic integrity checks (model, scaler, featureSchema, artifactHash).
+   * Performs cryptographic integrity checks and immediately persists to disk.
    */
   public static registerCandidateArtifact(artifact: CandidateArtifact): CandidateArtifact {
     if (!artifact || typeof artifact !== 'object') {
@@ -97,6 +191,8 @@ export class ModelRegistry {
       newStatus: artifact.status,
       reason: 'Candidate artifact registered in model registry',
     });
+
+    this.autoPersist();
 
     return frozen;
   }
@@ -173,14 +269,17 @@ export class ModelRegistry {
       reason,
     });
 
+    this.autoPersist();
+
     return updated;
   }
 
   /**
-   * Records immutable promotion evidence.
+   * Records immutable promotion evidence and persists to disk.
    */
   public static savePromotionEvidence(evidence: PromotionEvidence): void {
     this.promotionEvidences.set(evidence.candidateId, Object.freeze({ ...evidence }));
+    this.autoPersist();
   }
 
   /**
@@ -202,11 +301,12 @@ export class ModelRegistry {
   }
 
   /**
-   * Atomically sets the production model state.
+   * Atomically sets the production model state and persists to disk.
    */
   public static setProductionState(state: ProductionModelState): void {
     const key = `${state.strategyId}:${state.environment}`;
     this.productionState.set(key, Object.freeze({ ...state }));
+    this.autoPersist();
   }
 
   /**
@@ -246,14 +346,11 @@ export class ModelRegistry {
    * Persists the entire registry to disk for crash-safe state recovery.
    */
   public static saveToFile(filePath: string): void {
-    const snapshot = {
-      artifacts: Array.from(this.artifacts.entries()),
-      events: this.events,
-      promotionEvidences: Array.from(this.promotionEvidences.entries()),
-      productionState: Array.from(this.productionState.entries()),
-      models: Array.from(this.models.entries()),
-      activeModelVersion: this.activeModelVersion,
-    };
+    const snapshot = this.exportSnapshot();
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
   }
 
@@ -264,16 +361,11 @@ export class ModelRegistry {
     if (!fs.existsSync(filePath)) return;
     const content = fs.readFileSync(filePath, 'utf-8');
     const snapshot = JSON.parse(content);
-    if (snapshot.artifacts) this.artifacts = new Map(snapshot.artifacts);
-    if (snapshot.events) this.events = snapshot.events;
-    if (snapshot.promotionEvidences) this.promotionEvidences = new Map(snapshot.promotionEvidences);
-    if (snapshot.productionState) this.productionState = new Map(snapshot.productionState);
-    if (snapshot.models) this.models = new Map(snapshot.models);
-    if (snapshot.activeModelVersion) this.activeModelVersion = snapshot.activeModelVersion;
+    this.restoreSnapshot(snapshot);
   }
 
   /**
-   * Clears in-memory registry state (useful for test isolation).
+   * Clears in-memory registry state and re-initializes defaults.
    */
   public static clear(): void {
     this.artifacts.clear();
@@ -283,6 +375,7 @@ export class ModelRegistry {
     this.activationLocks.clear();
     this.models.clear();
     this.activeModelVersion = 'v2.0-ml-canonical';
+    this.initDefaultState();
   }
 
   // --- Legacy Methods for Backward Compatibility ---
@@ -292,6 +385,7 @@ export class ModelRegistry {
    */
   public static registerModel(entry: IModelRegistryEntry): void {
     this.models.set(entry.modelVersion, Object.freeze({ ...entry }));
+    this.autoPersist();
   }
 
   /**
@@ -316,6 +410,7 @@ export class ModelRegistry {
       Object.freeze({ ...candidate, status: 'ACTIVE', promotedAt: new Date() }),
     );
     this.activeModelVersion = modelVersion;
+    this.autoPersist();
   }
 
   /**
@@ -337,6 +432,7 @@ export class ModelRegistry {
 
     this.models.set(targetModelVersion, Object.freeze({ ...target, status: 'ACTIVE' }));
     this.activeModelVersion = targetModelVersion;
+    this.autoPersist();
   }
 
   /**
@@ -353,4 +449,3 @@ export class ModelRegistry {
     return Array.from(this.models.values());
   }
 }
-

@@ -3,11 +3,13 @@ import {
   PromotionCriteria,
   PromotionDecision,
   PromotionEvaluationResult,
+  PromotionEvidence,
   PromotionGateInput,
   PromotionPolicy,
   StrategyCandidate,
 } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
+import { ModelRegistry } from './model-registry';
 
 export class PromotionGate {
   public static readonly DEFAULT_POLICY: PromotionPolicy = {
@@ -143,9 +145,46 @@ export class PromotionGate {
     const decision: 'PROMOTE' | 'REJECT' =
       rejectionReasons.length === 0 && policy.allowAutoPromotion ? 'PROMOTE' : 'REJECT';
 
+    const evidenceId = `pe-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const evidence: PromotionEvidence = {
+      evidenceId,
+      candidateId: candidateArtifact.candidateId,
+      artifactHash: candidateArtifact.artifactHash,
+      trainingDatasetHash: candidateArtifact.trainingDatasetHash,
+      validationDatasetHash: candidateArtifact.validationDatasetHash,
+      oosDatasetHash: candidateArtifact.oosDatasetHash,
+      shadowDatasetHash: shadowResult?.shadowDatasetHash || candidateArtifact.marketDatasetHash,
+      shadowWindowStart: shadowResult?.shadowStartTimestamp ?? 0,
+      shadowWindowEnd: shadowResult?.shadowEndTimestamp ?? evaluatedAt,
+      shadowMetrics: metrics,
+      promotionPolicyVersion: policyVersion,
+      promotionDecision: decision,
+      decisionReasons: decision === 'PROMOTE' ? reasons : rejectionReasons,
+      evaluatedAt,
+    };
+
+    ModelRegistry.savePromotionEvidence(evidence);
+
+    // Update candidate status to PROMOTION_ELIGIBLE if metrics criteria passed
+    if (rejectionReasons.length === 0 || (rejectionReasons.length === 1 && rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED'))) {
+      try {
+        const currentArtifact = ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId);
+        if (currentArtifact && currentArtifact.status !== 'PROMOTED') {
+          ModelRegistry.updateCandidateStatus(
+            candidateArtifact.candidateId,
+            'PROMOTION_ELIGIBLE',
+            'Candidate passed all shadow validation criteria',
+          );
+        }
+      } catch {
+        // Best-effort status update
+      }
+    }
+
     return {
       decision,
       candidateId: candidateArtifact.candidateId,
+      evidenceId,
       evaluatedAt,
       reasons: decision === 'PROMOTE' ? reasons : [],
       rejectionReasons: rejectionReasons.length > 0 ? rejectionReasons : undefined,

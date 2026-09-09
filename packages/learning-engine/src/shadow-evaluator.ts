@@ -51,6 +51,9 @@ export class ShadowEvaluator {
         reasons: [],
         rejectionReason: reason,
         window: shadowWindow,
+        shadowDatasetHash: marketDataset.datasetHash,
+        shadowStartTimestamp: shadowWindow.startTimestamp,
+        shadowEndTimestamp: shadowWindow.endTimestamp,
         evaluatedAt,
         metrics: this.createEmptyMetrics(0),
       };
@@ -80,6 +83,9 @@ export class ShadowEvaluator {
         reasons: [],
         rejectionReason: `SHADOW_MARKET_SLICING_FAILED: ${err.message}`,
         window: shadowWindow,
+        shadowDatasetHash: marketDataset.datasetHash,
+        shadowStartTimestamp: shadowWindow.startTimestamp,
+        shadowEndTimestamp: shadowWindow.endTimestamp,
         evaluatedAt,
         metrics: this.createEmptyMetrics(0),
       };
@@ -168,6 +174,9 @@ export class ShadowEvaluator {
         reasons: [],
         rejectionReason: `INSUFFICIENT_SHADOW_OBSERVATIONS: Shadow window contained ${observationsCount} observations < required ${minObs}`,
         window: shadowWindow,
+        shadowDatasetHash: marketDataset.datasetHash,
+        shadowStartTimestamp: shadowWindow.startTimestamp,
+        shadowEndTimestamp: shadowWindow.endTimestamp,
         evaluatedAt,
         metrics,
       };
@@ -180,6 +189,9 @@ export class ShadowEvaluator {
         reasons: [],
         rejectionReason: `INSUFFICIENT_SHADOW_TRADES: Shadow window produced ${totalTrades} trades < required ${minTrades}`,
         window: shadowWindow,
+        shadowDatasetHash: marketDataset.datasetHash,
+        shadowStartTimestamp: shadowWindow.startTimestamp,
+        shadowEndTimestamp: shadowWindow.endTimestamp,
         evaluatedAt,
         metrics,
       };
@@ -196,6 +208,9 @@ export class ShadowEvaluator {
       metrics,
       reasons,
       window: shadowWindow,
+      shadowDatasetHash: marketDataset.datasetHash,
+      shadowStartTimestamp: shadowWindow.startTimestamp,
+      shadowEndTimestamp: shadowWindow.endTimestamp,
       evaluatedAt,
     };
   }

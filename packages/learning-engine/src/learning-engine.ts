@@ -267,10 +267,6 @@ export class LearningEngine {
       };
 
       // 9f. Create immutable candidate artifact and register in ModelRegistry in SHADOW_PENDING state
-      cand.status = 'SHADOW';
-      ShadowTradingEngine.activateCandidate(cand);
-      shadowCount++;
-
       try {
         const trainExpHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
         const valExpHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
@@ -290,20 +286,26 @@ export class LearningEngine {
         );
 
         ModelRegistry.registerCandidateArtifact(artifact);
-      } catch {
-        // Candidate artifact registration logged
-      }
+        cand.status = 'SHADOW_PENDING';
+        ShadowTradingEngine.activateCandidate(cand);
+        shadowCount++;
 
-      // Memory recording for candidate under shadow observation (same-cycle auto-promotion strictly disallowed)
-      LearningMemory.setMemory({
-        key: `shadow-${cand.candidateVersion}`,
-        memoryType: 'REJECTED_HYPOTHESIS',
-        summary: `Candidate placed in shadow observation: ${cand.description}`,
-        details: { ...cand.change, validationMetrics: cand.validationMetrics },
-        sampleSize: cand.evidence.sampleSize,
-        confidence: 80,
-        status: 'ACTIVE',
-      });
+        // Memory recording for candidate under shadow observation (same-cycle auto-promotion strictly disallowed)
+        LearningMemory.setMemory({
+          key: `shadow-${cand.candidateVersion}`,
+          memoryType: 'REJECTED_HYPOTHESIS',
+          summary: `Candidate placed in shadow observation: ${cand.description}`,
+          details: { ...cand.change, validationMetrics: cand.validationMetrics },
+          sampleSize: cand.evidence.sampleSize,
+          confidence: 80,
+          status: 'ACTIVE',
+        });
+      } catch (err: any) {
+        cand.status = 'REJECTED';
+        cand.rejectionReason = `ARTIFACT_REGISTRATION_FAILED: ${err.message}`;
+        rejectedCount++;
+        continue;
+      }
     }
 
     // 10. Drift Detection

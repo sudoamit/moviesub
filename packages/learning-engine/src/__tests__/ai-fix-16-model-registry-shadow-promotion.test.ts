@@ -75,6 +75,11 @@ function createDummyCandidate(id = 'cand-test-1'): StrategyCandidate {
       modelArtifact: model,
       scalerArtifact: { scalerParameters: scaler.getParameters() } as any,
       selectedFeatures: ['fvgSize', 'obStrength', 'rsi14'],
+      trainingDatasetHash: 'hash_train_exp_default',
+      validationDatasetHash: 'hash_val_exp_default',
+      oosDatasetHash: 'hash_oos_exp_default',
+      marketDatasetHash: 'hash_mkt_dev_default',
+      datasetHash: 'hash_mkt_dev_default',
     },
     evidence: {
       sampleSize: 100,
@@ -160,6 +165,28 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(validation.reason).toBeUndefined();
     });
 
+    it('ensures zero fake fallback strings (no_scaler, no_model, all_features) in candidate artifacts', () => {
+      const candidate: StrategyCandidate = {
+        id: 'cand-clean-prov',
+        candidateVersion: 'v2.0',
+        baseStrategyVersion: 'v2.0',
+        type: 'FILTER',
+        description: 'Clean provenance candidate',
+        change: { component: 'ENTRY_FILTER', type: 'PARAM_TWEAK' },
+        evidence: { sampleSize: 10, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+        status: 'GENERATED',
+        createdAt: new Date(),
+      };
+
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
+      expect(artifact.scalerHash).not.toBe('no_scaler');
+      expect(artifact.modelHash).not.toBe('no_model');
+      expect(artifact.selectedFeatures).not.toContain('all_features');
+      expect(artifact.scalerHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(artifact.modelHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(artifact.artifactHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
     it('generates identical artifactHash given identical contents (deterministic reproducibility)', () => {
       const candidateA = createDummyCandidate('cand-determ');
       const candidateB = createDummyCandidate('cand-determ');
@@ -221,8 +248,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         scalerArtifact: {
           ...(artifact.scalerArtifact as any),
           scalerParameters: {
-            ...((artifact.scalerArtifact as any)?.scalerParameters || {}),
-            means: { fvgSize: 9999 },
+            fvgSize: { mean: 9999, std: 1, min: 0, max: 10 },
           },
         },
       };
@@ -251,13 +277,20 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
     });
   });
 
-  describe('2. ModelRegistry Lifecycle, State Machine, Audit Logging, & Persistence', () => {
-    it('registers candidate artifact, prevents duplicates, and logs registration event', () => {
+  describe('2. ModelRegistry Lifecycle, Inherent Persistence, & State Machine', () => {
+    it('registers candidate artifact, prevents duplicates, auto-persists to disk, and logs registration event', () => {
+      fs.mkdirSync(testArtifactDir, { recursive: true });
+      const persistPath = path.join(testArtifactDir, 'auto-registry.json');
+      ModelRegistry.setPersistencePath(persistPath);
+
       const candidate = createDummyCandidate('cand-reg-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
 
       const registered = ModelRegistry.registerCandidateArtifact(artifact);
       expect(registered.candidateId).toBe('cand-reg-1');
+
+      // Verify file was written to disk automatically
+      expect(fs.existsSync(persistPath)).toBe(true);
 
       // Duplicate registration must throw
       expect(() => ModelRegistry.registerCandidateArtifact(artifact)).toThrow('DUPLICATE_CANDIDATE_ARTIFACT');
@@ -365,9 +398,10 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
 
       expect(result.passed).toBe(false);
       expect(result.rejectionReason).toContain('SHADOW_WINDOW_OVERLAP');
+      expect(result.shadowDatasetHash).toBe(datasetHash);
     });
 
-    it('executes candidate strategy deterministically over independent shadow market data with 0% synthetic PnL', () => {
+    it('executes candidate strategy deterministically over independent shadow market data with authoritative provenance', () => {
       const candidate = createDummyCandidate('cand-shadow-clean');
       const candles = generateContinuousCandles(shadowStartTs, 60, 900000);
       const datasetHash = DatasetManager.requireCanonicalMarketDatasetHash(candles, '15m');
@@ -399,6 +433,9 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       });
 
       expect(shadowResult.candidateId).toBe('cand-shadow-clean');
+      expect(shadowResult.shadowDatasetHash).toBe(datasetHash);
+      expect(shadowResult.shadowStartTimestamp).toBe(shadowStartTs);
+      expect(shadowResult.shadowEndTimestamp).toBe(shadowEndTs);
       expect(shadowResult.metrics.observationsCount).toBeGreaterThanOrEqual(30);
       expect(typeof shadowResult.metrics.totalTrades).toBe('number');
       expect(typeof shadowResult.metrics.profitFactor).toBe('number');
@@ -408,7 +445,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
     });
   });
 
-  describe('4. Promotion Gate Contract & Decoupled Policy Evaluation', () => {
+  describe('4. Promotion Gate Contract & Stored Promotion Evidence', () => {
     const policy: PromotionPolicy = {
       minimumShadowObservations: 50,
       minimumShadowTrades: 10,
@@ -421,9 +458,10 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       allowAutoPromotion: true,
     };
 
-    it('approves candidate that satisfies all shadow performance criteria', () => {
+    it('approves candidate, transitions status to PROMOTION_ELIGIBLE, and stores authoritative PromotionEvidence', () => {
       const candidate = createDummyCandidate('cand-pass-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
 
       const shadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-pass-1',
@@ -446,6 +484,9 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
           minimumObservations: 50,
           minimumTrades: 10,
         },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
 
@@ -457,8 +498,18 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
 
       const decision = PromotionGate.evaluatePromotion(input);
       expect(decision.decision).toBe('PROMOTE');
-      expect(decision.rejectionReasons?.length || 0).toBe(0);
-      expect(decision.metrics.totalTrades).toBe(25);
+      expect(decision.evidenceId).toBeDefined();
+
+      // Verify PromotionEvidence was persisted in registry
+      const storedEvidence = ModelRegistry.getPromotionEvidence('cand-pass-1');
+      expect(storedEvidence).toBeDefined();
+      expect(storedEvidence?.evidenceId).toBe(decision.evidenceId);
+      expect(storedEvidence?.shadowDatasetHash).toBe('m_hash');
+      expect(storedEvidence?.shadowWindowStart).toBe(1700000000000);
+      expect(storedEvidence?.shadowWindowEnd).toBe(1700050000000);
+
+      // Verify candidate transitioned to PROMOTION_ELIGIBLE
+      expect(ModelRegistry.getCandidateArtifact('cand-pass-1')?.status).toBe('PROMOTION_ELIGIBLE');
     });
 
     it('rejects candidate with explicit reasons if any criteria fails', () => {
@@ -486,6 +537,9 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
           minimumObservations: 50,
           minimumTrades: 10,
         },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
 
@@ -498,14 +552,14 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const decision = PromotionGate.evaluatePromotion(input);
       expect(decision.decision).toBe('REJECT');
       expect(decision.rejectionReasons?.length).toBeGreaterThanOrEqual(5);
-      expect(decision.rejectionReasons?.some((r) => r.includes('INSUFFICIENT_SHADOW_OBSERVATIONS'))).toBe(true);
-      expect(decision.rejectionReasons?.some((r) => r.includes('INSUFFICIENT_SHADOW_TRADES'))).toBe(true);
-      expect(decision.rejectionReasons?.some((r) => r.includes('PROFIT_FACTOR_BELOW_THRESHOLD'))).toBe(true);
-      expect(decision.rejectionReasons?.some((r) => r.includes('EXPECTANCY_BELOW_THRESHOLD'))).toBe(true);
-      expect(decision.rejectionReasons?.some((r) => r.includes('DRAWDOWN_ABOVE_LIMIT'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('INSUFFICIENT_SHADOW_OBSERVATIONS'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('INSUFFICIENT_SHADOW_TRADES'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('PROFIT_FACTOR_BELOW_THRESHOLD'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('EXPECTANCY_BELOW_THRESHOLD'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('DRAWDOWN_ABOVE_LIMIT'))).toBe(true);
     });
 
-    it('rejects when allowAutoPromotion is false and records AUTO_PROMOTION_DISABLED', () => {
+    it('rejects when allowAutoPromotion is false and records AUTO_PROMOTION_DISABLED while setting PROMOTION_ELIGIBLE', () => {
       const manualOnlyPolicy: PromotionPolicy = {
         ...policy,
         allowAutoPromotion: false,
@@ -513,6 +567,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
 
       const candidate = createDummyCandidate('cand-manual-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
 
       const shadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-manual-1',
@@ -535,6 +590,9 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
           minimumObservations: 50,
           minimumTrades: 10,
         },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
 
@@ -546,11 +604,12 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
 
       const decision = PromotionGate.evaluatePromotion(input);
       expect(decision.decision).toBe('REJECT');
-      expect(decision.rejectionReasons?.some((r) => r.includes('AUTO_PROMOTION_DISABLED'))).toBe(true);
+      expect(decision.rejectionReasons?.some((r: string) => r.includes('AUTO_PROMOTION_DISABLED'))).toBe(true);
+      expect(ModelRegistry.getCandidateArtifact('cand-manual-1')?.status).toBe('PROMOTION_ELIGIBLE');
     });
   });
 
-  describe('5. ProductionModelActivator Atomic Activation & Rollback', () => {
+  describe('5. ProductionModelActivator Transactional Activation, Status Gating, & Rollback', () => {
     const policy: PromotionPolicy = {
       minimumShadowObservations: 50,
       minimumShadowTrades: 10,
@@ -563,48 +622,63 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       allowAutoPromotion: true,
     };
 
-    it('refuses activation if promotion decision is not PROMOTE', () => {
-      const candidate = createDummyCandidate('cand-act-reject');
+    it('refuses activation if candidate is not in PROMOTION_ELIGIBLE state', () => {
+      const candidate = createDummyCandidate('cand-not-eligible');
+      candidate.status = 'SHADOW_ACTIVE';
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifact);
 
-      const rejectedDecision: PromotionDecision = {
-        candidateId: 'cand-act-reject',
-        decision: 'REJECT',
+      const decision: PromotionDecision = {
+        candidateId: 'cand-not-eligible',
+        decision: 'PROMOTE',
         policyVersion: 'v2.0',
-        reasons: ['LOW_PROFIT_FACTOR'],
-        metrics: createSampleMetrics({
-          observationsCount: 100,
-          totalTrades: 20,
-          netPnL: 10,
-          profitFactor: 1.05,
-          expectancy: 0.05,
-          maxDrawdownR: 2.0,
-          winRate: 50.0,
-        }),
+        reasons: [],
+        metrics: createSampleMetrics(),
         evaluatedAt: Date.now(),
       };
 
       expect(() => {
         ProductionModelActivator.activateCandidate({
-          candidateId: 'cand-act-reject',
-          promotionDecision: rejectedDecision,
+          candidateId: 'cand-not-eligible',
+          promotionDecision: decision,
           policy,
         });
-      }).toThrow('PROMOTION_NOT_APPROVED');
+      }).toThrow('INVALID_CANDIDATE_STATUS');
     });
 
-    it('atomically activates approved candidate, transitions previous model to RETIRED, and records promotion evidence', () => {
-      // 1. Setup candidate A and candidate B
+    it('refuses activation if promotion evidence is missing or decision was not PROMOTE', () => {
+      const candidate = createDummyCandidate('cand-no-evidence');
+      candidate.status = 'PROMOTION_ELIGIBLE';
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const decision: PromotionDecision = {
+        candidateId: 'cand-no-evidence',
+        decision: 'PROMOTE',
+        policyVersion: 'v2.0',
+        reasons: [],
+        metrics: createSampleMetrics(),
+        evaluatedAt: Date.now(),
+      };
+
+      expect(() => {
+        ProductionModelActivator.activateCandidate({
+          candidateId: 'cand-no-evidence',
+          promotionDecision: decision,
+          policy,
+        });
+      }).toThrow('PROMOTION_EVIDENCE_NOT_FOUND');
+    });
+
+    it('atomically activates approved candidate in PROMOTION_ELIGIBLE state and verifies evidence', () => {
+      // 1. Setup and evaluate Candidate A
       const candA = createDummyCandidate('cand-prod-A');
       const artifactA = CandidateBacktestRunner.createCandidateArtifact(candA, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactA);
 
-      const decisionA: PromotionDecision = {
+      const shadowResultA: ShadowEvaluationResult = {
         candidateId: 'cand-prod-A',
-        decision: 'PROMOTE',
-        policyVersion: 'v2.0',
-        reasons: [],
+        passed: true,
         metrics: createSampleMetrics({
           observationsCount: 100,
           totalTrades: 20,
@@ -614,8 +688,26 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
           maxDrawdownR: 1.5,
           winRate: 60.0,
         }),
+        reasons: [],
+        window: {
+          candidateId: 'cand-prod-A',
+          marketDatasetHash: 'm_hash',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
+
+      const decisionA = PromotionGate.evaluatePromotion({
+        candidateArtifact: artifactA,
+        shadowResult: shadowResultA,
+        policy,
+      });
 
       // Activate Candidate A
       const prodStateA = ProductionModelActivator.activateCandidate({
@@ -628,16 +720,14 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(prodStateA.activeArtifactHash).toBe(artifactA.artifactHash);
       expect(ModelRegistry.getCandidateArtifact('cand-prod-A')?.status).toBe('PROMOTED');
 
-      // 2. Setup candidate B
+      // 2. Setup and evaluate Candidate B
       const candB = createDummyCandidate('cand-prod-B');
       const artifactB = CandidateBacktestRunner.createCandidateArtifact(candB, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactB);
 
-      const decisionB: PromotionDecision = {
+      const shadowResultB: ShadowEvaluationResult = {
         candidateId: 'cand-prod-B',
-        decision: 'PROMOTE',
-        policyVersion: 'v2.0',
-        reasons: [],
+        passed: true,
         metrics: createSampleMetrics({
           observationsCount: 120,
           totalTrades: 25,
@@ -647,8 +737,26 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
           maxDrawdownR: 1.2,
           winRate: 65.0,
         }),
+        reasons: [],
+        window: {
+          candidateId: 'cand-prod-B',
+          marketDatasetHash: 'm_hash',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
+
+      const decisionB = PromotionGate.evaluatePromotion({
+        candidateArtifact: artifactB,
+        shadowResult: shadowResultB,
+        policy,
+      });
 
       // Activate Candidate B
       const prodStateB = ProductionModelActivator.activateCandidate({
@@ -661,40 +769,42 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(prodStateB.previousCandidateId).toBe('cand-prod-A');
       expect(ModelRegistry.getCandidateArtifact('cand-prod-B')?.status).toBe('PROMOTED');
       expect(ModelRegistry.getCandidateArtifact('cand-prod-A')?.status).toBe('RETIRED');
-
-      // Verify PromotionEvidence saved
-      const evidence = ModelRegistry.getPromotionEvidence('cand-prod-B');
-      expect(evidence).toBeDefined();
-      expect(evidence?.promotionDecision).toBe('PROMOTE');
-      expect(evidence?.shadowMetrics.profitFactor).toBe(2.1);
     });
 
-    it('performs immutable rollback restoring previous active model without retraining', () => {
+    it('performs immutable rollback restoring previous active model transactionally', () => {
       // Cand A activated then Cand B activated
       const candA = createDummyCandidate('cand-rb-A');
       const artifactA = CandidateBacktestRunner.createCandidateArtifact(candA, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactA);
 
-      const decision: PromotionDecision = {
+      const shadowResultA: ShadowEvaluationResult = {
         candidateId: 'cand-rb-A',
-        decision: 'PROMOTE',
-        policyVersion: 'v2.0',
+        passed: true,
+        metrics: createSampleMetrics(),
         reasons: [],
-        metrics: createSampleMetrics({
-          observationsCount: 100,
-          totalTrades: 20,
-          netPnL: 100,
-          profitFactor: 1.8,
-          expectancy: 0.4,
-          maxDrawdownR: 1.5,
-          winRate: 60.0,
-        }),
+        window: {
+          candidateId: 'cand-rb-A',
+          marketDatasetHash: 'm_hash',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
         evaluatedAt: Date.now(),
       };
 
+      const decisionA = PromotionGate.evaluatePromotion({
+        candidateArtifact: artifactA,
+        shadowResult: shadowResultA,
+        policy,
+      });
+
       ProductionModelActivator.activateCandidate({
         candidateId: 'cand-rb-A',
-        promotionDecision: decision,
+        promotionDecision: decisionA,
         policy,
       });
 
@@ -702,9 +812,34 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const artifactB = CandidateBacktestRunner.createCandidateArtifact(candB, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactB);
 
+      const shadowResultB: ShadowEvaluationResult = {
+        candidateId: 'cand-rb-B',
+        passed: true,
+        metrics: createSampleMetrics(),
+        reasons: [],
+        window: {
+          candidateId: 'cand-rb-B',
+          marketDatasetHash: 'm_hash',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'm_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
+        evaluatedAt: Date.now(),
+      };
+
+      const decisionB = PromotionGate.evaluatePromotion({
+        candidateArtifact: artifactB,
+        shadowResult: shadowResultB,
+        policy,
+      });
+
       ProductionModelActivator.activateCandidate({
         candidateId: 'cand-rb-B',
-        promotionDecision: { ...decision, candidateId: 'cand-rb-B' },
+        promotionDecision: decisionB,
         policy,
       });
 

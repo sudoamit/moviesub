@@ -272,13 +272,14 @@ export class DatasetManager {
       .substring(0, 16);
   }
 
-  public static requireCanonicalMarketDatasetHash(candles: ICandle[], timeframe = '15m'): string {
+  public static requireCanonicalMarketDatasetHash(candles: ICandle[], timeframe?: string): string {
     if (!candles || candles.length === 0) {
       throw new Error('EMPTY_MARKET_DATA: Cannot compute canonical market dataset hash for empty candle array');
     }
+    const resolvedTf = timeframe || (candles.length > 1 ? MarketDatasetValidator.inferTimeframe(candles) : '15m');
     // Hard production boundary: Validate monotonic timestamps, OHLC sanity, and continuity before hashing
-    MarketDatasetValidator.validateCandles(candles, timeframe);
-    return this.computeCanonicalMarketDatasetHash(candles, timeframe);
+    MarketDatasetValidator.validateCandles(candles, resolvedTf);
+    return this.computeCanonicalMarketDatasetHash(candles, resolvedTf);
   }
 }
 

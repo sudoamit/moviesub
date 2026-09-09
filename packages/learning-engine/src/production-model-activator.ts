@@ -27,7 +27,8 @@ export interface IRollbackProductionOptions {
 export class ProductionModelActivator {
   /**
    * Atomically activates an approved candidate into authoritative production state.
-   * Enforces fail-closed validation, lock acquisition, integrity checks, and evidence recording.
+   * Enforces fail-closed validation, lock acquisition, strict PROMOTION_ELIGIBLE status check,
+   * immutable PromotionEvidence verification, and transactional snapshot rollback.
    */
   public static activateCandidate(options: IActivateCandidateOptions): ProductionModelState {
     const strategyId = options.strategyId ?? 'smc-quant-baseline';
@@ -48,14 +49,34 @@ export class ProductionModelActivator {
       throw new Error(`CANDIDATE_NOT_FOUND: Candidate ${options.candidateId} not found in model registry`);
     }
 
-    if (candidate.status === 'PROMOTED') {
-      const currentState = ModelRegistry.getProductionState(strategyId, environment);
-      if (currentState?.activeCandidateId === candidate.candidateId) {
-        return currentState;
-      }
+    // 1. Strict Status Gate Invariant
+    if (candidate.status !== 'PROMOTION_ELIGIBLE') {
+      throw new Error(
+        `INVALID_CANDIDATE_STATUS: Candidate ${options.candidateId} is in status '${candidate.status}', must be 'PROMOTION_ELIGIBLE' to activate`,
+      );
     }
 
-    // Acquire activation concurrency lock
+    // 2. Strict Immutable Promotion Evidence Binding
+    const storedEvidence = ModelRegistry.getPromotionEvidence(candidate.candidateId);
+    if (!storedEvidence) {
+      throw new Error(
+        `PROMOTION_EVIDENCE_NOT_FOUND: No promotion evidence recorded in model registry for candidate ${options.candidateId}`,
+      );
+    }
+
+    if (storedEvidence.candidateId !== candidate.candidateId) {
+      throw new Error(`EVIDENCE_CANDIDATE_MISMATCH: Evidence candidateId does not match candidate ${candidate.candidateId}`);
+    }
+
+    if (storedEvidence.artifactHash !== candidate.artifactHash) {
+      throw new Error(`EVIDENCE_ARTIFACT_MISMATCH: Evidence artifactHash does not match candidate artifactHash`);
+    }
+
+    if (storedEvidence.promotionDecision !== 'PROMOTE') {
+      throw new Error(`EVIDENCE_DECISION_NOT_PROMOTE: Stored promotion evidence decision is '${storedEvidence.promotionDecision}'`);
+    }
+
+    // 3. Acquire activation concurrency lock
     const lockAcquired = ModelRegistry.acquireActivationLock(strategyId, environment);
     if (!lockAcquired) {
       throw new Error(
@@ -70,70 +91,53 @@ export class ProductionModelActivator {
         throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: Candidate artifact tampered: ${valResult.reason}`);
       }
 
-      const currentState = ModelRegistry.getProductionState(strategyId, environment);
+      // Execute atomic transaction with automatic rollback on failure
+      return ModelRegistry.executeTransaction(() => {
+        const currentState = ModelRegistry.getProductionState(strategyId, environment);
 
-      // Retire previous active model if present
-      if (currentState?.activeCandidateId && currentState.activeCandidateId !== candidate.candidateId) {
-        try {
-          const prevArtifact = ModelRegistry.getCandidateArtifact(currentState.activeCandidateId);
-          if (prevArtifact && prevArtifact.status === 'PROMOTED') {
-            ModelRegistry.updateCandidateStatus(
-              currentState.activeCandidateId,
-              'RETIRED',
-              `Superseded by activation of candidate ${candidate.candidateId}`,
-            );
+        // Retire previous active model if present
+        if (currentState?.activeCandidateId && currentState.activeCandidateId !== candidate.candidateId) {
+          try {
+            const prevArtifact = ModelRegistry.getCandidateArtifact(currentState.activeCandidateId);
+            if (prevArtifact && prevArtifact.status === 'PROMOTED') {
+              ModelRegistry.updateCandidateStatus(
+                currentState.activeCandidateId,
+                'RETIRED',
+                `Superseded by activation of candidate ${candidate.candidateId}`,
+              );
+            }
+          } catch {
+            // If previous artifact is not in registry (e.g. baseline stub), proceed
           }
-        } catch {
-          // If previous artifact is not in registry (e.g. baseline stub), proceed
         }
-      }
 
-      // Record promotion evidence
-      const evidenceId = `ev-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      const evidence: PromotionEvidence = {
-        evidenceId,
-        candidateId: candidate.candidateId,
-        artifactHash: candidate.artifactHash,
-        trainingDatasetHash: candidate.trainingDatasetHash,
-        validationDatasetHash: candidate.validationDatasetHash,
-        oosDatasetHash: candidate.oosDatasetHash,
-        shadowDatasetHash: candidate.marketDatasetHash,
-        shadowWindowStart: 0,
-        shadowWindowEnd: Date.now(),
-        shadowMetrics: options.promotionDecision.metrics,
-        promotionPolicyVersion: options.policy.policyVersion || 'v2.0',
-        promotionDecision: options.promotionDecision.decision,
-        decisionReasons: options.promotionDecision.reasons,
-        evaluatedAt: options.promotionDecision.evaluatedAt,
-      };
-      ModelRegistry.savePromotionEvidence(evidence);
+        // Transition candidate status to PROMOTED
+        ModelRegistry.updateCandidateStatus(
+          candidate.candidateId,
+          'PROMOTED',
+          `Promoted and activated to ${environment} for strategy ${strategyId}`,
+        );
 
-      // Transition candidate status to PROMOTED
-      ModelRegistry.updateCandidateStatus(
-        candidate.candidateId,
-        'PROMOTED',
-        `Promoted and activated to ${environment} for strategy ${strategyId}`,
-      );
+        // Atomically update production state
+        const activationId = `act-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const newProductionState: ProductionModelState = {
+          strategyId,
+          environment,
+          activeCandidateId: candidate.candidateId,
+          activeModelVersion: candidate.modelVersion,
+          activeStrategyVersion: candidate.strategyVersion,
+          activeArtifactHash: candidate.artifactHash,
+          activatedAt: Date.now(),
+          previousCandidateId: currentState?.activeCandidateId,
+          previousArtifactHash: currentState?.activeArtifactHash,
+          promotionEvidenceId: storedEvidence.evidenceId,
+          activationId,
+        };
 
-      // Atomically update production state
-      const activationId = `act-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      const newProductionState: ProductionModelState = {
-        strategyId,
-        environment,
-        activeCandidateId: candidate.candidateId,
-        activeModelVersion: candidate.modelVersion,
-        activeStrategyVersion: candidate.strategyVersion,
-        activeArtifactHash: candidate.artifactHash,
-        activatedAt: Date.now(),
-        previousCandidateId: currentState?.activeCandidateId,
-        previousArtifactHash: currentState?.activeArtifactHash,
-        promotionEvidenceId: evidenceId,
-        activationId,
-      };
+        ModelRegistry.setProductionState(newProductionState);
 
-      ModelRegistry.setProductionState(newProductionState);
-
-      return newProductionState;
+        return newProductionState;
+      });
     } finally {
       ModelRegistry.releaseActivationLock(strategyId, environment);
     }
@@ -141,7 +145,7 @@ export class ProductionModelActivator {
 
   /**
    * Rolls back production state to a target or previously active candidate artifact.
-   * Does not retrain or recompute; restores verified immutable artifact state.
+   * Does not retrain or recompute; restores verified immutable artifact state transactionally.
    */
   public static rollbackProduction(options: IRollbackProductionOptions): ProductionModelState {
     const strategyId = options.strategyId ?? 'smc-quant-baseline';
@@ -182,43 +186,45 @@ export class ProductionModelActivator {
         );
       }
 
-      // Mark current candidate as ROLLED_BACK
-      if (currentState.activeCandidateId) {
-        try {
-          ModelRegistry.updateCandidateStatus(
-            currentState.activeCandidateId,
-            'ROLLED_BACK',
-            `Rolled back due to: ${options.reason}`,
-          );
-        } catch {
-          // Ignore if previous active model not in registry
+      return ModelRegistry.executeTransaction(() => {
+        // Mark current candidate as ROLLED_BACK
+        if (currentState.activeCandidateId) {
+          try {
+            ModelRegistry.updateCandidateStatus(
+              currentState.activeCandidateId,
+              'ROLLED_BACK',
+              `Rolled back due to: ${options.reason}`,
+            );
+          } catch {
+            // Ignore if previous active model not in registry
+          }
         }
-      }
 
-      // Mark target candidate as PROMOTED (reactivated)
-      ModelRegistry.updateCandidateStatus(
-        targetCandidateId,
-        'PROMOTED',
-        `Reactivated via rollback from ${currentState.activeCandidateId}. Reason: ${options.reason}`,
-      );
+        // Mark target candidate as PROMOTED (reactivated)
+        ModelRegistry.updateCandidateStatus(
+          targetCandidateId,
+          'PROMOTED',
+          `Reactivated via rollback from ${currentState.activeCandidateId}. Reason: ${options.reason}`,
+        );
 
-      const rollbackActivationId = `rb-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      const rollbackState: ProductionModelState = {
-        strategyId,
-        environment,
-        activeCandidateId: targetArtifact.candidateId,
-        activeModelVersion: targetArtifact.modelVersion,
-        activeStrategyVersion: targetArtifact.strategyVersion,
-        activeArtifactHash: targetArtifact.artifactHash,
-        activatedAt: Date.now(),
-        previousCandidateId: currentState.activeCandidateId,
-        previousArtifactHash: currentState.activeArtifactHash,
-        activationId: rollbackActivationId,
-      };
+        const rollbackActivationId = `rb-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const rollbackState: ProductionModelState = {
+          strategyId,
+          environment,
+          activeCandidateId: targetArtifact.candidateId,
+          activeModelVersion: targetArtifact.modelVersion,
+          activeStrategyVersion: targetArtifact.strategyVersion,
+          activeArtifactHash: targetArtifact.artifactHash,
+          activatedAt: Date.now(),
+          previousCandidateId: currentState.activeCandidateId,
+          previousArtifactHash: currentState.activeArtifactHash,
+          activationId: rollbackActivationId,
+        };
 
-      ModelRegistry.setProductionState(rollbackState);
+        ModelRegistry.setProductionState(rollbackState);
 
-      return rollbackState;
+        return rollbackState;
+      });
     } finally {
       ModelRegistry.releaseActivationLock(strategyId, environment);
     }

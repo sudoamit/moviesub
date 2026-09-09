@@ -454,6 +454,9 @@ export interface ShadowEvaluationResult {
   reasons: string[];
   rejectionReason?: string;
   window: ShadowEvaluationWindow;
+  shadowDatasetHash: string;
+  shadowStartTimestamp: number;
+  shadowEndTimestamp: number;
   evaluatedAt: number;
 }
 
@@ -479,6 +482,7 @@ export interface PromotionGateInput {
 export interface PromotionDecision {
   decision: 'PROMOTE' | 'REJECT';
   candidateId: string;
+  evidenceId?: string;
   evaluatedAt: number;
   reasons: string[];
   rejectionReasons?: string[];
