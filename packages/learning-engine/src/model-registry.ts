@@ -69,6 +69,7 @@ export class ModelRegistry {
   private static promotionEvidences: Map<string, PromotionEvidence> = new Map();
   private static productionState: Map<string, ProductionModelState> = new Map();
   private static activationLocks: Set<string> = new Set();
+  private static inTransaction = false;
 
   // Legacy model entries for read-only / metadata inspection
   private static models: Map<string, IModelRegistryEntry> = new Map();
@@ -127,22 +128,89 @@ export class ModelRegistry {
   }
 
   /**
-   * Atomically flushes the registry to disk if a persistence path is configured.
+   * Resets all in-memory registry state and unlocks all activation mutexes.
+   */
+  public static reset(): void {
+    this.artifacts.clear();
+    this.events = [];
+    this.promotionEvidences.clear();
+    this.productionState.clear();
+    this.activationLocks.clear();
+    this.models.clear();
+    this.activeModelVersion = 'v2.0-ml-canonical';
+    this.inTransaction = false;
+  }
+
+  /**
+   * Saves authoritative registry state atomically to disk.
+   */
+  public static saveToFile(filePath?: string): void {
+    const targetPath = filePath || this.persistencePath;
+    if (!targetPath) return;
+
+    const data = {
+      artifacts: Array.from(this.artifacts.entries()),
+      events: this.events,
+      promotionEvidences: Array.from(this.promotionEvidences.entries()),
+      productionState: Array.from(this.productionState.entries()),
+      models: Array.from(this.models.entries()),
+      activeModelVersion: this.activeModelVersion,
+      savedAt: Date.now(),
+    };
+
+    const dir = path.dirname(targetPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const tempPath = `${targetPath}.tmp.${Date.now()}.${randomUUID()}`;
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tempPath, targetPath);
+  }
+
+  /**
+   * Loads authoritative registry state from disk.
+   */
+  public static loadFromFile(filePath: string): void {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`MODEL_REGISTRY_FILE_NOT_FOUND: Registry file does not exist at ${filePath}`);
+    }
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(content);
+
+      if (data.artifacts) {
+        this.artifacts = new Map(data.artifacts);
+      }
+      if (data.events) {
+        this.events = data.events;
+      }
+      if (data.promotionEvidences) {
+        this.promotionEvidences = new Map(data.promotionEvidences);
+      }
+      if (data.productionState) {
+        this.productionState = new Map(data.productionState);
+      }
+      if (data.models) {
+        this.models = new Map(data.models);
+      }
+      if (data.activeModelVersion) {
+        this.activeModelVersion = data.activeModelVersion;
+      }
+    } catch (err: any) {
+      throw new Error(`MODEL_REGISTRY_CORRUPT: Failed to load registry state: ${err.message}`);
+    }
+  }
+
+  /**
+   * Auto-persists authoritative state to configured persistence path and verifies immediately.
    */
   private static autoPersist(): void {
     if (!this.persistencePath) return;
 
     try {
-      const dir = path.dirname(this.persistencePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      const tempFile = `${this.persistencePath}.${Date.now()}.${randomUUID()}.tmp`;
-      const snapshot = this.exportSnapshot();
-      fs.writeFileSync(tempFile, JSON.stringify(snapshot, null, 2), 'utf-8');
-      fs.renameSync(tempFile, this.persistencePath);
-
+      this.saveToFile(this.persistencePath);
       // Verify persistence on disk immediately
       const readBack = fs.readFileSync(this.persistencePath, 'utf-8');
       JSON.parse(readBack);
@@ -157,7 +225,7 @@ export class ModelRegistry {
   private static exportSnapshot(): Record<string, unknown> {
     return {
       artifacts: Array.from(this.artifacts.entries()),
-      events: this.events,
+      events: [...this.events],
       promotionEvidences: Array.from(this.promotionEvidences.entries()),
       productionState: Array.from(this.productionState.entries()),
       models: Array.from(this.models.entries()),
@@ -180,6 +248,7 @@ export class ModelRegistry {
   /**
    * Executes a transactional compound operation with automatic snapshot rollback on failure.
    * If requirePersistence is true (default), rejects if no persistencePath is configured.
+   * Re-entrant: nested transactions run within the outer transaction context without duplicate commits.
    */
   public static executeTransaction<T>(
     operation: () => T,
@@ -191,6 +260,11 @@ export class ModelRegistry {
       );
     }
 
+    if (this.inTransaction) {
+      return operation();
+    }
+
+    this.inTransaction = true;
     const snapshot = this.exportSnapshot();
     try {
       const result = operation();
@@ -204,14 +278,15 @@ export class ModelRegistry {
         // Rollback persistence best-effort
       }
       throw new Error(`TRANSACTION_FAILED: ${err.message}`);
+    } finally {
+      this.inTransaction = false;
     }
   }
 
   /**
-   * Registers an immutable CandidateArtifact into the registry.
-   * Performs cryptographic integrity checks, deep-freezes, and immediately persists to disk.
+   * Internal candidate artifact registration without standalone persistence.
    */
-  public static registerCandidateArtifact(artifact: CandidateArtifact): CandidateArtifact {
+  private static registerCandidateArtifactInternal(artifact: CandidateArtifact): CandidateArtifact {
     if (!artifact || typeof artifact !== 'object') {
       throw new Error('INVALID_ARTIFACT: Cannot register null or undefined artifact');
     }
@@ -239,9 +314,18 @@ export class ModelRegistry {
       reason: 'Candidate artifact registered in model registry',
     });
 
-    this.autoPersist();
-
     return frozen;
+  }
+
+  /**
+   * Registers an immutable CandidateArtifact into the registry.
+   * Performs cryptographic integrity checks, deep-freezes, and immediately persists transactionally to disk.
+   */
+  public static registerCandidateArtifact(artifact: CandidateArtifact): CandidateArtifact {
+    return this.executeTransaction(
+      () => this.registerCandidateArtifactInternal(artifact),
+      { requirePersistence: true },
+    );
   }
 
   /**
@@ -277,9 +361,9 @@ export class ModelRegistry {
   }
 
   /**
-   * Updates candidate status with explicit state-machine validation and audit event logging.
+   * Internal candidate status update without standalone persistence.
    */
-  public static updateCandidateStatus(
+  private static updateCandidateStatusInternal(
     candidateId: string,
     newStatus: CandidateStatus,
     reason?: string,
@@ -327,15 +411,28 @@ export class ModelRegistry {
       reason,
     });
 
-    this.autoPersist();
-
     return updated;
   }
 
   /**
-   * Records immutable promotion evidence into registry after strict validation of registry invariants.
+   * Updates candidate status with explicit state-machine validation and audit event logging.
+   * Transactional and requires durable persistence.
    */
-  public static savePromotionEvidence(evidence: PromotionEvidence): void {
+  public static updateCandidateStatus(
+    candidateId: string,
+    newStatus: CandidateStatus,
+    reason?: string,
+  ): CandidateArtifact {
+    return this.executeTransaction(
+      () => this.updateCandidateStatusInternal(candidateId, newStatus, reason),
+      { requirePersistence: true },
+    );
+  }
+
+  /**
+   * Internal promotion evidence recording without standalone persistence.
+   */
+  private static savePromotionEvidenceInternal(evidence: PromotionEvidence): void {
     if (!evidence || typeof evidence !== 'object') {
       throw new Error('INVALID_PROMOTION_EVIDENCE: Evidence cannot be null or undefined');
     }
@@ -374,7 +471,16 @@ export class ModelRegistry {
 
     const frozen = deepFreeze(JSON.parse(JSON.stringify(evidence)));
     this.promotionEvidences.set(evidence.candidateId, frozen);
-    this.autoPersist();
+  }
+
+  /**
+   * Records immutable promotion evidence into registry transactionally.
+   */
+  public static savePromotionEvidence(evidence: PromotionEvidence): void {
+    this.executeTransaction(
+      () => this.savePromotionEvidenceInternal(evidence),
+      { requirePersistence: true },
+    );
   }
 
   /**
@@ -386,7 +492,7 @@ export class ModelRegistry {
 
   /**
    * Atomically records promotion evidence and updates candidate status to PROMOTION_ELIGIBLE or REJECTED.
-   * Requires durable persistence (fails closed if persistence is not configured).
+   * Single persistence commit; fails closed if persistence is not configured.
    */
   public static recordPromotionOutcome(
     candidateId: string,
@@ -409,7 +515,7 @@ export class ModelRegistry {
 
     this.executeTransaction(
       () => {
-        this.savePromotionEvidence(evidence);
+        this.savePromotionEvidenceInternal(evidence);
 
         const candidate = this.artifacts.get(candidateId);
         if (!candidate) return;
@@ -425,7 +531,7 @@ export class ModelRegistry {
             candidate.status !== 'PROMOTED' &&
             candidate.status !== 'REACTIVATED'
           ) {
-            this.updateCandidateStatus(
+            this.updateCandidateStatusInternal(
               candidateId,
               'PROMOTION_ELIGIBLE',
               'Candidate passed all shadow validation criteria',
@@ -433,7 +539,7 @@ export class ModelRegistry {
           }
         } else if (decision.decision === 'REJECT') {
           if (candidate.status !== 'REJECTED') {
-            this.updateCandidateStatus(
+            this.updateCandidateStatusInternal(
               candidateId,
               'REJECTED',
               decision.rejectionReasons?.join('; ') || 'Failed promotion gate validation criteria',
@@ -464,12 +570,25 @@ export class ModelRegistry {
   }
 
   /**
+   * Internal production model state setter without standalone persistence.
+   */
+  private static setProductionStateInternal(state: ProductionModelState): void {
+    const key = `${state.strategyId}:${state.environment}`;
+    this.productionState.set(key, deepFreeze(JSON.parse(JSON.stringify(state))));
+  }
+
+  /**
    * Atomically sets the production model state, deep-freezes, and persists to disk.
    */
   public static setProductionState(state: ProductionModelState): void {
-    const key = `${state.strategyId}:${state.environment}`;
-    this.productionState.set(key, deepFreeze(JSON.parse(JSON.stringify(state))));
-    this.autoPersist();
+    if (this.inTransaction) {
+      this.setProductionStateInternal(state);
+    } else {
+      this.executeTransaction(
+        () => this.setProductionStateInternal(state),
+        { requirePersistence: true },
+      );
+    }
   }
 
   /**
@@ -506,28 +625,6 @@ export class ModelRegistry {
   }
 
   /**
-   * Persists the entire registry to disk for crash-safe state recovery.
-   */
-  public static saveToFile(filePath: string): void {
-    const snapshot = this.exportSnapshot();
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
-  }
-
-  /**
-   * Hydrates the registry from disk.
-   */
-  public static loadFromFile(filePath: string): void {
-    if (!fs.existsSync(filePath)) return;
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const snapshot = JSON.parse(content);
-    this.restoreSnapshot(snapshot);
-  }
-
-  /**
    * Clears in-memory registry state and re-initializes defaults.
    */
   public static clear(): void {
@@ -538,6 +635,7 @@ export class ModelRegistry {
     this.activationLocks.clear();
     this.models.clear();
     this.activeModelVersion = 'v2.0-ml-canonical';
+    this.inTransaction = false;
     this.initDefaultState();
   }
 

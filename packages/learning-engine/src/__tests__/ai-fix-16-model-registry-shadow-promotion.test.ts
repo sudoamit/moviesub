@@ -948,7 +948,14 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       allowAutoPromotion: true,
     };
 
-    it('P0 #1: rejects activation, transactions, and promotion outcome recording when persistence is not configured', () => {
+    beforeEach(() => {
+      if (!fs.existsSync(testArtifactDir)) {
+        fs.mkdirSync(testArtifactDir, { recursive: true });
+      }
+      ModelRegistry.setPersistencePath(path.join(testArtifactDir, 'model-registry.json'));
+    });
+
+    it('P0 #1: registration, activation, transactions, and promotion outcome recording strictly fail closed without persistence', () => {
       ModelRegistry.setPersistencePath(null);
 
       expect(() => {
@@ -957,44 +964,12 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         });
       }).toThrow('PERSISTENCE_NOT_CONFIGURED');
 
-      // Production activation and promotion gate recording must fail closed without persistence path
+      // Candidate registration itself must fail closed without persistence
       const candidate = createDummyCandidate('cand-no-persist');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
-      ModelRegistry.registerCandidateArtifact(artifact);
-      ModelRegistry.updateCandidateStatus('cand-no-persist', 'OOS_VALIDATED');
-      ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_PENDING');
-      ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_ACTIVE');
-
-      const shadowResult: ShadowEvaluationResult = {
-        candidateId: 'cand-no-persist',
-        passed: true,
-        metrics: createSampleMetrics({ totalTrades: 20, profitFactor: 2.0, expectancy: 0.4 }),
-        reasons: [],
-        window: {
-          candidateId: 'cand-no-persist',
-          marketDatasetHash: 'mkt_shadow',
-          startTimestamp: 1700000000000,
-          endTimestamp: 1700050000000,
-          minimumObservations: 50,
-          minimumTrades: 10,
-        },
-        shadowDatasetHash: 'mkt_shadow',
-        shadowStartTimestamp: 1700000000000,
-        shadowEndTimestamp: 1700050000000,
-        evaluatedAt: Date.now(),
-      };
-
-      // Fails closed on recording outcome without persistence
       expect(() => {
-        PromotionGate.evaluatePromotion({
-          candidateArtifact: artifact,
-          shadowResult,
-          policy,
-        });
+        ModelRegistry.registerCandidateArtifact(artifact);
       }).toThrow('PERSISTENCE_NOT_CONFIGURED');
-
-      // Candidate must NOT become promotion eligible
-      expect(ModelRegistry.getCandidateArtifact('cand-no-persist')?.status).toBe('SHADOW_ACTIVE');
     });
 
     it('P0 #2: throws LEGACY_MODEL_PROMOTION_DISABLED and LEGACY_MODEL_ROLLBACK_DISABLED when legacy bypass methods are called', () => {
@@ -1115,6 +1090,83 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(() => {
         ModelRegistry.updateCandidateStatus('cand-matrix', 'REACTIVATED');
       }).not.toThrow();
+    });
+
+    it('P1 #6: direct evidence mutation cannot bypass promotion lifecycle', () => {
+      const candidate = createDummyCandidate('cand-ev-bypass');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const evidence: PromotionEvidence = {
+        evidenceId: 'ev-bypass-1',
+        candidateId: 'cand-ev-bypass',
+        artifactHash: artifact.artifactHash,
+        trainingDatasetHash: artifact.trainingDatasetHash,
+        validationDatasetHash: artifact.validationDatasetHash,
+        oosDatasetHash: artifact.oosDatasetHash,
+        shadowDatasetHash: 'shadow_hash_1',
+        shadowWindowStart: 1700000000000,
+        shadowWindowEnd: 1700050000000,
+        shadowMetrics: createSampleMetrics(),
+        promotionPolicyVersion: 'v2.0',
+        promotionDecision: 'PROMOTE',
+        decisionReasons: ['All thresholds passed'],
+        evaluatedAt: Date.now(),
+      };
+
+      const invalidDecision: PromotionDecision = {
+        decision: 'PROMOTE',
+        candidateId: 'different-candidate-id',
+        evidenceId: 'ev-bypass-1',
+        evaluatedAt: Date.now(),
+        metrics: createSampleMetrics(),
+        policyVersion: 'v2.0',
+        reasons: ['All metrics passed'],
+      };
+
+      expect(() => {
+        ModelRegistry.recordPromotionOutcome('cand-ev-bypass', evidence, invalidDecision);
+      }).toThrow('INVALID_PROMOTION_DECISION');
+    });
+
+    it('P1 #7: records promotion outcome in exactly one atomic persistence commit', () => {
+      const candidate = createDummyCandidate('cand-single-commit');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+      ModelRegistry.updateCandidateStatus('cand-single-commit', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-single-commit', 'SHADOW_ACTIVE');
+
+      const shadowResult: ShadowEvaluationResult = {
+        candidateId: 'cand-single-commit',
+        passed: true,
+        metrics: createSampleMetrics({ totalTrades: 25, profitFactor: 2.0, expectancy: 0.4 }),
+        reasons: [],
+        window: {
+          candidateId: 'cand-single-commit',
+          marketDatasetHash: 'mkt_hash',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'mkt_hash',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
+        evaluatedAt: Date.now(),
+      };
+
+      const saveSpy = jest.spyOn(ModelRegistry as any, 'saveToFile');
+      saveSpy.mockClear();
+
+      PromotionGate.evaluatePromotion({
+        candidateArtifact: artifact,
+        shadowResult,
+        policy,
+      });
+
+      // Exactly ONE persistence commit for the entire compound outcome
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      saveSpy.mockRestore();
     });
   });
 });
