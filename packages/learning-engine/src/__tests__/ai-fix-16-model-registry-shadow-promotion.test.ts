@@ -1172,8 +1172,25 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
     it('P1 #8: loadFromFile authoritatively revalidates all artifacts, evidence, and production bindings, rejecting corrupt files', () => {
       const corruptFilePath = path.join(testArtifactDir, 'corrupt-registry.json');
 
+      // Test 0: Missing mandatory top-level fields rejected
+      fs.writeFileSync(corruptFilePath, JSON.stringify({}, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
+      const partialData = {
+        artifacts: [],
+        productionState: [],
+        // missing promotionEvidences, events, models, activeModelVersion
+      };
+      fs.writeFileSync(corruptFilePath, JSON.stringify(partialData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
       // Test 1: Tampered artifact hash rejected
       const tamperedArtifactData = {
+        version: '2.0',
         artifacts: [
           [
             'cand-tampered-1',
@@ -1203,6 +1220,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         productionState: [],
         promotionEvidences: [],
         events: [],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
       };
 
       fs.writeFileSync(corruptFilePath, JSON.stringify(tamperedArtifactData, null, 2), 'utf-8');
@@ -1214,6 +1233,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candidate = createDummyCandidate('cand-valid-rec');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
       const orphanedEvidenceData = {
+        version: '2.0',
         artifacts: [[artifact.candidateId, artifact]],
         promotionEvidences: [
           [
@@ -1230,6 +1250,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         ],
         productionState: [],
         events: [],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
       };
 
       fs.writeFileSync(corruptFilePath, JSON.stringify(orphanedEvidenceData, null, 2), 'utf-8');
@@ -1239,6 +1261,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
 
       // Test 3: Production state referring to non-promoted candidate rejected
       const invalidProdData = {
+        version: '2.0',
         artifacts: [[artifact.candidateId, { ...artifact, status: 'TRAINED' }]],
         productionState: [
           [
@@ -1253,9 +1276,60 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         ],
         promotionEvidences: [],
         events: [],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
       };
 
       fs.writeFileSync(corruptFilePath, JSON.stringify(invalidProdData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
+      // Test 4: Production state without verified promotion evidence rejected
+      const prodMissingEvidence = {
+        version: '2.0',
+        artifacts: [[artifact.candidateId, { ...artifact, status: 'PROMOTED' }]],
+        productionState: [
+          [
+            'smc-quant-baseline:paper',
+            {
+              strategyId: 'smc-quant-baseline',
+              environment: 'paper',
+              activeCandidateId: artifact.candidateId,
+              activeArtifactHash: artifact.artifactHash,
+            },
+          ],
+        ],
+        promotionEvidences: [], // Missing required PromotionEvidence
+        events: [],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
+      };
+
+      fs.writeFileSync(corruptFilePath, JSON.stringify(prodMissingEvidence, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
+      // Test 5: Semantic audit event referring to non-existent candidate rejected
+      const corruptEventData = {
+        version: '2.0',
+        artifacts: [[artifact.candidateId, artifact]],
+        promotionEvidences: [],
+        productionState: [],
+        events: [
+          {
+            eventId: 'evt-1',
+            candidateId: 'unknown-cand-xyz',
+            eventType: 'CANDIDATE_REGISTERED',
+            timestamp: Date.now(),
+          },
+        ],
+        models: [],
+        activeModelVersion: 'v2.0-ml-canonical',
+      };
+
+      fs.writeFileSync(corruptFilePath, JSON.stringify(corruptEventData, null, 2), 'utf-8');
       expect(() => {
         ModelRegistry.loadFromFile(corruptFilePath);
       }).toThrow('MODEL_REGISTRY_CORRUPT');
