@@ -87,12 +87,20 @@ describe('LearningEngine Pipeline', () => {
     const dataset = createMockDataset(45);
     ExperienceStore.loadExperiences(dataset);
 
-    const candles = dataset.flatMap((e: any) => e.candlesDuringTrade || []);
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 100 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 1800000),
+      open: 24000 + Math.sin(i * 0.2) * 200,
+      high: 24000 + Math.sin(i * 0.2) * 200 + 50,
+      low: 24000 + Math.sin(i * 0.2) * 200 - 50,
+      close: 24000 + Math.sin(i * 0.2) * 200 + (i % 2 === 0 ? 20 : -20),
+      volume: 1000 + (i % 5) * 200,
+    }));
+
     const report = await LearningEngine.runLearningCycle({
       baseStrategyVersion: 'v2.0-smc-quant',
       autoPromote: false,
       candles,
-      testOnlyDeterministicSignals: true,
     });
 
     expect(report.experiencesUsed).toBe(45);

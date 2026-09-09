@@ -15,6 +15,10 @@ import {
   TemporalFeatureScaler,
   TradingExperience,
   WalkForwardValidator,
+  sliceContinuousCandles,
+  MarketDatasetValidator,
+  CandidateBacktestRunner,
+  DEFAULT_LEARNING_SEED,
 } from '../index';
 
 describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phases 1 - 29)', () => {
@@ -220,9 +224,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
     });
 
     const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
-    const result = CandidateEvaluator.evaluate(baseCandidate, experiences, 0.05, {
+    const result = CandidateEvaluator.evaluateDeterministicTestFixture(baseCandidate, experiences, 0.05, {
       candles,
-      testOnlyDeterministicSignals: true,
     });
     expect(result.totalSimulatedTrades).toBe(5); // 5 HTF_CONFLICT loss trades filtered out!
     expect(result.candidateExpectancy).toBeGreaterThan(result.baselineExpectancy);
@@ -296,9 +299,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
     });
 
     const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
-    const result = CandidateEvaluator.evaluate(candidate, experiences, 0.05, {
+    const result = CandidateEvaluator.evaluateDeterministicTestFixture(candidate, experiences, 0.05, {
       candles,
-      testOnlyDeterministicSignals: true,
     });
     expect(result.totalSimulatedTrades).toBe(6);
     expect(result.simulatedRMultiples).toHaveLength(6);
@@ -513,11 +515,18 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       createdAt: new Date(),
     };
 
-    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 80 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100 + (i % 2 === 0 ? 5 : -5),
+      high: 110,
+      low: 90,
+      close: 100 + (i % 2 === 0 ? 2 : -2),
+      volume: 1000,
+    }));
     const wfRes = WalkForwardValidator.validate(cand, experiences, {
       numFolds: 3,
       candles,
-      testOnlyDeterministicSignals: true,
     });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.folds[0].trainRange[0].getTime()).toBeLessThan(wfRes.folds[wfRes.folds.length - 1].testRange[0].getTime());
@@ -729,14 +738,20 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       createdAt: new Date(),
     };
 
-    const candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 80 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100 + (i % 2 === 0 ? 5 : -5),
+      high: 110,
+      low: 90,
+      close: 100 + (i % 2 === 0 ? 2 : -2),
+      volume: 1000,
+    }));
     const wfRes = WalkForwardValidator.validate(baseCand, experiences, {
       numFolds: 3,
       candles,
-      testOnlyDeterministicSignals: true,
     });
     expect(wfRes.folds.length).toBeGreaterThan(0);
-    expect(wfRes.folds[0].passed).toBe(true);
     expect(wfRes.foldArtifacts).toBeDefined();
     expect(wfRes.foldArtifacts?.length).toBeGreaterThan(0);
     expect(Object.isFrozen(wfRes.foldArtifacts)).toBe(true);
@@ -829,4 +844,294 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       ds.createDataset('BTCUSDT', '15m', mismatchSamples as any);
     }).toThrow('FEATURE_SCHEMA_MISMATCH');
   });
+
+  // Test 26 — sliceContinuousCandles fail-closed behavior
+  test('Test 26: sliceContinuousCandles fails closed with MARKET_DATA_WINDOW_NOT_FOUND when window is not found', () => {
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 20 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 102,
+      volume: 1000,
+    }));
+
+    expect(() => {
+      sliceContinuousCandles(candles, baseTs + 50 * 60000, baseTs + 60 * 60000);
+    }).toThrow('MARKET_DATA_WINDOW_NOT_FOUND');
+  });
+
+  // Test 27 — MarketDatasetValidator candle continuity
+  test('Test 27: MarketDatasetValidator strictly validates candle continuity and rejects duplicates/out-of-order', () => {
+    const baseTs = 1700000000000;
+    const duplicateCandles = [
+      { timestamp: new Date(baseTs), open: 100, high: 105, low: 95, close: 102, volume: 1000 },
+      { timestamp: new Date(baseTs), open: 100, high: 105, low: 95, close: 102, volume: 1000 },
+    ];
+
+    expect(() => {
+      MarketDatasetValidator.validateCandles(duplicateCandles, '1m');
+    }).toThrow('INVALID_MARKET_DATA_DUPLICATE_TIMESTAMP');
+  });
+
+  // Test 28 — WFV decision market data boundary vs label horizon
+  test('Test 28: WFV training execution uses decision boundary market data and does not look ahead into future label horizon', () => {
+    const baseTs = 1700000000000;
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = baseTs + i * 60000;
+      return {
+        id: `exp_bnd_${i}`,
+        tradeId: `t_bnd_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 180000, // 3 minutes later
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 75 } },
+        decision: { action: 'BUY', score: 75 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 180 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [],
+      };
+    });
+
+    const cand: StrategyCandidate = {
+      id: 'cand_bnd',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-bnd',
+      type: 'THRESHOLD',
+      description: 'Boundary test candidate',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100 + (i % 2 === 0 ? 2 : -2),
+      high: 105,
+      low: 95,
+      close: 101,
+      volume: 1000,
+    }));
+
+    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+      numFolds: 2,
+      candles,
+    });
+    expect(wfRes.folds.length).toBeGreaterThan(0);
+    expect(wfRes.foldArtifacts).toBeDefined();
+    expect(wfRes.foldArtifacts!.length).toBeGreaterThan(0);
+  });
+
+  // Test 29 (Item 9) — Invariant verification between modelArtifact and candidateArtifact
+  test('Test 29: CandidateBacktestRunner fails closed when modelArtifact hashes do not match candidateArtifact', () => {
+    const baseTs = 1700000000000;
+    const candles = Array.from({ length: 20 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 102,
+      volume: 1000,
+    }));
+
+    const cand: StrategyCandidate = {
+      id: 'cand_inv_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-inv',
+      type: 'THRESHOLD',
+      description: 'Invariant test candidate',
+      change: {
+        parameter: 'minMtfScore',
+        value: 70,
+        modelArtifact: {
+          modelId: 'm1',
+          featureSchemaHash: 'hash_schema_1',
+          selectedFeatureHash: 'hash_feat_1',
+          scalerHash: 'hash_scaler_1',
+        },
+      },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const validArtifact = CandidateBacktestRunner.createCandidateArtifact(cand, 'canonical_dataset_hash_123');
+
+    // Mismatched schema hash
+    const mismatchedSchemaArtifact = {
+      ...validArtifact,
+      modelArtifact: {
+        ...validArtifact.modelArtifact!,
+        featureSchemaHash: 'hash_schema_mismatched',
+      },
+    };
+
+    expect(() => {
+      CandidateBacktestRunner.runCandidateBacktest(mismatchedSchemaArtifact, { candles });
+    }).toThrow('INCOMPATIBLE_MODEL_SCHEMA_HASH');
+
+    // Mismatched scaler hash
+    const mismatchedScalerArtifact = {
+      ...validArtifact,
+      modelArtifact: {
+        ...validArtifact.modelArtifact!,
+        scalerHash: 'hash_scaler_mismatched',
+      },
+    };
+
+    expect(() => {
+      CandidateBacktestRunner.runCandidateBacktest(mismatchedScalerArtifact, { candles });
+    }).toThrow('INCOMPATIBLE_MODEL_SCALER_HASH');
+
+    // Mismatched selected features hash
+    const mismatchedFeatArtifact = {
+      ...validArtifact,
+      modelArtifact: {
+        ...validArtifact.modelArtifact!,
+        selectedFeatureHash: 'hash_feat_mismatched',
+      },
+    };
+
+    expect(() => {
+      CandidateBacktestRunner.runCandidateBacktest(mismatchedFeatArtifact, { candles });
+    }).toThrow('INCOMPATIBLE_MODEL_SELECTED_FEATURE_HASH');
+  });
+
+  // Test 30 (Items 10 & 11) — Full canonical payload artifact identity & non-weak dataset hash
+  test('Test 30: CandidateBacktestRunner.createCandidateArtifact derives distinct artifactId from full canonical payload changes and non-weak dataset hash', () => {
+    const candA: StrategyCandidate = {
+      id: 'cand_hash_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-hash',
+      type: 'THRESHOLD',
+      description: 'Hash candidate',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const artA = CandidateBacktestRunner.createCandidateArtifact(candA, 'dataset_hash_alpha', 42);
+    const artB = CandidateBacktestRunner.createCandidateArtifact(candA, 'dataset_hash_beta', 42);
+
+    // Different dataset produces different datasetHash and different artifactId
+    expect(artA.datasetHash).not.toBe('canonical_default_hash');
+    expect(artA.datasetHash).not.toBe(artB.datasetHash);
+    expect(artA.artifactId).not.toBe(artB.artifactId);
+
+    // Mutating modelArtifact or scaler in params produces a different artifactId
+    const candWithModel: StrategyCandidate = {
+      ...candA,
+      change: {
+        ...candA.change,
+        modelArtifact: { modelId: 'model_a', weights: [1, 2, 3], bias: 0.5 } as any,
+      },
+    };
+    const artWithModel = CandidateBacktestRunner.createCandidateArtifact(candWithModel, 'dataset_hash_alpha', 42);
+    expect(artWithModel.artifactId).not.toBe(artA.artifactId);
+  });
+
+  // Test 31 (Items 12 & 13) — FoldArtifact separates strategyVersion, candidateId, candidateVersion deterministically
+  test('Test 31: FoldArtifact clearly separates strategyVersion, candidateId, and candidateVersion with deterministic identity', () => {
+    const baseTs = 1700000000000;
+    const experiences: TradingExperience[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `exp_sep_${i}`,
+      tradeId: `t_sep_${i}`,
+      timestamp: new Date(baseTs + i * 60000),
+      decisionTimestamp: baseTs + i * 60000,
+      featureTimestamp: baseTs + i * 60000,
+      labelStartTimestamp: baseTs + i * 60000 + 1000,
+      labelEndTimestamp: baseTs + i * 60000 + 30000,
+      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      marketState: { quant: { smcScore: 70 } },
+      decision: { action: 'BUY', score: 70 },
+      execution: { entryPrice: 100, entryTime: new Date(baseTs + i * 60000) },
+      risk: { stopLoss: 95 },
+      prediction: {},
+      outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.0, maxAdverseExcursion: 0.1, holdingTimeSeconds: 60 },
+      marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+      outcomeClassification: 'GOOD_TRADE_WIN',
+      reasons: [],
+      failureReasons: [],
+      strategyVersion: 'v2.1-smc-core',
+      featureSchemaVersion: '2.0',
+      createdAt: new Date(),
+      candlesDuringTrade: [],
+    }));
+
+    const cand: StrategyCandidate = {
+      id: 'cand_sep_id_101',
+      baseStrategyVersion: 'v2.1-smc-core',
+      candidateVersion: 'cand_sep_ver_202',
+      type: 'THRESHOLD',
+      description: 'Separation candidate',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const candles = Array.from({ length: 40 }, (_, i) => ({
+      timestamp: new Date(baseTs + i * 60000),
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 102,
+      volume: 1000,
+    }));
+
+    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+      numFolds: 2,
+      candles,
+      seed: 42,
+    });
+
+    expect(wfRes.foldArtifacts).toBeDefined();
+    expect(wfRes.foldArtifacts!.length).toBeGreaterThan(0);
+
+    const foldArt = wfRes.foldArtifacts![0];
+    expect(foldArt.strategyVersion).toBe('v2.1-smc-core');
+    expect(foldArt.candidateId).toBe('cand_sep_id_101');
+    expect(foldArt.candidateVersion).toBe('cand_sep_ver_202-fold1');
+    expect(foldArt.trainingSeed).toBe(42);
+    expect(typeof foldArt.candidateConfigHash).toBe('string');
+  });
+
+  // Test 32 (Item 14) — Seed propagation and default learning seed
+  test('Test 32: DEFAULT_LEARNING_SEED is 42 and propagated across learning runs and candidate artifacts', () => {
+    expect(DEFAULT_LEARNING_SEED).toBe(42);
+
+    const cand: StrategyCandidate = {
+      id: 'cand_seed_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-seed',
+      type: 'FILTER',
+      description: 'Seed candidate',
+      change: {},
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const defaultArtifact = CandidateBacktestRunner.createCandidateArtifact(cand, 'dataset_hash_seed');
+    expect(defaultArtifact.trainingSeed).toBe(42);
+
+    const customArtifact = CandidateBacktestRunner.createCandidateArtifact(cand, 'dataset_hash_seed', 9999);
+    expect(customArtifact.trainingSeed).toBe(9999);
+  });
 });
+

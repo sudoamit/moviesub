@@ -12,6 +12,7 @@ import { FeatureSelector } from './feature-selector';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { ModelTrainer, ITrainedModelArtifact } from './model-trainer';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
+import { MarketDatasetValidator } from './market-dataset-validator';
 
 export interface FoldArtifact {
   foldIndex: number;
@@ -25,8 +26,9 @@ export interface FoldArtifact {
   modelVersion: string;
   modelParameters: { weights: number[]; bias: number };
   strategyVersion: string;
-  strategyParameters: Record<string, any>;
   candidateId: string;
+  candidateVersion: string;
+  strategyParameters: Record<string, any>;
   candidateConfigHash: string;
   trainingSeed: number;
   createdAt: Date;
@@ -41,7 +43,6 @@ export interface IWalkForwardOptions {
   seed?: number;
   candles?: ICandle[];
   dataset?: CandidateMarketDataset;
-  testOnlyDeterministicSignals?: boolean;
   retrainFn?: (
     trainSlice: TradingExperience[],
     baseCandidate: StrategyCandidate,
@@ -59,13 +60,19 @@ export function sliceContinuousCandles(
   const startIdx = candles.findIndex(
     (c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()) >= startTime,
   );
-  if (startIdx === -1) return candles;
+  if (startIdx === -1) {
+    throw new Error('MARKET_DATA_WINDOW_NOT_FOUND');
+  }
   const warmupStartIdx = Math.max(0, startIdx - warmupBars);
   const endIdx = candles.findIndex(
     (c) => (c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime()) > endTime,
   );
   const slice = endIdx === -1 ? candles.slice(warmupStartIdx) : candles.slice(warmupStartIdx, endIdx);
-  return slice.length > 0 ? slice : candles;
+  if (slice.length === 0) {
+    throw new Error('EMPTY_MARKET_DATA_WINDOW');
+  }
+  MarketDatasetValidator.validateCandles(slice);
+  return slice;
 }
 
 export class WalkForwardValidator {
@@ -109,7 +116,11 @@ export class WalkForwardValidator {
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
-    const foldSize = Math.floor(n / (numFolds + 2)); // Divide into train, val, oos chunks
+    const candles = options.candles;
+    const hasContinuousCandles = Boolean(candles && candles.length >= Math.max(20, (numFolds + 2) * 5));
+
+    const totalIntervals = hasContinuousCandles ? candles!.length : n;
+    const foldIntervalSize = Math.floor(totalIntervals / (numFolds + 2)); // Divide into train, val, oos chunks
     const folds: WalkForwardFold[] = [];
     const foldArtifacts: FoldArtifact[] = [];
 
@@ -117,18 +128,89 @@ export class WalkForwardValidator {
     let totalOOS = 0;
 
     for (let f = 0; f < numFolds; f++) {
-      const trainStart = 0;
-      const trainEnd = (f + 1) * foldSize;
-      const valStart = trainEnd;
-      const valEnd = Math.min(n, valStart + Math.max(1, Math.floor(foldSize / 2)));
-      const testStart = valEnd;
-      const testEnd = Math.min(n, testStart + foldSize);
+      let trainCandles: ICandle[] | undefined;
+      let valCandles: ICandle[] | undefined;
+      let testCandles: ICandle[] | undefined;
 
-      const trainSlice = sorted.slice(trainStart, trainEnd);
-      const valRaw = sorted.slice(valStart, valEnd);
-      const testRaw = sorted.slice(testStart, testEnd);
+      let trainSlice: TradingExperience[];
+      let valRaw: TradingExperience[];
+      let testRaw: TradingExperience[];
 
-      if (trainSlice.length === 0 || testRaw.length === 0) continue;
+      let trainRange: [Date, Date];
+      let validateRange: [Date, Date];
+      let testRange: [Date, Date];
+
+      if (hasContinuousCandles) {
+        // Continuous Market-Data-First Partitioning: Folds are defined by the continuous market dataset windows
+        const trainStartIdx = 0;
+        const trainEndIdx = (f + 1) * foldIntervalSize;
+        const valStartIdx = trainEndIdx;
+        const valEndIdx = Math.min(totalIntervals, valStartIdx + Math.max(1, Math.floor(foldIntervalSize / 2)));
+        const testStartIdx = valEndIdx;
+        const testEndIdx = Math.min(totalIntervals, testStartIdx + foldIntervalSize);
+
+        const trainStartTs = new Date(candles![trainStartIdx].timestamp).getTime();
+        const trainEndTs = new Date(candles![trainEndIdx - 1].timestamp).getTime();
+        const valStartTs = new Date(candles![valStartIdx].timestamp).getTime();
+        const valEndTs = new Date(candles![valEndIdx - 1].timestamp).getTime();
+        const testStartTs = new Date(candles![testStartIdx].timestamp).getTime();
+        const testEndTs = new Date(candles![testEndIdx - 1].timestamp).getTime();
+
+        trainCandles = candles!.slice(0, trainEndIdx);
+        MarketDatasetValidator.validateCandles(trainCandles);
+        valCandles = sliceContinuousCandles(candles, valStartTs, valEndTs, 40);
+        testCandles = sliceContinuousCandles(candles, testStartTs, testEndTs, 40);
+
+        trainRange = [new Date(trainStartTs), new Date(trainEndTs)];
+        validateRange = [new Date(valStartTs), new Date(valEndTs)];
+        testRange = [new Date(testStartTs), new Date(testEndTs)];
+
+        // Supervised labels / experiences within corresponding market windows
+        trainSlice = sorted.filter((e) => {
+          const t = new Date(e.timestamp).getTime();
+          return t >= trainStartTs && t <= trainEndTs;
+        });
+        if (trainSlice.length === 0) {
+          const fallbackExpEnd = Math.max(1, Math.floor((f + 1) * (n / (numFolds + 2))));
+          trainSlice = sorted.slice(0, fallbackExpEnd);
+        }
+
+        valRaw = sorted.filter((e) => {
+          const t = new Date(e.timestamp).getTime();
+          return t >= valStartTs && t <= valEndTs;
+        });
+
+        testRaw = sorted.filter((e) => {
+          const t = new Date(e.timestamp).getTime();
+          return t >= testStartTs && t <= testEndTs;
+        });
+      } else {
+        const trainStart = 0;
+        const trainEnd = (f + 1) * foldIntervalSize;
+        const valStart = trainEnd;
+        const valEnd = Math.min(n, valStart + Math.max(1, Math.floor(foldIntervalSize / 2)));
+        const testStart = valEnd;
+        const testEnd = Math.min(n, testStart + foldIntervalSize);
+
+        trainSlice = sorted.slice(trainStart, trainEnd);
+        valRaw = sorted.slice(valStart, valEnd);
+        testRaw = sorted.slice(testStart, testEnd);
+
+        trainRange = [
+          new Date(trainSlice[0]?.timestamp || 0),
+          new Date(trainSlice[trainSlice.length - 1]?.timestamp || 0),
+        ];
+        validateRange = [
+          new Date(valRaw[0]?.timestamp || trainRange[1]),
+          new Date(valRaw[valRaw.length - 1]?.timestamp || trainRange[1]),
+        ];
+        testRange = [
+          new Date(testRaw[0]?.timestamp || validateRange[1]),
+          new Date(testRaw[testRaw.length - 1]?.timestamp || validateRange[1]),
+        ];
+      }
+
+      if (trainSlice.length === 0 || (!hasContinuousCandles && testRaw.length === 0)) continue;
 
       // Calculate label end timestamp purge boundary for training fold
       let trainMaxLabelEnd = 0;
@@ -181,25 +263,26 @@ export class WalkForwardValidator {
       const valDatasetHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
       const oosDatasetHash = DatasetManager.computeCanonicalDatasetHash(testSlice);
 
-      // Extract fold-specific continuous candle slices with warmup bars
-      const trainStartTime = new Date(trainSlice[0].timestamp).getTime();
-      const trainEndTime = trainMaxLabelEnd;
-      const valStartTime = valSlice.length > 0 ? new Date(valSlice[0].timestamp).getTime() : trainEndTime;
-      const valEndTime = valMaxLabelEnd;
-      const testStartTime = new Date(testSlice[0].timestamp).getTime();
-      const testEndTime = Math.max(...testSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
+      if (!hasContinuousCandles) {
+        const trainStartTime = new Date(trainSlice[0].timestamp).getTime();
+        const trainEndTime = new Date(trainSlice[trainSlice.length - 1].timestamp).getTime();
+        const valStartTime = valSlice.length > 0 ? new Date(valSlice[0].timestamp).getTime() : trainEndTime;
+        const valEndTime = valSlice.length > 0 ? new Date(valSlice[valSlice.length - 1].timestamp).getTime() : valStartTime;
+        const testStartTime = testSlice.length > 0 ? new Date(testSlice[0].timestamp).getTime() : valEndTime;
+        const testEndTime = testSlice.length > 0 ? new Date(testSlice[testSlice.length - 1].timestamp).getTime() : testStartTime;
 
-      const trainCandles = sliceContinuousCandles(options.candles, trainStartTime, trainEndTime);
-      const valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime);
-      const testCandles = sliceContinuousCandles(options.candles, testStartTime, testEndTime);
+        trainCandles = sliceContinuousCandles(options.candles, trainStartTime, trainEndTime, 40);
+        valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime, 40);
+        testCandles = sliceContinuousCandles(options.candles, testStartTime, testEndTime, 40);
+      }
 
       // Retrain candidate strategy on fold using trained ML artifacts and fold-specific market data
       const foldCandidate = options.retrainFn
         ? options.retrainFn(trainSlice, candidate, f + 1)
-        : this.retrainCandidateOnFold(trainSlice, candidate, f + 1, modelArtifact, foldSelection.retainedFeatures, {
+        : this.retrainCandidateOnFold(trainCandles || options.candles, candidate, f + 1, modelArtifact, foldSelection.retainedFeatures, {
             dataset: options.dataset,
             candles: trainCandles || options.candles,
-            testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
+            trainSlice,
           });
 
       const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate).configHash;
@@ -218,9 +301,10 @@ export class WalkForwardValidator {
         scalerParameters: scalerParams,
         modelVersion: modelArtifact.modelVersion,
         modelParameters: { weights: modelArtifact.weights, bias: modelArtifact.bias },
-        strategyVersion: foldCandidate.candidateVersion || foldCandidate.id,
-        strategyParameters: foldCandidate.change || {},
+        strategyVersion: candidate.baseStrategyVersion || 'v2.0',
         candidateId: candidate.id,
+        candidateVersion: foldCandidate.candidateVersion || foldCandidate.id,
+        strategyParameters: foldCandidate.change || {},
         candidateConfigHash,
         trainingSeed,
         createdAt: new Date(),
@@ -228,22 +312,19 @@ export class WalkForwardValidator {
       foldArtifacts.push(foldArtifact);
 
       // 1. Evaluate retrained candidate in-sample on training fold market data
-      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice, 0.05, {
+      const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: options.dataset,
         candles: trainCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
       // 2. Evaluate frozen retrained candidate on validation fold market data
-      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice, 0.05, {
+      const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: options.dataset,
         candles: valCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
       // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold market data
-      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice, 0.05, {
+      const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: options.dataset,
         candles: testCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
 
       const isExp = isEval.candidateExpectancy;
@@ -256,18 +337,9 @@ export class WalkForwardValidator {
 
       folds.push({
         foldIndex: f + 1,
-        trainRange: [
-          new Date(trainSlice[0].timestamp),
-          new Date(trainSlice[trainSlice.length - 1].timestamp),
-        ],
-        validateRange: [
-          new Date(valSlice[0]?.timestamp || trainSlice[0].timestamp),
-          new Date(valSlice[valSlice.length - 1]?.timestamp || trainSlice[trainSlice.length - 1].timestamp),
-        ],
-        testRange: [
-          new Date(testSlice[0].timestamp),
-          new Date(testSlice[testSlice.length - 1].timestamp),
-        ],
+        trainRange,
+        validateRange,
+        testRange,
         inSampleExpectancy: isExp,
         outOfSampleExpectancy: oosExp,
         winRate,
@@ -296,10 +368,10 @@ export class WalkForwardValidator {
   }
 
   /**
-   * Empirically fits candidate strategy parameters through grid search and execution evaluation strictly on training fold data.
+   * Empirically fits candidate strategy parameters through grid search and execution evaluation strictly on training fold market data.
    */
   public static retrainCandidateOnFold(
-    trainSlice: TradingExperience[],
+    trainData: ICandle[] | TradingExperience[] | undefined,
     baseCandidate: StrategyCandidate,
     foldIndex: number,
     modelArtifact?: ITrainedModelArtifact,
@@ -307,9 +379,17 @@ export class WalkForwardValidator {
     options?: {
       candles?: ICandle[];
       dataset?: CandidateMarketDataset;
-      testOnlyDeterministicSignals?: boolean;
+      trainSlice?: TradingExperience[];
     },
   ): StrategyCandidate {
+    const isCandleArray = Array.isArray(trainData) && trainData.length > 0 && 'open' in (trainData[0] as any);
+    const marketCandles: ICandle[] | undefined = isCandleArray
+      ? (trainData as ICandle[])
+      : options?.candles;
+    const trainSlice: TradingExperience[] = !isCandleArray && Array.isArray(trainData)
+      ? (trainData as TradingExperience[])
+      : options?.trainSlice || [];
+
     const paramName =
       (baseCandidate.change as any)?.parameter ||
       (baseCandidate.type === 'THRESHOLD'
@@ -320,7 +400,7 @@ export class WalkForwardValidator {
             ? 'minProbability'
             : 'minMtfScore');
 
-    // 1. Build search grid based on parameter type and training data
+    // 1. Build search grid based on parameter type
     let grid: number[] = [];
 
     if (paramName === 'minMtfScore') {
@@ -345,7 +425,7 @@ export class WalkForwardValidator {
       grid = [55, 60, 65, 70, 75];
     }
 
-    // 2. Search parameter grid and evaluate each value on training fold
+    // 2. Search parameter grid and evaluate each value strictly on continuous training market data
     let bestValue =
       typeof (baseCandidate.change as any)?.value === 'number'
         ? (baseCandidate.change as any).value
@@ -367,14 +447,14 @@ export class WalkForwardValidator {
       };
 
       try {
-        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, trainSlice, {
+        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, {
           dataset: options?.dataset,
-          candles: options?.candles,
-          testOnlyDeterministicSignals: options?.testOnlyDeterministicSignals,
+          candles: marketCandles,
         });
         if (evalRes.totalTrades > 0) {
-          // Objective: Maximize trade expectancy penalized for low sample count
-          const samplePenalty = Math.min(1.0, evalRes.totalTrades / Math.max(1, Math.floor(trainSlice.length / 3)));
+          // Objective: Maximize trade expectancy penalized for low trade count
+          const sampleCount = trainSlice.length > 0 ? trainSlice.length : (marketCandles?.length ?? 100);
+          const samplePenalty = Math.min(1.0, evalRes.totalTrades / Math.max(1, Math.floor(sampleCount / 3)));
           const objective = evalRes.expectancyR * samplePenalty + (evalRes.profitFactor >= 1.25 ? 0.2 : 0.0);
           if (objective > bestObjective) {
             bestObjective = objective;
@@ -392,7 +472,7 @@ export class WalkForwardValidator {
       change: {
         ...baseCandidate.change,
         fittedOnFold: foldIndex,
-        fittedSampleCount: trainSlice.length,
+        fittedSampleCount: trainSlice.length > 0 ? trainSlice.length : (marketCandles?.length ?? 0),
         fittedValue: bestValue,
         fittedObjective: Number.isFinite(bestObjective) ? Number(bestObjective.toFixed(4)) : 0,
         modelArtifact: baseCandidate.type === 'MODEL' ? modelArtifact : baseCandidate.change?.modelArtifact,

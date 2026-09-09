@@ -1,5 +1,6 @@
-import { StrategyCandidate, TradingExperience } from './types';
+import { CandidateMarketDataset, StrategyCandidate, TradingExperience } from './types';
 import { CandidateEvaluator } from './candidate-evaluator';
+import { ICandle } from '@quant/shared';
 
 export interface IRobustnessReport {
   candidateId: string;
@@ -14,18 +15,31 @@ export interface IRobustnessReport {
 
 export class RobustnessEngine {
   /**
-   * Stress tests candidate strategies against aggressive transaction costs, slippage, and spread widening.
+   * Stress tests candidate strategies against aggressive transaction costs, slippage, and spread widening
+   * strictly on continuous market data.
    */
   public static evaluateCosts(
     candidate: StrategyCandidate,
-    experiences: TradingExperience[],
+    marketDataOrExperiences?: { candles?: ICandle[]; dataset?: CandidateMarketDataset } | ICandle[] | TradingExperience[],
+    options?: { candles?: ICandle[]; dataset?: CandidateMarketDataset },
   ): IRobustnessReport {
+    const isCandleArray =
+      Array.isArray(marketDataOrExperiences) &&
+      marketDataOrExperiences.length > 0 &&
+      'open' in (marketDataOrExperiences[0] as any);
+
+    const marketData: { candles?: ICandle[]; dataset?: CandidateMarketDataset } = isCandleArray
+      ? { candles: marketDataOrExperiences as ICandle[] }
+      : !Array.isArray(marketDataOrExperiences) && marketDataOrExperiences && ('candles' in marketDataOrExperiences || 'dataset' in marketDataOrExperiences)
+        ? marketDataOrExperiences
+        : { candles: options?.candles, dataset: options?.dataset };
+
     // 1. Normal Cost: 0.05R
-    const normal = CandidateEvaluator.evaluate(candidate, experiences, 0.05);
+    const normal = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.05 });
     // 2. Double Cost: 0.10R
-    const doubleCost = CandidateEvaluator.evaluate(candidate, experiences, 0.1);
+    const doubleCost = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.1 });
     // 3. Triple Cost (Stress): 0.15R
-    const tripleCost = CandidateEvaluator.evaluate(candidate, experiences, 0.15);
+    const tripleCost = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.15 });
 
     const normalExp = normal.candidateExpectancy;
     const doubleExp = doubleCost.candidateExpectancy;

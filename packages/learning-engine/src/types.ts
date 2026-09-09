@@ -385,6 +385,7 @@ export interface LearningRunReport {
   id: string;
   startedAt: Date;
   completedAt: Date;
+  trainingSeed?: number;
   experiencesUsed: number;
   hypothesesDiscovered: number;
   candidatesGenerated: number;

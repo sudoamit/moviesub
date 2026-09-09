@@ -353,8 +353,8 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
-    const resA = CandidateBacktestRunner.runCandidateBacktest(candA, [expA], { candles, testOnlyDeterministicSignals: true });
-    const resB = CandidateBacktestRunner.runCandidateBacktest(candA, [expB], { candles, testOnlyDeterministicSignals: true });
+    const resA = CandidateBacktestRunner.runDeterministicTestFixture(candA, { candles, experiences: [expA] });
+    const resB = CandidateBacktestRunner.runDeterministicTestFixture(candA, { candles, experiences: [expB] });
 
     expect(resA.trades.length).toBeGreaterThan(0);
     expect(resB.trades.length).toBeGreaterThan(0);
@@ -415,8 +415,8 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       change: { parameter: 'sizingMultiplier', value: 2.0 },
     };
 
-    const res1 = CandidateBacktestRunner.runCandidateBacktest(baseCand, [exp], { candles, testOnlyDeterministicSignals: true });
-    const res2 = CandidateBacktestRunner.runCandidateBacktest(doubleCand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const res1 = CandidateBacktestRunner.runDeterministicTestFixture(baseCand, { candles, experiences: [exp] });
+    const res2 = CandidateBacktestRunner.runDeterministicTestFixture(doubleCand, { candles, experiences: [exp] });
 
     expect(res2.trades[0].positionSize).toBe(res1.trades[0].positionSize * 2);
     expect(res2.trades[0].positionSize).toBe(400);
@@ -445,8 +445,8 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       change: { parameter: 'stopLossAtrMultiplier', value: 2.0 },
     };
 
-    const res1 = CandidateBacktestRunner.runCandidateBacktest(stop1Cand, [exp], { candles, testOnlyDeterministicSignals: true });
-    const res2 = CandidateBacktestRunner.runCandidateBacktest(stop2Cand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const res1 = CandidateBacktestRunner.runDeterministicTestFixture(stop1Cand, { candles, experiences: [exp] });
+    const res2 = CandidateBacktestRunner.runDeterministicTestFixture(stop2Cand, { candles, experiences: [exp] });
 
     expect(res1).toBeDefined();
     expect(res2).toBeDefined();
@@ -468,7 +468,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
-    const res = CandidateBacktestRunner.runCandidateBacktest(cand, [exp], { candles, testOnlyDeterministicSignals: true });
+    const res = CandidateBacktestRunner.runDeterministicTestFixture(cand, { candles, experiences: [exp] });
 
     expect(res.trades.length).toBe(1);
     expect(res.trades[0].exitReason).toBe('TP3_HIT');
@@ -909,7 +909,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
-    // Run WFV with continuous candles without passing testOnlyDeterministicSignals (defaults to false / continuous replay)
+    // Run WFV with continuous market candles (production continuous strategy replay)
     const wfvRes = WalkForwardValidator.validate(candidate, experiences, {
       numFolds: 2,
       candles: continuousCandles,

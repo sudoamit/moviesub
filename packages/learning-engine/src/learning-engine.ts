@@ -10,7 +10,8 @@ import { VolatilityPerformanceAnalyzer } from './volatility-performance-analyzer
 import { StrategyPerformanceAnalyzer } from './strategy-performance-analyzer';
 import { CandidateGenerator } from './candidate-generator';
 import { CandidateEvaluator } from './candidate-evaluator';
-import { WalkForwardValidator, sliceContinuousCandles } from './walk-forward-validator';
+import { WalkForwardValidator, sliceContinuousCandles, DEFAULT_LEARNING_SEED } from './walk-forward-validator';
+import { MarketDatasetValidator } from './market-dataset-validator';
 import { RobustnessEngine } from './robustness-engine';
 import { MonteCarloEngine } from './monte-carlo-engine';
 import { ShadowTradingEngine } from './shadow-trading-engine';
@@ -35,9 +36,9 @@ export interface ILearningCycleOptions {
   baseStrategyVersion?: string;
   autoPromote?: boolean;
   embargoMs?: number;
+  seed?: number;
   dataset?: CandidateMarketDataset;
   candles?: ICandle[];
-  testOnlyDeterministicSignals?: boolean;
 }
 
 export class LearningEngine {
@@ -140,22 +141,42 @@ export class LearningEngine {
         throw new Error('INSUFFICIENT_FINAL_OOS_DATA');
       }
 
-      const valStartTime = new Date(valSlice[0].timestamp).getTime();
-      const valEndTime = Math.max(...valSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
-      const oosStartTime = new Date(oosSlice[0].timestamp).getTime();
-      const oosEndTime = Math.max(...oosSlice.map((e) => e.labelEndTimestamp || new Date(e.timestamp).getTime()));
-      const devStartTime = new Date(trainSlice[0].timestamp).getTime();
-      const devEndTime = valEndTime;
+      let valCandles: ICandle[] | undefined;
+      let devCandles: ICandle[] | undefined;
+      let oosCandles: ICandle[] | undefined;
 
-      const valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime);
-      const devCandles = sliceContinuousCandles(options.candles, devStartTime, devEndTime);
-      const oosCandles = sliceContinuousCandles(options.candles, oosStartTime, oosEndTime);
+      // Independent Continuous Market Dataset Partitioning
+      if (options.candles && options.candles.length >= 50) {
+        const totalCandles = options.candles.length;
+        const trainEndIdx = Math.floor(totalCandles * 0.60);
+        const valEndIdx = Math.floor(totalCandles * 0.80);
+
+        const valStartTs = new Date(options.candles[trainEndIdx].timestamp).getTime();
+        const valEndTs = new Date(options.candles[valEndIdx - 1].timestamp).getTime();
+        const oosStartTs = new Date(options.candles[valEndIdx].timestamp).getTime();
+        const oosEndTs = new Date(options.candles[totalCandles - 1].timestamp).getTime();
+
+        devCandles = options.candles.slice(0, valEndIdx);
+        MarketDatasetValidator.validateCandles(devCandles);
+        valCandles = sliceContinuousCandles(options.candles, valStartTs, valEndTs, 40);
+        oosCandles = sliceContinuousCandles(options.candles, oosStartTs, oosEndTs, 40);
+      } else {
+        const valStartTime = new Date(valSlice[0].timestamp).getTime();
+        const valEndTime = new Date(valSlice[valSlice.length - 1].timestamp).getTime();
+        const oosStartTime = new Date(oosSlice[0].timestamp).getTime();
+        const oosEndTime = new Date(oosSlice[oosSlice.length - 1].timestamp).getTime();
+        const devStartTime = new Date(trainSlice[0].timestamp).getTime();
+        const devEndTime = valEndTime;
+
+        valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime, 40);
+        devCandles = sliceContinuousCandles(options.candles, devStartTime, devEndTime, 40);
+        oosCandles = sliceContinuousCandles(options.candles, oosStartTime, oosEndTime, 40);
+      }
 
       // 9a. Historical Simulation on Validation slice of development dataset
-      const valEval = CandidateEvaluator.evaluate(cand, valSlice, 0.05, {
+      const valEval = CandidateEvaluator.evaluate(cand, {
         dataset: options.dataset,
         candles: valCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
       if (!valEval.passed) {
         cand.status = 'REJECTED';
@@ -170,11 +191,13 @@ export class LearningEngine {
         embargoMs,
         dataset: options.dataset,
         candles: devCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
 
       // 9c. Robustness & Transaction Costs
-      const costEval = RobustnessEngine.evaluateCosts(cand, valSlice);
+      const costEval = RobustnessEngine.evaluateCosts(cand, {
+        candles: valCandles || options.candles,
+        dataset: options.dataset,
+      });
 
       // 9d. Candidate-Specific Seeded Monte Carlo Stress Simulation
       if (!valEval.simulatedRMultiples || valEval.simulatedRMultiples.length === 0) {
@@ -182,12 +205,17 @@ export class LearningEngine {
       }
       const mcEval = MonteCarloEngine.simulate(valEval.simulatedRMultiples, { seed: 42 });
 
-      // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset
-      const finalOosEval = CandidateEvaluator.evaluate(cand, oosSlice, 0.05, {
+      // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset (pure market data, zero experience leakage)
+      const finalOosEval = CandidateEvaluator.evaluate(cand, {
         dataset: options.dataset,
         candles: oosCandles || options.candles,
-        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals,
       });
+
+      // Post-execution label analysis (strictly separated from backtest strategy execution)
+      const oosLabelMetrics = CandidateEvaluator.evaluateLabels(
+        finalOosEval.simulatedRMultiples.map((r) => ({ pnlR: r })),
+        oosSlice,
+      );
 
       cand.validationMetrics = {
         inSampleExpectancy: wfEval.meanInSampleExpectancy || valEval.candidateExpectancy,
@@ -252,6 +280,7 @@ export class LearningEngine {
       id: `learn-run-${Date.now()}`,
       startedAt,
       completedAt,
+      trainingSeed: options.seed ?? DEFAULT_LEARNING_SEED,
       experiencesUsed: expCount,
       hypothesesDiscovered: patterns.length,
       candidatesGenerated: candidates.length,

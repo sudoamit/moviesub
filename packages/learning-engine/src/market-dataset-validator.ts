@@ -25,6 +25,41 @@ export class MarketDatasetValidator {
   }
 
   /**
+   * Infers typical candle interval in milliseconds from candle sequence.
+   */
+  public static inferIntervalMs(candles: ICandle[]): number {
+    if (!candles || candles.length < 2) return 15 * 60 * 1000;
+    const intervals: number[] = [];
+    for (let i = 1; i < Math.min(candles.length, 10); i++) {
+      const t1 = candles[i - 1].timestamp instanceof Date ? candles[i - 1].timestamp.getTime() : new Date(candles[i - 1].timestamp).getTime();
+      const t2 = candles[i].timestamp instanceof Date ? candles[i].timestamp.getTime() : new Date(candles[i].timestamp).getTime();
+      intervals.push(Math.abs(t2 - t1));
+    }
+    intervals.sort((a, b) => a - b);
+    return intervals[Math.floor(intervals.length / 2)] || 15 * 60 * 1000;
+  }
+
+  /**
+   * Validates continuous candle sequence for strictly monotonic increasing timestamps, OHLC sanity, and continuity.
+   */
+  public static validateCandles(
+    candles: ICandle[],
+    timeframe?: string,
+    options?: IValidateMarketDatasetOptions,
+  ): void {
+    if (!candles || candles.length === 0) {
+      throw new Error('INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candle array is empty');
+    }
+    const expectedIntervalMs =
+      options?.expectedIntervalMs ||
+      (timeframe ? this.resolveTimeframeIntervalMs(timeframe) : this.inferIntervalMs(candles));
+    this.validateAndCreateDataset(candles, timeframe || '15m', undefined, {
+      ...options,
+      expectedIntervalMs,
+    });
+  }
+
+  /**
    * Strictly validates and constructs a continuous CandidateMarketDataset.
    * Fails closed on:
    * - Empty or missing candle array (< 2 candles)
