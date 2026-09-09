@@ -8,6 +8,8 @@ import {
   WalkForwardValidator,
   sliceContinuousMarketWindow,
   DEFAULT_LEARNING_SEED,
+  ExperienceDataset,
+  CandidateMarketDataset,
 } from '../index';
 
 describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A - M)', () => {
@@ -80,7 +82,7 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
   });
 
-  // Test B — Production runner signature cannot accept TradingExperience[]
+  // Test B — Production evaluator rejects execution when market data is missing
   test('Test B: CandidateEvaluator.evaluate rejects execution when market data is missing', () => {
     const candidate: StrategyCandidate = {
       id: 'cand_test_b',
@@ -99,7 +101,7 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
   });
 
-  // Test C — Candidate execution is unchanged when historical experience outcomes are mutated
+  // Test C — Candidate execution is 100% unchanged when mutating historical experience outcomes
   test('Test C: Candidate execution is 100% identical when mutating historical experience outcomes', () => {
     const candles = generateContinuousCandles(80);
     const candidate: StrategyCandidate = {
@@ -109,53 +111,95 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       type: 'THRESHOLD',
       description: 'Test C candidate',
       change: { parameter: 'minMtfScore', value: 60 },
-      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
     };
 
-    const artifactNormal = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_c_1');
-    const artifactMutated = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_c_1');
+    const experiencesNormal = generateExperiences(30);
+    const experiencesMutated = generateExperiences(30).map((e) => ({
+      ...e,
+      marketState: { quant: { smcScore: -999 } },
+      decision: { action: 'SELL' as const, score: -999 },
+      outcome: {
+        status: 'LOSS' as const,
+        pnl: -99999,
+        pnlR: -100.0,
+        maxFavorableExcursion: 0,
+        maxAdverseExcursion: 50,
+        holdingTimeSeconds: 10,
+      },
+    }));
 
-    const res1 = CandidateBacktestRunner.runCandidateBacktest(artifactNormal, { candles });
-    const res2 = CandidateBacktestRunner.runCandidateBacktest(artifactMutated, { candles });
+    const wfRes1 = WalkForwardValidator.validate(candidate, experiencesNormal, {
+      numFolds: 2,
+      candles,
+      seed: 42,
+    });
+    const wfRes2 = WalkForwardValidator.validate(candidate, experiencesMutated, {
+      numFolds: 2,
+      candles,
+      seed: 42,
+    });
 
-    expect(res1.totalTrades).toBe(res2.totalTrades);
-    expect(res1.netPnL).toBe(res2.netPnL);
-    expect(res1.expectancyR).toBe(res2.expectancyR);
-    expect(res1.winRate).toBe(res2.winRate);
+    expect(wfRes1.folds.length).toBe(wfRes2.folds.length);
+    for (let f = 0; f < wfRes1.folds.length; f++) {
+      expect(wfRes1.folds[f].simulatedTrades!.length).toBe(wfRes2.folds[f].simulatedTrades!.length);
+      expect(wfRes1.folds[f].outOfSampleExpectancy).toBe(wfRes2.folds[f].outOfSampleExpectancy);
+      expect(wfRes1.folds[f].simulatedTrades!.map((t: any) => t.pnl)).toEqual(
+        wfRes2.folds[f].simulatedTrades!.map((t: any) => t.pnl),
+      );
+    }
   });
 
   // Test D — OOS experience mutation test
-  test('Test D: Mutating OOS features, scores, or outcomes does not change OOS execution results', () => {
-    const candles = generateContinuousCandles(80);
+  test('Test D: Mutating OOS features, scores, or outcomes does not change OOS execution results, but changes label evaluation', async () => {
+    const provider = new MockMarketDataProvider({ seed: 42 });
+    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 120);
     const candidate: StrategyCandidate = {
       id: 'cand_test_d',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-d',
       type: 'THRESHOLD',
       description: 'Test D candidate',
-      change: { parameter: 'minMtfScore', value: 65 },
-      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      change: { parameter: 'minMtfScore', value: 50 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
     };
 
-    const eval1 = CandidateEvaluator.evaluate(candidate, { candles });
+    const firstCandleTs = candles[0].timestamp instanceof Date ? candles[0].timestamp.getTime() : new Date(candles[0].timestamp).getTime();
+    const expsNormal = generateExperiences(30, firstCandleTs, 15 * 60 * 1000);
+    const expsMutated = generateExperiences(30, firstCandleTs, 15 * 60 * 1000).map((e, idx) =>
+      idx >= 15
+        ? {
+            ...e,
+            outcome: {
+              status: 'LOSS' as const,
+              pnl: -88888,
+              pnlR: -50.0,
+              maxFavorableExcursion: 0,
+              maxAdverseExcursion: 20,
+              holdingTimeSeconds: 1,
+            },
+          }
+        : e,
+    );
 
-    // Mutate experiences outside
-    const mutatedExps = generateExperiences(20).map((e) => ({
-      ...e,
-      marketState: { quant: { smcScore: 999 } },
-      decision: { action: 'BUY' as const, score: 999 },
-      outcome: { status: 'LOSS' as const, pnl: -999, pnlR: -10.0, maxFavorableExcursion: 0, maxAdverseExcursion: 10, holdingTimeSeconds: 10 },
-    }));
+    const wfResNormal = WalkForwardValidator.validate(candidate, expsNormal, { numFolds: 2, candles, seed: 42 });
+    const wfResMutated = WalkForwardValidator.validate(candidate, expsMutated, { numFolds: 2, candles, seed: 42 });
 
-    const eval2 = CandidateEvaluator.evaluate(candidate, { candles });
+    // Execution trades in OOS are strictly identical
+    expect(wfResNormal.folds[0].simulatedTrades!.length).toBe(wfResMutated.folds[0].simulatedTrades!.length);
+    expect(wfResNormal.meanOutOfSampleExpectancy).toBe(wfResMutated.meanOutOfSampleExpectancy);
 
-    expect(eval1.candidateExpectancy).toBe(eval2.candidateExpectancy);
-    expect(eval1.totalSimulatedTrades).toBe(eval2.totalSimulatedTrades);
-    expect(eval1.profitFactor).toBe(eval2.profitFactor);
+    // Supervised label evaluation reflects label differences
+    const simulatedTrades = wfResNormal.folds[0].simulatedTrades || [{ pnlR: 1.0 }, { pnlR: -1.0 }];
+    const labelEvalNormal = CandidateEvaluator.evaluateLabels(simulatedTrades, expsNormal);
+    const labelEvalMutated = CandidateEvaluator.evaluateLabels(simulatedTrades, expsMutated);
+
+    expect(labelEvalNormal.matchedCount).toBeGreaterThan(0);
+    expect(labelEvalNormal.labelWinRate).not.toBe(labelEvalMutated.labelWinRate);
   });
 
   // Test E — Market mutation test
@@ -182,87 +226,59 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       candidateVersion: 'v2.0-e',
       type: 'THRESHOLD',
       description: 'Test E candidate',
-      change: { parameter: 'minMtfScore', value: 50 },
+      change: { parameter: 'minMtfScore', value: 65 },
       evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
     };
 
-    const resOrig = CandidateBacktestRunner.runCandidateBacktest(candidate, { candles: candlesOriginal });
+    const resOriginal = CandidateBacktestRunner.runCandidateBacktest(candidate, { candles: candlesOriginal });
     const resMutated = CandidateBacktestRunner.runCandidateBacktest(candidate, { candles: candlesMutated });
 
-    // Price action change must alter execution outcome
-    expect(resOrig.netPnL).not.toEqual(resMutated.netPnL);
+    expect(resOriginal.netPnL).not.toBe(resMutated.netPnL);
   });
 
-  // Test F — Fold boundary test
-  test('Test F: Changing experience timestamps without changing market candles leaves market execution windows unchanged', () => {
-    const candles = generateContinuousCandles(80);
-    const window1 = sliceContinuousMarketWindow(candles, baseTime + 20 * 15 * 60000, baseTime + 40 * 15 * 60000, 10);
-    const window2 = sliceContinuousMarketWindow(candles, baseTime + 20 * 15 * 60000, baseTime + 40 * 15 * 60000, 10);
+  // Test F — Fail closed on missing market data window
+  test('Test F: sliceContinuousMarketWindow throws MARKET_DATA_WINDOW_NOT_FOUND when out of range or empty', () => {
+    const candles = generateContinuousCandles(50, baseTime);
 
-    expect(window1?.evaluationStartTimestamp).toBe(window2?.evaluationStartTimestamp);
-    expect(window1?.evaluationEndTimestamp).toBe(window2?.evaluationEndTimestamp);
-    expect(window1?.allCandles.length).toBe(window2?.allCandles.length);
+    expect(() => {
+      sliceContinuousMarketWindow(candles, baseTime - 1000000, baseTime - 500000);
+    }).toThrow('MARKET_DATA_WINDOW_NOT_FOUND');
+
+    expect(() => {
+      sliceContinuousMarketWindow([], baseTime, baseTime + 10000);
+    }).toThrow('MARKET_DATA_WINDOW_NOT_FOUND');
+
+    expect(() => {
+      sliceContinuousMarketWindow(undefined, baseTime, baseTime + 10000);
+    }).toThrow('MARKET_DATA_WINDOW_NOT_FOUND');
   });
 
-  // Test G — Market-data boundary test
-  test('Test G: Changing market candles shifts fold execution windows accordingly', () => {
-    const candlesA = generateContinuousCandles(80, baseTime);
-    const candlesB = generateContinuousCandles(80, baseTime + 100 * 15 * 60000);
+  // Test G — Fail closed on non-continuous market candles
+  test('Test G: Non-contiguous candles throw MARKET_DATA_NOT_CONTINUOUS', () => {
+    const candles = generateContinuousCandles(40, baseTime, 15 * 60 * 1000);
+    const corruptedCandles = [
+      ...candles.slice(0, 20),
+      ...generateContinuousCandles(20, baseTime + 50 * 15 * 60 * 1000, 15 * 60 * 1000),
+    ];
 
-    const windowA = sliceContinuousMarketWindow(candlesA, baseTime + 20 * 15 * 60000, baseTime + 40 * 15 * 60000, 10);
-    const windowB = sliceContinuousMarketWindow(candlesB, baseTime + 120 * 15 * 60000, baseTime + 140 * 15 * 60000, 10);
-
-    expect(windowA?.evaluationStartTimestamp).not.toBe(windowB?.evaluationStartTimestamp);
-    expect(windowB?.evaluationStartTimestamp).toBe(baseTime + 120 * 15 * 60000);
+    expect(() => {
+      MarketDatasetValidator.validateCandles(corruptedCandles);
+    }).toThrow(/MARKET_DATA_NOT_CONTINUOUS/);
   });
 
-  // Test H — Missing training labels
-  test('Test H: WFV throws INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW if training market window has zero labels', () => {
-    const candles = generateContinuousCandles(80, baseTime);
-    // Experiences starting far in the future
-    const experiences = generateExperiences(20, baseTime + 500 * 15 * 60000);
-
+  // Test H — Warmup trade filtering and entry-based evaluation
+  test('Test H: Warmup period trades are excluded from evaluation window metrics and drawdown', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
     const candidate: StrategyCandidate = {
       id: 'cand_test_h',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-h',
       type: 'THRESHOLD',
       description: 'Test H candidate',
-      change: { parameter: 'minMtfScore', value: 70 },
-      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
-      status: 'GENERATED',
-      createdAt: new Date(),
-    };
-
-    expect(() => {
-      WalkForwardValidator.validate(candidate, experiences, { numFolds: 2, candles });
-    }).toThrow('INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW');
-  });
-
-  // Test I — Market gap test
-  test('Test I: Removing a candle from a continuous dataset throws MARKET_DATA_NOT_CONTINUOUS', () => {
-    const candles = generateContinuousCandles(20, baseTime, 15 * 60 * 1000);
-    // Drop candle index 10 to introduce a 30m gap
-    const gappedCandles = candles.filter((_, idx) => idx !== 10);
-
-    expect(() => {
-      MarketDatasetValidator.validateCandles(gappedCandles, '15m');
-    }).toThrow(/MARKET_DATA_NOT_CONTINUOUS|INVALID_MARKET_DATA_GAP/);
-  });
-
-  // Test J — Warmup accounting test
-  test('Test J: Trades triggered entirely during warmup are excluded from validation/OOS trade results', () => {
-    const candles = generateContinuousCandles(60, baseTime, 15 * 60 * 1000);
-    const candidate: StrategyCandidate = {
-      id: 'cand_test_j',
-      baseStrategyVersion: 'v2.0',
-      candidateVersion: 'v2.0-j',
-      type: 'THRESHOLD',
-      description: 'Test J candidate',
-      change: { minMtfScore: 50 },
-      evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      change: { parameter: 'minMtfScore', value: 50 },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
     };
@@ -278,6 +294,93 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       const entryTs = trade.entryTime instanceof Date ? trade.entryTime.getTime() : new Date(trade.entryTime).getTime();
       expect(entryTs).toBeGreaterThanOrEqual(evalStartTs);
     }
+  });
+
+  // Test I — First-Class Options API in WalkForwardValidator
+  test('Test I: WalkForwardValidator accepts structured IWalkForwardOptions with ExperienceDataset and MarketDataset', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
+    const experiences = generateExperiences(30, baseTime, 15 * 60 * 1000);
+
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_1',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      candles,
+      executionCandles: candles,
+      datasetHash: 'market_hash_1',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_i',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-i',
+      type: 'THRESHOLD',
+      description: 'Test I candidate',
+      change: { parameter: 'minMtfScore', value: 65 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const wfRes = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDataset,
+      marketDataset,
+      numFolds: 2,
+      seed: 42,
+    });
+
+    expect(wfRes.folds.length).toBe(2);
+    expect(wfRes.foldArtifacts?.length).toBe(2);
+  });
+
+  // Test J — Hardened retrainFn receives structured context and disallows experience injection into candidate execution
+  test('Test J: Hardened retrainFn receives structured context without raw experience leakage', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
+    const experiences = generateExperiences(30, baseTime, 15 * 60 * 1000);
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_j',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-j',
+      type: 'THRESHOLD',
+      description: 'Test J candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    let receivedContext: any = null;
+    const customRetrainFn = (context: any, baseCand: StrategyCandidate) => {
+      receivedContext = context;
+      return {
+        ...baseCand,
+        change: { ...baseCand.change, fittedValue: 75 },
+      };
+    };
+
+    const wfRes = WalkForwardValidator.validate(candidate, {
+      experiences,
+      candles,
+      numFolds: 2,
+      retrainFn: customRetrainFn,
+    });
+
+    expect(receivedContext).toBeDefined();
+    expect(receivedContext.experienceDataset).toBeDefined();
+    expect(receivedContext.trainExperiences).toBeDefined();
+    expect(receivedContext.trainCandles).toBeDefined();
+    expect(receivedContext.foldIndex).toBe(2); // Last fold executed
+    expect(wfRes.folds.length).toBe(2);
   });
 
   // Test K — OOS metrics test

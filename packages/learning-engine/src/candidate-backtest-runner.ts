@@ -356,7 +356,7 @@ export class CandidateBacktestRunner {
     const evaluationStartTimestamp = options?.evaluationStartTimestamp;
     const evaluationEndTimestamp = options?.evaluationEndTimestamp;
 
-    // Filter out any trades that occurred exclusively during the warmup period
+    // Entry-based evaluation: Filter out any trades whose entry occurred outside the evaluation window
     const trades = rawTrades.filter((t) => {
       const entryTs = t.entryTime instanceof Date ? t.entryTime.getTime() : new Date(t.entryTime).getTime();
       if (evaluationStartTimestamp !== undefined && entryTs < evaluationStartTimestamp) {
@@ -376,7 +376,27 @@ export class CandidateBacktestRunner {
     const totalPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
     const winRate = trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0;
     const expectancyR = trades.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / trades.length : 0;
-    const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? 10 : 1) : Number((grossProfit / grossLoss).toFixed(2));
+    const profitFactor =
+      grossLoss === 0
+        ? grossProfit > 0
+          ? Infinity
+          : 0
+        : Number((grossProfit / grossLoss).toFixed(2));
+
+    // Calculate evaluation-window drawdown strictly from the evaluation trade ledger (isolating from warmup)
+    let peakR = 0;
+    let currentR = 0;
+    let maxDrawdownR = 0;
+    for (const t of trades) {
+      currentR += t.pnlRMultiple || 0;
+      if (currentR > peakR) {
+        peakR = currentR;
+      }
+      const dd = peakR - currentR;
+      if (dd > maxDrawdownR) {
+        maxDrawdownR = dd;
+      }
+    }
 
     return {
       candidateId,
@@ -389,7 +409,7 @@ export class CandidateBacktestRunner {
       winRate: Number(winRate.toFixed(1)),
       expectancyR: Number(expectancyR.toFixed(2)),
       profitFactor,
-      maxDrawdownR: simResult.maxDrawdownPercent,
+      maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
     };
   }
 

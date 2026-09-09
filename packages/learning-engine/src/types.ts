@@ -240,9 +240,11 @@ export interface ExperienceDataset {
   datasetId?: string;
   datasetHash: string;
   featureSchemaVersion: string;
+  symbol?: string;
+  timeframe?: string;
   labelMetadata?: Record<string, unknown>;
-  startTimestamp: number;
-  endTimestamp: number;
+  startTimestamp?: number;
+  endTimestamp?: number;
 }
 
 export interface MarketDataset {
@@ -250,8 +252,8 @@ export interface MarketDataset {
   timeframe: string;
   executionCandles: ICandle[];
   higherTimeframeCandles?: Record<string, ICandle[]>;
-  startTimestamp: number;
-  endTimestamp: number;
+  startTimestamp?: number;
+  endTimestamp?: number;
   datasetHash: string;
   marketDataHash?: string;
   continuityMetadata?: {
@@ -261,7 +263,11 @@ export interface MarketDataset {
   };
 }
 
-export interface CandidateMarketDataset extends MarketDataset {}
+export interface CandidateMarketDataset extends MarketDataset {
+  candles?: ICandle[];
+  isContinuous?: boolean;
+  expectedIntervalMs?: number;
+}
 
 export interface HistoricalExperienceOutcome {
   readonly _brand: 'HistoricalExperienceOutcome';
@@ -321,6 +327,7 @@ export interface WalkForwardFold {
   outOfSampleExpectancy: number;
   winRate: number;
   passed: boolean;
+  simulatedTrades?: any[];
 }
 
 export interface WalkForwardValidationResult {

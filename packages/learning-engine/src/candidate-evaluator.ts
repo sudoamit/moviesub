@@ -26,6 +26,7 @@ export interface ICandidateEvaluationResult {
   maxDrawdownPercent: number;
   totalSimulatedTrades: number;
   simulatedRMultiples: number[];
+  simulatedTrades?: any[];
   rejectionReason?: string;
   baselineTrades?: number;
 }
@@ -89,6 +90,7 @@ export class CandidateEvaluator {
         maxDrawdownPercent: 0,
         totalSimulatedTrades: 0,
         simulatedRMultiples: [],
+        simulatedTrades: [],
         rejectionReason: `Insufficient market data for candidate evaluation (requires >= ${minimumCandles} candles).`,
       };
     }
@@ -131,6 +133,7 @@ export class CandidateEvaluator {
         maxDrawdownPercent: 0,
         totalSimulatedTrades: 0,
         simulatedRMultiples: [],
+        simulatedTrades: [],
         rejectionReason: 'Candidate generated zero trades in backtest execution simulation.',
         baselineTrades: baselineRes.totalTrades,
       };
@@ -141,7 +144,7 @@ export class CandidateEvaluator {
     const profitFactor = backtestRes.profitFactor;
     const maxDrawdownPercent = backtestRes.maxDrawdownR;
 
-    const passed = expectancyDelta > 0.02 && profitFactor >= 1.25 && candidateExpectancy > 0;
+    const passed = expectancyDelta > 0.02 && (profitFactor === Infinity || profitFactor >= 1.25) && candidateExpectancy > 0;
     const rejectionReason = !passed
       ? `Candidate did not improve expectancy (Delta: ${expectancyDelta}R, Profit Factor: ${profitFactor}).`
       : undefined;
@@ -156,6 +159,7 @@ export class CandidateEvaluator {
       maxDrawdownPercent,
       totalSimulatedTrades: backtestRes.totalTrades,
       simulatedRMultiples: backtestRes.rMultiples,
+      simulatedTrades: backtestRes.trades,
       rejectionReason,
       baselineTrades: baselineRes.totalTrades,
     };
