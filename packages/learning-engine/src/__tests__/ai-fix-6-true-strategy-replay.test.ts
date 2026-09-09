@@ -11,7 +11,7 @@ import { TemporalFeatureScaler } from '../feature-scaler';
 import { MarketDatasetValidator } from '../market-dataset-validator';
 import { ModelTrainer } from '../model-trainer';
 import { MonteCarloEngine } from '../monte-carlo-engine';
-import { StrategyCandidate, TradingExperience } from '../types';
+import { StrategyCandidate, TradingExperience, ExperienceDataset, CandidateMarketDataset } from '../types';
 import { WalkForwardValidator } from '../walk-forward-validator';
 
 describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-End Learning (Tests 1 - 26)', () => {
@@ -601,9 +601,9 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       experiences.push({
         id: `exp_${i}`,
         tradeId: `t_${i}`,
-        timestamp: new Date(baseTime + i * 1000),
-        decisionTimestamp: baseTime + i * 1000,
-        labelStartTimestamp: baseTime + i * 1000 + 100,
+        timestamp: new Date(baseTime + i * 15 * 60 * 1000),
+        decisionTimestamp: baseTime + i * 15 * 60 * 1000,
+        labelStartTimestamp: baseTime + i * 15 * 60 * 1000 + 100,
         labelEndTimestamp: baseTime + 1000000000, // Massive label duration that purges all samples
         decision: { action: 'BUY', score: 80 },
         outcome: { status: 'WIN', pnlR: 1.0 },
@@ -622,8 +622,34 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
+    const candles30 = generateContinuousCandles(30);
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_purge',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles30,
+      datasetHash: 'market_hash_purge',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles30[0].timestamp.getTime(),
+      endTimestamp: candles30[candles30.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
     expect(() => {
-      WalkForwardValidator.validate(candidate, experiences, { numFolds: 2, embargoMs: 0 });
+      WalkForwardValidator.validate(candidate, {
+        experienceDataset: expDataset,
+        marketDataset,
+        numFolds: 2,
+        embargoMs: 0,
+      });
     }).toThrow(/INSUFFICIENT_PURGED_VALIDATION_DATA/);
   });
 
@@ -899,10 +925,31 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       createdAt: new Date(),
     };
 
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_cont',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_cont',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
     // Run WFV with continuous market candles (production continuous strategy replay)
-    const wfvRes = WalkForwardValidator.validate(candidate, experiences, {
+    const wfvRes = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles: continuousCandles,
     });
 
     expect(wfvRes).toBeDefined();

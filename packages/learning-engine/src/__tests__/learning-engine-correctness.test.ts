@@ -20,6 +20,8 @@ import {
   MarketDatasetValidator,
   CandidateBacktestRunner,
   DEFAULT_LEARNING_SEED,
+  ExperienceDataset,
+  CandidateMarketDataset,
 } from '../index';
 
 describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phases 1 - 29)', () => {
@@ -525,9 +527,29 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       close: 100 + (i % 2 === 0 ? 2 : -2),
       volume: 1000,
     }));
-    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_13',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_13',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+    const wfRes = WalkForwardValidator.validate(cand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 3,
-      candles,
     });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.folds[0].trainRange[0].getTime()).toBeLessThan(wfRes.folds[wfRes.folds.length - 1].testRange[0].getTime());
@@ -748,9 +770,29 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       close: 100 + (i % 2 === 0 ? 2 : -2),
       volume: 1000,
     }));
-    const wfRes = WalkForwardValidator.validate(baseCand, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_20',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_20',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+    const wfRes = WalkForwardValidator.validate(baseCand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 3,
-      candles,
     });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.foldArtifacts).toBeDefined();
@@ -934,10 +976,29 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       close: 101,
       volume: 1000,
     }));
-
-    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_28',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_28',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+    const wfRes = WalkForwardValidator.validate(cand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles,
     });
     expect(wfRes.folds.length).toBeGreaterThan(0);
     expect(wfRes.foldArtifacts).toBeDefined();
@@ -1101,10 +1162,29 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       close: 102,
       volume: 1000,
     }));
-
-    const wfRes = WalkForwardValidator.validate(cand, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_31',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_31',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+    const wfRes = WalkForwardValidator.validate(cand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles,
       seed: 42,
     });
 
@@ -1191,11 +1271,30 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       close: 102,
       volume: 1000,
     }));
-
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_33',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_33',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
     expect(() => {
-      WalkForwardValidator.validate(cand, experiences, {
+      WalkForwardValidator.validate(cand, {
+        experienceDataset: expDataset,
+        marketDataset,
         numFolds: 2,
-        candles,
       });
     }).toThrow('INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW');
   });

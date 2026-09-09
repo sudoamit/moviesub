@@ -1,5 +1,7 @@
-import { Direction, ICandle, ISignalSetup, MarketRegimeType, Timeframe } from '@quant/shared';
+import { Direction, ICandle, IBacktestTrade, ISignalSetup, MarketRegimeType, Timeframe } from '@quant/shared';
 import { PointInTimeMarketSnapshot } from '@quant/trading-engine';
+
+export type SimulatedTrade = IBacktestTrade;
 
 export type TradeOutcomeClassification =
   | 'GOOD_TRADE_WIN'
@@ -243,8 +245,8 @@ export interface ExperienceDataset {
   symbol?: string;
   timeframe?: string;
   labelMetadata?: Record<string, unknown>;
-  startTimestamp?: number;
-  endTimestamp?: number;
+  startTimestamp: number;
+  endTimestamp: number;
 }
 
 export interface MarketDataset {
@@ -252,8 +254,8 @@ export interface MarketDataset {
   timeframe: string;
   executionCandles: ICandle[];
   higherTimeframeCandles?: Record<string, ICandle[]>;
-  startTimestamp?: number;
-  endTimestamp?: number;
+  startTimestamp: number;
+  endTimestamp: number;
   datasetHash: string;
   marketDataHash?: string;
   continuityMetadata?: {
@@ -264,7 +266,6 @@ export interface MarketDataset {
 }
 
 export interface CandidateMarketDataset extends MarketDataset {
-  candles?: ICandle[];
   isContinuous?: boolean;
   expectedIntervalMs?: number;
 }
@@ -291,7 +292,7 @@ export interface SimulatedBacktestOutcome {
   readonly maxDrawdownPercent: number;
   readonly totalFees: number;
   readonly totalSlippage: number;
-  readonly trades: any[];
+  readonly trades: IBacktestTrade[];
 }
 
 export interface CandidateArtifact {
@@ -327,7 +328,7 @@ export interface WalkForwardFold {
   outOfSampleExpectancy: number;
   winRate: number;
   passed: boolean;
-  simulatedTrades?: any[];
+  simulatedTrades?: IBacktestTrade[];
 }
 
 export interface WalkForwardValidationResult {

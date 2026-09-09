@@ -54,33 +54,16 @@ export interface MarketFoldWindow {
 export const DEFAULT_LEARNING_SEED = 42;
 
 export interface IWalkForwardOptions {
+  experienceDataset: ExperienceDataset;
+  marketDataset: CandidateMarketDataset;
   numFolds?: number;
   embargoDays?: number;
   embargoMs?: number;
   seed?: number;
-  candles?: ICandle[];
-  dataset?: CandidateMarketDataset;
-  marketDataset?: CandidateMarketDataset;
-  experiences?: TradingExperience[];
-  experienceDataset?: ExperienceDataset;
   minFoldSize?: number;
   warmupBars?: number;
-  symbol?: string;
-  timeframe?: string;
   trainModelOnExperienceDataset?: (experienceDataset: ExperienceDataset, foldIndex: number) => Promise<ITrainedModelArtifact> | ITrainedModelArtifact;
-  fitCandidateParametersOnMarketDataset?: (candidate: StrategyCandidate, marketDataset: CandidateMarketDataset | ICandle[], foldIndex: number) => StrategyCandidate;
-  retrainFn?: (
-    context: {
-      experienceDataset: ExperienceDataset;
-      trainExperiences: TradingExperience[];
-      marketDataset?: CandidateMarketDataset;
-      trainCandles?: ICandle[];
-      foldIndex: number;
-      modelArtifact?: ITrainedModelArtifact;
-      selectedFeatures?: string[];
-    },
-    baseCandidate: StrategyCandidate,
-  ) => StrategyCandidate;
+  fitCandidateParametersOnMarketDataset?: (candidate: StrategyCandidate, marketDataset: CandidateMarketDataset, foldIndex: number) => StrategyCandidate;
 }
 
 export function sliceContinuousMarketWindow(
@@ -144,6 +127,7 @@ export function sliceContinuousCandles(
   endTime: number,
   warmupBars: number = 40,
 ): ICandle[] | undefined {
+  if (!candles || candles.length === 0) return undefined;
   const window = sliceContinuousMarketWindow(candles, startTime, endTime, warmupBars);
   return window?.allCandles;
 }
@@ -151,52 +135,17 @@ export function sliceContinuousCandles(
 export class WalkForwardValidator {
   /**
    * Performs chronological purged and embargoed walk-forward validation with genuine candidate retraining per fold.
+   * STRICT DATASET BOUNDARY: Exclusively accepts (candidate, options: IWalkForwardOptions).
    */
   public static validate(
     candidate: StrategyCandidate,
     options: IWalkForwardOptions,
-  ): WalkForwardValidationResult & { foldArtifacts?: ReadonlyArray<FoldArtifact> };
-  public static validate(
-    candidate: StrategyCandidate,
-    experiences: TradingExperience[] | ExperienceDataset,
-    options?: IWalkForwardOptions,
-  ): WalkForwardValidationResult & { foldArtifacts?: ReadonlyArray<FoldArtifact> };
-  public static validate(
-    candidate: StrategyCandidate,
-    experiencesOrOptions: TradingExperience[] | ExperienceDataset | IWalkForwardOptions,
-    maybeOptions?: IWalkForwardOptions,
   ): WalkForwardValidationResult & { foldArtifacts?: ReadonlyArray<FoldArtifact> } {
-    let experiences: TradingExperience[] = [];
-    let options: IWalkForwardOptions = {};
-
-    if (Array.isArray(experiencesOrOptions)) {
-      experiences = experiencesOrOptions;
-      options = maybeOptions || {};
-    } else if (
-      experiencesOrOptions &&
-      'experiences' in experiencesOrOptions &&
-      Array.isArray((experiencesOrOptions as any).experiences)
-    ) {
-      if (
-        'numFolds' in experiencesOrOptions ||
-        'candles' in experiencesOrOptions ||
-        'marketDataset' in experiencesOrOptions ||
-        'dataset' in experiencesOrOptions
-      ) {
-        options = experiencesOrOptions as IWalkForwardOptions;
-        experiences = (experiencesOrOptions as any).experiences;
-      } else {
-        experiences = (experiencesOrOptions as ExperienceDataset).experiences;
-        options = maybeOptions || {};
-      }
-    } else {
-      options = (experiencesOrOptions as IWalkForwardOptions) || {};
-      if (options.experienceDataset) {
-        experiences = options.experienceDataset.experiences;
-      } else if (options.experiences) {
-        experiences = options.experiences;
-      }
+    if (!options || !options.experienceDataset || !options.marketDataset) {
+      throw new Error('INVALID_WALK_FORWARD_OPTIONS: WalkForwardValidator strictly requires experienceDataset and marketDataset');
     }
+
+    const experiences = options.experienceDataset.experiences || [];
     const numFolds = options.numFolds || 3;
     const embargoMs = options.embargoMs ?? (options.embargoDays ? options.embargoDays * 24 * 3600 * 1000 : 0);
     if (embargoMs < 0) {
@@ -229,12 +178,7 @@ export class WalkForwardValidator {
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
-    const candles =
-      options.marketDataset?.candles ||
-      options.marketDataset?.executionCandles ||
-      options.dataset?.candles ||
-      options.dataset?.executionCandles ||
-      options.candles;
+    const candles = options.marketDataset.executionCandles || [];
     const hasContinuousCandles = Boolean(candles && candles.length >= Math.max(20, (numFolds + 2) * 5));
 
     const totalIntervals = hasContinuousCandles ? candles!.length : n;
@@ -395,18 +339,35 @@ export class WalkForwardValidator {
         const testStartTime = testSlice.length > 0 ? new Date(testSlice[0].timestamp).getTime() : valEndTime;
         const testEndTime = testSlice.length > 0 ? new Date(testSlice[testSlice.length - 1].timestamp).getTime() : testStartTime;
 
-        trainCandles = sliceContinuousCandles(options.candles, trainStartTime, trainEndTime, 40);
-        valCandles = sliceContinuousCandles(options.candles, valStartTime, valEndTime, 40);
-        testCandles = sliceContinuousCandles(options.candles, testStartTime, testEndTime, 40);
+        trainCandles = sliceContinuousCandles(candles, trainStartTime, trainEndTime, 40);
+        valCandles = sliceContinuousCandles(candles, valStartTime, valEndTime, 40);
+        testCandles = sliceContinuousCandles(candles, testStartTime, testEndTime, 40);
       }
+
+      const trainExpStart = new Date(trainSlice[0].timestamp).getTime();
+      const trainExpEnd = new Date(trainSlice[trainSlice.length - 1].timestamp).getTime();
 
       // Build train experience dataset for ML model training and metadata
       const trainExpDataset: ExperienceDataset = {
         experiences: trainSlice,
         datasetHash: trainDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
-        symbol: (options.marketDataset as any)?.symbol || (options.dataset as any)?.symbol || 'BTCUSDT',
-        timeframe: (options.marketDataset as any)?.timeframe || (options.dataset as any)?.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        timeframe: options.marketDataset.timeframe || '15m',
+        startTimestamp: trainExpStart,
+        endTimestamp: trainExpEnd,
+      };
+
+      const trainCandlesSlice = trainCandles || candles;
+      const trainMarketDataset: CandidateMarketDataset = {
+        executionCandles: trainCandlesSlice,
+        datasetHash: trainDatasetHash,
+        timeframe: options.marketDataset.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        startTimestamp: trainCandlesSlice.length > 0 ? new Date(trainCandlesSlice[0].timestamp).getTime() : 0,
+        endTimestamp: trainCandlesSlice.length > 0 ? new Date(trainCandlesSlice[trainCandlesSlice.length - 1].timestamp).getTime() : 0,
+        isContinuous: true,
+        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
       };
 
       // Retrain candidate strategy on fold strictly using fold-specific market data (NO experiences in execution)
@@ -414,33 +375,16 @@ export class WalkForwardValidator {
       if (options.fitCandidateParametersOnMarketDataset) {
         foldCandidate = options.fitCandidateParametersOnMarketDataset(
           candidate,
-          options.marketDataset || options.dataset || trainCandles || options.candles!,
+          trainMarketDataset,
           f + 1,
-        );
-      } else if (options.retrainFn) {
-        foldCandidate = options.retrainFn(
-          {
-            experienceDataset: trainExpDataset,
-            trainExperiences: trainSlice,
-            marketDataset: options.marketDataset || options.dataset,
-            trainCandles: trainCandles || options.candles,
-            foldIndex: f + 1,
-            modelArtifact,
-            selectedFeatures: foldSelection.retainedFeatures,
-          },
-          candidate,
         );
       } else {
         foldCandidate = this.retrainCandidateOnFold(
-          trainCandles || options.candles,
+          trainMarketDataset,
           candidate,
           f + 1,
           modelArtifact,
           foldSelection.retainedFeatures,
-          {
-            dataset: options.dataset || options.marketDataset,
-            candles: trainCandles || options.candles,
-          },
         );
       }
 
@@ -458,7 +402,7 @@ export class WalkForwardValidator {
         selectedFeatures: foldSelection.retainedFeatures,
         scalerVersion,
         scalerParameters: scalerParams,
-        modelVersion: modelArtifact.modelVersion,
+        modelVersion: modelArtifact.modelVersion || '2.0.0',
         modelParameters: { weights: modelArtifact.weights, bias: modelArtifact.bias },
         strategyVersion: candidate.baseStrategyVersion || 'v2.0',
         candidateId: candidate.id,
@@ -472,22 +416,46 @@ export class WalkForwardValidator {
 
       // 1. Evaluate retrained candidate in-sample strictly on training fold market data
       const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: options.dataset,
-        candles: trainCandles || options.candles,
+        dataset: trainMarketDataset,
+        candles: trainCandles || candles,
         evaluationStartTimestamp: trainWindow?.evaluationStartTimestamp,
         evaluationEndTimestamp: trainWindow?.evaluationEndTimestamp,
       });
+
       // 2. Evaluate frozen retrained candidate strictly on validation fold market data
+      const valCandlesSlice = valCandles || candles;
+      const valMarketDataset: CandidateMarketDataset = {
+        executionCandles: valCandlesSlice,
+        datasetHash: valDatasetHash,
+        timeframe: options.marketDataset.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        startTimestamp: valCandlesSlice.length > 0 ? new Date(valCandlesSlice[0].timestamp).getTime() : 0,
+        endTimestamp: valCandlesSlice.length > 0 ? new Date(valCandlesSlice[valCandlesSlice.length - 1].timestamp).getTime() : 0,
+        isContinuous: true,
+        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
+      };
       const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: options.dataset,
-        candles: valCandles || options.candles,
+        dataset: valMarketDataset,
+        candles: valCandles || candles,
         evaluationStartTimestamp: valWindow?.evaluationStartTimestamp,
         evaluationEndTimestamp: valWindow?.evaluationEndTimestamp,
       });
+
       // 3. Evaluate frozen retrained candidate strictly out-of-sample on OOS fold market data
+      const oosCandlesSlice = testCandles || candles;
+      const oosMarketDataset: CandidateMarketDataset = {
+        executionCandles: oosCandlesSlice,
+        datasetHash: oosDatasetHash,
+        timeframe: options.marketDataset.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        startTimestamp: oosCandlesSlice.length > 0 ? new Date(oosCandlesSlice[0].timestamp).getTime() : 0,
+        endTimestamp: oosCandlesSlice.length > 0 ? new Date(oosCandlesSlice[oosCandlesSlice.length - 1].timestamp).getTime() : 0,
+        isContinuous: true,
+        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
+      };
       const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: options.dataset,
-        candles: testCandles || options.candles,
+        dataset: oosMarketDataset,
+        candles: testCandles || candles,
         evaluationStartTimestamp: testWindow?.evaluationStartTimestamp,
         evaluationEndTimestamp: testWindow?.evaluationEndTimestamp,
       });

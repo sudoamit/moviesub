@@ -131,14 +131,47 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       },
     }));
 
-    const wfRes1 = WalkForwardValidator.validate(candidate, experiencesNormal, {
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_c',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const expDatasetNormal: ExperienceDataset = {
+      experiences: experiencesNormal,
+      datasetHash: 'exp_hash_normal',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesNormal[0].timestamp.getTime(),
+      endTimestamp: experiencesNormal[experiencesNormal.length - 1].timestamp.getTime(),
+    };
+
+    const expDatasetMutated: ExperienceDataset = {
+      experiences: experiencesMutated,
+      datasetHash: 'exp_hash_mutated',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesMutated[0].timestamp.getTime(),
+      endTimestamp: experiencesMutated[experiencesMutated.length - 1].timestamp.getTime(),
+    };
+
+    const wfRes1 = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetNormal,
+      marketDataset,
       numFolds: 2,
-      candles,
       seed: 42,
     });
-    const wfRes2 = WalkForwardValidator.validate(candidate, experiencesMutated, {
+    const wfRes2 = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetMutated,
+      marketDataset,
       numFolds: 2,
-      candles,
       seed: 42,
     });
 
@@ -169,6 +202,7 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     };
 
     const firstCandleTs = candles[0].timestamp instanceof Date ? candles[0].timestamp.getTime() : new Date(candles[0].timestamp).getTime();
+    const lastCandleTs = candles[candles.length - 1].timestamp instanceof Date ? candles[candles.length - 1].timestamp.getTime() : new Date(candles[candles.length - 1].timestamp).getTime();
     const expsNormal = generateExperiences(30, firstCandleTs, 15 * 60 * 1000);
     const expsMutated = generateExperiences(30, firstCandleTs, 15 * 60 * 1000).map((e, idx) =>
       idx >= 15
@@ -186,8 +220,49 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
         : e,
     );
 
-    const wfResNormal = WalkForwardValidator.validate(candidate, expsNormal, { numFolds: 2, candles, seed: 42 });
-    const wfResMutated = WalkForwardValidator.validate(candidate, expsMutated, { numFolds: 2, candles, seed: 42 });
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_d',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: firstCandleTs,
+      endTimestamp: lastCandleTs,
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const expDatasetNormal: ExperienceDataset = {
+      experiences: expsNormal,
+      datasetHash: 'exp_hash_d_norm',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: expsNormal[0].timestamp.getTime(),
+      endTimestamp: expsNormal[expsNormal.length - 1].timestamp.getTime(),
+    };
+
+    const expDatasetMutated: ExperienceDataset = {
+      experiences: expsMutated,
+      datasetHash: 'exp_hash_d_mut',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: expsMutated[0].timestamp.getTime(),
+      endTimestamp: expsMutated[expsMutated.length - 1].timestamp.getTime(),
+    };
+
+    const wfResNormal = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetNormal,
+      marketDataset,
+      numFolds: 2,
+      seed: 42,
+    });
+    const wfResMutated = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetMutated,
+      marketDataset,
+      numFolds: 2,
+      seed: 42,
+    });
 
     // Execution trades in OOS are strictly identical
     expect(wfResNormal.folds[0].simulatedTrades!.length).toBe(wfResMutated.folds[0].simulatedTrades!.length);
@@ -232,8 +307,29 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       createdAt: new Date(),
     };
 
-    const resOriginal = CandidateBacktestRunner.runCandidateBacktest(candidate, { candles: candlesOriginal });
-    const resMutated = CandidateBacktestRunner.runCandidateBacktest(candidate, { candles: candlesMutated });
+    const firstTs = candlesOriginal[0].timestamp instanceof Date ? candlesOriginal[0].timestamp.getTime() : new Date(candlesOriginal[0].timestamp).getTime();
+    const lastTs = candlesOriginal[candlesOriginal.length - 1].timestamp instanceof Date ? candlesOriginal[candlesOriginal.length - 1].timestamp.getTime() : new Date(candlesOriginal[candlesOriginal.length - 1].timestamp).getTime();
+
+    const resOriginal = CandidateBacktestRunner.runCandidateBacktest(candidate, {
+      marketDataset: {
+        executionCandles: candlesOriginal,
+        datasetHash: 'market_orig',
+        timeframe: '15m',
+        symbol: 'BTCUSDT',
+        startTimestamp: firstTs,
+        endTimestamp: lastTs,
+      },
+    });
+    const resMutated = CandidateBacktestRunner.runCandidateBacktest(candidate, {
+      marketDataset: {
+        executionCandles: candlesMutated,
+        datasetHash: 'market_mut',
+        timeframe: '15m',
+        symbol: 'BTCUSDT',
+        startTimestamp: firstTs,
+        endTimestamp: lastTs,
+      },
+    });
 
     expect(resOriginal.netPnL).not.toBe(resMutated.netPnL);
   });
@@ -283,17 +379,37 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       createdAt: new Date(),
     };
 
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_h',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: baseTime,
+      endTimestamp: baseTime + 79 * 15 * 60000,
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    // Full run includes trades across all candles (both before and after index 30)
+    const resFull = CandidateBacktestRunner.runCandidateBacktest(candidate, {
+      marketDataset,
+    });
+
     // Evaluation window starting at candle 30
     const evalStartTs = baseTime + 30 * 15 * 60000;
     const resWithWarmup = CandidateBacktestRunner.runCandidateBacktest(candidate, {
-      candles,
+      marketDataset,
       evaluationStartTimestamp: evalStartTs,
     });
 
+    // Verify entry timestamp boundary
     for (const trade of resWithWarmup.trades) {
       const entryTs = trade.entryTime instanceof Date ? trade.entryTime.getTime() : new Date(trade.entryTime).getTime();
       expect(entryTs).toBeGreaterThanOrEqual(evalStartTs);
     }
+
+    // Warmup trades must be excluded from evaluation results
+    expect(resWithWarmup.trades.length).toBeLessThanOrEqual(resFull.trades.length);
   });
 
   // Test I — First-Class Options API in WalkForwardValidator
@@ -307,14 +423,17 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       featureSchemaVersion: '2.0',
       symbol: 'BTCUSDT',
       timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
     };
 
     const marketDataset: CandidateMarketDataset = {
-      candles,
       executionCandles: candles,
       datasetHash: 'market_hash_1',
       timeframe: '15m',
       symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
       isContinuous: true,
       expectedIntervalMs: 15 * 60 * 1000,
     };
@@ -342,8 +461,8 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     expect(wfRes.foldArtifacts?.length).toBe(2);
   });
 
-  // Test J — Hardened retrainFn receives structured context and disallows experience injection into candidate execution
-  test('Test J: Hardened retrainFn receives structured context without raw experience leakage', () => {
+  // Test J — fitCandidateParametersOnMarketDataset receives exclusively CandidateMarketDataset
+  test('Test J: fitCandidateParametersOnMarketDataset receives exclusively CandidateMarketDataset with zero experience exposure', () => {
     const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
     const experiences = generateExperiences(30, baseTime, 15 * 60 * 1000);
 
@@ -359,27 +478,50 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       createdAt: new Date(),
     };
 
-    let receivedContext: any = null;
-    const customRetrainFn = (context: any, baseCand: StrategyCandidate) => {
-      receivedContext = context;
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_j',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_j',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    let receivedMarketDataset: CandidateMarketDataset | null = null;
+    const customFitter = (baseCand: StrategyCandidate, mDataset: CandidateMarketDataset, foldIdx: number) => {
+      receivedMarketDataset = mDataset;
       return {
         ...baseCand,
-        change: { ...baseCand.change, fittedValue: 75 },
+        change: { ...baseCand.change, fittedValue: 75, fittedOnFold: foldIdx },
       };
     };
 
     const wfRes = WalkForwardValidator.validate(candidate, {
-      experiences,
-      candles,
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      retrainFn: customRetrainFn,
+      fitCandidateParametersOnMarketDataset: customFitter,
     });
 
-    expect(receivedContext).toBeDefined();
-    expect(receivedContext.experienceDataset).toBeDefined();
-    expect(receivedContext.trainExperiences).toBeDefined();
-    expect(receivedContext.trainCandles).toBeDefined();
-    expect(receivedContext.foldIndex).toBe(2); // Last fold executed
+    expect(receivedMarketDataset).toBeDefined();
+    expect((receivedMarketDataset as any).executionCandles).toBeDefined();
+    expect((receivedMarketDataset as any).startTimestamp).toBeDefined();
+    expect((receivedMarketDataset as any).endTimestamp).toBeDefined();
+    expect((receivedMarketDataset as any)).not.toHaveProperty('trainExperiences');
+    expect((receivedMarketDataset as any)).not.toHaveProperty('experienceDataset');
+    expect((receivedMarketDataset as any)).not.toHaveProperty('experiences');
     expect(wfRes.folds.length).toBe(2);
   });
 
@@ -391,6 +533,37 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       ...e,
       outcome: { ...e.outcome, status: 'LOSS' as const, pnlR: -1.0 }, // Invert labels to all losses
     }));
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_k',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const expDatasetA: ExperienceDataset = {
+      experiences: experiencesA,
+      datasetHash: 'exp_hash_k_a',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesA[0].timestamp.getTime(),
+      endTimestamp: experiencesA[experiencesA.length - 1].timestamp.getTime(),
+    };
+
+    const expDatasetB: ExperienceDataset = {
+      experiences: experiencesB,
+      datasetHash: 'exp_hash_k_b',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesB[0].timestamp.getTime(),
+      endTimestamp: experiencesB[experiencesB.length - 1].timestamp.getTime(),
+    };
 
     const candidate: StrategyCandidate = {
       id: 'cand_test_k',
@@ -404,8 +577,8 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       createdAt: new Date(),
     };
 
-    const wfResA = WalkForwardValidator.validate(candidate, experiencesA, { numFolds: 2, candles, seed: 42 });
-    const wfResB = WalkForwardValidator.validate(candidate, experiencesB, { numFolds: 2, candles, seed: 42 });
+    const wfResA = WalkForwardValidator.validate(candidate, { experienceDataset: expDatasetA, marketDataset, numFolds: 2, seed: 42 });
+    const wfResB = WalkForwardValidator.validate(candidate, { experienceDataset: expDatasetB, marketDataset, numFolds: 2, seed: 42 });
 
     // OOS expectancy is determined strictly by market replay
     expect(wfResA.meanOutOfSampleExpectancy).toBe(wfResB.meanOutOfSampleExpectancy);

@@ -14,7 +14,7 @@ import { ModelTrainer, CANONICAL_FEATURE_NAMES_V2 } from '../model-trainer';
 import { MonteCarloEngine } from '../monte-carlo-engine';
 import { PointInTimeValidator } from '../point-in-time-validator';
 import { PromotionGate } from '../promotion-gate';
-import { StrategyCandidate, TradingExperience } from '../types';
+import { StrategyCandidate, TradingExperience, ExperienceDataset, CandidateMarketDataset } from '../types';
 import { WalkForwardValidator } from '../walk-forward-validator';
 
 function generateContinuousCandles(count: number = 30): ICandle[] {
@@ -592,9 +592,30 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       volume: 1000,
     }));
 
-    const wfRes = WalkForwardValidator.validate(candidate, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_p',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_p',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 300000,
+    };
+
+    const wfRes = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles: continuousCandles,
     });
     expect(wfRes.foldArtifacts).toBeDefined();
     expect(wfRes.foldArtifacts!.length).toBe(2);
@@ -670,9 +691,30 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       volume: 1000,
     }));
 
-    const wfRes = WalkForwardValidator.validate(candidate, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_q',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_q',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 300000,
+    };
+
+    const wfRes = WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 1,
-      candles: continuousCandles,
     });
     const fold = wfRes.foldArtifacts![0];
 
@@ -791,9 +833,31 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       volume: 1000,
     }));
 
-    const resOriginal = WalkForwardValidator.validate(baseCand, experiences, {
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_t',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 300000,
+    };
+
+    const expDatasetOriginal: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_orig',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+
+    const resOriginal = WalkForwardValidator.validate(baseCand, {
+      experienceDataset: expDatasetOriginal,
+      marketDataset,
       numFolds: 1,
-      candles: continuousCandles,
     });
 
     // Mutate the final OOS items with completely different feature values and outcome
@@ -808,9 +872,20 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       return e;
     });
 
-    const resMutated = WalkForwardValidator.validate(baseCand, experiencesMutated, {
+    const expDatasetMutated: ExperienceDataset = {
+      experiences: experiencesMutated,
+      datasetHash: 'exp_hash_mut',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesMutated[0].timestamp.getTime(),
+      endTimestamp: experiencesMutated[experiencesMutated.length - 1].timestamp.getTime(),
+    };
+
+    const resMutated = WalkForwardValidator.validate(baseCand, {
+      experienceDataset: expDatasetMutated,
+      marketDataset,
       numFolds: 1,
-      candles: continuousCandles,
     });
 
     // Training fold artifacts must be 100% identical
@@ -1193,9 +1268,30 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
-    const wfRes = WalkForwardValidator.validate(baseCand, experiences, {
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_ae',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_ae',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 300000,
+    };
+
+    const wfRes = WalkForwardValidator.validate(baseCand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles: continuousCandles,
     });
     expect(wfRes.folds.length).toBe(2);
     expect(wfRes.foldArtifacts).toBeDefined();
@@ -1252,8 +1348,33 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_af',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const candlesAF = generateContinuousCandles(30);
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candlesAF,
+      datasetHash: 'market_hash_af',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candlesAF[0].timestamp.getTime(),
+      endTimestamp: candlesAF[candlesAF.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+
     expect(() => {
-      WalkForwardValidator.validate(cand, experiences, { numFolds: 2, candles: generateContinuousCandles(30) });
+      WalkForwardValidator.validate(cand, {
+        experienceDataset: expDataset,
+        marketDataset,
+        numFolds: 2,
+      });
     }).toThrow('INSUFFICIENT_PURGED_VALIDATION_DATA');
   });
 
@@ -1301,8 +1422,33 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_ag',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const candlesAG = generateContinuousCandles(30);
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candlesAG,
+      datasetHash: 'market_hash_ag',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candlesAG[0].timestamp.getTime(),
+      endTimestamp: candlesAG[candlesAG.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+
     expect(() => {
-      WalkForwardValidator.validate(cand, experiences, { numFolds: 2, candles: generateContinuousCandles(30) });
+      WalkForwardValidator.validate(cand, {
+        experienceDataset: expDataset,
+        marketDataset,
+        numFolds: 2,
+      });
     }).toThrow('INSUFFICIENT_PURGED_OOS_DATA');
   });
 
@@ -1320,13 +1466,29 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       createdAt: new Date(),
     };
 
+    const candlesAH = generateContinuousCandles(30);
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candlesAH,
+      datasetHash: 'market_hash_ah',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candlesAH[0].timestamp.getTime(),
+      endTimestamp: candlesAH[candlesAH.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+
     const expsWithoutStart: any[] = Array.from({ length: 30 }, (_, i) => ({
       id: `exp_no_start_${i}`,
       timestamp: new Date(1700000000000 + i * 60000),
       labelEndTimestamp: 1700000000000 + i * 60000 + 30000,
     }));
     expect(() => {
-      WalkForwardValidator.validate(cand, expsWithoutStart as any, { numFolds: 2, candles: generateContinuousCandles(30) });
+      WalkForwardValidator.validate(cand, {
+        experienceDataset: { experiences: expsWithoutStart as any, datasetHash: 'h', featureSchemaVersion: '2.0', startTimestamp: 0, endTimestamp: 0 },
+        marketDataset,
+        numFolds: 2,
+      });
     }).toThrow('MISSING_LABEL_START_TIMESTAMP');
 
     const expsWithoutEnd: any[] = Array.from({ length: 30 }, (_, i) => ({
@@ -1335,7 +1497,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       labelStartTimestamp: 1700000000000 + i * 60000 + 1000,
     }));
     expect(() => {
-      WalkForwardValidator.validate(cand, expsWithoutEnd as any, { numFolds: 2, candles: generateContinuousCandles(30) });
+      WalkForwardValidator.validate(cand, {
+        experienceDataset: { experiences: expsWithoutEnd as any, datasetHash: 'h', featureSchemaVersion: '2.0', startTimestamp: 0, endTimestamp: 0 },
+        marketDataset,
+        numFolds: 2,
+      });
     }).toThrow('MISSING_LABEL_END_TIMESTAMP');
   });
 
@@ -1746,10 +1912,31 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       volume: 1000,
     }));
 
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_ao',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: continuousCandles,
+      datasetHash: 'market_hash_ao',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: continuousCandles[0].timestamp.getTime(),
+      endTimestamp: continuousCandles[continuousCandles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 60000,
+    };
+
     // 1. Default seed (42) produces content-derived scalerVersion
-    const wfResDefault = WalkForwardValidator.validate(cand, experiences, {
+    const wfResDefault = WalkForwardValidator.validate(cand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
-      candles: continuousCandles,
     });
     expect(wfResDefault.foldArtifacts).toBeDefined();
     expect(wfResDefault.foldArtifacts!.length).toBe(2);
@@ -1760,10 +1947,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     expect(fold1.trainingSeed).toBe(42);
 
     // 2. Custom seed (1337) is recorded in fold artifacts
-    const wfResCustomSeed = WalkForwardValidator.validate(cand, experiences, {
+    const wfResCustomSeed = WalkForwardValidator.validate(cand, {
+      experienceDataset: expDataset,
+      marketDataset,
       numFolds: 2,
       seed: 1337,
-      candles: continuousCandles,
     });
     expect(wfResCustomSeed.foldArtifacts![0].trainingSeed).toBe(1337);
   });

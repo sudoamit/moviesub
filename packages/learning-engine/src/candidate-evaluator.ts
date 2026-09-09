@@ -1,4 +1,4 @@
-import { ICandle } from '@quant/shared';
+import { ICandle, IBacktestTrade } from '@quant/shared';
 import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 
@@ -26,7 +26,7 @@ export interface ICandidateEvaluationResult {
   maxDrawdownPercent: number;
   totalSimulatedTrades: number;
   simulatedRMultiples: number[];
-  simulatedTrades?: any[];
+  simulatedTrades?: IBacktestTrade[];
   rejectionReason?: string;
   baselineTrades?: number;
 }

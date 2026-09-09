@@ -1,5 +1,5 @@
 import { ExperienceStore } from './experience-store';
-import { TemporalDatasetBuilder } from './dataset-manager';
+import { TemporalDatasetBuilder, DatasetManager } from './dataset-manager';
 import { ErrorAnalyzer } from './error-analyzer';
 import { PatternDiscoveryEngine } from './pattern-discovery';
 import { FeatureSelector } from './feature-selector';
@@ -21,7 +21,7 @@ import { DriftDetector } from './drift-detector';
 import { LearningMemory } from './learning-memory';
 import { LearningScheduler } from './learning-scheduler';
 import { ICandle } from '@quant/shared';
-import { CandidateMarketDataset, LearningRunReport, StrategyCandidate } from './types';
+import { CandidateMarketDataset, ExperienceDataset, LearningRunReport, StrategyCandidate } from './types';
 
 /**
  * Centrally defined temporal validation policy for the autonomous learning pipeline:
@@ -187,10 +187,34 @@ export class LearningEngine {
 
       // 9b. Walk-Forward Purged & Embargo Validation on Development Dataset
       const devExperiences = [...trainSlice, ...valSlice];
-      const wfEval = WalkForwardValidator.validate(cand, devExperiences, {
+      const devExpStart = devExperiences.length > 0 ? new Date(devExperiences[0].timestamp).getTime() : 0;
+      const devExpEnd = devExperiences.length > 0 ? new Date(devExperiences[devExperiences.length - 1].timestamp).getTime() : 0;
+      const devExpDataset: ExperienceDataset = {
+        experiences: devExperiences,
+        datasetHash: DatasetManager.computeCanonicalDatasetHash(devExperiences),
+        featureSchemaVersion: '2.0',
+        symbol: options.dataset?.symbol || 'BTCUSDT',
+        timeframe: options.dataset?.timeframe || '15m',
+        startTimestamp: devExpStart,
+        endTimestamp: devExpEnd,
+      };
+      const devExecutionCandles = devCandles || options.candles || [];
+      const devMktStart = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[0].timestamp).getTime() : 0;
+      const devMktEnd = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[devExecutionCandles.length - 1].timestamp).getTime() : 0;
+      const devMarketDataset: CandidateMarketDataset = {
+        executionCandles: devExecutionCandles,
+        datasetHash: options.dataset?.datasetHash || 'market_hash_dev',
+        timeframe: options.dataset?.timeframe || '15m',
+        symbol: options.dataset?.symbol || 'BTCUSDT',
+        startTimestamp: devMktStart,
+        endTimestamp: devMktEnd,
+        isContinuous: true,
+        expectedIntervalMs: 15 * 60 * 1000,
+      };
+      const wfEval = WalkForwardValidator.validate(cand, {
+        experienceDataset: devExpDataset,
+        marketDataset: devMarketDataset,
         embargoMs,
-        dataset: options.dataset,
-        candles: devCandles || options.candles,
       });
 
       // 9c. Robustness & Transaction Costs
