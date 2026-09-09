@@ -85,6 +85,7 @@ export class SignalGenerator {
           : currTime;
 
       const det = detList.find((d: any) => {
+        if (!d.timestamp) return true;
         const targetTime =
           d.timestamp instanceof Date
             ? d.timestamp.getTime()
@@ -102,16 +103,19 @@ export class SignalGenerator {
           (det.direction === Direction.BEARISH ? entryPrice * 1.05 : entryPrice * 0.95);
         const baseStopDist = Math.abs(entryPrice - baseStopPrice);
         const target1 =
+          det.takeProfits?.tp1 ??
           det.tp1 ??
           (det.direction === Direction.BEARISH
             ? entryPrice - baseStopDist * 1.5
             : entryPrice + baseStopDist * 1.5);
         const target2 =
+          det.takeProfits?.tp2 ??
           det.tp2 ??
           (det.direction === Direction.BEARISH
             ? entryPrice - baseStopDist * 2.5
             : entryPrice + baseStopDist * 2.5);
         const target3 =
+          det.takeProfits?.tp3 ??
           det.tp3 ??
           (det.direction === Direction.BEARISH
             ? entryPrice - baseStopDist * 4.0

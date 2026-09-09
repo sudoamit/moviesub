@@ -3,6 +3,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { IBacktestTrade, ICandle } from '@quant/shared';
 import { IFill, IOrder } from '@quant/backtesting';
+import { PositionLot } from '@quant/risk-engine';
 import {
   CandidateProductionComparison,
   DEFAULT_SHADOW_WINDOW_CONFIG,
@@ -47,12 +48,20 @@ export class ShadowLedger {
   private health: ShadowHealthState;
   private lastMarketTimestamp = 0;
 
+  private symbol: string;
+  private activeLot: PositionLot | null = null;
+  private recentCandles: ICandle[] = [];
+  private pendingOrders: IOrder[] = [];
+  private regimeHistory: any[] = [];
+  private featureVectors: (readonly number[])[] = [];
+
   constructor(params: {
     candidateId: string;
     candidateVersion: string;
     strategyVersion: string;
     featureSchemaHash: string;
     artifactHash: string;
+    symbol?: string;
     persistencePath?: string;
   }) {
     this.candidateId = params.candidateId;
@@ -60,8 +69,12 @@ export class ShadowLedger {
     this.strategyVersion = params.strategyVersion;
     this.featureSchemaHash = params.featureSchemaHash;
     this.artifactHash = params.artifactHash;
+    this.symbol = params.symbol || 'BTCUSDT';
     this.persistencePath = params.persistencePath || null;
     this.health = ShadowHealthMachine.createInitialState(params.candidateId);
+    if (this.persistencePath && fs.existsSync(this.persistencePath)) {
+      this.loadFromFile(this.persistencePath);
+    }
   }
 
   public setPersistencePath(filePath: string | null): void {
@@ -291,6 +304,54 @@ export class ShadowLedger {
     return deepFreeze(metrics);
   }
 
+  public getSymbol(): string {
+    return this.symbol;
+  }
+
+  public setSymbol(symbol: string): void {
+    this.symbol = symbol;
+  }
+
+  public getActiveLot(): Readonly<PositionLot> | null {
+    return this.activeLot ? deepFreeze({ ...this.activeLot }) : null;
+  }
+
+  public setActiveLot(lot: PositionLot | null): void {
+    this.activeLot = lot ? deepFreeze({ ...lot }) : null;
+  }
+
+  public getRecentCandles(): readonly ICandle[] {
+    return deepFreeze([...this.recentCandles]);
+  }
+
+  public setRecentCandles(candles: readonly ICandle[]): void {
+    this.recentCandles = candles.map((c) => deepFreeze({ ...c }));
+  }
+
+  public getPendingOrders(): readonly IOrder[] {
+    return deepFreeze([...this.pendingOrders]);
+  }
+
+  public setPendingOrders(orders: readonly IOrder[]): void {
+    this.pendingOrders = orders.map((o) => deepFreeze({ ...o }));
+  }
+
+  public getRegimeHistory(): readonly any[] {
+    return deepFreeze([...this.regimeHistory]);
+  }
+
+  public setRegimeHistory(history: readonly any[]): void {
+    this.regimeHistory = history.map((h) => deepFreeze({ ...h }));
+  }
+
+  public getFeatureVectors(): readonly (readonly number[])[] {
+    return deepFreeze([...this.featureVectors]);
+  }
+
+  public setFeatureVectors(vectors: readonly (readonly number[])[]): void {
+    this.featureVectors = vectors.map((v) => deepFreeze([...v]));
+  }
+
   /**
    * Saves authoritative shadow state atomically to disk.
    */
@@ -305,6 +366,7 @@ export class ShadowLedger {
       strategyVersion: this.strategyVersion,
       featureSchemaHash: this.featureSchemaHash,
       artifactHash: this.artifactHash,
+      symbol: this.symbol,
       lastMarketTimestamp: this.lastMarketTimestamp,
       observations: this.observations,
       orders: this.orders,
@@ -315,6 +377,11 @@ export class ShadowLedger {
       comparisons: this.comparisons,
       health: this.health,
       events: this.events,
+      activeLot: this.activeLot,
+      recentCandles: this.recentCandles,
+      pendingOrders: this.pendingOrders,
+      regimeHistory: this.regimeHistory,
+      featureVectors: this.featureVectors,
       savedAt: Date.now(),
     };
 
@@ -410,6 +477,12 @@ export class ShadowLedger {
       this.health = deepFreeze({ ...data.health });
       this.events = (data.events || []).map((e) => deepFreeze({ ...e }) as ShadowAuditRecord);
       this.lastMarketTimestamp = data.lastMarketTimestamp;
+      if (data.symbol) this.symbol = data.symbol;
+      this.activeLot = data.activeLot ? (deepFreeze({ ...data.activeLot }) as PositionLot) : null;
+      this.recentCandles = (data.recentCandles || []).map((c) => deepFreeze({ ...c }) as ICandle);
+      this.pendingOrders = (data.pendingOrders || []).map((o) => deepFreeze({ ...o }) as IOrder);
+      this.regimeHistory = (data.regimeHistory || []).map((h) => deepFreeze({ ...h }));
+      this.featureVectors = (data.featureVectors || []).map((v) => deepFreeze([...v]) as number[]);
     } catch (err: any) {
       throw new Error(`SHADOW_LEDGER_CORRUPT: Failed to hydrate shadow ledger: ${err.message}`);
     }

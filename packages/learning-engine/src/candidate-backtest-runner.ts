@@ -169,7 +169,7 @@ export class CandidateBacktestRunner {
     const artifactVersion = 'v2.0';
     const createdBy = provenance?.createdBy || 'LearningEngine';
     const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
-    const strategyConfig = { ...(candidate.change || {}) };
+    const strategyConfig = { ...((candidate as any).strategyConfig || {}), ...(candidate.change || {}) };
 
     const canonicalPayload = {
       candidateId: candidate.id,

@@ -156,7 +156,22 @@ export class ShadowOrchestrator {
       );
     }
 
-    // 2. Initialize ShadowLedger
+    // 2. Resolve Dynamic Symbol & Execution Configuration
+    const symbol =
+      (artifact as any).symbol ||
+      (artifact.executionConfig as any)?.symbol ||
+      (artifact.strategyConfig as any)?.symbol ||
+      'BTCUSDT';
+
+    const execConfig = (artifact.executionConfig as any) || {};
+    const fillModel = execConfig.fillModel || FillModel.OHLC_PATH;
+    const ambiguityMode = execConfig.ambiguityMode || SameCandleAmbiguityMode.CONSERVATIVE;
+    const latency = {
+      submissionLatencyMs: execConfig.latencyMs ?? 15,
+      processingLatencyMs: 5,
+    };
+
+    // 3. Initialize ShadowLedger
     const persistencePath =
       options?.persistenceFilePath ||
       (this.options.persistenceDir ? path.join(this.options.persistenceDir, `shadow-${candidateId}.json`) : undefined);
@@ -167,26 +182,33 @@ export class ShadowOrchestrator {
       strategyVersion: artifact.strategyVersion,
       featureSchemaHash: artifact.featureSchemaHash,
       artifactHash: artifact.artifactHash,
+      symbol,
       persistencePath,
     });
 
-    // 3. Initialize Authoritative ExecutionSimulator
+    // 4. Initialize Authoritative ExecutionSimulator
     const execSim = new ExecutionSimulator(
-      FillModel.OHLC_PATH,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 15, processingLatencyMs: 5 },
+      fillModel,
+      ambiguityMode,
+      latency,
       `shadow_${candidateId}`,
     );
+
+    // 5. Restore persisted state if recovering from existing ledger
+    const recoveredCandles = [...ledger.getRecentCandles()];
+    const recoveredActiveLot = ledger.getActiveLot() ? { ...ledger.getActiveLot()! } : null;
+    const recoveredRegimeHistory = [...ledger.getRegimeHistory()];
+    const recoveredFeatureVectors = [...ledger.getFeatureVectors().map((v) => [...v])];
 
     const context: ActiveCandidateContext = {
       candidateId,
       artifact,
       ledger,
       execSim,
-      candles: [],
-      regimeHistory: [],
-      featureVectors: [],
-      activeLot: null,
+      candles: recoveredCandles,
+      regimeHistory: recoveredRegimeHistory,
+      featureVectors: recoveredFeatureVectors,
+      activeLot: recoveredActiveLot,
       featureBaseline: options?.featureBaseline,
       baselineMetrics: {
         expectancyR: options?.baselineExpectancyR ?? 0.25,
@@ -197,7 +219,7 @@ export class ShadowOrchestrator {
         volatilityRegime: 'NORMAL_VOLATILITY',
         trendRegime: 'RANGING',
       },
-      tradeCounter: 0,
+      tradeCounter: ledger.getTrades().length,
     };
 
     this.activeCandidates.set(candidateId, context);
@@ -209,10 +231,10 @@ export class ShadowOrchestrator {
       candidateVersion: artifact.candidateVersion,
       strategyVersion: artifact.strategyVersion,
       timestamp: Date.now(),
-      marketTimestamp: 0,
+      marketTimestamp: ledger.getLastMarketTimestamp(),
       eventType: 'SHADOW_STARTED',
       evidenceHash: artifact.artifactHash,
-      metadata: { persistencePath },
+      metadata: { persistencePath, symbol, recoveredObservations: ledger.getObservations().length },
     });
 
     ledger.saveToFile();
@@ -232,94 +254,26 @@ export class ShadowOrchestrator {
       throw new Error(`CANDIDATE_NOT_ACTIVE: Candidate '${candidateId}' is not running in shadow orchestrator`);
     }
 
+    const symbol =
+      ctx.ledger.getSymbol() ||
+      (ctx.artifact as any).symbol ||
+      (ctx.artifact.executionConfig as any)?.symbol ||
+      (candle as any).symbol ||
+      'BTCUSDT';
+
     // 1. Strict Causal Market Candle Validation (Fail-closed)
-    this.validateCandleStrict(candle, ctx.candles);
+    this.validateCandleStrict(candle, ctx.candles, symbol);
 
     const candleTime =
       candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
-    ctx.candles.push(candle);
 
-    // 2. Causal Feature & Regime Extraction
-    const regimeObs = RegimeDriftDetector.classifyCausalRegime(ctx.candles);
-    ctx.regimeHistory.push(regimeObs);
-
-    let featureVectorHash = createHash('sha256').update(`feat_schema_${ctx.artifact.featureSchemaHash}`).digest('hex');
-    let featureVector: number[] = [];
-
-    if (ctx.candles.length >= 20) {
-      try {
-        const snapshot = SnapshotBuilder.buildSnapshot({
-          symbol: 'BTCUSDT',
-          executionCandles: ctx.candles,
-        });
-        const extracted = CanonicalMLEngineV2.extractFeatures(snapshot);
-        const mlFeatures = CanonicalMLEngineV2.toArray(extracted);
-        if (mlFeatures && mlFeatures.length > 0) {
-          featureVector = mlFeatures;
-          featureVectorHash = createHash('sha256').update(JSON.stringify(mlFeatures)).digest('hex');
-          ctx.featureVectors.push(mlFeatures);
-        }
-      } catch {
-        // Feature extraction warmup
-      }
-    }
-
-    // 3. Candidate Signal Generation using Candidate Parameters
-    const candidateSignal = this.generateCandidateSignal(ctx, candle);
-
-    // 4. Candidate vs Production Comparison (if production signal provided)
-    let comparison: CandidateProductionComparison | undefined;
-    let divergenceDrift: DriftEvent | undefined;
-    if (productionSignal) {
-      const compRes = CandidateProductionComparator.compareSignals(
-        candidateId,
-        candleTime,
-        candidateSignal,
-        productionSignal,
-        now,
-      );
-      comparison = compRes.comparison;
-      divergenceDrift = compRes.divergenceEvent;
-      ctx.ledger.recordComparison(comparison);
-      if (divergenceDrift) {
-        ctx.ledger.recordDrifts([divergenceDrift]);
-      }
-    }
-
-    // 5. Authoritative Execution Simulation (process execution bar)
-    const newOrders: IOrder[] = [];
+    // 2. Authoritative Execution Simulation on Incoming Candle Bar (Next-Candle Execution)
+    // Execute pending resting orders against incoming candle before computing new close-of-candle signals
     const closedTrades: IBacktestTrade[] = [];
-
-    // A. If no active position and signal is directional -> Submit entry order
-    if (!ctx.activeLot && (candidateSignal.direction === 'LONG' || candidateSignal.direction === 'SHORT')) {
-      ctx.tradeCounter++;
-      const tradeId = `shadow_trade_${candidateId}_${ctx.tradeCounter}`;
-      const side = candidateSignal.direction === 'LONG' ? 'BUY' : 'SELL';
-      const entryPrice = candle.close;
-      const stopPrice = candidateSignal.stopLoss ?? (side === 'BUY' ? entryPrice * 0.98 : entryPrice * 1.02);
-      const riskPerShare = Math.abs(entryPrice - stopPrice) || 1.0;
-      const capital = 10000;
-      const riskFraction = 0.01;
-      const initialQty = Math.max(1, Math.floor((capital * riskFraction) / riskPerShare));
-
-      const entryOrder = ctx.execSim.submitOrder({
-        tradeId,
-        symbol: 'BTCUSDT',
-        side,
-        orderType: 'MARKET',
-        price: entryPrice,
-        quantity: initialQty,
-        timestamp: candleTime,
-        exitTarget: 'ENTRY',
-      });
-      newOrders.push(entryOrder);
-    }
-
-    // B. Execute bar against pending orders in ExecutionSimulator
     const execBarRes = ctx.execSim.processSingleExecutionBar(candle);
     const newFills = execBarRes.fills;
 
-    // C. Process Fills and manage Trade Lifecycles
+    // Process Fills and manage Trade Lifecycles
     for (const fill of newFills) {
       const order = ctx.execSim.getOrder(fill.orderId);
       if (!order) continue;
@@ -328,14 +282,19 @@ export class ShadowOrchestrator {
         // Entry filled -> Open PositionLot & submit resting Stop Loss and TP Limit orders
         const isLong = order.side === 'BUY';
         const entryPrice = fill.price;
-        const stopLossPrice = candidateSignal.stopLoss ?? (isLong ? entryPrice * 0.98 : entryPrice * 1.02);
-        const tp1Price = candidateSignal.takeProfit ?? (isLong ? entryPrice * 1.02 : entryPrice * 0.98);
-        const tp2Price = isLong ? entryPrice * 1.04 : entryPrice * 0.96;
+        const stopLossPrice =
+          (order as any).calculatedStopLoss ??
+          (isLong ? entryPrice * 0.98 : entryPrice * 1.02);
+        const tp1Price =
+          (order as any).calculatedTp1 ??
+          (isLong ? entryPrice * 1.02 : entryPrice * 0.98);
+        const tp2Price = (order as any).calculatedTp2 ?? (isLong ? entryPrice * 1.04 : entryPrice * 0.96);
+        const tp3Price = (order as any).calculatedTp3 ?? 0;
 
         ctx.activeLot = {
           id: `lot_${order.tradeId}`,
           tradeId: order.tradeId,
-          symbol: order.symbol,
+          symbol,
           entryPrice,
           initialQuantity: fill.quantity,
           remainingQuantity: fill.quantity,
@@ -343,7 +302,7 @@ export class ShadowOrchestrator {
           currentStopLoss: stopLossPrice,
           tp1: tp1Price,
           tp2: tp2Price,
-          tp3: 0,
+          tp3: tp3Price,
           realizedPnl: 0,
           unrealizedPnl: 0,
           realizedR: 0,
@@ -361,7 +320,7 @@ export class ShadowOrchestrator {
         const exitSide = isLong ? 'SELL' : 'BUY';
         ctx.execSim.submitOrder({
           tradeId: order.tradeId,
-          symbol: order.symbol,
+          symbol,
           side: exitSide,
           orderType: 'STOP',
           stopPrice: stopLossPrice,
@@ -371,7 +330,7 @@ export class ShadowOrchestrator {
         });
         ctx.execSim.submitOrder({
           tradeId: order.tradeId,
-          symbol: order.symbol,
+          symbol,
           side: exitSide,
           orderType: 'LIMIT',
           price: tp1Price,
@@ -379,7 +338,12 @@ export class ShadowOrchestrator {
           timestamp: candleTime,
           exitTarget: 'TP1',
         });
-      } else if (order.exitTarget === 'SL' || order.exitTarget === 'TP1' || order.exitTarget === 'TP2' || order.exitTarget === 'TRAILING_STOP') {
+      } else if (
+        order.exitTarget === 'SL' ||
+        order.exitTarget === 'TP1' ||
+        order.exitTarget === 'TP2' ||
+        order.exitTarget === 'TRAILING_STOP'
+      ) {
         // Exit order filled -> Complete trade lifecycle
         if (ctx.activeLot && ctx.activeLot.tradeId === order.tradeId) {
           const isLong = ctx.activeLot.direction === Direction.BULLISH;
@@ -423,7 +387,88 @@ export class ShadowOrchestrator {
       }
     }
 
-    // 6. Record in ShadowLedger
+    // 3. Append Candle & Extract Causal Features / Regime
+    ctx.candles.push(candle);
+    const regimeObs = RegimeDriftDetector.classifyCausalRegime(ctx.candles);
+    ctx.regimeHistory.push(regimeObs);
+
+    let featureVectorHash = createHash('sha256').update(`feat_schema_${ctx.artifact.featureSchemaHash}`).digest('hex');
+    let featureVector: number[] = [];
+
+    if (ctx.candles.length >= 20) {
+      try {
+        const snapshot = SnapshotBuilder.buildSnapshot({
+          symbol,
+          executionCandles: ctx.candles,
+        });
+        const extracted = CanonicalMLEngineV2.extractFeatures(snapshot);
+        const mlFeatures = CanonicalMLEngineV2.toArray(extracted);
+        if (mlFeatures && mlFeatures.length > 0) {
+          featureVector = mlFeatures;
+          featureVectorHash = createHash('sha256').update(JSON.stringify(mlFeatures)).digest('hex');
+          ctx.featureVectors.push(mlFeatures);
+        }
+      } catch {
+        // Feature extraction warmup
+      }
+    }
+
+    // 4. Candidate Signal Generation using Authoritative Candidate Strategy
+    const candidateSignal = this.generateCandidateSignal(ctx, candle, symbol);
+
+    // 5. Candidate vs Production Comparison (if production signal provided)
+    let comparison: CandidateProductionComparison | undefined;
+    let divergenceDrift: DriftEvent | undefined;
+    if (productionSignal) {
+      const compRes = CandidateProductionComparator.compareSignals(
+        candidateId,
+        candleTime,
+        candidateSignal,
+        productionSignal,
+        now,
+      );
+      comparison = compRes.comparison;
+      divergenceDrift = compRes.divergenceEvent;
+      ctx.ledger.recordComparison(comparison);
+      if (divergenceDrift) {
+        ctx.ledger.recordDrifts([divergenceDrift]);
+      }
+    }
+
+    // 6. Submit New Orders (if no active position and signal is directional)
+    // Order submitted at candle close T will execute on candle T+1
+    const newOrders: IOrder[] = [];
+    if (!ctx.activeLot && (candidateSignal.direction === 'LONG' || candidateSignal.direction === 'SHORT')) {
+      ctx.tradeCounter++;
+      const tradeId = `shadow_trade_${candidateId}_${ctx.tradeCounter}`;
+      const side = candidateSignal.direction === 'LONG' ? 'BUY' : 'SELL';
+      const entryPrice = candle.close;
+      const stopPrice =
+        candidateSignal.stopLoss ??
+        (side === 'BUY' ? entryPrice * 0.98 : entryPrice * 1.02);
+      const riskPerShare = Math.abs(entryPrice - stopPrice) || 1.0;
+      const capital = (ctx.artifact.riskConfig as any)?.initialCapital ?? 10000;
+      const riskFraction = (ctx.artifact.riskConfig as any)?.maxRiskPerTrade ?? 0.01;
+      const initialQty = Math.max(1, Math.floor((capital * riskFraction) / riskPerShare));
+
+      const entryOrder = ctx.execSim.submitOrder({
+        tradeId,
+        symbol,
+        side,
+        orderType: 'MARKET',
+        price: entryPrice,
+        quantity: initialQty,
+        timestamp: candleTime,
+        exitTarget: 'ENTRY',
+      });
+      (entryOrder as any).calculatedStopLoss = stopPrice;
+      (entryOrder as any).calculatedTp1 = candidateSignal.targets?.tp1 ?? candidateSignal.takeProfit;
+      (entryOrder as any).calculatedTp2 = candidateSignal.targets?.tp2;
+      (entryOrder as any).calculatedTp3 = candidateSignal.targets?.tp3;
+      newOrders.push(entryOrder);
+    }
+
+    // 7. Record in ShadowLedger
     const observation: ShadowObservation = {
       candidateId,
       candidateVersion: ctx.artifact.candidateVersion,
@@ -434,14 +479,17 @@ export class ShadowOrchestrator {
       featureSchemaHash: ctx.artifact.featureSchemaHash,
       features: featureVector.length > 0 ? featureVector : undefined,
       signal: candidateSignal,
-      execution: newFills.length > 0 ? {
-        orderId: newFills[0].orderId,
-        fillId: newFills[0].fillId,
-        filledPrice: newFills[0].price,
-        quantity: newFills[0].quantity,
-        fees: newFills[0].fee,
-        slippage: newFills[0].slippage,
-      } : undefined,
+      execution:
+        newFills.length > 0
+          ? {
+              orderId: newFills[0].orderId,
+              fillId: newFills[0].fillId,
+              filledPrice: newFills[0].price,
+              quantity: newFills[0].quantity,
+              fees: newFills[0].fee,
+              slippage: newFills[0].slippage,
+            }
+          : undefined,
     };
 
     ctx.ledger.recordObservation(observation);
@@ -449,7 +497,7 @@ export class ShadowOrchestrator {
     if (newFills.length > 0) ctx.ledger.recordFills(newFills);
     if (closedTrades.length > 0) ctx.ledger.recordClosedTrades(closedTrades);
 
-    // 7. Rolling Window & Multi-Tier Drift Detection
+    // 8. Rolling Window & Multi-Tier Drift Detection
     const detectedDrifts: DriftEvent[] = [];
 
     // A. Performance Drift
@@ -512,7 +560,7 @@ export class ShadowOrchestrator {
       ctx.ledger.recordDrifts(detectedDrifts);
     }
 
-    // 8. Health State Machine Evaluation
+    // 9. Health State Machine Evaluation
     const prevHealth = ctx.ledger.getHealthState();
     const nextHealth = ShadowHealthMachine.evaluateNextState(
       prevHealth,
@@ -524,12 +572,12 @@ export class ShadowOrchestrator {
     );
     ctx.ledger.setHealthState(nextHealth);
 
-    // 9. Automated Paper Rollback upon FAILED state
+    // 10. Automated Paper Rollback upon FAILED state
     if (nextHealth.status === 'FAILED' && prevHealth.status !== 'FAILED') {
       this.executePaperRollback(ctx, nextHealth.statusReason || 'CRITICAL_DRIFT_FAILURE', now);
     }
 
-    // 10. Audit event emission
+    // 11. Audit event emission
     if (closedTrades.length > 0) {
       ctx.ledger.recordAuditEvent({
         eventId: `evt-trade-close-${candidateId}-${candleTime}`,
@@ -567,7 +615,11 @@ export class ShadowOrchestrator {
       });
     }
 
-    // 11. Atomic persistence to disk
+    // 12. Atomic persistence to disk including restart state
+    ctx.ledger.setActiveLot(ctx.activeLot);
+    ctx.ledger.setRecentCandles(ctx.candles.slice(-100));
+    ctx.ledger.setRegimeHistory(ctx.regimeHistory.slice(-50));
+    ctx.ledger.setFeatureVectors(ctx.featureVectors.slice(-50));
     ctx.ledger.saveToFile();
 
     return {
@@ -596,6 +648,7 @@ export class ShadowOrchestrator {
     const health = ctx.ledger.getHealthState();
     const trades = ctx.ledger.getTrades();
     const observations = ctx.ledger.getObservations();
+    const allFills = ctx.ledger.getFills();
 
     const startTimestamp = observations.length > 0 ? observations[0].marketTimestamp : 0;
     const endTimestamp = observations.length > 0 ? observations[observations.length - 1].marketTimestamp : 0;
@@ -625,6 +678,17 @@ export class ShadowOrchestrator {
       if (dd > maxDrawdownR) maxDrawdownR = dd;
     }
 
+    // Authoritative calculations directly from ledger without synthetic placeholders
+    const totalFees =
+      Number(allFills.reduce((sum, f) => sum + (f.fee || 0), 0).toFixed(2)) ||
+      Number(trades.reduce((sum, t) => sum + (t.exitFees || 0) + (t.entryFees || 0), 0).toFixed(2));
+    const totalSlippage =
+      Number(allFills.reduce((sum, f) => sum + (f.slippage || 0), 0).toFixed(2)) ||
+      Number(trades.reduce((sum, t) => sum + (t.exitSlippage || 0) + (t.entrySlippage || 0), 0).toFixed(2));
+    const pnlValues = trades.map((t) => t.pnl);
+    const largestLoss = pnlValues.length > 0 ? Number(Math.min(0, ...pnlValues).toFixed(2)) : 0;
+    const largestWin = pnlValues.length > 0 ? Number(Math.max(0, ...pnlValues).toFixed(2)) : 0;
+
     const metrics: ShadowEvaluationMetrics = {
       totalTrades: trades.length,
       wins: wins.length,
@@ -639,10 +703,10 @@ export class ShadowOrchestrator {
       expectancy: expectancyR,
       averageR: expectancyR,
       medianR: expectancyR,
-      largestLoss: -100,
-      largestWin: 250,
-      fees: 0,
-      slippage: 0,
+      largestLoss,
+      largestWin,
+      fees: totalFees,
+      slippage: totalSlippage,
       observationsCount: observations.length,
     };
 
@@ -708,9 +772,14 @@ export class ShadowOrchestrator {
     return this.activeCandidates.get(candidateId)?.ledger;
   }
 
-  private validateCandleStrict(candle: ICandle, candleHistory: readonly ICandle[]): void {
+  private validateCandleStrict(candle: ICandle, candleHistory: readonly ICandle[], expectedSymbol?: string): void {
     if (!candle || typeof candle !== 'object') {
       throw new Error('INVALID_CANDLE: Candle object is undefined or null');
+    }
+
+    const candleSym = (candle as any).symbol;
+    if (candleSym && expectedSymbol && candleSym !== expectedSymbol) {
+      throw new Error(`SYMBOL_MISMATCH: Candle symbol '${candleSym}' does not match expected '${expectedSymbol}'`);
     }
 
     const { open, high, low, close, volume, timestamp } = candle;
@@ -754,54 +823,54 @@ export class ShadowOrchestrator {
     }
   }
 
-  private generateCandidateSignal(ctx: ActiveCandidateContext, candle: ICandle): ShadowSignalSnapshot {
+  private generateCandidateSignal(
+    ctx: ActiveCandidateContext,
+    candle: ICandle,
+    symbol: string,
+  ): ShadowSignalSnapshot {
     if (ctx.candles.length < 15) {
       return { direction: 'FLAT' };
     }
 
-    const config = ctx.artifact.executionConfig as any;
-    const minMtfScore = config?.minMtfScore ?? 70;
-    const stopLossAtrMultiplier = config?.stopLossAtrMultiplier ?? 1.5;
+    // Extract candidate strategy configuration
+    const strategyConfig = {
+      ...(ctx.artifact.strategyConfig || {}),
+      ...(ctx.artifact.executionConfig || {}),
+      minMtfScore: ctx.artifact.executionConfig?.minMtfScore,
+      stopLossAtrMultiplier: ctx.artifact.executionConfig?.stopLossAtrMultiplier,
+      sizingMultiplier: ctx.artifact.executionConfig?.sizingMultiplier,
+      highVolatilitySizingMultiplier: ctx.artifact.executionConfig?.highVolatilitySizingMultiplier,
+      minProbability: ctx.artifact.executionConfig?.minProbability,
+      filterRegime: ctx.artifact.executionConfig?.filterRegime,
+      regimeMode: ctx.artifact.executionConfig?.regimeMode,
+      modelArtifact: ctx.artifact.modelArtifact,
+      scalerArtifact: ctx.artifact.scalerArtifact,
+      modelWeights: (ctx.artifact as any).modelWeights || (ctx.artifact.modelArtifact as any)?.weights,
+    };
 
-    // Simple causal SMC indicator mock/derivation based on close vs 14-period SMA
-    const window14 = ctx.candles.slice(-14);
-    const avgClose = window14.reduce((s, c) => s + c.close, 0) / 14;
-    const currentClose = candle.close;
-    const diffPct = (currentClose - avgClose) / avgClose;
+    const signalSetup = SignalGenerator.generateSignal({
+      symbol,
+      executionCandles: ctx.candles,
+      strategyConfig,
+      scoringWeights: (ctx.artifact.strategyConfig as any)?.scoringWeights,
+      minimumCandles: 15,
+    });
 
-    // ATR-14 for stop loss calculation
-    let trSum = 0;
-    for (let i = 1; i < window14.length; i++) {
-      trSum += Math.max(
-        window14[i].high - window14[i].low,
-        Math.abs(window14[i].high - window14[i - 1].close),
-        Math.abs(window14[i].low - window14[i - 1].close),
-      );
-    }
-    const atr = trSum / 13 || currentClose * 0.01;
+    const isLong = signalSetup.direction === Direction.BULLISH;
+    const isShort = signalSetup.direction === Direction.BEARISH;
+    const requiredScore = typeof ctx.artifact.executionConfig?.minMtfScore === 'number' ? ctx.artifact.executionConfig.minMtfScore : 65;
+    const isActionable = (isLong || isShort) && signalSetup.score >= requiredScore;
 
-    let direction: 'LONG' | 'SHORT' | 'FLAT' = 'FLAT';
-    let stopLoss: number | undefined;
-    let takeProfit: number | undefined;
-    let confidence = 0.65;
-
-    if (diffPct > 0.01) {
-      direction = 'LONG';
-      stopLoss = Number((currentClose - atr * stopLossAtrMultiplier).toFixed(2));
-      takeProfit = Number((currentClose + atr * stopLossAtrMultiplier * 2.0).toFixed(2));
-      confidence = 0.75;
-    } else if (diffPct < -0.01) {
-      direction = 'SHORT';
-      stopLoss = Number((currentClose + atr * stopLossAtrMultiplier).toFixed(2));
-      takeProfit = Number((currentClose - atr * stopLossAtrMultiplier * 2.0).toFixed(2));
-      confidence = 0.75;
-    }
+    const direction: 'LONG' | 'SHORT' | 'FLAT' = isActionable ? (isLong ? 'LONG' : 'SHORT') : 'FLAT';
+    const confidence = signalSetup.score ? Math.min(1.0, signalSetup.score / 100) : 0.65;
 
     return {
       direction,
       confidence,
-      stopLoss,
-      takeProfit,
+      score: signalSetup.score,
+      stopLoss: signalSetup.stopLoss,
+      takeProfit: signalSetup.takeProfits?.tp1,
+      targets: signalSetup.takeProfits,
       regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
     };
   }

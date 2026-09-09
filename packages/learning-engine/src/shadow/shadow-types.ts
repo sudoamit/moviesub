@@ -1,5 +1,5 @@
 import { IBacktestTrade, ICandle } from '@quant/shared';
-import { IExecutionEvent } from '@quant/risk-engine';
+import { IExecutionEvent, PositionLot } from '@quant/risk-engine';
 import { IFill, IOrder } from '@quant/backtesting';
 import { ShadowEvaluationMetrics } from '../types';
 
@@ -29,6 +29,7 @@ export interface ShadowSignalSnapshot {
   readonly score?: number;
   readonly stopLoss?: number;
   readonly takeProfit?: number;
+  readonly targets?: { readonly tp1: number; readonly tp2: number; readonly tp3: number };
   readonly regime?: string;
   readonly conditionRules?: readonly string[];
 }
@@ -189,6 +190,7 @@ export interface ShadowLedgerData {
   readonly strategyVersion: string;
   readonly featureSchemaHash: string;
   readonly artifactHash: string;
+  readonly symbol?: string;
   readonly lastMarketTimestamp: number;
   readonly observations: readonly ShadowObservation[];
   readonly orders: readonly IOrder[];
@@ -199,5 +201,11 @@ export interface ShadowLedgerData {
   readonly comparisons: readonly CandidateProductionComparison[];
   readonly health: ShadowHealthState;
   readonly events: readonly ShadowAuditRecord[];
+  readonly activeLot?: PositionLot | null;
+  readonly recentCandles?: readonly ICandle[];
+  readonly pendingOrders?: readonly IOrder[];
+  readonly regimeHistory?: readonly any[];
+  readonly featureVectors?: readonly (readonly number[])[];
   readonly savedAt: number;
 }
+
