@@ -5,6 +5,7 @@ import {
   CandidateArtifact,
   CandidateMarketDataset,
   PromotionDecision,
+  PromotionEvidence,
   PromotionGateInput,
   PromotionPolicy,
   ShadowEvaluationMetrics,
@@ -462,6 +463,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candidate = createDummyCandidate('cand-pass-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifact);
+      ModelRegistry.updateCandidateStatus('cand-pass-1', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-pass-1', 'SHADOW_ACTIVE');
 
       const shadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-pass-1',
@@ -568,6 +571,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candidate = createDummyCandidate('cand-manual-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifact);
+      ModelRegistry.updateCandidateStatus('cand-manual-1', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-manual-1', 'SHADOW_ACTIVE');
 
       const shadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-manual-1',
@@ -675,6 +680,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candA = createDummyCandidate('cand-prod-A');
       const artifactA = CandidateBacktestRunner.createCandidateArtifact(candA, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactA);
+      ModelRegistry.updateCandidateStatus('cand-prod-A', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-prod-A', 'SHADOW_ACTIVE');
 
       const shadowResultA: ShadowEvaluationResult = {
         candidateId: 'cand-prod-A',
@@ -724,6 +731,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candB = createDummyCandidate('cand-prod-B');
       const artifactB = CandidateBacktestRunner.createCandidateArtifact(candB, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactB);
+      ModelRegistry.updateCandidateStatus('cand-prod-B', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-prod-B', 'SHADOW_ACTIVE');
 
       const shadowResultB: ShadowEvaluationResult = {
         candidateId: 'cand-prod-B',
@@ -776,6 +785,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candA = createDummyCandidate('cand-rb-A');
       const artifactA = CandidateBacktestRunner.createCandidateArtifact(candA, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactA);
+      ModelRegistry.updateCandidateStatus('cand-rb-A', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-rb-A', 'SHADOW_ACTIVE');
 
       const shadowResultA: ShadowEvaluationResult = {
         candidateId: 'cand-rb-A',
@@ -811,6 +822,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       const candB = createDummyCandidate('cand-rb-B');
       const artifactB = CandidateBacktestRunner.createCandidateArtifact(candB, 'm_hash');
       ModelRegistry.registerCandidateArtifact(artifactB);
+      ModelRegistry.updateCandidateStatus('cand-rb-B', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-rb-B', 'SHADOW_ACTIVE');
 
       const shadowResultB: ShadowEvaluationResult = {
         candidateId: 'cand-rb-B',
@@ -913,6 +926,182 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       // Verify that no production activation occurred during the learning cycle
       const events = ModelRegistry.getEventHistory();
       expect(events.every((e) => e.eventType !== 'PRODUCTION_ACTIVATED')).toBe(true);
+    });
+  });
+
+  describe('7. Phase 3 Invariant Hardening: Mandatory Persistence, Deep Freeze, State Matrix & Legacy Disable', () => {
+    const policy: PromotionPolicy = {
+      minimumShadowObservations: 50,
+      minimumShadowTrades: 10,
+      minimumProfitFactor: 1.25,
+      minimumExpectancyR: 0.15,
+      maximumDrawdownR: 3.0,
+      minimumWinRate: 50.0,
+      requirePositiveNetPnl: true,
+      requireIndependentShadowWindow: true,
+      allowAutoPromotion: true,
+    };
+
+    it('P0 #1: rejects activation and transactions when persistence is not configured', () => {
+      ModelRegistry.setPersistencePath(null);
+
+      expect(() => {
+        ModelRegistry.executeTransaction(() => {
+          return 42;
+        });
+      }).toThrow('PERSISTENCE_NOT_CONFIGURED');
+
+      // Production activation must fail closed without persistence path
+      const candidate = createDummyCandidate('cand-no-persist');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+      ModelRegistry.updateCandidateStatus('cand-no-persist', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_PENDING');
+      ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_ACTIVE');
+      ModelRegistry.updateCandidateStatus('cand-no-persist', 'PROMOTION_ELIGIBLE');
+
+      const shadowResult: ShadowEvaluationResult = {
+        candidateId: 'cand-no-persist',
+        passed: true,
+        metrics: createSampleMetrics({ totalTrades: 20, profitFactor: 2.0, expectancy: 0.4 }),
+        reasons: [],
+        window: {
+          candidateId: 'cand-no-persist',
+          marketDatasetHash: 'mkt_shadow',
+          startTimestamp: 1700000000000,
+          endTimestamp: 1700050000000,
+          minimumObservations: 50,
+          minimumTrades: 10,
+        },
+        shadowDatasetHash: 'mkt_shadow',
+        shadowStartTimestamp: 1700000000000,
+        shadowEndTimestamp: 1700050000000,
+        evaluatedAt: Date.now(),
+      };
+
+      const promotionDecision = PromotionGate.evaluatePromotion({
+        candidateArtifact: artifact,
+        shadowResult,
+        policy,
+      });
+
+      expect(() => {
+        ProductionModelActivator.activateCandidate({
+          candidateId: 'cand-no-persist',
+          promotionDecision,
+          policy,
+        });
+      }).toThrow('PERSISTENCE_NOT_CONFIGURED');
+    });
+
+    it('P0 #2: throws LEGACY_MODEL_PROMOTION_DISABLED and LEGACY_MODEL_ROLLBACK_DISABLED when legacy bypass methods are called', () => {
+      expect(() => {
+        ModelRegistry.promoteModel('v2.0-ml-canonical');
+      }).toThrow('LEGACY_MODEL_PROMOTION_DISABLED');
+
+      expect(() => {
+        ModelRegistry.rollbackModel('v2.0-ml-canonical');
+      }).toThrow('LEGACY_MODEL_ROLLBACK_DISABLED');
+    });
+
+    it('P1 #3: deeply freezes registered candidate artifacts against nested mutation', () => {
+      const candidate = createDummyCandidate('cand-deep-freeze');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      const registered = ModelRegistry.registerCandidateArtifact(artifact);
+
+      expect(Object.isFrozen(registered)).toBe(true);
+      expect(Object.isFrozen(registered.modelArtifact)).toBe(true);
+      expect(Object.isFrozen(registered.strategyConfig)).toBe(true);
+      expect(Object.isFrozen(registered.riskConfig)).toBe(true);
+      expect(Object.isFrozen(registered.executionConfig)).toBe(true);
+    });
+
+    it('P1 #4: validates promotion evidence at the ModelRegistry boundary', () => {
+      const candidate = createDummyCandidate('cand-ev-boundary');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      // Candidate not in registry must be rejected
+      const evidenceForMissing: PromotionEvidence = {
+        evidenceId: 'ev-missing',
+        candidateId: 'non-existent-cand',
+        artifactHash: 'dummy_hash',
+        trainingDatasetHash: 'dummy_train',
+        validationDatasetHash: 'dummy_val',
+        oosDatasetHash: 'dummy_oos',
+        shadowDatasetHash: 'shadow_hash_1',
+        shadowWindowStart: 1700000000000,
+        shadowWindowEnd: 1700050000000,
+        shadowMetrics: createSampleMetrics(),
+        promotionPolicyVersion: 'v2.0',
+        promotionDecision: 'PROMOTE',
+        decisionReasons: ['All thresholds passed'],
+        evaluatedAt: Date.now(),
+      };
+
+      expect(() => {
+        ModelRegistry.savePromotionEvidence(evidenceForMissing);
+      }).toThrow('INVALID_PROMOTION_EVIDENCE');
+
+      const evidence: PromotionEvidence = {
+        evidenceId: 'ev-valid-1',
+        candidateId: 'cand-ev-boundary',
+        artifactHash: artifact.artifactHash,
+        trainingDatasetHash: artifact.trainingDatasetHash,
+        validationDatasetHash: artifact.validationDatasetHash,
+        oosDatasetHash: artifact.oosDatasetHash,
+        shadowDatasetHash: 'shadow_hash_1',
+        shadowWindowStart: 1700000000000,
+        shadowWindowEnd: 1700050000000,
+        shadowMetrics: createSampleMetrics(),
+        promotionPolicyVersion: 'v2.0',
+        promotionDecision: 'PROMOTE',
+        decisionReasons: ['All thresholds passed'],
+        evaluatedAt: Date.now(),
+      };
+
+      // Evidence with wrong artifactHash must be rejected
+      expect(() => {
+        ModelRegistry.savePromotionEvidence({
+          ...evidence,
+          artifactHash: 'wrong_tampered_hash',
+        });
+      }).toThrow('INVALID_PROMOTION_EVIDENCE');
+
+      // Valid evidence succeeds
+      expect(() => {
+        ModelRegistry.savePromotionEvidence(evidence);
+      }).not.toThrow();
+    });
+
+    it('P1 #5: strictly enforces state machine transition matrix in ModelRegistry.updateCandidateStatus', () => {
+      const candidate = createDummyCandidate('cand-matrix');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      // Illegal: TRAINED -> PROMOTED directly
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'PROMOTED');
+      }).toThrow('ILLEGAL_STATE_TRANSITION');
+
+      // Illegal: TRAINED -> SHADOW_ACTIVE directly
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'SHADOW_ACTIVE');
+      }).toThrow('ILLEGAL_STATE_TRANSITION');
+
+      // Legal: TRAINED -> OOS_VALIDATED -> SHADOW_PENDING -> SHADOW_ACTIVE -> PROMOTION_ELIGIBLE -> PROMOTED
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'OOS_VALIDATED');
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'SHADOW_PENDING');
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'SHADOW_ACTIVE');
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'PROMOTION_ELIGIBLE');
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'PROMOTED');
+      }).not.toThrow();
+
+      // Legal: PROMOTED -> RETIRED
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'RETIRED');
+      }).not.toThrow();
     });
   });
 });

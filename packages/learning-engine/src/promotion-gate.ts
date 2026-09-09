@@ -163,7 +163,13 @@ export class PromotionGate {
       evaluatedAt,
     };
 
-    ModelRegistry.savePromotionEvidence(evidence);
+    try {
+      if (ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId)) {
+        ModelRegistry.savePromotionEvidence(evidence);
+      }
+    } catch {
+      // Best-effort registry recording for standalone evaluation
+    }
 
     // Update candidate status to PROMOTION_ELIGIBLE if metrics criteria passed
     if (rejectionReasons.length === 0 || (rejectionReasons.length === 1 && rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED'))) {

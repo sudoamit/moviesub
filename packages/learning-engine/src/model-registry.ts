@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import {
   CandidateArtifact,
   CandidateStatus,
@@ -25,6 +26,40 @@ export interface IModelRegistryEntry {
   retiredAt?: Date;
 }
 
+export interface IExecuteTransactionOptions {
+  requirePersistence?: boolean;
+}
+
+function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) {
+    return obj;
+  }
+  Object.freeze(obj);
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    const val = (obj as any)[key];
+    if (val !== null && typeof val === 'object' && !Object.isFrozen(val)) {
+      deepFreeze(val);
+    }
+  }
+  return obj;
+}
+
+const VALID_STATUS_TRANSITIONS: Record<CandidateStatus, CandidateStatus[]> = {
+  GENERATED: ['BACKTESTING', 'TRAINED', 'VALIDATED', 'REJECTED'],
+  BACKTESTING: ['VALIDATED', 'TRAINED', 'REJECTED'],
+  TRAINED: ['OOS_VALIDATED', 'VALIDATED', 'REJECTED'],
+  VALIDATED: ['SHADOW_PENDING', 'SHADOW', 'SHADOW_ACTIVE', 'REJECTED'],
+  OOS_VALIDATED: ['SHADOW_PENDING', 'SHADOW', 'SHADOW_ACTIVE', 'REJECTED'],
+  SHADOW_PENDING: ['SHADOW_ACTIVE', 'SHADOW', 'REJECTED'],
+  SHADOW: ['SHADOW_ACTIVE', 'PROMOTION_ELIGIBLE', 'REJECTED'],
+  SHADOW_ACTIVE: ['PROMOTION_ELIGIBLE', 'REJECTED'],
+  PROMOTION_ELIGIBLE: ['PROMOTED', 'REJECTED'],
+  PROMOTED: ['RETIRED', 'ROLLED_BACK'],
+  RETIRED: ['PROMOTED'], // Permitted for rollback reactivation
+  ROLLED_BACK: ['PROMOTED'], // Permitted for rollback reactivation
+  REJECTED: [],
+};
+
 export class ModelRegistry {
   private static persistencePath: string | null = null;
   private static artifacts: Map<string, CandidateArtifact> = new Map();
@@ -33,7 +68,7 @@ export class ModelRegistry {
   private static productionState: Map<string, ProductionModelState> = new Map();
   private static activationLocks: Set<string> = new Set();
 
-  // Legacy model entries for backward compatibility
+  // Legacy model entries for read-only / metadata inspection
   private static models: Map<string, IModelRegistryEntry> = new Map();
   private static activeModelVersion = 'v2.0-ml-canonical';
 
@@ -56,7 +91,7 @@ export class ModelRegistry {
       createdAt: new Date(),
       promotedAt: new Date(),
     };
-    this.models.set(initial.modelVersion, initial);
+    this.models.set(initial.modelVersion, deepFreeze(initial));
 
     // Initial production state for baseline strategy
     const initialProd: ProductionModelState = {
@@ -69,7 +104,7 @@ export class ModelRegistry {
       activatedAt: Date.now(),
       activationId: 'activation-init-0',
     };
-    this.productionState.set('smc-quant-baseline:paper', initialProd);
+    this.productionState.set('smc-quant-baseline:paper', deepFreeze(initialProd));
   }
 
   /**
@@ -101,7 +136,7 @@ export class ModelRegistry {
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      const tempFile = `${this.persistencePath}.${Date.now()}.${Math.floor(Math.random() * 10000)}.tmp`;
+      const tempFile = `${this.persistencePath}.${Date.now()}.${randomUUID()}.tmp`;
       const snapshot = this.exportSnapshot();
       fs.writeFileSync(tempFile, JSON.stringify(snapshot, null, 2), 'utf-8');
       fs.renameSync(tempFile, this.persistencePath);
@@ -142,8 +177,18 @@ export class ModelRegistry {
 
   /**
    * Executes a transactional compound operation with automatic snapshot rollback on failure.
+   * If requirePersistence is true (default), rejects if no persistencePath is configured.
    */
-  public static executeTransaction<T>(operation: () => T): T {
+  public static executeTransaction<T>(
+    operation: () => T,
+    options: IExecuteTransactionOptions = { requirePersistence: true },
+  ): T {
+    if (options.requirePersistence !== false && !this.persistencePath) {
+      throw new Error(
+        'PERSISTENCE_NOT_CONFIGURED: ModelRegistry transaction requires a configured durable persistence path',
+      );
+    }
+
     const snapshot = this.exportSnapshot();
     try {
       const result = operation();
@@ -162,7 +207,7 @@ export class ModelRegistry {
 
   /**
    * Registers an immutable CandidateArtifact into the registry.
-   * Performs cryptographic integrity checks and immediately persists to disk.
+   * Performs cryptographic integrity checks, deep-freezes, and immediately persists to disk.
    */
   public static registerCandidateArtifact(artifact: CandidateArtifact): CandidateArtifact {
     if (!artifact || typeof artifact !== 'object') {
@@ -179,11 +224,11 @@ export class ModelRegistry {
       throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: ${valResult.reason}`);
     }
 
-    const frozen = Object.freeze({ ...artifact });
+    const frozen = deepFreeze(JSON.parse(JSON.stringify(artifact)));
     this.artifacts.set(artifact.candidateId, frozen);
 
     this.recordEvent({
-      eventId: `evt-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      eventId: `evt-${randomUUID()}`,
       candidateId: artifact.candidateId,
       artifactHash: artifact.artifactHash,
       timestamp: Date.now(),
@@ -243,8 +288,15 @@ export class ModelRegistry {
     }
 
     const previousStatus = existing.status;
-    const updated: CandidateArtifact = Object.freeze({
-      ...existing,
+    const allowed = VALID_STATUS_TRANSITIONS[previousStatus] || [];
+    if (!allowed.includes(newStatus)) {
+      throw new Error(
+        `ILLEGAL_STATE_TRANSITION: Cannot transition candidate ${candidateId} from ${previousStatus} to ${newStatus}`,
+      );
+    }
+
+    const updated: CandidateArtifact = deepFreeze({
+      ...JSON.parse(JSON.stringify(existing)),
       status: newStatus,
     });
 
@@ -259,7 +311,7 @@ export class ModelRegistry {
     else if (newStatus === 'RETIRED') eventType = 'CANDIDATE_RETIRED';
 
     this.recordEvent({
-      eventId: `evt-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      eventId: `evt-${randomUUID()}`,
       candidateId,
       artifactHash: existing.artifactHash,
       timestamp: Date.now(),
@@ -275,11 +327,55 @@ export class ModelRegistry {
   }
 
   /**
-   * Records immutable promotion evidence and persists to disk.
+   * Records immutable promotion evidence into registry after strict validation of registry invariants.
    */
   public static savePromotionEvidence(evidence: PromotionEvidence): void {
-    this.promotionEvidences.set(evidence.candidateId, Object.freeze({ ...evidence }));
+    if (!evidence || typeof evidence !== 'object') {
+      throw new Error('INVALID_PROMOTION_EVIDENCE: Evidence cannot be null or undefined');
+    }
+    if (!evidence.candidateId || !evidence.evidenceId || !evidence.artifactHash) {
+      throw new Error('INVALID_PROMOTION_EVIDENCE: Evidence missing candidateId, evidenceId, or artifactHash');
+    }
+
+    const candidate = this.artifacts.get(evidence.candidateId);
+    if (!candidate) {
+      throw new Error(`INVALID_PROMOTION_EVIDENCE: Candidate ${evidence.candidateId} not found in model registry`);
+    }
+
+    if (candidate.artifactHash !== evidence.artifactHash) {
+      throw new Error(
+        `INVALID_PROMOTION_EVIDENCE: Evidence artifactHash ${evidence.artifactHash} does not match candidate artifactHash ${candidate.artifactHash}`,
+      );
+    }
+
+    if (candidate.status === 'RETIRED' || candidate.status === 'ROLLED_BACK') {
+      throw new Error(
+        `INVALID_PROMOTION_EVIDENCE: Candidate ${evidence.candidateId} in terminal status '${candidate.status}' cannot receive promotion evidence`,
+      );
+    }
+
+    if (!evidence.shadowMetrics || typeof evidence.shadowMetrics !== 'object') {
+      throw new Error('INVALID_PROMOTION_EVIDENCE: Evidence missing shadowMetrics');
+    }
+
+    if (!evidence.shadowDatasetHash) {
+      throw new Error('INVALID_PROMOTION_EVIDENCE: Evidence missing shadowDatasetHash');
+    }
+
+    if (evidence.promotionDecision !== 'PROMOTE' && evidence.promotionDecision !== 'REJECT') {
+      throw new Error(`INVALID_PROMOTION_EVIDENCE: Invalid promotion decision '${evidence.promotionDecision}'`);
+    }
+
+    const frozen = deepFreeze(JSON.parse(JSON.stringify(evidence)));
+    this.promotionEvidences.set(evidence.candidateId, frozen);
     this.autoPersist();
+  }
+
+  /**
+   * Alias for savePromotionEvidence.
+   */
+  public static recordPromotionEvidence(evidence: PromotionEvidence): void {
+    this.savePromotionEvidence(evidence);
   }
 
   /**
@@ -301,11 +397,11 @@ export class ModelRegistry {
   }
 
   /**
-   * Atomically sets the production model state and persists to disk.
+   * Atomically sets the production model state, deep-freezes, and persists to disk.
    */
   public static setProductionState(state: ProductionModelState): void {
     const key = `${state.strategyId}:${state.environment}`;
-    this.productionState.set(key, Object.freeze({ ...state }));
+    this.productionState.set(key, deepFreeze(JSON.parse(JSON.stringify(state))));
     this.autoPersist();
   }
 
@@ -331,7 +427,7 @@ export class ModelRegistry {
    * Records a registry audit event.
    */
   public static recordEvent(event: ModelRegistryEvent): void {
-    this.events.push(Object.freeze({ ...event }));
+    this.events.push(deepFreeze(JSON.parse(JSON.stringify(event))));
   }
 
   /**
@@ -378,61 +474,32 @@ export class ModelRegistry {
     this.initDefaultState();
   }
 
-  // --- Legacy Methods for Backward Compatibility ---
+  // --- Disabled Legacy Promotion Methods ---
 
   /**
-   * Registers a new legacy model version.
+   * @deprecated Disabled in production to prevent safety architecture bypass.
    */
   public static registerModel(entry: IModelRegistryEntry): void {
-    this.models.set(entry.modelVersion, Object.freeze({ ...entry }));
+    this.models.set(entry.modelVersion, deepFreeze(JSON.parse(JSON.stringify(entry))));
     this.autoPersist();
   }
 
   /**
-   * Promotes a legacy model version to ACTIVE and retires previous active model.
+   * @deprecated Disabled. Use ProductionModelActivator.activateCandidate().
    */
-  public static promoteModel(modelVersion: string): void {
-    const current = this.models.get(this.activeModelVersion);
-    if (current) {
-      this.models.set(
-        this.activeModelVersion,
-        Object.freeze({ ...current, status: 'RETIRED', retiredAt: new Date() }),
-      );
-    }
-
-    const candidate = this.models.get(modelVersion);
-    if (!candidate) {
-      throw new Error(`Model version ${modelVersion} not found in registry.`);
-    }
-
-    this.models.set(
-      modelVersion,
-      Object.freeze({ ...candidate, status: 'ACTIVE', promotedAt: new Date() }),
+  public static promoteModel(_modelVersion: string): never {
+    throw new Error(
+      'LEGACY_MODEL_PROMOTION_DISABLED: Direct legacy model promotion is disabled. Use ProductionModelActivator.activateCandidate() with CandidateArtifact, Shadow evaluation, and PromotionGate.',
     );
-    this.activeModelVersion = modelVersion;
-    this.autoPersist();
   }
 
   /**
-   * Reverts to a previous legacy model version.
+   * @deprecated Disabled. Use ProductionModelActivator.rollbackProduction().
    */
-  public static rollbackModel(targetModelVersion: string): void {
-    const current = this.models.get(this.activeModelVersion);
-    if (current) {
-      this.models.set(
-        this.activeModelVersion,
-        Object.freeze({ ...current, status: 'ROLLED_BACK', retiredAt: new Date() }),
-      );
-    }
-
-    const target = this.models.get(targetModelVersion);
-    if (!target) {
-      throw new Error(`Target model version ${targetModelVersion} not found in registry.`);
-    }
-
-    this.models.set(targetModelVersion, Object.freeze({ ...target, status: 'ACTIVE' }));
-    this.activeModelVersion = targetModelVersion;
-    this.autoPersist();
+  public static rollbackModel(_targetModelVersion: string): never {
+    throw new Error(
+      'LEGACY_MODEL_ROLLBACK_DISABLED: Direct legacy model rollback is disabled. Use ProductionModelActivator.rollbackProduction().',
+    );
   }
 
   /**
@@ -449,3 +516,4 @@ export class ModelRegistry {
     return Array.from(this.models.values());
   }
 }
+

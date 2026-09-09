@@ -56,9 +56,8 @@ export class RollbackManager {
     if (isDegraded && activeVersion !== previousStable) {
       const reason = `Performance degradation detected. Recent expectancy (${recentExpR}R) dropped significantly below baseline (${baselineR}R) across ${count} trades.`;
 
-      // Execute atomic rollback in registries for strategy and model bundle
+      // Execute atomic rollback in strategy registry
       StrategyRegistry.rollbackStrategy(previousStable);
-      ModelRegistry.rollbackModel(previousModelVersion);
 
       return {
         shouldRollback: true,

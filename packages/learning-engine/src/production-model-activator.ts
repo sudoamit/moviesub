@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   CandidateArtifact,
   ProductionModelState,
@@ -119,7 +120,7 @@ export class ProductionModelActivator {
         );
 
         // Atomically update production state
-        const activationId = `act-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const activationId = `act-${randomUUID()}`;
         const newProductionState: ProductionModelState = {
           strategyId,
           environment,
@@ -207,7 +208,7 @@ export class ProductionModelActivator {
           `Reactivated via rollback from ${currentState.activeCandidateId}. Reason: ${options.reason}`,
         );
 
-        const rollbackActivationId = `rb-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const rollbackActivationId = `rb-${randomUUID()}`;
         const rollbackState: ProductionModelState = {
           strategyId,
           environment,
