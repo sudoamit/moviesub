@@ -35,3 +35,4 @@ export * from './shadow-evaluator';
 export * from './production-model-activator';
 export * from './experiments';
 export * from './research';
+export * from './shadow';
