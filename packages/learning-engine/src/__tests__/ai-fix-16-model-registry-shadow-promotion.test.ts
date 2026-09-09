@@ -1168,5 +1168,97 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(saveSpy).toHaveBeenCalledTimes(1);
       saveSpy.mockRestore();
     });
+
+    it('P1 #8: loadFromFile authoritatively revalidates all artifacts, evidence, and production bindings, rejecting corrupt files', () => {
+      const corruptFilePath = path.join(testArtifactDir, 'corrupt-registry.json');
+
+      // Test 1: Tampered artifact hash rejected
+      const tamperedArtifactData = {
+        artifacts: [
+          [
+            'cand-tampered-1',
+            {
+              candidateId: 'cand-tampered-1',
+              artifactHash: 'wrong_tampered_hash_123',
+              modelHash: 'hash_1',
+              scalerHash: 'hash_2',
+              featureSchemaHash: 'hash_3',
+              selectedFeatureHash: 'hash_4',
+              trainingDatasetHash: 'hash_5',
+              validationDatasetHash: 'hash_6',
+              oosDatasetHash: 'hash_7',
+              marketDatasetHash: 'hash_8',
+              status: 'PROMOTION_ELIGIBLE',
+              createdAt: Date.now(),
+              modelVersion: 'v2.1',
+              strategyVersion: 'v2.0',
+              featureSchemaVersion: 'v2.0',
+              modelArtifact: { modelVersion: 'v2.1' },
+              strategyConfig: { parameters: {} },
+              riskConfig: {},
+              executionConfig: {},
+            },
+          ],
+        ],
+        productionState: [],
+        promotionEvidences: [],
+        events: [],
+      };
+
+      fs.writeFileSync(corruptFilePath, JSON.stringify(tamperedArtifactData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
+      // Test 2: Orphaned promotion evidence rejected
+      const candidate = createDummyCandidate('cand-valid-rec');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
+      const orphanedEvidenceData = {
+        artifacts: [[artifact.candidateId, artifact]],
+        promotionEvidences: [
+          [
+            'non-existent-candidate',
+            {
+              evidenceId: 'ev-orphan',
+              candidateId: 'non-existent-candidate',
+              artifactHash: 'dummy_hash',
+              shadowDatasetHash: 'mkt_shadow',
+              shadowMetrics: createSampleMetrics(),
+              promotionDecision: 'PROMOTE',
+            },
+          ],
+        ],
+        productionState: [],
+        events: [],
+      };
+
+      fs.writeFileSync(corruptFilePath, JSON.stringify(orphanedEvidenceData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+
+      // Test 3: Production state referring to non-promoted candidate rejected
+      const invalidProdData = {
+        artifacts: [[artifact.candidateId, { ...artifact, status: 'TRAINED' }]],
+        productionState: [
+          [
+            'smc-quant-baseline:paper',
+            {
+              strategyId: 'smc-quant-baseline',
+              environment: 'paper',
+              activeCandidateId: artifact.candidateId,
+              activeArtifactHash: artifact.artifactHash,
+            },
+          ],
+        ],
+        promotionEvidences: [],
+        events: [],
+      };
+
+      fs.writeFileSync(corruptFilePath, JSON.stringify(invalidProdData, null, 2), 'utf-8');
+      expect(() => {
+        ModelRegistry.loadFromFile(corruptFilePath);
+      }).toThrow('MODEL_REGISTRY_CORRUPT');
+    });
   });
 });

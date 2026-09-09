@@ -169,7 +169,8 @@ export class ModelRegistry {
   }
 
   /**
-   * Loads authoritative registry state from disk.
+   * Authoritatively hydrates and validates registry state from disk.
+   * Fails closed if file contains any corrupt artifacts, invalid promotion evidence, or broken state bindings.
    */
   public static loadFromFile(filePath: string): void {
     if (!fs.existsSync(filePath)) {
@@ -179,22 +180,143 @@ export class ModelRegistry {
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
       const data = JSON.parse(content);
+      if (!data || typeof data !== 'object') {
+        throw new Error('Registry file does not contain a valid JSON object');
+      }
 
+      const tempArtifacts = new Map<string, CandidateArtifact>();
+      const tempEvents: ModelRegistryEvent[] = [];
+      const tempPromotionEvidences = new Map<string, PromotionEvidence>();
+      const tempProductionState = new Map<string, ProductionModelState>();
+      const tempModels = new Map<string, IModelRegistryEntry>();
+
+      // 1. Authoritative CandidateArtifact revalidation
       if (data.artifacts) {
-        this.artifacts = new Map(data.artifacts);
+        if (!Array.isArray(data.artifacts)) {
+          throw new Error('artifacts field must be an array of entries');
+        }
+        for (const [candidateId, artifact] of data.artifacts) {
+          if (!candidateId || !artifact || typeof artifact !== 'object') {
+            throw new Error(`Invalid artifact entry for candidate: ${candidateId}`);
+          }
+          if (artifact.candidateId !== candidateId) {
+            throw new Error(
+              `Artifact candidateId mismatch: entry key ${candidateId} vs artifact ${artifact.candidateId}`,
+            );
+          }
+          const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
+          if (!val.isValid) {
+            throw new Error(`Candidate ${candidateId} integrity violation: ${val.reason}`);
+          }
+          tempArtifacts.set(candidateId, deepFreeze(JSON.parse(JSON.stringify(artifact))));
+        }
       }
-      if (data.events) {
-        this.events = data.events;
-      }
+
+      // 2. Authoritative PromotionEvidence revalidation & binding check
       if (data.promotionEvidences) {
-        this.promotionEvidences = new Map(data.promotionEvidences);
+        if (!Array.isArray(data.promotionEvidences)) {
+          throw new Error('promotionEvidences field must be an array of entries');
+        }
+        for (const [candidateId, evidence] of data.promotionEvidences) {
+          if (!candidateId || !evidence || typeof evidence !== 'object') {
+            throw new Error(`Invalid promotion evidence entry for candidate: ${candidateId}`);
+          }
+          if (evidence.candidateId !== candidateId) {
+            throw new Error(
+              `Evidence candidateId mismatch: key ${candidateId} vs evidence ${evidence.candidateId}`,
+            );
+          }
+          if (!evidence.evidenceId || !evidence.artifactHash || !evidence.shadowDatasetHash || !evidence.shadowMetrics) {
+            throw new Error(`Promotion evidence for ${candidateId} is missing required fields`);
+          }
+          const boundArtifact = tempArtifacts.get(candidateId);
+          if (!boundArtifact) {
+            throw new Error(
+              `Orphaned promotion evidence: candidate ${candidateId} does not exist in registry artifacts`,
+            );
+          }
+          if (boundArtifact.artifactHash !== evidence.artifactHash) {
+            throw new Error(
+              `Promotion evidence artifactHash mismatch for candidate ${candidateId}: ${evidence.artifactHash} vs ${boundArtifact.artifactHash}`,
+            );
+          }
+          if (evidence.promotionDecision !== 'PROMOTE' && evidence.promotionDecision !== 'REJECT') {
+            throw new Error(`Invalid promotion decision in evidence for candidate ${candidateId}`);
+          }
+          tempPromotionEvidences.set(candidateId, deepFreeze(JSON.parse(JSON.stringify(evidence))));
+        }
       }
+
+      // 3. Authoritative ProductionModelState revalidation & binding check
       if (data.productionState) {
-        this.productionState = new Map(data.productionState);
+        if (!Array.isArray(data.productionState)) {
+          throw new Error('productionState field must be an array of entries');
+        }
+        for (const [key, state] of data.productionState) {
+          if (!key || !state || typeof state !== 'object') {
+            throw new Error(`Invalid productionState entry for key: ${key}`);
+          }
+          const expectedKey = `${state.strategyId}:${state.environment}`;
+          if (key !== expectedKey) {
+            throw new Error(`Production state key mismatch: ${key} vs expected ${expectedKey}`);
+          }
+          if (!state.activeCandidateId || !state.activeArtifactHash) {
+            throw new Error(`Production state for ${key} missing active candidateId or artifactHash`);
+          }
+          if (state.activeCandidateId !== 'baseline-candidate') {
+            const activeArtifact = tempArtifacts.get(state.activeCandidateId);
+            if (!activeArtifact) {
+              throw new Error(
+                `Production state refers to missing candidate ${state.activeCandidateId}`,
+              );
+            }
+            if (activeArtifact.artifactHash !== state.activeArtifactHash) {
+              throw new Error(
+                `Production state artifactHash mismatch for active candidate ${state.activeCandidateId}`,
+              );
+            }
+            if (activeArtifact.status !== 'PROMOTED' && activeArtifact.status !== 'REACTIVATED') {
+              throw new Error(
+                `Production state candidate ${state.activeCandidateId} has invalid status '${activeArtifact.status}' (must be PROMOTED or REACTIVATED)`,
+              );
+            }
+          }
+          tempProductionState.set(key, deepFreeze(JSON.parse(JSON.stringify(state))));
+        }
       }
+
+      // 4. Audit events validation
+      if (data.events) {
+        if (!Array.isArray(data.events)) {
+          throw new Error('events field must be an array');
+        }
+        for (const event of data.events) {
+          if (!event || !event.eventId || !event.candidateId || !event.eventType || !event.timestamp) {
+            throw new Error('Corrupt audit event found in registry file');
+          }
+          tempEvents.push(deepFreeze(JSON.parse(JSON.stringify(event))));
+        }
+      }
+
+      // 5. Legacy models validation
       if (data.models) {
-        this.models = new Map(data.models);
+        if (!Array.isArray(data.models)) {
+          throw new Error('models field must be an array of entries');
+        }
+        for (const [version, model] of data.models) {
+          if (!version || !model || model.modelVersion !== version) {
+            throw new Error(`Corrupt legacy model entry for version: ${version}`);
+          }
+          tempModels.set(version, deepFreeze(JSON.parse(JSON.stringify(model))));
+        }
       }
+
+      // Atomic commit to in-memory state only after complete validation pass
+      this.artifacts = tempArtifacts;
+      this.events = tempEvents;
+      this.promotionEvidences = tempPromotionEvidences;
+      this.productionState = tempProductionState;
+      this.models = tempModels;
       if (data.activeModelVersion) {
         this.activeModelVersion = data.activeModelVersion;
       }
