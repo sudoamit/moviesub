@@ -1,4 +1,6 @@
+import { ICandle } from '@quant/shared';
 import {
+  CandidateMarketDataset,
   StrategyCandidate,
   TradingExperience,
   WalkForwardFold,
@@ -37,6 +39,9 @@ export interface IWalkForwardOptions {
   embargoDays?: number;
   embargoMs?: number;
   seed?: number;
+  candles?: ICandle[];
+  dataset?: CandidateMarketDataset;
+  testOnlyDeterministicSignals?: boolean;
   retrainFn?: (
     trainSlice: TradingExperience[],
     baseCandidate: StrategyCandidate,
@@ -187,12 +192,18 @@ export class WalkForwardValidator {
       });
       foldArtifacts.push(foldArtifact);
 
+      const evalOptions = {
+        dataset: options.dataset,
+        candles: options.candles,
+        testOnlyDeterministicSignals: options.testOnlyDeterministicSignals ?? true,
+      };
+
       // 1. Evaluate retrained candidate in-sample on training fold
-      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice);
+      const isEval = CandidateEvaluator.evaluate(foldCandidate, trainSlice, 0.05, evalOptions);
       // 2. Evaluate frozen retrained candidate on validation fold
-      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice);
+      const valEval = CandidateEvaluator.evaluate(foldCandidate, valSlice, 0.05, evalOptions);
       // 3. Evaluate frozen retrained candidate out-of-sample on OOS fold
-      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice);
+      const oosEval = CandidateEvaluator.evaluate(foldCandidate, testSlice, 0.05, evalOptions);
 
       const isExp = isEval.candidateExpectancy;
       const oosExp = oosEval.candidateExpectancy;
@@ -246,7 +257,7 @@ export class WalkForwardValidator {
   /**
    * Empirically fits candidate strategy parameters through grid search and execution evaluation strictly on training fold data.
    */
-  private static retrainCandidateOnFold(
+  public static retrainCandidateOnFold(
     trainSlice: TradingExperience[],
     baseCandidate: StrategyCandidate,
     foldIndex: number,
@@ -310,7 +321,9 @@ export class WalkForwardValidator {
       };
 
       try {
-        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, trainSlice);
+        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, trainSlice, {
+          testOnlyDeterministicSignals: true,
+        });
         if (evalRes.totalTrades > 0) {
           // Objective: Maximize trade expectancy penalized for low sample count
           const samplePenalty = Math.min(1.0, evalRes.totalTrades / Math.max(1, Math.floor(trainSlice.length / 3)));

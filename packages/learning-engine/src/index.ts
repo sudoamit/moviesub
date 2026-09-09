@@ -30,5 +30,6 @@ export * from './point-in-time-validator';
 export * from './feature-scaler';
 export * from './seeded-rng';
 export * from './candidate-backtest-runner';
+export * from './market-dataset-validator';
 export * from './experiments';
 export * from './research';

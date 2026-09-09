@@ -13,6 +13,23 @@ export class TemporalFeatureScaler {
   private featureStats: Map<string, IScaleParameters> = new Map();
 
   /**
+   * Computes a canonical SHA-256 hash for scaler parameters.
+   */
+  public static computeScalerHash(
+    scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>,
+  ): string {
+    const keys = Object.keys(scalerParameters).sort();
+    if (keys.length === 0) return crypto.createHash('sha256').update('scaler-v2-empty').digest('hex');
+    const payload = keys
+      .map(
+        (k) =>
+          `${k}:${scalerParameters[k].mean.toFixed(4)}_${scalerParameters[k].std.toFixed(4)}_${scalerParameters[k].min.toFixed(4)}_${scalerParameters[k].max.toFixed(4)}`,
+      )
+      .join('|');
+    return crypto.createHash('sha256').update(payload).digest('hex');
+  }
+
+  /**
    * Computes a canonical SHA-256 content-derived version identifier for scaler parameters.
    */
   public static computeVersion(
@@ -20,13 +37,7 @@ export class TemporalFeatureScaler {
   ): string {
     const keys = Object.keys(scalerParameters).sort();
     if (keys.length === 0) return 'scaler-v2-empty';
-    const payload = keys
-      .map(
-        (k) =>
-          `${k}:${scalerParameters[k].mean.toFixed(4)}_${scalerParameters[k].std.toFixed(4)}_${scalerParameters[k].min.toFixed(4)}_${scalerParameters[k].max.toFixed(4)}`,
-      )
-      .join('|');
-    const hash = crypto.createHash('sha256').update(payload).digest('hex').substring(0, 12);
+    const hash = this.computeScalerHash(scalerParameters).substring(0, 12);
     return `scaler-v2-${hash}`;
   }
 
@@ -105,11 +116,19 @@ export class TemporalFeatureScaler {
     return this.featureStats.get(featureName);
   }
 
-  public getVersion(): string {
+  public getParameters(): Record<string, IScaleParameters> {
     const params: Record<string, IScaleParameters> = {};
     for (const [k, v] of this.featureStats.entries()) {
       params[k] = v;
     }
-    return TemporalFeatureScaler.computeVersion(params);
+    return params;
+  }
+
+  public getScalerHash(): string {
+    return TemporalFeatureScaler.computeScalerHash(this.getParameters());
+  }
+
+  public getVersion(): string {
+    return TemporalFeatureScaler.computeVersion(this.getParameters());
   }
 }

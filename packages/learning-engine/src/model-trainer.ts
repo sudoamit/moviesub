@@ -18,14 +18,22 @@ export interface IModelTrainingOptions {
 
 export interface ITrainedModelArtifact {
   modelVersion: string;
+  modelHash?: string;
   weights: number[];
   bias: number;
   featureSchemaVersion: string;
+  featureSchemaHash?: string;
+  selectedFeatures?: string[];
+  selectedFeatureHash?: string;
+  scalerHash?: string;
+  trainingDatasetHash?: string;
+  strategyVersion?: string;
   sampleCount: number;
   trainLoss: number;
   trainedAt: Date;
   scalerArtifact?: {
     scalerVersion: string;
+    scalerHash?: string;
     scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>;
   };
 }
@@ -140,24 +148,43 @@ export class ModelTrainer {
     const roundedWeights = weights.map((w) => Number(w.toFixed(5)));
     const roundedBias = Number(bias.toFixed(5));
 
-    const modelContentStr = `samples:${samples.length}_w:${roundedWeights.join(',')}_b:${roundedBias}_loss:${finalLoss.toFixed(4)}_schema:2.0`;
-    const modelHash = crypto
+    const scalerHash = TemporalFeatureScaler.computeScalerHash(scalerParameters);
+    const featureSchemaHash = crypto
       .createHash('sha256')
-      .update(modelContentStr)
-      .digest('hex')
-      .substring(0, 12);
-    const modelVersion = `ml-v2-${modelHash}`;
+      .update('canonical_schema_v2.0_' + CANONICAL_FEATURE_NAMES_V2.join(','))
+      .digest('hex');
+    const selectedFeatureHash = crypto
+      .createHash('sha256')
+      .update(CANONICAL_FEATURE_NAMES_V2.join(','))
+      .digest('hex');
+    const trainingDatasetHash = crypto
+      .createHash('sha256')
+      .update(`dataset_${samples.length}_${samples[0]?.label ?? 0}`)
+      .digest('hex');
+
+    const modelContentStr = `samples:${samples.length}_w:${roundedWeights.join(',')}_b:${roundedBias}_loss:${finalLoss.toFixed(4)}_schema:2.0_scaler:${scalerHash}`;
+    const fullModelHash = crypto.createHash('sha256').update(modelContentStr).digest('hex');
+    const modelHashShort = fullModelHash.substring(0, 12);
+    const modelVersion = `ml-v2-${modelHashShort}`;
 
     return {
       modelVersion,
+      modelHash: fullModelHash,
       weights: roundedWeights,
       bias: roundedBias,
       featureSchemaVersion: '2.0',
+      featureSchemaHash,
+      selectedFeatures: [...CANONICAL_FEATURE_NAMES_V2],
+      selectedFeatureHash,
+      scalerHash,
+      trainingDatasetHash,
+      strategyVersion: 'v2.0',
       sampleCount: samples.length,
       trainLoss: Number(finalLoss.toFixed(4)),
       trainedAt: new Date(0),
       scalerArtifact: {
         scalerVersion: TemporalFeatureScaler.computeVersion(scalerParameters),
+        scalerHash,
         scalerParameters,
       },
     };

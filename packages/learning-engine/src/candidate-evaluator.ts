@@ -1,14 +1,16 @@
 import { ICandle } from '@quant/shared';
-import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
+import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 
 export interface ICandidateEvaluationOptions {
   baselineCandidate?: StrategyCandidate | CandidateArtifact;
+  dataset?: CandidateMarketDataset;
   candles?: ICandle[];
   minimumCandles?: number;
   warmupBars?: number;
   symbol?: string;
   timeframe?: string;
+  testOnlyDeterministicSignals?: boolean;
 }
 
 export interface ICandidateEvaluationResult {
@@ -79,11 +81,13 @@ export class CandidateEvaluator {
     // 1. Evaluate baseline strategy benchmark on authoritative BacktestSimulator using the exact same market candles
     const baselineCandidate = options?.baselineCandidate || this.createBaselineBenchmarkCandidate(baseStrategyVersion);
     const baselineRes = CandidateBacktestRunner.runCandidateBacktest(baselineCandidate, experiences, {
+      dataset: options?.dataset,
       candles: options?.candles,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
       symbol: options?.symbol,
       timeframe: options?.timeframe,
+      testOnlyDeterministicSignals: options?.testOnlyDeterministicSignals,
     });
 
     const baselineExpectancy =
@@ -93,11 +97,13 @@ export class CandidateEvaluator {
 
     // 2. Evaluate candidate strategy on authoritative BacktestSimulator using the exact same market candles
     const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, experiences, {
+      dataset: options?.dataset,
       candles: options?.candles,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
       symbol: options?.symbol,
       timeframe: options?.timeframe,
+      testOnlyDeterministicSignals: options?.testOnlyDeterministicSignals,
     });
 
     if (backtestRes.totalTrades === 0) {

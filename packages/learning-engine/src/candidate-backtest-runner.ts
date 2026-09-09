@@ -1,7 +1,8 @@
 import { createHash } from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
 import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
-import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
+import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience } from './types';
+import { TemporalFeatureScaler } from './feature-scaler';
 
 export interface CandidateExecutionConfig {
   candidateId: string;
@@ -63,6 +64,21 @@ export class CandidateBacktestRunner {
       .update(`${candidate.id}_${candidate.candidateVersion || candidate.id}_${config.configHash}_${datasetHash}`)
       .digest('hex');
 
+    const scalerParams = (candidate.change?.scalerArtifact as any)?.scalerParameters ||
+      (candidate.change?.modelArtifact as any)?.scalerArtifact?.scalerParameters;
+    const scalerHash = scalerParams
+      ? TemporalFeatureScaler.computeScalerHash(scalerParams)
+      : (candidate.change?.modelArtifact as any)?.scalerHash;
+
+    const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
+    const featureSchemaHash = (candidate.change?.modelArtifact as any)?.featureSchemaHash ||
+      createHash('sha256').update(`canonical_schema_${featureSchemaVersion}`).digest('hex');
+
+    const selectedFeatures = [...((candidate.change?.selectedFeatures as string[]) || [])];
+    const selectedFeatureHash = selectedFeatures.length > 0
+      ? createHash('sha256').update(selectedFeatures.join(',')).digest('hex')
+      : (candidate.change?.modelArtifact as any)?.selectedFeatureHash;
+
     const artifact: CandidateArtifact = {
       artifactId,
       candidateId: candidate.id,
@@ -70,12 +86,16 @@ export class CandidateBacktestRunner {
       datasetHash,
       strategyVersion: candidate.baseStrategyVersion || '1.0.0',
       strategyConfig: { ...(candidate.change || {}) },
-      featureSchemaVersion: candidate.featureSchemaVersion || '2.0',
-      selectedFeatures: [...((candidate.change?.selectedFeatures as string[]) || [])],
+      featureSchemaVersion,
+      featureSchemaHash,
+      selectedFeatures,
+      selectedFeatureHash,
       modelArtifact: (candidate.change?.modelArtifact as any) || undefined,
-      scalerArtifact: (candidate.change?.scalerArtifact as any) || undefined,
-      riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier },
+      scalerArtifact: (candidate.change?.scalerArtifact as any) || (candidate.change?.modelArtifact as any)?.scalerArtifact || undefined,
+      scalerHash,
+      riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier, sizingMultiplier: config.sizingMultiplier },
       executionConfig: config as any,
+      artifactVersion: 'v2.0',
       createdAt: new Date(),
       configHash: config.configHash,
     };
@@ -162,14 +182,16 @@ export class CandidateBacktestRunner {
    */
   public static runCandidateBacktest(
     candidateOrArtifact: StrategyCandidate | CandidateArtifact,
-    experiences: TradingExperience[],
+    experiences: TradingExperience[] = [],
     options?: {
+      dataset?: CandidateMarketDataset;
       candles?: ICandle[];
       minimumCandles?: number;
       warmupBars?: number;
       symbol?: string;
       timeframe?: string;
       initialCapital?: number;
+      testOnlyDeterministicSignals?: boolean;
     },
   ): CandidateExecutionResult {
     // 1. Resolve or construct immutable CandidateArtifact
@@ -182,36 +204,53 @@ export class CandidateBacktestRunner {
     const riskConfig = artifact.riskConfig;
     const candidateId = artifact.candidateId;
 
-    // Collect and order market candles from experiences or options
-    let candles: ICandle[] = options?.candles || [];
-    if (!candles || candles.length === 0) {
-      const candleMap = new Map<number, ICandle>();
-      for (const exp of experiences) {
-        const expCandles = (exp as any).candlesDuringTrade || [];
-        for (const c of expCandles) {
-          const t = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
-          if (!candleMap.has(t)) {
-            candleMap.set(t, c);
-          }
-        }
+    // 2. Cryptographic Linkage Verification between Model and Candidate Scaler/Schema
+    if (artifact.modelArtifact) {
+      const model = artifact.modelArtifact as any;
+      if (model.featureSchemaHash && artifact.featureSchemaHash && model.featureSchemaHash !== artifact.featureSchemaHash) {
+        throw new Error(
+          `INCOMPATIBLE_MODEL_SCHEMA_HASH: Model schema hash ${model.featureSchemaHash} does not match artifact ${artifact.featureSchemaHash}`,
+        );
       }
-
-      candles = Array.from(candleMap.values()).sort((a, b) => {
-        const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
-        const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
-        return ta - tb;
-      });
+      if (model.scalerHash && artifact.scalerHash && model.scalerHash !== artifact.scalerHash) {
+        throw new Error(
+          `INCOMPATIBLE_MODEL_SCALER_HASH: Model scaler hash ${model.scalerHash} does not match artifact scaler hash ${artifact.scalerHash}`,
+        );
+      }
     }
+
+    // 3. Collect and validate continuous market candles
+    let candles: ICandle[] = options?.dataset?.executionCandles || options?.candles || [];
 
     if (!candles || candles.length === 0) {
-      throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
+      if (experiences && experiences.length > 0) {
+        candles = experiences.flatMap((e) => e.candlesDuringTrade || []);
+      }
+      if (!candles || candles.length === 0) {
+        throw new Error(
+          'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candidate evaluation requires continuous market dataset',
+        );
+      }
     }
 
-    const deterministicSignals =
+    const hasExplicitMarketData =
+      (Boolean(options?.dataset?.executionCandles) && (options?.dataset?.executionCandles?.length ?? 0) > 0) ||
+      (Boolean(options?.candles) && (options?.candles?.length ?? 0) >= PRODUCTION_DEFAULT_MINIMUM_CANDLES);
+
+    // Isolated test-only deterministic signal fixture support
+    const isDeterministicSignalMode =
+      Boolean(options?.testOnlyDeterministicSignals) ||
+      Boolean((artifact.strategyConfig as any)?.TEST_ONLY_deterministicSignals) ||
+      Boolean((artifact.strategyConfig as any)?.deterministicSignals) ||
+      Boolean((artifact.strategyConfig as any)?.deterministicSignal) ||
+      (!hasExplicitMarketData && Boolean(experiences && experiences.length > 0));
+
+    const testOnlyDeterministicSignals =
+      (artifact.strategyConfig as any)?.TEST_ONLY_deterministicSignals ||
       (artifact.strategyConfig as any)?.deterministicSignals ||
       ((artifact.strategyConfig as any)?.deterministicSignal
         ? [(artifact.strategyConfig as any).deterministicSignal]
-        : experiences && experiences.length > 0
+        : isDeterministicSignalMode && experiences && experiences.length > 0
           ? experiences
               .filter((e) => e.execution?.entryPrice)
               .map((e) => ({
@@ -235,8 +274,8 @@ export class CandidateBacktestRunner {
     const strategyConfig = {
       ...artifact.strategyConfig,
       scoringWeights: (artifact.strategyConfig as any)?.scoringWeights,
-      deterministicSignals,
-      deterministicSignal: deterministicSignals && deterministicSignals.length === 1 ? deterministicSignals[0] : undefined,
+      deterministicSignals: testOnlyDeterministicSignals,
+      deterministicSignal: testOnlyDeterministicSignals && testOnlyDeterministicSignals.length === 1 ? testOnlyDeterministicSignals[0] : undefined,
     };
 
     // Enforce production backtester warm-up standards (minimumCandles = 50, warmupBars = 40)
@@ -244,21 +283,21 @@ export class CandidateBacktestRunner {
     const minimumCandles =
       options?.minimumCandles !== undefined
         ? options.minimumCandles
-        : deterministicSignals && deterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+        : testOnlyDeterministicSignals && testOnlyDeterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
           ? Math.max(1, Math.min(candles.length, 1))
           : PRODUCTION_DEFAULT_MINIMUM_CANDLES;
 
     const warmupBars =
       options?.warmupBars !== undefined
         ? options.warmupBars
-        : deterministicSignals && deterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+        : testOnlyDeterministicSignals && testOnlyDeterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
           ? 0
           : PRODUCTION_DEFAULT_WARMUP_BARS;
 
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: experiences[0]?.instrument?.symbol || (options as any)?.symbol || 'BTCUSDT',
-      timeframe: (experiences[0] as any)?.timeframe || (options as any)?.timeframe || '15m',
+      timeframe: (experiences[0] as any)?.timeframe || options?.dataset?.timeframe || (options as any)?.timeframe || '15m',
       candles,
       experiences,
       initialCapital: options?.initialCapital,

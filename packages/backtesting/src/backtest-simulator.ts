@@ -155,6 +155,29 @@ export class BacktestSimulator {
     const partialPolicy = options.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
     const strategyMode = options.strategyMode || 'SMC';
 
+    // Cryptographic Linkage Verification between Model and Candidate Scaler/Schema
+    if (options.candidateArtifact?.modelArtifact) {
+      const model = options.candidateArtifact.modelArtifact as any;
+      if (
+        model.featureSchemaHash &&
+        options.candidateArtifact.featureSchemaHash &&
+        model.featureSchemaHash !== options.candidateArtifact.featureSchemaHash
+      ) {
+        throw new Error(
+          `INCOMPATIBLE_MODEL_SCHEMA_HASH: Model schema hash ${model.featureSchemaHash} does not match artifact ${options.candidateArtifact.featureSchemaHash}`,
+        );
+      }
+      if (
+        model.scalerHash &&
+        options.candidateArtifact.scalerHash &&
+        model.scalerHash !== options.candidateArtifact.scalerHash
+      ) {
+        throw new Error(
+          `INCOMPATIBLE_MODEL_SCALER_HASH: Model scaler hash ${model.scalerHash} does not match artifact scaler hash ${options.candidateArtifact.scalerHash}`,
+        );
+      }
+    }
+
     // 0. Temporal filter on candles if asOfTimestamp is provided
     let inputCandles = options.candles || [];
     const tfMs = this.getDurationMs(timeframe);
@@ -659,6 +682,24 @@ export class BacktestSimulator {
                     options.experiences[0]?.marketState?.quant ||
                     options.experiences[0]?.marketState?.features
                   : undefined);
+
+              const failClosedOnMissing =
+                (model as any)?.failClosedOnMissingFeatures ||
+                (options.candidateArtifact as any)?.failClosedOnMissingFeatures ||
+                (options as any)?.failClosedOnMissingFeatures;
+
+              if (failClosedOnMissing) {
+                if (!candidateFeatures) {
+                  throw new Error('MISSING_REQUIRED_MODEL_FEATURE: No candidate feature vector available');
+                }
+                if (typeof candidateFeatures === 'object' && !Array.isArray(candidateFeatures)) {
+                  for (const name of CANONICAL_FEATURE_NAMES_V2) {
+                    if (typeof candidateFeatures[name] !== 'number' || isNaN(candidateFeatures[name])) {
+                      throw new Error(`MISSING_REQUIRED_MODEL_FEATURE: Required feature '${name}' is missing`);
+                    }
+                  }
+                }
+              }
 
               if (Array.isArray(candidateFeatures)) {
                 featureVector = candidateFeatures;

@@ -235,6 +235,40 @@ export interface StrategyCandidate {
   promotedAt?: Date;
 }
 
+export interface CandidateMarketDataset {
+  executionCandles: ICandle[];
+  higherTimeframeCandles?: Record<string, ICandle[]>;
+  startTimestamp: number;
+  endTimestamp: number;
+  timeframe: string;
+  datasetHash: string;
+}
+
+export interface HistoricalExperienceOutcome {
+  readonly _brand: 'HistoricalExperienceOutcome';
+  readonly status: 'WIN' | 'LOSS' | 'TIMEOUT' | 'SCRATCH';
+  readonly pnl: number;
+  readonly pnlR: number;
+  readonly maxFavorableExcursion: number;
+  readonly maxAdverseExcursion: number;
+  readonly holdingTimeSeconds: number;
+  readonly exitPrice?: number;
+  readonly exitTime?: Date;
+}
+
+export interface SimulatedBacktestOutcome {
+  readonly _brand: 'SimulatedBacktestOutcome';
+  readonly tradeCount: number;
+  readonly winRate: number;
+  readonly expectancyR: number;
+  readonly totalPnLR: number;
+  readonly profitFactor: number;
+  readonly maxDrawdownPercent: number;
+  readonly totalFees: number;
+  readonly totalSlippage: number;
+  readonly trades: any[];
+}
+
 export interface CandidateArtifact {
   readonly artifactId: string;
   readonly candidateId: string;
@@ -244,13 +278,17 @@ export interface CandidateArtifact {
   readonly strategyConfig: Record<string, unknown>;
   readonly modelArtifact?: Record<string, unknown>;
   readonly featureSchemaVersion: string;
+  readonly featureSchemaHash?: string;
   readonly selectedFeatures: string[];
+  readonly selectedFeatureHash?: string;
   readonly scalerArtifact?: Record<string, unknown>;
+  readonly scalerHash?: string;
   readonly riskConfig: Record<string, unknown>;
   readonly executionConfig: Record<string, unknown>;
   readonly trainingSeed?: number;
   readonly candidateSeed?: number;
   readonly parentCandidateId?: string;
+  readonly artifactVersion?: string;
   readonly createdAt: Date;
   readonly configHash: string;
 }
