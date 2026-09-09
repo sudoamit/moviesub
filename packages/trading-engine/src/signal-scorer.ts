@@ -28,6 +28,19 @@ export interface IScoringInputs {
   indicatorsAligned: boolean;
 }
 
+export interface IScoringWeights {
+  htfAlignment?: number;
+  liquiditySweep?: number;
+  structureBreak?: number;
+  orderBlock?: number;
+  fairValueGap?: number;
+  displacement?: number;
+  dealingRange?: number;
+  volumeExpansion?: number;
+  riskReward?: number;
+  indicatorAlignment?: number;
+}
+
 export interface IDetailedScoreResult {
   totalScore: number;
   grade: SignalGrade;
@@ -40,7 +53,10 @@ export class SignalScorer {
    * Deterministically calculates 0-100 setup score and confidence grade with decoupled
    * Order Block, FVG, Liquidity, and Structural Quality components.
    */
-  static calculateScore(inputs: IScoringInputs): IDetailedScoreResult {
+  static calculateScore(
+    inputs: IScoringInputs,
+    customWeights?: IScoringWeights,
+  ): IDetailedScoreResult {
     if (inputs.direction === Direction.NEUTRAL) {
       return {
         totalScore: 0,
@@ -62,10 +78,27 @@ export class SignalScorer {
       };
     }
 
+    const weights: Required<IScoringWeights> = {
+      htfAlignment: customWeights?.htfAlignment ?? 20,
+      liquiditySweep: customWeights?.liquiditySweep ?? 15,
+      structureBreak: customWeights?.structureBreak ?? 15,
+      orderBlock: customWeights?.orderBlock ?? 8,
+      fairValueGap: customWeights?.fairValueGap ?? 7,
+      displacement: customWeights?.displacement ?? 10,
+      dealingRange: customWeights?.dealingRange ?? 10,
+      volumeExpansion: customWeights?.volumeExpansion ?? 5,
+      riskReward: customWeights?.riskReward ?? 5,
+      indicatorAlignment: customWeights?.indicatorAlignment ?? 5,
+    };
+
     const components: Record<string, IConfluenceComponentScore> = {};
 
-    // 1. HTF Trend Alignment (20 points max)
-    const htfScore = inputs.htfAligned ? (inputs.htfAlignmentScore >= 20 ? 20 : 15) : 0;
+    // 1. HTF Trend Alignment
+    const htfScore = inputs.htfAligned
+      ? inputs.htfAlignmentScore >= 20
+        ? weights.htfAlignment
+        : Math.round(weights.htfAlignment * 0.75)
+      : 0;
     components.htfAlignment = {
       score: htfScore,
       confidence: inputs.htfAligned ? (inputs.htfAlignmentScore >= 20 ? 1.0 : 0.75) : 0,
@@ -75,9 +108,11 @@ export class SignalScorer {
         : 'HTF structural conflict',
     };
 
-    // 2. Liquidity Sweep (15 points max)
+    // 2. Liquidity Sweep
     const liqQuality = inputs.liquidityQuality ?? (inputs.hasLiquiditySweep ? 1.0 : 0);
-    const sweepScore = inputs.hasLiquiditySweep ? Math.round(15 * Math.max(0.5, liqQuality)) : 0;
+    const sweepScore = inputs.hasLiquiditySweep
+      ? Math.round(weights.liquiditySweep * Math.max(0.5, liqQuality))
+      : 0;
     components.liquiditySweep = {
       score: sweepScore,
       confidence: liqQuality,
@@ -89,9 +124,9 @@ export class SignalScorer {
         : 'Absence of stop run',
     };
 
-    // 3. Break of Structure / CHoCH (15 points max)
+    // 3. Break of Structure / CHoCH
     const hasStructure = Boolean(inputs.hasBOS || inputs.hasCHOCH || inputs.hasBOSOrCHOCH);
-    const structureScore = hasStructure ? 15 : 0;
+    const structureScore = hasStructure ? weights.structureBreak : 0;
     components.structureBreak = {
       score: structureScore,
       confidence: hasStructure ? 1.0 : 0,
@@ -107,11 +142,13 @@ export class SignalScorer {
         : 'No confirmed trend change',
     };
 
-    // 4. Order Block Quality (8 points max) - DECOUPLED FROM FVG
+    // 4. Order Block Quality - DECOUPLED FROM FVG
     const hasOB =
       inputs.hasOrderBlock !== undefined ? inputs.hasOrderBlock : (inputs.hasOBOrFVG ?? false);
     const obQuality = inputs.orderBlockQuality ?? (hasOB ? 1.0 : 0);
-    const obScore = hasOB ? Math.min(8, Math.round(8 * Math.max(0.5, obQuality))) : 0;
+    const obScore = hasOB
+      ? Math.min(weights.orderBlock, Math.round(weights.orderBlock * Math.max(0.5, obQuality)))
+      : 0;
     components.orderBlock = {
       score: obScore,
       confidence: obQuality,
@@ -123,10 +160,12 @@ export class SignalScorer {
         : 'Missing order block POI',
     };
 
-    // 5. FVG Quality (7 points max) - DECOUPLED FROM OB
+    // 5. FVG Quality - DECOUPLED FROM OB
     const hasFVG = inputs.hasFVG !== undefined ? inputs.hasFVG : (inputs.hasOBOrFVG ?? false);
     const fvgQuality = inputs.fvgQuality ?? (hasFVG ? 1.0 : 0);
-    const fvgScore = hasFVG ? Math.min(7, Math.round(7 * Math.max(0.5, fvgQuality))) : 0;
+    const fvgScore = hasFVG
+      ? Math.min(weights.fairValueGap, Math.round(weights.fairValueGap * Math.max(0.5, fvgQuality)))
+      : 0;
     components.fairValueGap = {
       score: fvgScore,
       confidence: fvgQuality,
@@ -136,10 +175,16 @@ export class SignalScorer {
       reason: hasFVG ? 'Mitigation of price imbalance / liquidity void' : 'No active FVG zone',
     };
 
-    // 6. Displacement Quality (10 points max)
+    // 6. Displacement Quality
     const dispRatio = inputs.displacementRatio || 0;
     const displacementScore =
-      dispRatio >= 1.5 ? 10 : dispRatio >= 1.0 ? 6 : dispRatio >= 0.7 ? 3 : 0;
+      dispRatio >= 1.5
+        ? weights.displacement
+        : dispRatio >= 1.0
+          ? Math.round(weights.displacement * 0.6)
+          : dispRatio >= 0.7
+            ? Math.round(weights.displacement * 0.3)
+            : 0;
     components.displacement = {
       score: displacementScore,
       confidence: Math.min(1.0, dispRatio / 1.5),
@@ -150,8 +195,8 @@ export class SignalScorer {
           : 'Weak or indecisive candle bodies',
     };
 
-    // 7. Premium / Discount Zone (10 points max)
-    const zoneScore = inputs.inCorrectZone ? 10 : 0;
+    // 7. Premium / Discount Zone
+    const zoneScore = inputs.inCorrectZone ? weights.dealingRange : 0;
     components.dealingRange = {
       score: zoneScore,
       confidence: inputs.inCorrectZone ? 1.0 : 0,
@@ -163,8 +208,8 @@ export class SignalScorer {
         : 'Trading into opposing premium/discount equilibrium',
     };
 
-    // 8. Volume Confirmation (5 points max)
-    const volumeScore = inputs.hasVolumeExpansion ? 5 : 0;
+    // 8. Volume Confirmation
+    const volumeScore = inputs.hasVolumeExpansion ? weights.volumeExpansion : 0;
     components.volumeExpansion = {
       score: volumeScore,
       confidence: inputs.hasVolumeExpansion ? 1.0 : 0.3,
@@ -174,9 +219,14 @@ export class SignalScorer {
       reason: inputs.hasVolumeExpansion ? 'Participation confirmation' : 'Low volume backdrop',
     };
 
-    // 9. Risk-to-Reward >= 2.0 (5 points max)
+    // 9. Risk-to-Reward
     const rr = inputs.riskRewardRatio || 0;
-    const rrScore = rr >= 2.0 ? 5 : rr >= 1.5 ? 3 : 0;
+    const rrScore =
+      rr >= 2.0
+        ? weights.riskReward
+        : rr >= 1.5
+          ? Math.round(weights.riskReward * 0.6)
+          : 0;
     components.riskReward = {
       score: rrScore,
       confidence: Math.min(1.0, rr / 2.0),
@@ -184,8 +234,8 @@ export class SignalScorer {
       reason: rr >= 2.0 ? 'Favorable asymmetric payoff' : 'Substandard risk-reward profile',
     };
 
-    // 10. Indicator Alignment (5 points max)
-    const indicatorScore = inputs.indicatorsAligned ? 5 : 0;
+    // 10. Indicator Alignment
+    const indicatorScore = inputs.indicatorsAligned ? weights.indicatorAlignment : 0;
     components.indicatorAlignment = {
       score: indicatorScore,
       confidence: inputs.indicatorsAligned ? 1.0 : 0,

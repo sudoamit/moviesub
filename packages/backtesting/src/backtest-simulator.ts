@@ -7,7 +7,13 @@ import {
   SignalState,
   Timeframe,
 } from '@quant/shared';
-import { SignalGenerator } from '@quant/trading-engine';
+import {
+  SignalGenerator,
+  CanonicalMLEngineV2,
+  SnapshotBuilder,
+  CANONICAL_FEATURE_NAMES_V2,
+  CANONICAL_V2_DIMENSION,
+} from '@quant/trading-engine';
 import {
   PositionSizer,
   TradeLifecycleManager,
@@ -514,175 +520,305 @@ export class BacktestSimulator {
       // 4. Scan for New Signal on Historical Bar i (Zero Lookahead via MarketDataRouter & explicit asOfTimestamp)
       if (!activeLot && !pendingEntryOrder) {
         const mtfData = router.getAvailableMarketDataAt(i);
-        let signal: ISignalSetup | undefined;
 
-        if (options.experiences && options.experiences.length > 0) {
-          const matchingExp = options.experiences.find((exp: any) => {
-            const expTime = exp.decisionTimestamp !== undefined
-              ? exp.decisionTimestamp
-              : (exp.timestamp instanceof Date ? exp.timestamp.getTime() : new Date(exp.timestamp).getTime());
-            return Math.abs(expTime - candleTime) <= 1000;
-          });
+        // Authoritative signal generation directly from market data using candidate strategy configuration
+        const effectiveStrategyMode =
+          (options.candidateArtifact?.strategyConfig?.strategyMode || options.strategyMode || strategyMode) as any;
+        const scoringWeights =
+          options.scoringWeights || options.candidateArtifact?.strategyConfig?.scoringWeights;
+        const strategyConfig =
+          options.strategyConfig ||
+          options.candidateArtifact?.strategyConfig ||
+          (options.experiences && options.experiences.length > 0 && options.experiences[0]?.execution?.entryPrice
+            ? {
+                deterministicSignals: options.experiences
+                  .filter((e) => e.execution?.entryPrice)
+                  .map((e) => ({
+                    id: e.id,
+                    direction: e.decision?.action === 'SELL' ? 'BEARISH' : 'BULLISH',
+                    score: e.decision?.score ?? 80,
+                    entryPrice: e.execution?.entryPrice,
+                    stopLoss: e.risk?.stopLoss,
+                    tp1: e.risk?.target1,
+                    tp2: e.risk?.target2,
+                    tp3: e.risk?.target3,
+                    reasons: [...(e.reasons || []), ...(e.failureReasons || [])],
+                    marketContext: e.marketContext,
+                    features: (e as any).features,
+                    marketState: e.marketState,
+                    prediction: e.prediction,
+                    timestamp: e.timestamp,
+                  })),
+              }
+            : undefined);
 
-          if (matchingExp) {
-            let skip = false;
-            // Filter out HTF conflicts or conditions depending on candidate parameter rules
-            if (options.conditionRules && options.conditionRules.length > 0) {
-              if (options.conditionRules.some((r: any) => matchingExp.failureReasons?.includes(r))) {
-                skip = true;
-              }
-            }
+        const signal = SignalGenerator.generateSignal({
+          symbol,
+          executionCandles: mtfData.executionSlice,
+          executionTimeframe: timeframe,
+          htf1Candles: mtfData.htf1Slice,
+          htf1Timeframe: options.htf1Timeframe || '1h',
+          htf2Candles: mtfData.htf2Slice,
+          htf2Timeframe: options.htf2Timeframe || '4h',
+          strategyMode: effectiveStrategyMode,
+          asOfTimestamp: new Date(mtfData.timestamp),
+          scoringWeights,
+          strategyConfig,
+          minimumCandles: options.minimumCandles,
+        });
 
-            // Regime filtering (INCLUDE_REGIME / EXCLUDE_REGIME)
-            if (options.filterRegime) {
-              const expRegime = matchingExp.marketContext?.regime;
-              if (options.regimeMode === 'INCLUDE' && expRegime !== options.filterRegime) {
-                skip = true;
-              } else if (options.regimeMode === 'EXCLUDE' && expRegime === options.filterRegime) {
-                skip = true;
-              }
-            }
-
-            // Model scoring & filtering if candidate model artifact provided
-            const model = options.modelArtifact || options.candidateArtifact?.modelArtifact;
-            if (model) {
-              let modelScore: number | undefined;
-              if (typeof (model as any).score === 'function') {
-                modelScore = (model as any).score(matchingExp);
-              } else if (Array.isArray((model as any).weights) && typeof (model as any).bias === 'number') {
-                let z = (model as any).bias;
-                for (let j = 0; j < (model as any).weights.length; j++) {
-                  z += (model as any).weights[j] * 0.1;
-                }
-                const prob = 1.0 / (1.0 + Math.exp(-Math.max(-10, Math.min(10, z))));
-                modelScore = Math.round(prob * 100);
-              }
-              if (typeof modelScore === 'number' && modelScore < minScore) {
-                skip = true;
-              }
-              if (typeof (model as any).predict === 'function') {
-                const pred = (model as any).predict(matchingExp);
-                if (pred && typeof pred.score === 'number' && pred.score < minScore) {
-                  skip = true;
-                }
-              }
-            }
-
-            if (!skip) {
-              const entryPrice = matchingExp.execution?.entryPrice || currentCandle.close;
-              const baseStopPrice = matchingExp.risk?.stopLoss || entryPrice * 0.95;
-              const baseStopDist = Math.abs(entryPrice - baseStopPrice);
-              const stopDist = baseStopDist * (options.stopLossAtrMultiplier || 1.0);
-              const isLong = matchingExp.decision?.action !== 'SELL';
-              const stopPrice = isLong ? entryPrice - stopDist : entryPrice + stopDist;
-              const target1 =
-                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
-                  ? isLong ? entryPrice + stopDist * 1.5 : entryPrice - stopDist * 1.5
-                  : (matchingExp.risk?.target1 ?? (isLong ? entryPrice + stopDist * 1.5 : entryPrice - stopDist * 1.5));
-              const target2 =
-                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
-                  ? isLong ? entryPrice + stopDist * 2.5 : entryPrice - stopDist * 2.5
-                  : (matchingExp.risk?.target2 ?? (isLong ? entryPrice + stopDist * 2.5 : entryPrice - stopDist * 2.5));
-              const target3 =
-                options.stopLossAtrMultiplier && options.stopLossAtrMultiplier !== 1.0
-                  ? isLong ? entryPrice + stopDist * 4.0 : entryPrice - stopDist * 4.0
-                  : (matchingExp.risk?.target3 ?? (isLong ? entryPrice + stopDist * 4.0 : entryPrice - stopDist * 4.0));
-              
-              signal = {
-                id: matchingExp.id,
-                symbol,
-                direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-                score: matchingExp.decision?.score ?? 80,
-                grade: SignalGrade.A_PLUS,
-                entryZone: { min: entryPrice, max: entryPrice, optimal: entryPrice },
-                stopLoss: stopPrice,
-                takeProfits: {
-                  tp1: target1,
-                  tp2: target2,
-                  tp3: target3,
-                },
-                riskRewardRatios: {
-                  rr1: 1.5,
-                  rr2: 2.5,
-                  rr3: 4.0,
-                },
-                reasoning: {} as any,
-                scoreBreakdown: {} as any,
-                timeframe,
-                reasons: ['Candidate experience replay setup'],
-                timestamp: new Date(candleTime),
-                state: SignalState.ACTIVE,
-              };
-            }
-          }
-        } else {
-          signal = SignalGenerator.generateSignal({
-            symbol,
-            executionCandles: mtfData.executionSlice,
-            executionTimeframe: timeframe,
-            htf1Candles: mtfData.htf1Slice,
-            htf1Timeframe: options.htf1Timeframe || '1h',
-            htf2Candles: mtfData.htf2Slice,
-            htf2Timeframe: options.htf2Timeframe || '4h',
-            strategyMode,
-            asOfTimestamp: new Date(mtfData.timestamp),
-          });
-        }
+        const effectiveMinScore =
+          options.candidateArtifact?.executionConfig?.minMtfScore ?? options.minScore ?? minScore;
+        const effectiveStopLossMultiplier =
+          options.candidateArtifact?.riskConfig?.stopLossAtrMultiplier ??
+          options.candidateArtifact?.executionConfig?.stopLossAtrMultiplier ??
+          options.stopLossAtrMultiplier;
+        const effectiveSizingMultiplier =
+          options.candidateArtifact?.executionConfig?.sizingMultiplier ?? options.sizingMultiplier;
+        const effectiveHighVolMultiplier =
+          options.candidateArtifact?.executionConfig?.highVolatilitySizingMultiplier ??
+          options.highVolatilitySizingMultiplier;
+        const effectiveConditionRules =
+          options.candidateArtifact?.executionConfig?.conditionRules ?? options.conditionRules;
+        const effectiveFilterRegime =
+          options.candidateArtifact?.executionConfig?.filterRegime ?? options.filterRegime;
+        const effectiveRegimeMode =
+          options.candidateArtifact?.executionConfig?.regimeMode ?? options.regimeMode;
+        const effectiveMinProbability =
+          options.candidateArtifact?.executionConfig?.minProbability ?? options.minProbability;
 
         if (
           signal &&
           signal.direction !== Direction.NEUTRAL &&
-          signal.score >= minScore &&
+          signal.score >= effectiveMinScore &&
           signal.grade !== SignalGrade.NO_TRADE
         ) {
-          pendingEntrySignal = signal;
-          const isLong = signal.direction === Direction.BULLISH;
-          const decisionPrice =
-            options.experiences && options.experiences.length > 0
-              ? signal.entryZone.optimal
-              : fillModel === FillModel.NEXT_BAR_MARKET
-                ? currentCandle.close
-                : signal.entryZone.optimal;
+          let skip = false;
 
-          // Fail-closed position sizing using reference decision price
-          const sizing = PositionSizer.calculatePosition({
-            accountBalance: currentEquity,
-            riskPercentage: riskPercent,
-            entryPrice: decisionPrice,
-            stopLoss: signal.stopLoss,
-            lotSize,
-          });
-
-          let finalQuantity = sizing.roundedUnits;
-          if (options.sizingMultiplier && options.sizingMultiplier > 0) {
-            finalQuantity = Math.max(1, Math.round(finalQuantity * options.sizingMultiplier));
-          }
-          if (options.highVolatilitySizingMultiplier && options.highVolatilitySizingMultiplier > 0) {
-            const isHighVol =
-              (options.experiences?.find((e: any) => e.id === signal?.id)?.marketContext?.regime === 'HIGH_VOLATILITY') ||
-              (options.experiences?.find((e: any) => e.id === signal?.id)?.marketContext?.volatilityRegime === 'HIGH');
-            if (isHighVol) {
-              finalQuantity = Math.max(1, Math.round(finalQuantity * options.highVolatilitySizingMultiplier));
+          // Condition rules filtering
+          if (effectiveConditionRules && effectiveConditionRules.length > 0) {
+            if (effectiveConditionRules.some((r: any) => signal.reasons?.includes(r))) {
+              skip = true;
             }
           }
 
-          if (sizing.isValid && finalQuantity > 0) {
-            const side = isLong ? 'BUY' : 'SELL';
-            const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
-            pendingEntryOrder = execSim.submitOrder({
-              tradeId: signal.id || `trade_${candleTime}`,
-              symbol,
-              side,
-              orderType,
-              price: decisionPrice,
-              quantity: finalQuantity,
+          // Regime filtering (INCLUDE_REGIME / EXCLUDE_REGIME)
+          if (effectiveFilterRegime) {
+            const currentRegime =
+              (signal as any).marketContext?.regime ||
+              (mtfData.currentCandle as any)?.regime ||
+              (mtfData.currentCandle as any)?.marketContext?.regime;
+            if (effectiveRegimeMode === 'INCLUDE' && currentRegime !== effectiveFilterRegime) {
+              skip = true;
+            } else if (effectiveRegimeMode === 'EXCLUDE' && currentRegime === effectiveFilterRegime) {
+              skip = true;
+            }
+          }
+
+          // Model scoring & filtering if candidate model artifact provided
+          const model = options.modelArtifact || options.candidateArtifact?.modelArtifact;
+          let modelProb: number | undefined;
+          if (model) {
+            const scalerParams =
+              (model as any).scalerArtifact?.scalerParameters ||
+              options.candidateArtifact?.scalerArtifact?.scalerParameters ||
+              (options as any).scalerArtifact?.scalerParameters;
+
+            let modelScore: number | undefined;
+            const modelInput = {
+              signal,
+              candle: currentCandle,
               timestamp: candleTime,
-              referencePrice: decisionPrice,
-              maxRiskDrift: 0.25,
-              signalTimestamp: candleTime,
-              ambiguityMode,
-              exitTarget: 'ENTRY',
+            };
+
+            if (typeof (model as any).score === 'function') {
+              modelScore = (model as any).score(modelInput);
+            } else if (Array.isArray((model as any).weights) && typeof (model as any).bias === 'number') {
+              // Extract the REAL 28-dimensional canonical feature vector
+              let featureVector: number[] | undefined;
+
+              // 1. From signal.features or deterministic setup or matching experience
+              const matchingExp = options.experiences?.find(
+                (e) =>
+                  Math.abs(
+                    (e.timestamp instanceof Date ? e.timestamp.getTime() : new Date(e.timestamp).getTime()) -
+                      candleTime,
+                  ) <= 1000,
+              );
+
+              const candidateFeatures =
+                (signal as any).features ||
+                (signal as any).quantSnapshot?.features ||
+                (signal as any).marketState?.quant ||
+                (signal as any).marketState?.features ||
+                (matchingExp as any)?.features ||
+                matchingExp?.marketState?.quant ||
+                matchingExp?.marketState?.features ||
+                (options.experiences && options.experiences.length === 1
+                  ? (options.experiences[0] as any).features ||
+                    options.experiences[0]?.marketState?.quant ||
+                    options.experiences[0]?.marketState?.features
+                  : undefined);
+
+              if (Array.isArray(candidateFeatures)) {
+                featureVector = candidateFeatures;
+              } else if (candidateFeatures && typeof candidateFeatures === 'object') {
+                featureVector = CANONICAL_FEATURE_NAMES_V2.map((name) => {
+                  let val = candidateFeatures[name];
+                  if (typeof val === 'number') {
+                    if (!scalerParams && val > 1.0 && val <= 100.0) val = val / 100.0;
+                    return val;
+                  }
+                  return 0.5;
+                });
+              } else if ((signal as any).quantSnapshot) {
+                const feats = CanonicalMLEngineV2.extractFeatures((signal as any).quantSnapshot);
+                featureVector = CanonicalMLEngineV2.toArray(feats);
+              } else if (mtfData.executionSlice.length >= 20) {
+                // Build snapshot from execution and HTF candles if sufficient history exists
+                try {
+                  const snap = SnapshotBuilder.buildSnapshot({
+                    symbol,
+                    executionCandles: mtfData.executionSlice,
+                    executionTimeframe: timeframe,
+                    htf1Candles: mtfData.htf1Slice,
+                    htf1Timeframe: options.htf1Timeframe,
+                    htf2Candles: mtfData.htf2Slice,
+                    htf2Timeframe: options.htf2Timeframe,
+                    asOfTimestamp: new Date(mtfData.timestamp),
+                  });
+                  const feats = CanonicalMLEngineV2.extractFeatures(snap);
+                  featureVector = CanonicalMLEngineV2.toArray(feats);
+                } catch {
+                  featureVector = undefined;
+                }
+              }
+
+              if (!featureVector) {
+                // Fallback: derive approximate canonical vector from available signal data
+                featureVector = CANONICAL_FEATURE_NAMES_V2.map((name) => {
+                  if (name === 'smcScore') return (signal.score || 50) / 100.0;
+                  if (name === 'riskRewardRatio') return Math.min(1.0, (signal.riskRewardRatios?.rr1 || 1.5) / 5.0);
+                  if (name === 'mtfAlignment') return signal.score >= 75 ? 1.0 : signal.score >= 60 ? 0.6 : 0.2;
+                  return 0.5;
+                });
+              }
+
+              // Evaluate against actual experience/market feature vector using scalerArtifact if present
+              let z = (model as any).bias;
+              for (let j = 0; j < (model as any).weights.length; j++) {
+                const featName = CANONICAL_FEATURE_NAMES_V2[j];
+                const rawFeatVal =
+                  featureVector && j < featureVector.length && typeof featureVector[j] === 'number'
+                    ? featureVector[j]
+                    : 0.5;
+                const scaledVal =
+                  scalerParams && featName && scalerParams[featName]
+                    ? scalerParams[featName].std < 1e-5
+                      ? 0
+                      : (rawFeatVal - scalerParams[featName].mean) / scalerParams[featName].std
+                    : rawFeatVal - 0.5;
+                z += (model as any).weights[j] * scaledVal;
+              }
+              const prob = 1.0 / (1.0 + Math.exp(-Math.max(-15, Math.min(15, z))));
+              modelProb = prob;
+              modelScore = Math.round(prob * 100);
+            }
+
+            if (typeof (model as any).predict === 'function') {
+              const pred = (model as any).predict(modelInput);
+              if (pred && typeof pred.score === 'number') {
+                modelScore = pred.score;
+              }
+              if (pred && typeof pred.probability === 'number') {
+                modelProb = pred.probability;
+              }
+            }
+
+            const requiredMinScore =
+              effectiveMinProbability !== undefined
+                ? (effectiveMinProbability > 1 ? effectiveMinProbability : effectiveMinProbability * 100)
+                : (effectiveMinScore ?? minScore);
+
+            if (typeof modelScore === 'number' && modelScore < requiredMinScore) {
+              skip = true;
+            }
+          }
+
+          // Universal minProbability enforcement across model predictions and signal probability
+          if (effectiveMinProbability !== undefined) {
+            const minProbThreshold =
+              effectiveMinProbability > 1 ? effectiveMinProbability / 100.0 : effectiveMinProbability;
+            const signalProb =
+              modelProb ??
+              (signal as any).mlProbability ??
+              (signal as any).quantSnapshot?.ml?.probabilityWin ??
+              (signal as any).prediction?.probabilityWin ??
+              (signal as any).probability;
+
+            if (typeof signalProb === 'number' && signalProb < minProbThreshold) {
+              skip = true;
+            }
+          }
+
+          if (!skip) {
+            // Apply candidate stop loss multiplier if configured
+            if (effectiveStopLossMultiplier && effectiveStopLossMultiplier !== 1.0) {
+              const baseStopDist = Math.abs(signal.entryZone.optimal - signal.stopLoss);
+              const newStopDist = baseStopDist * effectiveStopLossMultiplier;
+              signal.stopLoss =
+                signal.direction === Direction.BULLISH
+                  ? signal.entryZone.optimal - newStopDist
+                  : signal.entryZone.optimal + newStopDist;
+            }
+
+            pendingEntrySignal = signal;
+            const isLong = signal.direction === Direction.BULLISH;
+            const decisionPrice =
+              fillModel === FillModel.NEXT_BAR_MARKET
+                ? currentCandle.close
+                : signal.entryZone.optimal;
+
+            // Fail-closed position sizing using reference decision price
+            const sizing = PositionSizer.calculatePosition({
+              accountBalance: currentEquity,
+              riskPercentage: riskPercent,
+              entryPrice: decisionPrice,
+              stopLoss: signal.stopLoss,
+              lotSize,
             });
+
+            let finalQuantity = sizing.roundedUnits;
+            if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
+              finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
+            }
+            if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
+              const isHighVol =
+                (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
+                (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
+              if (isHighVol) {
+                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
+              }
+            }
+
+            if (sizing.isValid && finalQuantity > 0) {
+              const side = isLong ? 'BUY' : 'SELL';
+              const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
+              pendingEntryOrder = execSim.submitOrder({
+                tradeId: signal.id || `trade_${candleTime}`,
+                symbol,
+                side,
+                orderType,
+                price: decisionPrice,
+                quantity: finalQuantity,
+                timestamp: candleTime,
+                referencePrice: decisionPrice,
+                maxRiskDrift: 0.25,
+                signalTimestamp: candleTime,
+                ambiguityMode,
+                exitTarget: 'ENTRY',
+              });
+            }
           }
         }
       }

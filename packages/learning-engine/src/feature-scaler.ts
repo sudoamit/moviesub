@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { IDatasetSample } from './dataset-manager';
 import { TradingExperience } from './types';
 
@@ -10,6 +11,24 @@ export interface IScaleParameters {
 
 export class TemporalFeatureScaler {
   private featureStats: Map<string, IScaleParameters> = new Map();
+
+  /**
+   * Computes a canonical SHA-256 content-derived version identifier for scaler parameters.
+   */
+  public static computeVersion(
+    scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>,
+  ): string {
+    const keys = Object.keys(scalerParameters).sort();
+    if (keys.length === 0) return 'scaler-v2-empty';
+    const payload = keys
+      .map(
+        (k) =>
+          `${k}:${scalerParameters[k].mean.toFixed(4)}_${scalerParameters[k].std.toFixed(4)}_${scalerParameters[k].min.toFixed(4)}_${scalerParameters[k].max.toFixed(4)}`,
+      )
+      .join('|');
+    const hash = crypto.createHash('sha256').update(payload).digest('hex').substring(0, 12);
+    return `scaler-v2-${hash}`;
+  }
 
   /**
    * Fits normalization parameters (mean, std, min, max) EXCLUSIVELY on the training fold.
@@ -65,6 +84,7 @@ export class TemporalFeatureScaler {
   public transformValue(featureName: string, rawValue: number): number {
     const stats = this.featureStats.get(featureName);
     if (!stats) return rawValue;
+    if (stats.std < 1e-5) return 0;
     return (rawValue - stats.mean) / stats.std;
   }
 
@@ -83,5 +103,13 @@ export class TemporalFeatureScaler {
 
   public getParams(featureName: string): IScaleParameters | undefined {
     return this.featureStats.get(featureName);
+  }
+
+  public getVersion(): string {
+    const params: Record<string, IScaleParameters> = {};
+    for (const [k, v] of this.featureStats.entries()) {
+      params[k] = v;
+    }
+    return TemporalFeatureScaler.computeVersion(params);
   }
 }

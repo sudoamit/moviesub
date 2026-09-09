@@ -44,7 +44,13 @@ function deepFreeze<T extends object>(obj: T): Readonly<T> {
   return obj;
 }
 
+export const PRODUCTION_DEFAULT_MINIMUM_CANDLES = 50;
+export const PRODUCTION_DEFAULT_WARMUP_BARS = 40;
+
 export class CandidateBacktestRunner {
+  public static readonly PRODUCTION_DEFAULT_MINIMUM_CANDLES = PRODUCTION_DEFAULT_MINIMUM_CANDLES;
+  public static readonly PRODUCTION_DEFAULT_WARMUP_BARS = PRODUCTION_DEFAULT_WARMUP_BARS;
+
   /**
    * Creates an immutable, reproducible CandidateArtifact.
    */
@@ -63,9 +69,9 @@ export class CandidateBacktestRunner {
       candidateVersion: candidate.candidateVersion || candidate.id,
       datasetHash,
       strategyVersion: candidate.baseStrategyVersion || '1.0.0',
-      strategyConfig: candidate.change || {},
+      strategyConfig: { ...(candidate.change || {}) },
       featureSchemaVersion: candidate.featureSchemaVersion || '2.0',
-      selectedFeatures: (candidate.change?.selectedFeatures as string[]) || [],
+      selectedFeatures: [...((candidate.change?.selectedFeatures as string[]) || [])],
       modelArtifact: (candidate.change?.modelArtifact as any) || undefined,
       scalerArtifact: (candidate.change?.scalerArtifact as any) || undefined,
       riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier },
@@ -84,7 +90,7 @@ export class CandidateBacktestRunner {
     const change = candidate.change || {};
     const minMtfScore =
       change.parameter === 'minMtfScore'
-        ? (typeof change.value === 'number' ? change.value : (change.fittedValue as number))
+        ? (typeof change.fittedValue === 'number' ? change.fittedValue : (typeof change.value === 'number' ? change.value : undefined))
         : (typeof change.minMtfScore === 'number' ? change.minMtfScore : (change.minScore as number));
 
     const stopLossAtrMultiplier =
@@ -151,14 +157,30 @@ export class CandidateBacktestRunner {
   }
 
   /**
-   * Replays candidate execution strictly through the authoritative BacktestSimulator engine.
+   * Replays candidate execution strictly through the authoritative BacktestSimulator engine
+   * using the immutable CandidateArtifact as the single source of truth.
    */
   public static runCandidateBacktest(
-    candidate: StrategyCandidate,
+    candidateOrArtifact: StrategyCandidate | CandidateArtifact,
     experiences: TradingExperience[],
-    options?: { candles?: ICandle[] },
+    options?: {
+      candles?: ICandle[];
+      minimumCandles?: number;
+      warmupBars?: number;
+      symbol?: string;
+      timeframe?: string;
+      initialCapital?: number;
+    },
   ): CandidateExecutionResult {
-    const config = this.createExecutionConfig(candidate);
+    // 1. Resolve or construct immutable CandidateArtifact
+    const artifact: CandidateArtifact =
+      'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
+        ? (candidateOrArtifact as CandidateArtifact)
+        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate);
+
+    const config: CandidateExecutionConfig = artifact.executionConfig as any;
+    const riskConfig = artifact.riskConfig;
+    const candidateId = artifact.candidateId;
 
     // Collect and order market candles from experiences or options
     let candles: ICandle[] = options?.candles || [];
@@ -185,16 +207,66 @@ export class CandidateBacktestRunner {
       throw new Error('INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION');
     }
 
+    const deterministicSignals =
+      (artifact.strategyConfig as any)?.deterministicSignals ||
+      ((artifact.strategyConfig as any)?.deterministicSignal
+        ? [(artifact.strategyConfig as any).deterministicSignal]
+        : experiences && experiences.length > 0
+          ? experiences
+              .filter((e) => e.execution?.entryPrice)
+              .map((e) => ({
+                id: e.id,
+                direction: e.decision?.action === 'SELL' ? 'BEARISH' : 'BULLISH',
+                score: e.decision?.score ?? 80,
+                entryPrice: e.execution?.entryPrice,
+                stopLoss: e.risk?.stopLoss,
+                tp1: e.risk?.target1,
+                tp2: e.risk?.target2,
+                tp3: e.risk?.target3,
+                reasons: [...(e.reasons || []), ...(e.failureReasons || [])],
+                marketContext: e.marketContext,
+                features: (e as any).features,
+                marketState: e.marketState,
+                prediction: e.prediction,
+                timestamp: e.timestamp,
+              }))
+          : undefined);
+
+    const strategyConfig = {
+      ...artifact.strategyConfig,
+      scoringWeights: (artifact.strategyConfig as any)?.scoringWeights,
+      deterministicSignals,
+      deterministicSignal: deterministicSignals && deterministicSignals.length === 1 ? deterministicSignals[0] : undefined,
+    };
+
+    // Enforce production backtester warm-up standards (minimumCandles = 50, warmupBars = 40)
+    // to preserve SMC swings, BOS, CHOCH, FVG, order blocks, indicators, and MTF context integrity.
+    const minimumCandles =
+      options?.minimumCandles !== undefined
+        ? options.minimumCandles
+        : deterministicSignals && deterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+          ? Math.max(1, Math.min(candles.length, 1))
+          : PRODUCTION_DEFAULT_MINIMUM_CANDLES;
+
+    const warmupBars =
+      options?.warmupBars !== undefined
+        ? options.warmupBars
+        : deterministicSignals && deterministicSignals.length > 0 && candles.length < PRODUCTION_DEFAULT_MINIMUM_CANDLES
+          ? 0
+          : PRODUCTION_DEFAULT_WARMUP_BARS;
+
     const backtestOptions: IBacktestOptions = {
-      runId: `cand_bt_${candidate.id}`,
-      symbol: experiences[0]?.instrument?.symbol || 'BTCUSDT',
-      timeframe: (experiences[0] as any)?.timeframe || '15m',
+      runId: `cand_bt_${candidateId}`,
+      symbol: experiences[0]?.instrument?.symbol || (options as any)?.symbol || 'BTCUSDT',
+      timeframe: (experiences[0] as any)?.timeframe || (options as any)?.timeframe || '15m',
       candles,
       experiences,
-      minimumCandles: 1,
-      warmupBars: 0,
+      initialCapital: options?.initialCapital,
+      minimumCandles,
+      warmupBars,
+      candidateArtifact: artifact,
       minScore: config.minMtfScore,
-      stopLossAtrMultiplier: config.stopLossAtrMultiplier,
+      stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
       sizingMultiplier: config.sizingMultiplier,
       highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
       filterRegime: config.filterRegime,
@@ -202,6 +274,9 @@ export class CandidateBacktestRunner {
       minProbability: config.minProbability,
       conditionRules: config.conditionRules,
       enablePartialTp1Trailing: config.enablePartialTp1Trailing,
+      scoringWeights: (artifact.strategyConfig as any)?.scoringWeights,
+      strategyConfig,
+      modelArtifact: artifact.modelArtifact || (artifact.strategyConfig as any)?.modelArtifact,
     };
 
     // Invoke authoritative BacktestSimulator engine directly
@@ -210,7 +285,7 @@ export class CandidateBacktestRunner {
     const rMultiples = trades.map((t) => t.pnlRMultiple || 0);
 
     return {
-      candidateId: candidate.id,
+      candidateId,
       totalTrades: simResult.totalTrades,
       trades,
       rMultiples,

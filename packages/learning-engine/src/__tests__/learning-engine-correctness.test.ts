@@ -98,15 +98,20 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   // Test 3 — Temporal split
   test('Test 3: Temporal Dataset Builder enforces max(train.ts) < min(val.ts) < min(oos.ts)', () => {
     const ds = new DatasetManager();
-    const samples = Array.from({ length: 100 }, (_, i) => ({
-      sampleId: `s_${i}`,
-      timestamp: 1700000000000 + i * 60000,
-      features: { smcScore: 50 + i },
-      labelBinary: i % 2,
-      labelContinuousR: i % 2 === 1 ? 1.5 : -1.0,
-      regime: 'BULLISH',
-      volatilityBucket: 'NORMAL',
-    }));
+    const samples = Array.from({ length: 100 }, (_, i) => {
+      const t = 1700000000000 + i * 60000;
+      return {
+        sampleId: `s_${i}`,
+        timestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 30000,
+        features: { smcScore: 50 + i },
+        labelBinary: i % 2,
+        labelContinuousR: i % 2 === 1 ? 1.5 : -1.0,
+        regime: 'BULLISH',
+        volatilityBucket: 'NORMAL',
+      };
+    });
 
     const record = ds.createDataset('BTCUSDT', '15m', samples);
     const splits = ds.splitDataset(record.metadata.datasetId, 0.6, 0.2, 0.2);
@@ -128,13 +133,13 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 4: OOS data modifications cannot influence training fold parameters', () => {
     const scaler1 = new TemporalFeatureScaler();
     const trainData = [
-      { sampleId: '1', timestamp: 1000, features: { f1: 10, f2: 20 }, labelBinary: 1, labelContinuousR: 1, regime: 'NORM', volatilityBucket: 'NORM' },
-      { sampleId: '2', timestamp: 2000, features: { f1: 20, f2: 40 }, labelBinary: 0, labelContinuousR: -1, regime: 'NORM', volatilityBucket: 'NORM' },
+      { sampleId: '1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 1500, features: { f1: 10, f2: 20 }, labelBinary: 1, labelContinuousR: 1, regime: 'NORM', volatilityBucket: 'NORM' },
+      { sampleId: '2', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 2500, features: { f1: 20, f2: 40 }, labelBinary: 0, labelContinuousR: -1, regime: 'NORM', volatilityBucket: 'NORM' },
     ];
     scaler1.fit(trainData);
 
     const oosDataExtreme = [
-      { sampleId: '3', timestamp: 3000, features: { f1: 10000, f2: 99999 }, labelBinary: 1, labelContinuousR: 10, regime: 'HIGH', volatilityBucket: 'HIGH' },
+      { sampleId: '3', timestamp: 3000, labelStartTimestamp: 3000, labelEndTimestamp: 3500, features: { f1: 10000, f2: 99999 }, labelBinary: 1, labelContinuousR: 10, regime: 'HIGH', volatilityBucket: 'HIGH' },
     ];
 
     const scaler2 = new TemporalFeatureScaler();
@@ -434,8 +439,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 12: Extreme OOS values do not mutate pre-fitted training scaler statistics', () => {
     const scaler = new TemporalFeatureScaler();
     const trainData = [
-      { sampleId: '1', timestamp: 1000, features: { smcScore: 60 }, labelBinary: 1, labelContinuousR: 1, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: '2', timestamp: 2000, features: { smcScore: 80 }, labelBinary: 1, labelContinuousR: 1, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: '1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 1500, features: { smcScore: 60 }, labelBinary: 1, labelContinuousR: 1, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: '2', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 2500, features: { smcScore: 80 }, labelBinary: 1, labelContinuousR: 1, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
 
     scaler.fit(trainData);
@@ -451,35 +456,42 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
 
   // Test 13 — Walk-forward retraining
   test('Test 13: Walk-forward validator processes folds with distinct training windows', () => {
-    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => ({
-      id: `exp_wf_${i}`,
-      tradeId: `t_wf_${i}`,
-      timestamp: new Date(1700000000000 + i * 60000),
-      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
-      marketState: { quant: { smcScore: 70 + i } },
-      decision: { action: 'BUY', score: 70 },
-      execution: { entryPrice: 100, entryTime: new Date(1700000000000 + i * 60000) },
-      risk: { stopLoss: 95 },
-      prediction: {},
-      outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
-      marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
-      outcomeClassification: 'GOOD_TRADE_WIN',
-      reasons: [],
-      failureReasons: [],
-      strategyVersion: 'v2.0',
-      featureSchemaVersion: '2.0',
-      createdAt: new Date(),
-      candlesDuringTrade: [
-        {
-          timestamp: new Date(1700000000000 + i * 60000),
-          open: 100,
-          high: 110,
-          low: 99,
-          close: 108,
-          volume: 100,
-        },
-      ],
-    }));
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = 1700000000000 + i * 60000;
+      return {
+        id: `exp_wf_${i}`,
+        tradeId: `t_wf_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 30000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 70 + i } },
+        decision: { action: 'BUY', score: 70 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [
+          {
+            timestamp: new Date(t),
+            open: 100,
+            high: 110,
+            low: 99,
+            close: 108,
+            volume: 100,
+          },
+        ],
+      };
+    });
 
     const cand: StrategyCandidate = {
       id: 'cand_wf',
@@ -554,8 +566,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 16: DatasetManager throws DUPLICATE_SAMPLE_ID error on duplicate sample IDs', () => {
     const ds = new DatasetManager();
     const duplicateSamples = [
-      { sampleId: 'dup_1', timestamp: 1000, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 'dup_1', timestamp: 2000, features: { smcScore: 60 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 'dup_1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 1500, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 'dup_1', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 2500, features: { smcScore: 60 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
 
     expect(() => {
@@ -567,13 +579,13 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 17: Datasets with identical timestamps but different feature values produce different dataHashes', () => {
     const ds1 = new DatasetManager();
     const samplesA = [
-      { sampleId: 's1', timestamp: 1000, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 1500, features: { smcScore: 50 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
     const recA = ds1.createDataset('BTCUSDT', '15m', samplesA, '2.0', '2.0.0', 42);
 
     const ds2 = new DatasetManager();
     const samplesB = [
-      { sampleId: 's1', timestamp: 1000, features: { smcScore: 99 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 1500, features: { smcScore: 99 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
     const recB = ds2.createDataset('BTCUSDT', '15m', samplesB, '2.0', '2.0.0', 42);
 
@@ -584,11 +596,11 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 18: DatasetManager purges validation samples overlapping with training label horizons', () => {
     const ds = new DatasetManager();
     const samples = [
-      { sampleId: 's1', timestamp: 1000, labelEndTimestamp: 5000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 's2', timestamp: 2000, labelEndTimestamp: 3000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 's3', timestamp: 4000, labelEndTimestamp: 6000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' }, // Overlaps with s1 labelEnd
-      { sampleId: 's4', timestamp: 6000, labelEndTimestamp: 7000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 's5', timestamp: 8000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 5000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's2', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 3000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's3', timestamp: 4000, labelStartTimestamp: 4000, labelEndTimestamp: 6000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' }, // Overlaps with s1 labelEnd
+      { sampleId: 's4', timestamp: 6000, labelStartTimestamp: 6000, labelEndTimestamp: 7000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's5', timestamp: 8000, labelStartTimestamp: 8000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
 
     const rec = ds.createDataset('BTCUSDT', '15m', samples);
@@ -723,8 +735,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 22: DatasetManager throws INSUFFICIENT_PURGED_VALIDATION_DATA when all validation samples overlap', () => {
     const ds = new DatasetManager();
     const overlappingSamples = [
-      { sampleId: 's1', timestamp: 1000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 's2', timestamp: 2000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's2', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 9000, features: { f: 1 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
 
     const rec = ds.createDataset('BTCUSDT', '15m', overlappingSamples);
@@ -737,7 +749,7 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 23: DatasetManager throws INVALID_EMBARGO_DURATION on negative embargoMs', () => {
     const ds = new DatasetManager();
     const samples = [
-      { sampleId: 's1', timestamp: 1000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 2000, features: { f: 1 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
     const rec = ds.createDataset('BTCUSDT', '15m', samples);
 
@@ -791,8 +803,8 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
   test('Test 25: DatasetManager throws FEATURE_SCHEMA_MISMATCH when sample feature keys differ', () => {
     const ds = new DatasetManager();
     const mismatchSamples = [
-      { sampleId: 's1', timestamp: 1000, features: { featA: 10 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
-      { sampleId: 's2', timestamp: 2000, features: { featB: 20 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's1', timestamp: 1000, labelStartTimestamp: 1000, labelEndTimestamp: 2000, features: { featA: 10 }, labelBinary: 1, labelContinuousR: 1.0, regime: 'BULL', volatilityBucket: 'NORM' },
+      { sampleId: 's2', timestamp: 2000, labelStartTimestamp: 2000, labelEndTimestamp: 3000, features: { featB: 20 }, labelBinary: 0, labelContinuousR: -1.0, regime: 'BULL', volatilityBucket: 'NORM' },
     ];
 
     expect(() => {

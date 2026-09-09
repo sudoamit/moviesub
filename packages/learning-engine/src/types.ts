@@ -182,6 +182,7 @@ export interface FeatureSelectionResult {
 }
 
 export type StrategyCandidateType =
+  | 'BASELINE'
   | 'FILTER'
   | 'THRESHOLD'
   | 'FEATURE'

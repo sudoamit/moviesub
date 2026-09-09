@@ -30,10 +30,13 @@ export interface FoldArtifact {
   createdAt: Date;
 }
 
+export const DEFAULT_LEARNING_SEED = 42;
+
 export interface IWalkForwardOptions {
   numFolds?: number;
   embargoDays?: number;
   embargoMs?: number;
+  seed?: number;
   retrainFn?: (
     trainSlice: TradingExperience[],
     baseCandidate: StrategyCandidate,
@@ -54,6 +57,15 @@ export class WalkForwardValidator {
     const embargoMs = options.embargoMs ?? (options.embargoDays ? options.embargoDays * 24 * 3600 * 1000 : 0);
     if (embargoMs < 0) {
       throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
+    }
+
+    for (const exp of experiences) {
+      if (exp.labelStartTimestamp === undefined || exp.labelStartTimestamp === null) {
+        throw new Error('MISSING_LABEL_START_TIMESTAMP');
+      }
+      if (exp.labelEndTimestamp === undefined || exp.labelEndTimestamp === null) {
+        throw new Error('MISSING_LABEL_END_TIMESTAMP');
+      }
     }
 
     const n = experiences.length;
@@ -84,37 +96,49 @@ export class WalkForwardValidator {
       const trainStart = 0;
       const trainEnd = (f + 1) * foldSize;
       const valStart = trainEnd;
-      const valEnd = Math.min(n - 1, valStart + Math.max(1, Math.floor(foldSize / 2)));
+      const valEnd = Math.min(n, valStart + Math.max(1, Math.floor(foldSize / 2)));
       const testStart = valEnd;
-      const testEnd = Math.min(n - 1, testStart + foldSize);
+      const testEnd = Math.min(n, testStart + foldSize);
 
       const trainSlice = sorted.slice(trainStart, trainEnd);
-      const valRaw = sorted.slice(valStart, valEnd + 1);
-      const testRaw = sorted.slice(testStart, testEnd + 1);
+      const valRaw = sorted.slice(valStart, valEnd);
+      const testRaw = sorted.slice(testStart, testEnd);
 
       if (trainSlice.length === 0 || testRaw.length === 0) continue;
 
       // Calculate label end timestamp purge boundary for training fold
       let trainMaxLabelEnd = 0;
       for (const e of trainSlice) {
-        const endTs = e.labelEndTimestamp ?? (e.execution?.exitTime ? new Date(e.execution.exitTime).getTime() : new Date(e.timestamp).getTime());
+        if (e.labelEndTimestamp === undefined || e.labelEndTimestamp === null) {
+          throw new Error('MISSING_LABEL_END_TIMESTAMP');
+        }
+        const endTs = e.labelEndTimestamp;
         if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
       }
 
       // Purge validation samples whose entry timestamp overlaps with active training labels + embargoMs
       const valPurged = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd + embargoMs);
-      const valSlice = valPurged.length > 0 ? valPurged : valRaw;
+      if (valPurged.length === 0 && valRaw.length > 0) {
+        throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
+      }
+      const valSlice = valPurged;
 
       // Calculate label end timestamp purge boundary for validation fold
       let valMaxLabelEnd = trainMaxLabelEnd;
       for (const e of valSlice) {
-        const endTs = e.labelEndTimestamp ?? (e.execution?.exitTime ? new Date(e.execution.exitTime).getTime() : new Date(e.timestamp).getTime());
+        if (e.labelEndTimestamp === undefined || e.labelEndTimestamp === null) {
+          throw new Error('MISSING_LABEL_END_TIMESTAMP');
+        }
+        const endTs = e.labelEndTimestamp;
         if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
       }
 
       // Purge OOS samples whose entry timestamp overlaps with active validation labels + embargoMs
       const testPurged = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd + embargoMs);
-      const testSlice = testPurged.length > 0 ? testPurged : testRaw;
+      if (testPurged.length === 0 && testRaw.length > 0) {
+        throw new Error('INSUFFICIENT_PURGED_OOS_DATA');
+      }
+      const testSlice = testPurged;
 
       // Genuine ML fold retraining: feature selection, scaler fit, and model training on fold
       const foldSelection = FeatureSelector.selectFeatures(trainSlice);
@@ -127,7 +151,7 @@ export class WalkForwardValidator {
           scalerParams[feat] = { mean: stats.mean, std: stats.std, min: stats.min, max: stats.max };
         }
       }
-      const modelArtifact = ModelTrainer.trainModel(trainSlice);
+      const modelArtifact = ModelTrainer.trainModel(trainSlice, { scaler });
 
       const trainDatasetHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
       const valDatasetHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
@@ -139,6 +163,8 @@ export class WalkForwardValidator {
         : this.retrainCandidateOnFold(trainSlice, candidate, f + 1, modelArtifact, foldSelection.retainedFeatures);
 
       const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate).configHash;
+      const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
+      const trainingSeed = options.seed ?? DEFAULT_LEARNING_SEED;
 
       // Create and freeze immutable, real FoldArtifact
       const foldArtifact: FoldArtifact = Object.freeze({
@@ -148,7 +174,7 @@ export class WalkForwardValidator {
         oosDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         selectedFeatures: foldSelection.retainedFeatures,
-        scalerVersion: 'v1.0',
+        scalerVersion,
         scalerParameters: scalerParams,
         modelVersion: modelArtifact.modelVersion,
         modelParameters: { weights: modelArtifact.weights, bias: modelArtifact.bias },
@@ -156,7 +182,7 @@ export class WalkForwardValidator {
         strategyParameters: foldCandidate.change || {},
         candidateId: candidate.id,
         candidateConfigHash,
-        trainingSeed: 42,
+        trainingSeed,
         createdAt: new Date(),
       });
       foldArtifacts.push(foldArtifact);
@@ -218,7 +244,7 @@ export class WalkForwardValidator {
   }
 
   /**
-   * Fits candidate strategy parameters strictly on training fold data.
+   * Empirically fits candidate strategy parameters through grid search and execution evaluation strictly on training fold data.
    */
   private static retrainCandidateOnFold(
     trainSlice: TradingExperience[],
@@ -227,18 +253,77 @@ export class WalkForwardValidator {
     modelArtifact?: ITrainedModelArtifact,
     selectedFeatures?: string[],
   ): StrategyCandidate {
-    const winningTrain = trainSlice.filter((e) => e.outcome?.status === 'WIN');
-    const trainScores = winningTrain
-      .map((e) => e.decision?.score || 0)
-      .filter((s) => s > 0)
-      .sort((a, b) => a - b);
+    const paramName =
+      (baseCandidate.change as any)?.parameter ||
+      (baseCandidate.type === 'THRESHOLD'
+        ? 'minMtfScore'
+        : baseCandidate.type === 'RISK'
+          ? 'stopLossAtrMultiplier'
+          : (baseCandidate.type as any) === 'PROBABILITY'
+            ? 'minProbability'
+            : 'minMtfScore');
 
-    const fittedValue =
-      trainScores.length > 0
-        ? trainScores[Math.floor(trainScores.length / 2)]
-        : typeof baseCandidate.change?.value === 'number'
-          ? baseCandidate.change.value
-          : 70;
+    // 1. Build search grid based on parameter type and training data
+    let grid: number[] = [];
+
+    if (paramName === 'minMtfScore') {
+      const distinctScores = Array.from(
+        new Set(
+          trainSlice
+            .map((e) => e.decision?.score)
+            .filter((s): s is number => typeof s === 'number' && Number.isFinite(s)),
+        ),
+      );
+      grid = Array.from(new Set([...distinctScores, 50, 55, 60, 65, 70, 75, 80])).sort((a, b) => a - b);
+    } else if (paramName === 'stopLossAtrMultiplier') {
+      grid = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    } else if (paramName === 'sizingMultiplier' || paramName === 'highVolatilitySizingMultiplier') {
+      grid = [0.25, 0.5, 0.75, 1.0, 1.25];
+    } else if (paramName === 'minProbability') {
+      grid = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
+    } else if (typeof (baseCandidate.change as any)?.value === 'number') {
+      const v = (baseCandidate.change as any).value;
+      grid = [Number((v * 0.75).toFixed(2)), Number((v * 0.9).toFixed(2)), v, Number((v * 1.1).toFixed(2)), Number((v * 1.25).toFixed(2))];
+    } else {
+      grid = [55, 60, 65, 70, 75];
+    }
+
+    // 2. Search parameter grid and evaluate each value on training fold
+    let bestValue =
+      typeof (baseCandidate.change as any)?.value === 'number'
+        ? (baseCandidate.change as any).value
+        : grid[Math.floor(grid.length / 2)];
+    let bestObjective = -Infinity;
+
+    for (const val of grid) {
+      const trialCandidate: StrategyCandidate = {
+        ...baseCandidate,
+        candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-trial-${val}`,
+        change: {
+          ...baseCandidate.change,
+          parameter: paramName,
+          value: val,
+          fittedValue: val,
+          modelArtifact: baseCandidate.type === 'MODEL' ? modelArtifact : baseCandidate.change?.modelArtifact,
+          selectedFeatures,
+        },
+      };
+
+      try {
+        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, trainSlice);
+        if (evalRes.totalTrades > 0) {
+          // Objective: Maximize trade expectancy penalized for low sample count
+          const samplePenalty = Math.min(1.0, evalRes.totalTrades / Math.max(1, Math.floor(trainSlice.length / 3)));
+          const objective = evalRes.expectancyR * samplePenalty + (evalRes.profitFactor >= 1.25 ? 0.2 : 0.0);
+          if (objective > bestObjective) {
+            bestObjective = objective;
+            bestValue = val;
+          }
+        }
+      } catch {
+        // Continue search if trial evaluation fails
+      }
+    }
 
     return {
       ...baseCandidate,
@@ -247,8 +332,9 @@ export class WalkForwardValidator {
         ...baseCandidate.change,
         fittedOnFold: foldIndex,
         fittedSampleCount: trainSlice.length,
-        fittedValue,
-        modelArtifact,
+        fittedValue: bestValue,
+        fittedObjective: Number.isFinite(bestObjective) ? Number(bestObjective.toFixed(4)) : 0,
+        modelArtifact: baseCandidate.type === 'MODEL' ? modelArtifact : baseCandidate.change?.modelArtifact,
         selectedFeatures,
       },
     };

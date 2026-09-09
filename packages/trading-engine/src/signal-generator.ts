@@ -10,7 +10,7 @@ import {
 import { SMCAnalyzer } from './smc-analyzer';
 import { IMTFTimeframeData, MultiTimeframeAnalyzer } from './mtf-analyzer';
 import { TradeLevelsCalculator } from './trade-levels';
-import { IScoringInputs, SignalScorer } from './signal-scorer';
+import { IScoringInputs, IScoringWeights, SignalScorer } from './signal-scorer';
 import { ReasoningGenerator } from './reasoning-generator';
 import { calculateEMA, calculateRSI } from '@quant/indicators';
 import { SessionFilter } from './session-filter';
@@ -29,6 +29,9 @@ export interface IGenerateSignalOptions {
   mtfMode?: MTFMode;
   strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
   asOfTimestamp?: Date;
+  scoringWeights?: IScoringWeights;
+  strategyConfig?: Record<string, any>;
+  minimumCandles?: number;
 }
 
 export class SignalGenerator {
@@ -65,7 +68,93 @@ export class SignalGenerator {
       ? CandleNormalizer.getClosedCandlesAsOf(rawHtf2Candles, htf2Tf, decisionTimestamp)
       : undefined;
 
-    if (!execCandles || execCandles.length < 20) {
+    // Candidate Strategy Injection Point: Deterministic signal setup support
+    const detList = Array.isArray(options.strategyConfig?.deterministicSignals)
+      ? options.strategyConfig.deterministicSignals
+      : options.strategyConfig?.deterministicSignal
+        ? [options.strategyConfig.deterministicSignal]
+        : undefined;
+
+    if (detList && detList.length > 0) {
+      const currTime = decisionTimestamp.getTime();
+      const candleOpenTime =
+        rawExecCandles.length > 0
+          ? rawExecCandles[rawExecCandles.length - 1].timestamp instanceof Date
+            ? rawExecCandles[rawExecCandles.length - 1].timestamp.getTime()
+            : new Date(rawExecCandles[rawExecCandles.length - 1].timestamp).getTime()
+          : currTime;
+
+      const det = detList.find((d: any) => {
+        const targetTime =
+          d.timestamp instanceof Date
+            ? d.timestamp.getTime()
+            : typeof d.timestamp === 'number'
+              ? d.timestamp
+              : new Date(d.timestamp).getTime();
+        return Math.abs(currTime - targetTime) <= 1000 || Math.abs(candleOpenTime - targetTime) <= 1000;
+      });
+
+      if (det) {
+        const entryPrice =
+          det.entryPrice || (execCandles.length > 0 ? execCandles[execCandles.length - 1].close : 100);
+        const baseStopPrice =
+          det.stopLoss ||
+          (det.direction === Direction.BEARISH ? entryPrice * 1.05 : entryPrice * 0.95);
+        const baseStopDist = Math.abs(entryPrice - baseStopPrice);
+        const target1 =
+          det.tp1 ??
+          (det.direction === Direction.BEARISH
+            ? entryPrice - baseStopDist * 1.5
+            : entryPrice + baseStopDist * 1.5);
+        const target2 =
+          det.tp2 ??
+          (det.direction === Direction.BEARISH
+            ? entryPrice - baseStopDist * 2.5
+            : entryPrice + baseStopDist * 2.5);
+        const target3 =
+          det.tp3 ??
+          (det.direction === Direction.BEARISH
+            ? entryPrice - baseStopDist * 4.0
+            : entryPrice + baseStopDist * 4.0);
+
+        return {
+          id: det.id || `sig_${currTime}`,
+          symbol,
+          direction: det.direction,
+          score: det.score ?? 80,
+          grade: det.grade ?? SignalGrade.A_PLUS,
+          entryZone: det.entryZone ?? {
+            min: entryPrice,
+            max: entryPrice,
+            optimal: entryPrice,
+          },
+          stopLoss: baseStopPrice,
+          takeProfits: {
+            tp1: target1,
+            tp2: target2,
+            tp3: target3,
+          },
+          riskRewardRatios: {
+            rr1: 1.5,
+            rr2: 2.5,
+            rr3: 4.0,
+          },
+          reasoning: {} as any,
+          scoreBreakdown: {} as any,
+          timeframe: String(executionTf),
+          reasons: det.reasons ?? ['Candidate deterministic setup'],
+          marketContext: det.marketContext,
+          features: det.features,
+          marketState: det.marketState,
+          prediction: det.prediction,
+          timestamp: new Date(currTime),
+          state: SignalState.ACTIVE,
+        } as any;
+      }
+    }
+
+    const minCandles = options.minimumCandles !== undefined ? options.minimumCandles : 20;
+    if (!execCandles || execCandles.length < minCandles) {
       return SignalGenerator.createNoTradeSignal(
         symbol,
         executionTf,
@@ -252,7 +341,8 @@ export class SignalGenerator {
       indicatorsAligned,
     };
 
-    let { totalScore, grade, breakdown } = SignalScorer.calculateScore(scoringInputs);
+    const customWeights = options.scoringWeights || options.strategyConfig?.scoringWeights;
+    let { totalScore, grade, breakdown } = SignalScorer.calculateScore(scoringInputs, customWeights);
 
     // 9. Generate Trigger Description & Detailed Reasoning
     let triggerDesc = 'Micro-structure confirmation and price action trigger';

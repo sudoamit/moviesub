@@ -1,5 +1,15 @@
-import { StrategyCandidate, TradingExperience } from './types';
+import { ICandle } from '@quant/shared';
+import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
+
+export interface ICandidateEvaluationOptions {
+  baselineCandidate?: StrategyCandidate | CandidateArtifact;
+  candles?: ICandle[];
+  minimumCandles?: number;
+  warmupBars?: number;
+  symbol?: string;
+  timeframe?: string;
+}
 
 export interface ICandidateEvaluationResult {
   candidateId: string;
@@ -12,22 +22,48 @@ export interface ICandidateEvaluationResult {
   totalSimulatedTrades: number;
   simulatedRMultiples: number[];
   rejectionReason?: string;
+  baselineTrades?: number;
 }
 
 export class CandidateEvaluator {
   /**
-   * Orchestrates candidate strategy evaluation against historical trading experiences
-   * by delegating replay directly to CandidateBacktestRunner and authoritative backtest execution.
+   * Constructs a canonical frozen baseline benchmark strategy candidate.
+   */
+  public static createBaselineBenchmarkCandidate(baseStrategyVersion: string = 'v2.0'): StrategyCandidate {
+    return {
+      id: `baseline-${baseStrategyVersion}`,
+      baseStrategyVersion,
+      candidateVersion: `baseline-${baseStrategyVersion}`,
+      type: 'BASELINE',
+      description: `Baseline Benchmark Strategy (${baseStrategyVersion})`,
+      change: {
+        action: 'BASELINE_BENCHMARK',
+        stopLossAtrMultiplier: 1.0,
+        sizingMultiplier: 1.0,
+      },
+      evidence: { sampleSize: 0, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+      status: 'PROMOTED',
+      createdAt: new Date(),
+    };
+  }
+
+  /**
+   * Orchestrates candidate strategy evaluation against a formal baseline strategy benchmark
+   * using the exact same market candles and authoritative execution engine (BacktestSimulator).
    */
   public static evaluate(
-    candidate: StrategyCandidate,
+    candidate: StrategyCandidate | CandidateArtifact,
     experiences: TradingExperience[],
     costPerTradeR = 0.05,
+    options?: ICandidateEvaluationOptions,
   ): ICandidateEvaluationResult {
     const totalTrades = experiences.length;
+    const candidateId = 'artifactId' in candidate ? candidate.candidateId : candidate.id;
+    const baseStrategyVersion = 'artifactId' in candidate ? candidate.strategyVersion : candidate.baseStrategyVersion;
+
     if (totalTrades < 5) {
       return {
-        candidateId: candidate.id,
+        candidateId,
         passed: false,
         baselineExpectancy: 0,
         candidateExpectancy: 0,
@@ -40,15 +76,33 @@ export class CandidateEvaluator {
       };
     }
 
-    const baselineSumR = experiences.reduce((sum, e) => sum + e.outcome.pnlR, 0);
-    const baselineExpectancy = Number((baselineSumR / totalTrades).toFixed(2));
+    // 1. Evaluate baseline strategy benchmark on authoritative BacktestSimulator using the exact same market candles
+    const baselineCandidate = options?.baselineCandidate || this.createBaselineBenchmarkCandidate(baseStrategyVersion);
+    const baselineRes = CandidateBacktestRunner.runCandidateBacktest(baselineCandidate, experiences, {
+      candles: options?.candles,
+      minimumCandles: options?.minimumCandles,
+      warmupBars: options?.warmupBars,
+      symbol: options?.symbol,
+      timeframe: options?.timeframe,
+    });
 
-    // Delegate candidate backtest execution to CandidateBacktestRunner
-    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, experiences);
+    const baselineExpectancy =
+      baselineRes.totalTrades > 0
+        ? baselineRes.expectancyR
+        : Number((experiences.reduce((sum, e) => sum + (e.outcome?.pnlR ?? 0), 0) / totalTrades).toFixed(2));
+
+    // 2. Evaluate candidate strategy on authoritative BacktestSimulator using the exact same market candles
+    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(candidate, experiences, {
+      candles: options?.candles,
+      minimumCandles: options?.minimumCandles,
+      warmupBars: options?.warmupBars,
+      symbol: options?.symbol,
+      timeframe: options?.timeframe,
+    });
 
     if (backtestRes.totalTrades === 0) {
       return {
-        candidateId: candidate.id,
+        candidateId,
         passed: false,
         baselineExpectancy,
         candidateExpectancy: 0,
@@ -58,6 +112,7 @@ export class CandidateEvaluator {
         totalSimulatedTrades: 0,
         simulatedRMultiples: [],
         rejectionReason: 'Candidate generated zero trades in backtest execution simulation.',
+        baselineTrades: baselineRes.totalTrades,
       };
     }
 
@@ -72,7 +127,7 @@ export class CandidateEvaluator {
       : undefined;
 
     return {
-      candidateId: candidate.id,
+      candidateId,
       passed,
       baselineExpectancy,
       candidateExpectancy,
@@ -82,6 +137,7 @@ export class CandidateEvaluator {
       totalSimulatedTrades: backtestRes.totalTrades,
       simulatedRMultiples: backtestRes.rMultiples,
       rejectionReason,
+      baselineTrades: baselineRes.totalTrades,
     };
   }
 }

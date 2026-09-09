@@ -49,78 +49,62 @@ export class CounterfactualAnalyzer {
       (isBuy ? entryPrice + 4.0 * riskDistance : entryPrice - 4.0 * riskDistance);
 
     const candles = (exp as any).candlesDuringTrade || [];
-    let tp1PnLR = actualPnLR;
-    let tp2PnLR = actualPnLR;
-    let tp3PnLR = actualPnLR;
-    let bePnLR = actualPnLR;
-
-    if (candles && candles.length >= 2) {
-      // Replay experience through authoritative BacktestSimulator for each counterfactual scenario
-      const symbol = exp.instrument?.symbol || 'BTCUSDT';
-      const timeframe = exp.timeframe || '15m';
-
-      // 1. TP1 Fixed Scenario
-      const resTp1 = BacktestSimulator.runSimulation({
-        symbol,
-        timeframe,
-        candles,
-        experiences: [exp],
-        partialExitPolicy: { tp1Ratio: 1.0, tp2Ratio: 0, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
-        minimumCandles: 2,
-        warmupBars: 0,
-      });
-      tp1PnLR = resTp1.trades[0]?.pnlRMultiple ?? actualPnLR;
-
-      // 2. TP2 Standard Scenario
-      const resTp2 = BacktestSimulator.runSimulation({
-        symbol,
-        timeframe,
-        candles,
-        experiences: [exp],
-        partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
-        minimumCandles: 2,
-        warmupBars: 0,
-      });
-      tp2PnLR = resTp2.trades[0]?.pnlRMultiple ?? actualPnLR;
-
-      // 3. TP3 Runner Scenario
-      const resTp3 = BacktestSimulator.runSimulation({
-        symbol,
-        timeframe,
-        candles,
-        experiences: [exp],
-        partialExitPolicy: { tp1Ratio: 0.33, tp2Ratio: 0.33, tp3Ratio: 0.34, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
-        minimumCandles: 2,
-        warmupBars: 0,
-      });
-      tp3PnLR = resTp3.trades[0]?.pnlRMultiple ?? actualPnLR;
-
-      // 4. Trailing Breakeven Scenario
-      const resBe = BacktestSimulator.runSimulation({
-        symbol,
-        timeframe,
-        candles,
-        experiences: [exp],
-        enablePartialTp1Trailing: true,
-        partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: true, trailStopOnTp2: false },
-        minimumCandles: 2,
-        warmupBars: 0,
-      });
-      bePnLR = resBe.trades[0]?.pnlRMultiple ?? actualPnLR;
-    } else {
-      // Fallback if no candle telemetry is present
-      if (exp.outcome?.status === 'WIN') {
-        tp1PnLR = 1.5;
-        tp2PnLR = exp.outcome.pnlR >= 2.5 ? 2.5 : 1.5;
-        tp3PnLR = exp.outcome.pnlR >= 4.0 ? 4.0 : 1.5;
-        bePnLR = Math.max(0.0, actualPnLR);
-      } else if (exp.outcome?.status === 'LOSS') {
-        tp1PnLR = -1.0;
-        tp2PnLR = -1.0;
-        tp3PnLR = -1.0;
-        bePnLR = -1.0;
-      }
+    if (!candles || candles.length < 2) {
+      throw new Error('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
     }
+
+    // Replay experience through authoritative BacktestSimulator for each counterfactual scenario
+    const symbol = exp.instrument?.symbol || 'BTCUSDT';
+    const timeframe = exp.timeframe || '15m';
+
+    // 1. TP1 Fixed Scenario
+    const resTp1 = BacktestSimulator.runSimulation({
+      symbol,
+      timeframe,
+      candles,
+      experiences: [exp],
+      partialExitPolicy: { tp1Ratio: 1.0, tp2Ratio: 0, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+      minimumCandles: 2,
+      warmupBars: 0,
+    });
+    const tp1PnLR = resTp1.trades[0]?.pnlRMultiple ?? actualPnLR;
+
+    // 2. TP2 Standard Scenario
+    const resTp2 = BacktestSimulator.runSimulation({
+      symbol,
+      timeframe,
+      candles,
+      experiences: [exp],
+      partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+      minimumCandles: 2,
+      warmupBars: 0,
+    });
+    const tp2PnLR = resTp2.trades[0]?.pnlRMultiple ?? actualPnLR;
+
+    // 3. TP3 Runner Scenario
+    const resTp3 = BacktestSimulator.runSimulation({
+      symbol,
+      timeframe,
+      candles,
+      experiences: [exp],
+      partialExitPolicy: { tp1Ratio: 0.33, tp2Ratio: 0.33, tp3Ratio: 0.34, moveStopToBreakevenOnTp1: false, trailStopOnTp2: false },
+      minimumCandles: 2,
+      warmupBars: 0,
+    });
+    const tp3PnLR = resTp3.trades[0]?.pnlRMultiple ?? actualPnLR;
+
+    // 4. Trailing Breakeven Scenario
+    const resBe = BacktestSimulator.runSimulation({
+      symbol,
+      timeframe,
+      candles,
+      experiences: [exp],
+      enablePartialTp1Trailing: true,
+      partialExitPolicy: { tp1Ratio: 0.5, tp2Ratio: 0.5, tp3Ratio: 0, moveStopToBreakevenOnTp1: true, trailStopOnTp2: false },
+      minimumCandles: 2,
+      warmupBars: 0,
+    });
+    const bePnLR = resBe.trades[0]?.pnlRMultiple ?? actualPnLR;
 
     const tp1Scenario: CounterfactualExitScenario = {
       scenarioName: 'TP1_FIXED',

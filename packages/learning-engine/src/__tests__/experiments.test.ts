@@ -3,20 +3,25 @@ import { ExperimentRunner, QuantExperimentManager, ExperimentComparator } from '
 
 describe('DatasetManager & Quantitative Experiment System', () => {
   const baseTime = 1756972800000;
-  const mockSamples: IDatasetSample[] = Array.from({ length: 100 }, (_, i) => ({
-    sampleId: `sample_${i}`,
-    timestamp: baseTime + i * 15 * 60 * 1000,
-    features: {
-      htfTrend: i % 2 === 0 ? 1 : 0,
-      obMitigated: 1,
-      fvgQuality: 0.8,
-      volumeRatio: 1.4,
-    },
-    labelBinary: i % 3 === 0 ? 0 : 1, // 66% win rate
-    labelContinuousR: i % 3 === 0 ? -1.0 : 2.0, // +1.0R average expectancy
-    regime: i < 50 ? 'BULLISH_TREND' : 'RANGE',
-    volatilityBucket: 'NORMAL',
-  }));
+  const mockSamples: IDatasetSample[] = Array.from({ length: 100 }, (_, i) => {
+    const t = baseTime + i * 15 * 60 * 1000;
+    return {
+      sampleId: `sample_${i}`,
+      timestamp: t,
+      labelStartTimestamp: t + 1000,
+      labelEndTimestamp: t + 14 * 60 * 1000,
+      features: {
+        htfTrend: i % 2 === 0 ? 1 : 0,
+        obMitigated: 1,
+        fvgQuality: 0.8,
+        volumeRatio: 1.4,
+      },
+      labelBinary: i % 3 === 0 ? 0 : 1, // 66% win rate
+      labelContinuousR: i % 3 === 0 ? -1.0 : 2.0, // +1.0R average expectancy
+      regime: i < 50 ? 'BULLISH_TREND' : 'RANGE',
+      volatilityBucket: 'NORMAL',
+    };
+  });
 
   it('should create an immutable hashed dataset and partition into chronological Train, Validation, and OOS splits', () => {
     const manager = new DatasetManager();

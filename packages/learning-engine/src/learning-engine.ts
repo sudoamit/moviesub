@@ -3,6 +3,7 @@ import { TemporalDatasetBuilder } from './dataset-manager';
 import { ErrorAnalyzer } from './error-analyzer';
 import { PatternDiscoveryEngine } from './pattern-discovery';
 import { FeatureSelector } from './feature-selector';
+import { TemporalFeatureScaler } from './feature-scaler';
 import { ModelTrainer } from './model-trainer';
 import { RegimePerformanceAnalyzer } from './regime-performance-analyzer';
 import { VolatilityPerformanceAnalyzer } from './volatility-performance-analyzer';
@@ -20,6 +21,15 @@ import { LearningMemory } from './learning-memory';
 import { LearningScheduler } from './learning-scheduler';
 import { LearningRunReport, StrategyCandidate } from './types';
 
+/**
+ * Centrally defined temporal validation policy for the autonomous learning pipeline:
+ * Default embargo period (in milliseconds) applied after active label horizons during
+ * dataset partitioning and walk-forward validation to eliminate autoregressive / serial
+ * correlation leakage across folds.
+ * Calibrated based on the institutional SMC strategy / label horizon (15 minutes / 900,000 ms).
+ */
+export const DEFAULT_LEARNING_EMBARGO_MS = 15 * 60 * 1000; // 900,000 ms (15 minutes)
+
 export interface ILearningCycleOptions {
   baseStrategyVersion?: string;
   autoPromote?: boolean;
@@ -28,6 +38,7 @@ export interface ILearningCycleOptions {
 
 export class LearningEngine {
   public static readonly VERSION = '1.0.0';
+  public static readonly DEFAULT_EMBARGO_MS = DEFAULT_LEARNING_EMBARGO_MS;
 
   /**
    * Executes a complete, end-to-end self-improvement learning cycle across all modules.
@@ -37,7 +48,7 @@ export class LearningEngine {
   ): Promise<LearningRunReport> {
     const startedAt = new Date();
     const baseVersion = options.baseStrategyVersion || 'v2.0-smc-quant';
-    const embargoMs = options.embargoMs ?? 0;
+    const embargoMs = options.embargoMs ?? DEFAULT_LEARNING_EMBARGO_MS;
 
     // 1. Ingest experiences
     const experiences = ExperienceStore.query();
@@ -53,13 +64,17 @@ export class LearningEngine {
       const symbol = experiences[0]?.instrument?.symbol || 'BTCUSDT';
 
       const datasetSamples = experiences.map((exp) => {
-        const entryMs = exp.labelStartTimestamp || (exp.execution?.entryTime ? new Date(exp.execution.entryTime).getTime() : new Date(exp.timestamp).getTime());
-        const exitMs = exp.labelEndTimestamp || (exp.execution?.exitTime ? new Date(exp.execution.exitTime).getTime() : entryMs + 1800000);
+        if (exp.labelStartTimestamp === undefined || exp.labelStartTimestamp === null) {
+          throw new Error(`MISSING_LABEL_START_TIMESTAMP: Experience ${exp.id} is missing labelStartTimestamp`);
+        }
+        if (exp.labelEndTimestamp === undefined || exp.labelEndTimestamp === null) {
+          throw new Error(`MISSING_LABEL_END_TIMESTAMP: Experience ${exp.id} is missing labelEndTimestamp`);
+        }
         return {
           sampleId: exp.id,
           timestamp: new Date(exp.timestamp).getTime(),
-          labelStartTimestamp: entryMs,
-          labelEndTimestamp: exitMs,
+          labelStartTimestamp: exp.labelStartTimestamp,
+          labelEndTimestamp: exp.labelEndTimestamp,
           features: exp.marketState?.quant || {},
           labelBinary: exp.outcome?.status === 'WIN' ? 1 : 0,
           labelContinuousR: exp.outcome?.pnlR || 0,
@@ -89,8 +104,10 @@ export class LearningEngine {
     // 5. Select Features & Evaluate Subsets strictly on Train slice
     const featureSelection = FeatureSelector.selectFeatures(trainSlice);
 
-    // 6. Train Canonical ML Model strictly on Train slice
-    const modelArtifact = ModelTrainer.trainModel(trainSlice);
+    // 6. Train Canonical ML Model strictly on Train slice consuming fitted TemporalFeatureScaler
+    const scaler = new TemporalFeatureScaler();
+    scaler.fit(trainSlice);
+    const modelArtifact = ModelTrainer.trainModel(trainSlice, { scaler });
 
     // 7. Domain Metrics on Train slice
     RegimePerformanceAnalyzer.analyze(trainSlice);

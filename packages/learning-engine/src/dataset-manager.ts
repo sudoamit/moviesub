@@ -18,8 +18,8 @@ export interface IDatasetMetadata {
 export interface IDatasetSample {
   sampleId: string;
   timestamp: number; // UTC timestamp ms
-  labelStartTimestamp?: number;
-  labelEndTimestamp?: number;
+  labelStartTimestamp: number;
+  labelEndTimestamp: number;
   features: Record<string, number>;
   labelBinary: number; // 1 if +1R reached before -1R, 0 otherwise
   labelContinuousR: number; // Realized R-multiple
@@ -73,9 +73,16 @@ export class DatasetManager {
 
     const sampleFeatures = Object.keys(sorted[0].features || {}).sort();
 
-    // P1 #25: Feature Schema Validation across all samples
+    // P1 #25: Feature Schema & Label Timestamp Validation across all samples
     for (let i = 0; i < sorted.length; i++) {
-      const sampleKeys = Object.keys(sorted[i].features || {}).sort();
+      const sample = sorted[i];
+      if (sample.labelStartTimestamp === undefined || sample.labelStartTimestamp === null) {
+        throw new Error(`MISSING_LABEL_START_TIMESTAMP: Sample at index ${i} (${sample.sampleId}) is missing labelStartTimestamp`);
+      }
+      if (sample.labelEndTimestamp === undefined || sample.labelEndTimestamp === null) {
+        throw new Error(`MISSING_LABEL_END_TIMESTAMP: Sample at index ${i} (${sample.sampleId}) is missing labelEndTimestamp`);
+      }
+      const sampleKeys = Object.keys(sample.features || {}).sort();
       if (
         sampleKeys.length !== sampleFeatures.length ||
         sampleKeys.some((k, idx) => k !== sampleFeatures[idx])
@@ -92,8 +99,14 @@ export class DatasetManager {
           .join(',');
         const decTs = (s as any).decisionTimestamp ?? s.timestamp;
         const featTs = (s as any).featureTimestamp ?? s.timestamp;
-        const lStart = s.labelStartTimestamp ?? s.timestamp;
-        const lEnd = s.labelEndTimestamp ?? s.timestamp;
+        if (s.labelStartTimestamp === undefined || s.labelStartTimestamp === null) {
+          throw new Error('MISSING_LABEL_START_TIMESTAMP');
+        }
+        if (s.labelEndTimestamp === undefined || s.labelEndTimestamp === null) {
+          throw new Error('MISSING_LABEL_END_TIMESTAMP');
+        }
+        const lStart = s.labelStartTimestamp;
+        const lEnd = s.labelEndTimestamp;
         return `${s.sampleId}|${decTs}|${featTs}|${lStart}|${lEnd}|${sortedFeatStr}|${s.labelBinary}|${s.labelContinuousR}|${s.regime}|${s.volatilityBucket}`;
       })
       .join('\n');
@@ -159,7 +172,10 @@ export class DatasetManager {
     // Calculate maximum label end timestamp in training partition for embargo purging
     let trainMaxLabelEnd = 0;
     for (const s of trainRaw) {
-      const endTs = s.labelEndTimestamp ?? s.timestamp;
+      if (s.labelEndTimestamp === undefined || s.labelEndTimestamp === null) {
+        throw new Error('MISSING_LABEL_END_TIMESTAMP');
+      }
+      const endTs = s.labelEndTimestamp;
       if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
     }
 
@@ -172,7 +188,10 @@ export class DatasetManager {
     // Calculate maximum label end timestamp in validation partition
     let valMaxLabelEnd = trainMaxLabelEnd;
     for (const s of valPurged) {
-      const endTs = s.labelEndTimestamp ?? s.timestamp;
+      if (s.labelEndTimestamp === undefined || s.labelEndTimestamp === null) {
+        throw new Error('MISSING_LABEL_END_TIMESTAMP');
+      }
+      const endTs = s.labelEndTimestamp;
       if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
     }
 
@@ -210,8 +229,14 @@ export class DatasetManager {
         const sampleId = s.sampleId || s.id || 'sample_id';
         const decTs = s.decisionTimestamp ?? (typeof s.timestamp === 'number' ? s.timestamp : new Date(s.timestamp || 0).getTime());
         const featTs = s.featureTimestamp ?? decTs;
-        const lStart = s.labelStartTimestamp ?? decTs;
-        const lEnd = s.labelEndTimestamp ?? decTs;
+        if (s.labelStartTimestamp === undefined || s.labelStartTimestamp === null) {
+          throw new Error('MISSING_LABEL_START_TIMESTAMP');
+        }
+        if (s.labelEndTimestamp === undefined || s.labelEndTimestamp === null) {
+          throw new Error('MISSING_LABEL_END_TIMESTAMP');
+        }
+        const lStart = s.labelStartTimestamp;
+        const lEnd = s.labelEndTimestamp;
         const labelBinary = s.labelBinary ?? (s.outcome?.status === 'WIN' ? 1 : 0);
         const labelR = s.labelContinuousR ?? (s.outcome?.pnlR ?? 0);
         const regime = s.regime || s.marketContext?.regime || 'NORMAL';

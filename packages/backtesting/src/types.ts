@@ -103,6 +103,8 @@ export interface IBacktestOptions {
   enablePartialTp1Trailing?: boolean;
   candidateArtifact?: any;
   modelArtifact?: any;
+  scoringWeights?: any;
+  strategyConfig?: any;
 }
 
 export type AblationVariant =

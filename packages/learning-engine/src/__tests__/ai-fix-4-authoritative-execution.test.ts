@@ -1,18 +1,23 @@
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
-import { Direction, ICandle, SignalState } from '@quant/shared';
+import { Direction, ICandle, SignalState, MockMarketDataProvider } from '@quant/shared';
+import { CANONICAL_V2_DIMENSION } from '@quant/trading-engine';
 import { BacktestSimulator, FillModel, SameCandleAmbiguityMode } from '@quant/backtesting';
 import { CandidateBacktestRunner } from '../candidate-backtest-runner';
 import { CandidateEvaluator } from '../candidate-evaluator';
 import { CounterfactualAnalyzer } from '../counterfactual-analyzer';
 import { DatasetManager } from '../dataset-manager';
+import { ExperienceStore } from '../experience-store';
+import { TemporalFeatureScaler } from '../feature-scaler';
+import { LearningEngine, DEFAULT_LEARNING_EMBARGO_MS } from '../learning-engine';
+import { ModelTrainer } from '../model-trainer';
 import { MonteCarloEngine } from '../monte-carlo-engine';
 import { PointInTimeValidator } from '../point-in-time-validator';
 import { PromotionGate } from '../promotion-gate';
 import { StrategyCandidate, TradingExperience } from '../types';
 import { WalkForwardValidator } from '../walk-forward-validator';
 
-describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Tests A - Z)', () => {
+describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Tests A - AE)', () => {
   const baseTime = 1700000000000;
 
   const createDeterministicTradeFixture = (
@@ -879,4 +884,875 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
 
     expect(trackedArtifacts).toBe('');
   });
+
+  // Test AA — Candidate strategy changes discover new trades on market data that base strategy does not generate (True Strategy Replay)
+  test('Test AA: Candidate strategy changes discover new trades on market data without synthetic experience extraction', async () => {
+    const provider = new MockMarketDataProvider({ seed: 42 });
+    const candles = await provider.getHistoricalCandles('NIFTY', '15m', 250);
+
+    const baseCandidate: StrategyCandidate = {
+      id: 'base-strat-strict',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-strict',
+      type: 'THRESHOLD',
+      description: 'Strict baseline strategy',
+      change: {
+        parameter: 'minMtfScore',
+        value: 85, // Very strict score threshold
+      },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const permissiveCandidate: StrategyCandidate = {
+      id: 'permissive-strat',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-permissive',
+      type: 'THRESHOLD',
+      description: 'Permissive candidate strategy with lower score threshold',
+      change: {
+        parameter: 'minMtfScore',
+        value: 50, // Permissive score threshold
+      },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    // Run replay strictly with market data candles and NO historical experiences
+    const baseResult = CandidateBacktestRunner.runCandidateBacktest(baseCandidate, [], { candles });
+    const permResult = CandidateBacktestRunner.runCandidateBacktest(permissiveCandidate, [], { candles });
+
+    // Both simulations completed through SignalGenerator and BacktestSimulator
+    expect(baseResult).toBeDefined();
+    expect(permResult).toBeDefined();
+
+    // Permissive candidate discovers more trades directly from the market candle stream
+    expect(permResult.totalTrades).toBeGreaterThan(baseResult.totalTrades);
+    expect(permResult.trades.length).toBe(permResult.totalTrades);
+
+    // Each trade contains authoritative execution records from the engine
+    for (const trade of permResult.trades) {
+      expect(trade.entryPrice).toBeGreaterThan(0);
+      expect(trade.exitPrice).toBeGreaterThan(0);
+      expect(typeof trade.pnlRMultiple).toBe('number');
+    }
+  });
+
+  // Test AB — Model scoring evaluates against actual 28-dimensional canonical feature vector, not static constants
+  test('Test AB: Model scoring evaluates against actual 28-dimensional canonical feature vector, not static constants', () => {
+    const { exp: expBase, candidate } = createDeterministicTradeFixture();
+
+    // Model with selective weights: strongly positive on feature 0 (smcScore), strongly negative on feature 3 (mtfAlignment)
+    const weights = new Array(28).fill(0);
+    weights[0] = 10.0; // smcScore
+    weights[3] = -10.0; // mtfAlignment
+    const bias = 0.0;
+
+    const testModelArtifact = {
+      modelVersion: 'ml-v2-feature-test',
+      weights,
+      bias,
+      featureSchemaVersion: '2.0',
+      sampleCount: 100,
+      trainLoss: 0.1,
+      trainedAt: new Date(0),
+    };
+
+    // Experience 1: High smcScore (0.9), Low mtfAlignment (0.1) -> z = 10*(0.4) - 10*(-0.4) = +8.0 -> prob ~ 0.999 -> score 100
+    const expHighFavorable: TradingExperience = {
+      ...expBase,
+      id: 'exp_high_fav',
+      tradeId: 't_high_fav',
+      marketState: {
+        quant: {
+          smcScore: 0.9,
+          mtfAlignment: 0.1,
+        },
+      },
+    };
+
+    // Experience 2: Low smcScore (0.1), High mtfAlignment (0.9) -> z = 10*(-0.4) - 10*(0.4) = -8.0 -> prob ~ 0.0003 -> score 0
+    const expLowUnfavorable: TradingExperience = {
+      ...expBase,
+      id: 'exp_low_unfav',
+      tradeId: 't_low_unfav',
+      marketState: {
+        quant: {
+          smcScore: 0.1,
+          mtfAlignment: 0.9,
+        },
+      },
+    };
+
+    const candWithModel: StrategyCandidate = {
+      ...candidate,
+      id: 'cand_with_real_features',
+      type: 'MODEL',
+      change: {
+        modelArtifact: testModelArtifact,
+        minMtfScore: 60,
+      },
+    };
+
+    // Under the old bug where features were hardcoded to 0.1:
+    // z would be 10*(0.1) - 10*(0.1) = 0 for BOTH experiences, resulting in score 50 (both rejected).
+    // Under real canonical feature evaluation:
+    // expHighFavorable receives score ~100 and passes.
+    // expLowUnfavorable receives score ~0 and is rejected.
+
+    const simHigh = CandidateBacktestRunner.runCandidateBacktest(candWithModel, [expHighFavorable], {
+      candles: expHighFavorable.candlesDuringTrade!,
+    });
+    const simLow = CandidateBacktestRunner.runCandidateBacktest(candWithModel, [expLowUnfavorable], {
+      candles: expLowUnfavorable.candlesDuringTrade!,
+    });
+
+    expect(simHigh.totalTrades).toBe(1);
+    expect(simLow.totalTrades).toBe(0);
+  });
+
+  // Test AC — minProbability is passed into BacktestSimulator and filters trades without requiring a custom modelArtifact
+  test('Test AC: minProbability is passed into BacktestSimulator and filters trades without requiring custom modelArtifact', () => {
+    const { exp, candidate } = createDeterministicTradeFixture();
+    const expWithProb: TradingExperience = {
+      ...exp,
+      prediction: { probabilityWin: 0.65 },
+    };
+
+    // Candidate 1: Permissive minProbability (0.60) -> 0.65 >= 0.60 -> Trade passes
+    const candPermissive: StrategyCandidate = {
+      ...candidate,
+      id: 'cand_prob_permissive',
+      type: 'FILTER',
+      change: { parameter: 'minProbability', value: 0.60 },
+    };
+
+    // Candidate 2: Strict minProbability (0.75) -> 0.65 < 0.75 -> Trade rejected
+    const candStrict: StrategyCandidate = {
+      ...candidate,
+      id: 'cand_prob_strict',
+      type: 'FILTER',
+      change: { parameter: 'minProbability', value: 0.75 },
+    };
+
+    const resPermissive = CandidateBacktestRunner.runCandidateBacktest(candPermissive, [expWithProb], {
+      candles: expWithProb.candlesDuringTrade!,
+    });
+    const resStrict = CandidateBacktestRunner.runCandidateBacktest(candStrict, [expWithProb], {
+      candles: expWithProb.candlesDuringTrade!,
+    });
+
+    expect(resPermissive.totalTrades).toBe(1);
+    expect(resStrict.totalTrades).toBe(0);
+  });
+
+  // Test AD — CandidateArtifact is the authoritative object executed by CandidateBacktestRunner
+  test('Test AD: CandidateArtifact is the authoritative object executed and mutations to candidate after creation have zero effect', () => {
+    const { exp, candidate } = createDeterministicTradeFixture();
+
+    // Create frozen CandidateArtifact
+    const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate);
+    expect(Object.isFrozen(artifact)).toBe(true);
+    expect(artifact.configHash).toBeDefined();
+
+    // Directly execute the CandidateArtifact
+    const resArtifact = CandidateBacktestRunner.runCandidateBacktest(artifact, [exp], {
+      candles: exp.candlesDuringTrade!,
+    });
+    expect(resArtifact.totalTrades).toBe(1);
+
+    // Mutating mutable original candidate after artifact creation has zero effect on execution
+    (candidate.change as any).minMtfScore = 999;
+    (candidate.change as any).parameter = 'minMtfScore';
+    (candidate.change as any).value = 999;
+
+    const resFromFrozenArtifact = CandidateBacktestRunner.runCandidateBacktest(artifact, [exp], {
+      candles: exp.candlesDuringTrade!,
+    });
+    expect(resFromFrozenArtifact.totalTrades).toBe(1);
+  });
+
+  // Test AE — Walk-forward validation performs genuine parameter grid search on training fold to select optimal parameter
+  test('Test AE: WalkForwardValidator performs genuine parameter grid search on training fold', () => {
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = 1700000000000 + i * 300000;
+      return {
+        id: `exp_opt_${i}`,
+        tradeId: `t_opt_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 180000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: i < 10 ? 60 : 75 } },
+        decision: { action: 'BUY', score: i < 10 ? 60 : 75 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [
+          { timestamp: new Date(t), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          { timestamp: new Date(t + 60000), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          { timestamp: new Date(t + 120000), open: 100, high: 125, low: 99.5, close: 124, volume: 100 },
+        ],
+      };
+    });
+
+    const baseCand: StrategyCandidate = {
+      id: 'cand_grid_opt',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-grid-opt',
+      type: 'THRESHOLD',
+      description: 'Threshold optimization candidate',
+      change: { parameter: 'minMtfScore', value: 80 }, // Initial suboptimal parameter
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const wfRes = WalkForwardValidator.validate(baseCand, experiences, { numFolds: 2 });
+    expect(wfRes.folds.length).toBe(2);
+    expect(wfRes.foldArtifacts).toBeDefined();
+
+    // Verify each fold performed parameter optimization and fitted optimal parameter on training fold
+    const fold1Artifact = wfRes.foldArtifacts![0];
+    expect(fold1Artifact.strategyParameters.fittedValue).toBeDefined();
+    expect(typeof fold1Artifact.strategyParameters.fittedValue).toBe('number');
+    expect(fold1Artifact.strategyParameters.fittedValue).toBeLessThanOrEqual(75);
+    expect(wfRes.folds[0].passed).toBe(true);
+  });
+
+  // Test AF: WFV throws INSUFFICIENT_PURGED_VALIDATION_DATA when purging removes all validation samples
+  test('Test AF: WalkForwardValidator fails closed with INSUFFICIENT_PURGED_VALIDATION_DATA instead of falling back to unpurged data', () => {
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = 1700000000000 + i * 60000;
+      // Make training fold labels extend far into the future past all validation samples
+      const labelEnd = i < 15 ? 1700000000000 + 30 * 60000 : t + 30000;
+      return {
+        id: `exp_purge_val_${i}`,
+        tradeId: `t_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: labelEnd,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 80 } },
+        decision: { action: 'BUY', score: 80 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [],
+      };
+    });
+
+    const cand: StrategyCandidate = {
+      id: 'cand_purge_fail',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-pf',
+      type: 'THRESHOLD',
+      description: 'Purge test',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    expect(() => {
+      WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+    }).toThrow('INSUFFICIENT_PURGED_VALIDATION_DATA');
+  });
+
+  // Test AG: WFV throws INSUFFICIENT_PURGED_OOS_DATA when purging removes all OOS samples
+  test('Test AG: WalkForwardValidator fails closed with INSUFFICIENT_PURGED_OOS_DATA instead of falling back to unpurged data', () => {
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = 1700000000000 + i * 60000;
+      // Make validation fold samples (indices 7-9) extend far into the future past all OOS samples (10-16)
+      const labelEnd = (i >= 7 && i < 10) ? 1700000000000 + 40 * 60000 : t + 10000;
+      return {
+        id: `exp_purge_oos_${i}`,
+        tradeId: `t_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: labelEnd,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 80 } },
+        decision: { action: 'BUY', score: 80 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [],
+      };
+    });
+
+    const cand: StrategyCandidate = {
+      id: 'cand_purge_oos_fail',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-oos-pf',
+      type: 'THRESHOLD',
+      description: 'Purge OOS test',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    expect(() => {
+      WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+    }).toThrow('INSUFFICIENT_PURGED_OOS_DATA');
+  });
+
+  // Test AH: WFV rejects missing labelEndTimestamp & labelStartTimestamp with fail-closed errors
+  test('Test AH: WalkForwardValidator rejects missing labelEndTimestamp and labelStartTimestamp with fail-closed errors', () => {
+    const cand: StrategyCandidate = {
+      id: 'cand_lbl_err',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-lbl',
+      type: 'THRESHOLD',
+      description: 'Label error candidate',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const expsWithoutStart: any[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `exp_no_start_${i}`,
+      timestamp: new Date(1700000000000 + i * 60000),
+      labelEndTimestamp: 1700000000000 + i * 60000 + 30000,
+    }));
+    expect(() => {
+      WalkForwardValidator.validate(cand, expsWithoutStart as any, { numFolds: 2 });
+    }).toThrow('MISSING_LABEL_START_TIMESTAMP');
+
+    const expsWithoutEnd: any[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `exp_no_end_${i}`,
+      timestamp: new Date(1700000000000 + i * 60000),
+      labelStartTimestamp: 1700000000000 + i * 60000 + 1000,
+    }));
+    expect(() => {
+      WalkForwardValidator.validate(cand, expsWithoutEnd as any, { numFolds: 2 });
+    }).toThrow('MISSING_LABEL_END_TIMESTAMP');
+  });
+
+  // Test AI: DatasetManager & LearningEngine strictly fail closed on missing label timestamps without synthesizing horizons
+  test('Test AI: DatasetManager and LearningEngine fail closed on missing labelStartTimestamp or labelEndTimestamp', async () => {
+    const dm = new DatasetManager();
+    const badSampleNoStart: any = {
+      sampleId: 's_bad_1',
+      timestamp: 1000,
+      labelEndTimestamp: 2000,
+      features: { f1: 1 },
+      labelBinary: 1,
+      labelContinuousR: 1.0,
+      regime: 'BULL',
+      volatilityBucket: 'NORM',
+    };
+    expect(() => {
+      dm.createDataset('BTCUSDT', '15m', [badSampleNoStart]);
+    }).toThrow('MISSING_LABEL_START_TIMESTAMP');
+
+    const badSampleNoEnd: any = {
+      sampleId: 's_bad_2',
+      timestamp: 1000,
+      labelStartTimestamp: 1500,
+      features: { f1: 1 },
+      labelBinary: 1,
+      labelContinuousR: 1.0,
+      regime: 'BULL',
+      volatilityBucket: 'NORM',
+    };
+    expect(() => {
+      dm.createDataset('BTCUSDT', '15m', [badSampleNoEnd]);
+    }).toThrow('MISSING_LABEL_END_TIMESTAMP');
+
+    // LearningEngine fail-closed verification: experiences without labelStartTimestamp or labelEndTimestamp throw
+    ExperienceStore.clear();
+    const badExp: any = {
+      id: 'bad_exp_1',
+      timestamp: new Date(1700000000000),
+      decisionTimestamp: 1700000000000,
+      featureTimestamp: 1700000000000,
+      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      marketState: { quant: { smcScore: 80 } },
+      outcome: { status: 'WIN', pnlR: 1.0 },
+    };
+    expect(() => {
+      ExperienceStore.saveExperience(badExp);
+    }).toThrow('MISSING_LABEL_START_TIMESTAMP');
+
+    // Bypass store validator to verify LearningEngine itself throws on missing labelStart / labelEnd without synthesizing
+    for (let i = 0; i < 15; i++) {
+      (ExperienceStore as any).experiences.set(`exp_raw_${i}`, {
+        ...badExp,
+        id: `exp_raw_${i}`,
+        timestamp: new Date(1700000000000 + i * 60000),
+      });
+    }
+
+    await expect(async () => {
+      await LearningEngine.runLearningCycle();
+    }).rejects.toThrow('MISSING_LABEL_START_TIMESTAMP');
+    ExperienceStore.clear();
+  });
+
+  // Test AJ: Centrally defined temporal validation policy enforces DEFAULT_LEARNING_EMBARGO_MS > 0
+  test('Test AJ: Centrally defined temporal validation policy enforces non-zero DEFAULT_LEARNING_EMBARGO_MS as autonomous learning default', () => {
+    expect(DEFAULT_LEARNING_EMBARGO_MS).toBeDefined();
+    expect(DEFAULT_LEARNING_EMBARGO_MS).toBeGreaterThan(0);
+    expect(DEFAULT_LEARNING_EMBARGO_MS).toBe(15 * 60 * 1000); // 15 minutes (900,000 ms)
+    expect(LearningEngine.DEFAULT_EMBARGO_MS).toBe(DEFAULT_LEARNING_EMBARGO_MS);
+  });
+
+  // Test AK: CandidateBacktestRunner enforces production minimumCandles: 50 and warmupBars: 40
+  test('Test AK: CandidateBacktestRunner enforces production backtester standards (minimumCandles = 50, warmupBars = 40)', () => {
+    expect(CandidateBacktestRunner.PRODUCTION_DEFAULT_MINIMUM_CANDLES).toBe(50);
+    expect(CandidateBacktestRunner.PRODUCTION_DEFAULT_WARMUP_BARS).toBe(40);
+
+    const cand: StrategyCandidate = {
+      id: 'cand_warmup_check',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-wc',
+      type: 'THRESHOLD',
+      description: 'Warmup test',
+      change: { parameter: 'minMtfScore', value: 70 },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    // When market data is supplied without deterministic signals with candles < 50, it adheres to production minimumCandles: 50
+    const fewCandles: ICandle[] = Array.from({ length: 30 }, (_, i) => ({
+      timestamp: new Date(1700000000000 + i * 60000),
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100.5,
+      volume: 100,
+    }));
+
+    const result = CandidateBacktestRunner.runCandidateBacktest(cand, [], { candles: fewCandles });
+    // Adheres to BacktestSimulator production standard: < 50 candles produces zero trades (does not bypass warm-up)
+    expect(result.totalTrades).toBe(0);
+    expect(result.trades.length).toBe(0);
+  });
+
+  // Test AL: Baseline strategy expectancy is evaluated via authoritative BacktestSimulator using the exact same market candles
+  test('Test AL: CandidateEvaluator evaluates formal baseline strategy benchmark via BacktestSimulator using the same market candles', () => {
+    // Generate 10 trading experiences with candles where raw DB pnl is different from simulated baseline
+    const experiences: TradingExperience[] = Array.from({ length: 10 }, (_, i) => {
+      const t = 1700000000000 + i * 300000;
+      const isEven = i % 2 === 0;
+      return {
+        id: `exp_base_bench_${i}`,
+        tradeId: `t_base_bench_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 180000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 75 } },
+        decision: { action: 'BUY', score: 75 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        // Raw DB outcome pnlR is intentionally logged as 999 to test that CandidateEvaluator does NOT use raw DB pnl
+        outcome: {
+          status: isEven ? 'WIN' : 'LOSS',
+          pnl: isEven ? 100 : -100,
+          pnlR: 999.0, // Bogus DB pnl
+          maxFavorableExcursion: 1.5,
+          maxAdverseExcursion: 1.0,
+          holdingTimeSeconds: 600,
+        },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: isEven ? 'GOOD_TRADE_WIN' : 'BAD_TRADE_LOSS',
+        reasons: [],
+        failureReasons: !isEven ? ['HTF_CONFLICT'] : [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [
+          { timestamp: new Date(t), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          { timestamp: new Date(t + 60000), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          {
+            timestamp: new Date(t + 120000),
+            open: 100,
+            high: isEven ? 125 : 100.5,
+            low: isEven ? 99.5 : 90,
+            close: isEven ? 124 : 91,
+            volume: 100,
+          },
+        ],
+      };
+    });
+
+    const filterCand: StrategyCandidate = {
+      id: 'cand_filter_htf',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-f-htf',
+      type: 'FILTER',
+      description: 'Filter HTF conflict trades',
+      change: { action: 'ADD_FILTER_RULE', conditionRules: ['HTF_CONFLICT'], rejectWhenMatched: true },
+      evidence: { sampleSize: 10, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const evalResult = CandidateEvaluator.evaluate(filterCand, experiences);
+
+    // Baseline expectancy MUST NOT be 999.0 (the bogus DB logged pnlR); it must be the authoritative simulated baseline expectancy (~0.86R)
+    expect(evalResult.baselineExpectancy).not.toBe(999.0);
+    expect(evalResult.baselineExpectancy).toBeCloseTo(0.86, 1);
+    expect(evalResult.baselineTrades).toBe(10);
+
+    // Candidate expectancy filters 5 loss trades, so its expectancy should be ~4.8R
+    expect(evalResult.candidateExpectancy).toBeGreaterThan(evalResult.baselineExpectancy);
+    expect(evalResult.totalSimulatedTrades).toBe(5);
+    expect(evalResult.expectancyDelta).toBeGreaterThan(0);
+    expect(evalResult.passed).toBe(true);
+
+    // Verify custom baseline benchmark candidate can also be explicitly passed
+    const customBaseline: StrategyCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0');
+    const customEvalResult = CandidateEvaluator.evaluate(filterCand, experiences, 0.05, {
+      baselineCandidate: customBaseline,
+    });
+    expect(customEvalResult.baselineExpectancy).toBeCloseTo(evalResult.baselineExpectancy, 1);
+    expect(customEvalResult.passed).toBe(true);
+  });
+
+  // Test AM: CounterfactualAnalyzer strictly fails closed when market data is insufficient instead of synthesizing outcomes
+  test('Test AM: CounterfactualAnalyzer strictly fails closed on missing/insufficient candles (< 2)', () => {
+    const expNoCandles: TradingExperience = {
+      id: 'exp_cf_no_candles',
+      tradeId: 't_cf_no_candles',
+      timestamp: new Date(1700000000000),
+      decisionTimestamp: 1700000000000,
+      featureTimestamp: 1700000000000,
+      labelStartTimestamp: 1700000000000 + 1000,
+      labelEndTimestamp: 1700000000000 + 180000,
+      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      marketState: { quant: { smcScore: 75 } },
+      decision: { action: 'BUY', score: 75 },
+      execution: { entryPrice: 100, entryTime: new Date(1700000000000) },
+      risk: { stopLoss: 95 },
+      prediction: {},
+      outcome: {
+        status: 'WIN',
+        pnl: 100,
+        pnlR: 1.0,
+        maxFavorableExcursion: 1.5,
+        maxAdverseExcursion: 0.2,
+        holdingTimeSeconds: 600,
+      },
+      marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+      outcomeClassification: 'GOOD_TRADE_WIN',
+      reasons: [],
+      failureReasons: [],
+      strategyVersion: 'v2.0',
+      featureSchemaVersion: '2.0',
+      createdAt: new Date(),
+      candlesDuringTrade: [], // Empty candles
+    };
+
+    // Fails closed on empty candle telemetry
+    expect(() => {
+      CounterfactualAnalyzer.analyzeExperience(expNoCandles);
+    }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
+
+    // Fails closed on only 1 candle
+    const expOneCandle: TradingExperience = {
+      ...expNoCandles,
+      id: 'exp_cf_one_candle',
+      candlesDuringTrade: [
+        { timestamp: new Date(1700000000000), open: 100, high: 101, low: 99, close: 100.5, volume: 100 },
+      ],
+    };
+    expect(() => {
+      CounterfactualAnalyzer.analyzeExperience(expOneCandle);
+    }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
+
+    // Batch analysis also fails closed on invalid dataset
+    expect(() => {
+      CounterfactualAnalyzer.analyzeBatch([expNoCandles, expOneCandle]);
+    }).toThrow('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
+  });
+
+  // Test AN: ModelTrainer consumes TemporalFeatureScaler, learns weights on scaled features, and propagates scalerArtifact
+  test('Test AN: ModelTrainer consumes TemporalFeatureScaler, trains on standardized features, and includes scalerArtifact', () => {
+    // Generate a set of experiences with non-standard feature ranges (e.g. 100-200)
+    const rawExperiences: TradingExperience[] = Array.from({ length: 20 }, (_, i) => {
+      const isWin = i % 2 === 0;
+      const t = 1700000000000 + i * 300000;
+      return {
+        id: `exp_scaler_test_${i}`,
+        tradeId: `t_sc_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 180000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: {
+          quant: {
+            smcScore: isWin ? 180 : 110, // Non-unit range
+            mtfAlignment: isWin ? 95 : 15,
+            volatilityAtr: isWin ? 50 : 250,
+          },
+        },
+        decision: { action: 'BUY', score: 80 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95, target1: 115 },
+        prediction: {},
+        outcome: {
+          status: isWin ? 'WIN' : 'LOSS',
+          pnl: isWin ? 100 : -100,
+          pnlR: isWin ? 1.0 : -1.0,
+          maxFavorableExcursion: 1.5,
+          maxAdverseExcursion: 0.2,
+          holdingTimeSeconds: 600,
+        },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: isWin ? 'GOOD_TRADE_WIN' : 'BAD_TRADE_LOSS',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [
+          { timestamp: new Date(t), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          { timestamp: new Date(t + 60000), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          {
+            timestamp: new Date(t + 120000),
+            open: 100,
+            high: isWin ? 125 : 100.5,
+            low: isWin ? 99.5 : 90,
+            close: isWin ? 124 : 91,
+            volume: 100,
+          },
+        ],
+      };
+    });
+
+    // 1. Explicitly fit TemporalFeatureScaler
+    const scaler = new TemporalFeatureScaler();
+    scaler.fit(rawExperiences);
+
+    const smcStats = scaler.getParams('smcScore');
+    expect(smcStats).toBeDefined();
+    expect(smcStats!.mean).toBeCloseTo(145, 0);
+
+    // 2. Train model consuming fitted scaler
+    const modelArtifact = ModelTrainer.trainModel(rawExperiences, { scaler, epochs: 100 });
+
+    expect(modelArtifact.scalerArtifact).toBeDefined();
+    expect(modelArtifact.scalerArtifact?.scalerParameters.smcScore).toBeDefined();
+    expect(modelArtifact.scalerArtifact?.scalerParameters.smcScore.mean).toBeCloseTo(145, 0);
+    expect(modelArtifact.weights.length).toBe(CANONICAL_V2_DIMENSION);
+    expect(modelArtifact.trainLoss).toBeLessThan(0.693); // Loss decreased via learning
+
+    // 3. Verify CandidateBacktestRunner and BacktestSimulator execute model using the attached scalerArtifact
+    const modelCand: StrategyCandidate = {
+      id: 'cand_model_scaled',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-m-sc',
+      type: 'MODEL',
+      description: 'Scaled model candidate',
+      change: {
+        parameter: 'minProbability',
+        minProbability: 0.55,
+        modelArtifact,
+        scalerArtifact: modelArtifact.scalerArtifact,
+      },
+      evidence: { sampleSize: 20, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const backtestRes = CandidateBacktestRunner.runCandidateBacktest(modelCand, rawExperiences);
+    expect(backtestRes).toBeDefined();
+    // Model correctly filtered low-probability loss setups using scaled features
+    expect(backtestRes.winRate).toBeGreaterThan(0.5);
+  });
+
+  // Test AO: FoldArtifact scalerVersion is content-derived and trainingSeed is configurable
+  test('Test AO: WalkForwardValidator generates content-derived scalerVersion and respects configurable seed in FoldArtifact', () => {
+    const experiences: TradingExperience[] = Array.from({ length: 30 }, (_, i) => {
+      const t = 1700000000000 + i * 60000;
+      return {
+        id: `exp_fold_art_${i}`,
+        tradeId: `t_fa_${i}`,
+        timestamp: new Date(t),
+        decisionTimestamp: t,
+        featureTimestamp: t,
+        labelStartTimestamp: t + 1000,
+        labelEndTimestamp: t + 30000,
+        instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+        marketState: { quant: { smcScore: 70 + i, mtfAlignment: 0.8 } },
+        decision: { action: 'BUY', score: 80 },
+        execution: { entryPrice: 100, entryTime: new Date(t) },
+        risk: { stopLoss: 95 },
+        prediction: {},
+        outcome: { status: 'WIN', pnl: 100, pnlR: 1.0, maxFavorableExcursion: 1.5, maxAdverseExcursion: 0.2, holdingTimeSeconds: 600 },
+        marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
+        outcomeClassification: 'GOOD_TRADE_WIN',
+        reasons: [],
+        failureReasons: [],
+        strategyVersion: 'v2.0',
+        featureSchemaVersion: '2.0',
+        createdAt: new Date(),
+        candlesDuringTrade: [
+          { timestamp: new Date(t), open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+          { timestamp: new Date(t + 60000), open: 100, high: 125, low: 99.5, close: 124, volume: 100 },
+        ],
+      };
+    });
+
+    const cand: StrategyCandidate = {
+      id: 'cand_fold_art_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-fa',
+      type: 'THRESHOLD',
+      description: 'Fold artifact provenance test',
+      change: { parameter: 'minMtfScore', value: 75 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    // 1. Default seed (42) produces content-derived scalerVersion
+    const wfResDefault = WalkForwardValidator.validate(cand, experiences, { numFolds: 2 });
+    expect(wfResDefault.foldArtifacts).toBeDefined();
+    expect(wfResDefault.foldArtifacts!.length).toBe(2);
+
+    const fold1 = wfResDefault.foldArtifacts![0];
+    expect(fold1.scalerVersion).toMatch(/^scaler-v2-[0-9a-f]{12}$/);
+    expect(fold1.scalerVersion).not.toBe('v1.0');
+    expect(fold1.trainingSeed).toBe(42);
+
+    // 2. Custom seed (1337) is recorded in fold artifacts
+    const wfResCustomSeed = WalkForwardValidator.validate(cand, experiences, { numFolds: 2, seed: 1337 });
+    expect(wfResCustomSeed.foldArtifacts![0].trainingSeed).toBe(1337);
+  });
+
+  // Test AP: Base Strategy vs Candidate Strategy on the EXACT SAME continuous candles through SignalGenerator and BacktestSimulator
+  test('Test AP: Base Strategy vs Candidate Strategy on the EXACT SAME continuous candles through SignalGenerator and BacktestSimulator', async () => {
+    const provider = new MockMarketDataProvider({ seed: 100 });
+    const continuousCandles = await provider.getHistoricalCandles('BTCUSDT', '15m', 200);
+
+    // 1. Base Strategy Candidate
+    const baseCand: StrategyCandidate = {
+      id: 'base_strat_v2',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-base',
+      type: 'BASELINE',
+      description: 'Base production strategy',
+      change: {
+        minMtfScore: 50,
+        stopLossAtrMultiplier: 1.0,
+        sizingMultiplier: 1.0,
+      },
+      evidence: { sampleSize: 200, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+      status: 'PROMOTED',
+      createdAt: new Date(),
+    };
+
+    const baseResult = CandidateBacktestRunner.runCandidateBacktest(baseCand, [], {
+      candles: continuousCandles,
+      initialCapital: 500000,
+    });
+    expect(baseResult).toBeDefined();
+
+    // 2. Candidate Strategy with higher threshold (minMtfScore: 75)
+    const thresholdCand: StrategyCandidate = {
+      ...baseCand,
+      id: 'cand_higher_threshold',
+      candidateVersion: 'v2.0-thresh-75',
+      type: 'THRESHOLD',
+      change: { ...baseCand.change, minMtfScore: 75 },
+    };
+    const thresholdResult = CandidateBacktestRunner.runCandidateBacktest(thresholdCand, [], {
+      candles: continuousCandles,
+    });
+    // Threshold candidate strictly filters lower-conviction trades from SignalGenerator
+    expect(thresholdResult.totalTrades).toBeLessThanOrEqual(baseResult.totalTrades);
+
+    // 3. Candidate Strategy with widened stop multiplier (stopLossAtrMultiplier: 1.5)
+    const stopCand: StrategyCandidate = {
+      ...baseCand,
+      id: 'cand_wide_stop',
+      candidateVersion: 'v2.0-stop-1.5',
+      type: 'EXIT',
+      change: { ...baseCand.change, stopLossAtrMultiplier: 1.5 },
+    };
+    const stopResult = CandidateBacktestRunner.runCandidateBacktest(stopCand, [], {
+      candles: continuousCandles,
+    });
+    // Widened stop executes through authoritative BacktestSimulator on exact same candles
+    expect(stopResult).toBeDefined();
+
+    // 4. Candidate Strategy with custom position sizing (sizingMultiplier: 2.0)
+    const sizingCand: StrategyCandidate = {
+      ...baseCand,
+      id: 'cand_double_size',
+      candidateVersion: 'v2.0-size-2.0',
+      type: 'SIZING',
+      change: { ...baseCand.change, sizingMultiplier: 2.0 },
+    };
+    const sizingResult = CandidateBacktestRunner.runCandidateBacktest(sizingCand, [], {
+      candles: continuousCandles,
+      initialCapital: 500000,
+    });
+    expect(sizingResult.totalTrades).toBeGreaterThan(0);
+    expect(sizingResult.trades[0].positionSize).toBe(baseResult.trades[0].positionSize * 2);
+
+    // 5. Candidate Strategy with regime filtering
+    const regimeCand: StrategyCandidate = {
+      ...baseCand,
+      id: 'cand_bull_only',
+      candidateVersion: 'v2.0-regime-bull',
+      type: 'REGIME',
+      change: { ...baseCand.change, filterRegime: 'BEARISH_TREND', regimeMode: 'EXCLUDE' },
+    };
+    const regimeResult = CandidateBacktestRunner.runCandidateBacktest(regimeCand, [], {
+      candles: continuousCandles,
+    });
+    expect(regimeResult).toBeDefined();
+  });
 });
+
+
+
+
+
+
+
