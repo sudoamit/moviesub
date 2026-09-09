@@ -198,7 +198,19 @@ export type StrategyCandidateType =
   | 'TRAILING';
 
 export type CandidateStatus =
-  | 'GENERATED' | 'BACKTESTING' | 'VALIDATED' | 'SHADOW' | 'PROMOTED' | 'REJECTED' | 'ROLLED_BACK';
+  | 'TRAINED'
+  | 'OOS_VALIDATED'
+  | 'SHADOW_PENDING'
+  | 'SHADOW_ACTIVE'
+  | 'PROMOTION_ELIGIBLE'
+  | 'PROMOTED'
+  | 'REJECTED'
+  | 'ROLLED_BACK'
+  | 'RETIRED'
+  | 'GENERATED'
+  | 'BACKTESTING'
+  | 'VALIDATED'
+  | 'SHADOW';
 
 export interface StrategyCandidate {
   id: string;
@@ -298,25 +310,35 @@ export interface SimulatedBacktestOutcome {
 export interface CandidateArtifact {
   readonly artifactId: string;
   readonly candidateId: string;
-  readonly candidateVersion: string;
-  readonly datasetHash: string;
+  readonly modelId: string;
+  readonly modelVersion: string;
   readonly strategyVersion: string;
-  readonly strategyConfig: Record<string, unknown>;
-  readonly modelArtifact?: Record<string, unknown>;
+  readonly candidateVersion: string;
+  readonly artifactVersion: string;
   readonly featureSchemaVersion: string;
-  readonly featureSchemaHash?: string;
+  readonly featureSchemaHash: string;
   readonly selectedFeatures: string[];
-  readonly selectedFeatureHash?: string;
+  readonly selectedFeatureHash: string;
+  readonly scalerHash: string;
   readonly scalerArtifact?: Record<string, unknown>;
-  readonly scalerHash?: string;
-  readonly riskConfig: Record<string, unknown>;
-  readonly executionConfig: Record<string, unknown>;
-  readonly trainingSeed?: number;
+  readonly modelArtifact?: Record<string, unknown>;
+  readonly modelHash: string;
+  readonly strategyConfig: Record<string, unknown>;
+  readonly trainingDatasetHash: string;
+  readonly validationDatasetHash: string;
+  readonly oosDatasetHash: string;
+  readonly marketDatasetHash: string;
+  readonly datasetHash: string; // compatibility alias
+  readonly trainingSeed: number;
   readonly candidateSeed?: number;
   readonly parentCandidateId?: string;
-  readonly artifactVersion?: string;
+  readonly riskConfig: Record<string, unknown>;
+  readonly executionConfig: Record<string, unknown>;
+  readonly status: CandidateStatus;
+  readonly createdBy: string;
   readonly createdAt: Date;
   readonly configHash: string;
+  readonly artifactHash: string;
 }
 
 export interface WalkForwardFold {
@@ -393,6 +415,131 @@ export interface ShadowTradeRecord {
   pnl?: number;
   pnlR?: number;
   isClosed: boolean;
+}
+
+export interface ShadowEvaluationWindow {
+  candidateId: string;
+  marketDatasetHash: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  minimumObservations: number;
+  minimumTrades: number;
+}
+
+export interface ShadowEvaluationMetrics {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossPnL: number;
+  netPnL: number;
+  pnlR: number;
+  profitFactor: number;
+  maxDrawdown: number;
+  maxDrawdownR: number;
+  expectancy: number;
+  averageR: number;
+  medianR: number;
+  largestLoss: number;
+  largestWin: number;
+  fees: number;
+  slippage: number;
+  observationsCount: number;
+}
+
+export interface ShadowEvaluationResult {
+  candidateId: string;
+  passed: boolean;
+  metrics: ShadowEvaluationMetrics;
+  reasons: string[];
+  rejectionReason?: string;
+  window: ShadowEvaluationWindow;
+  evaluatedAt: number;
+}
+
+export interface PromotionPolicy {
+  policyVersion?: string;
+  minimumShadowTrades: number;
+  minimumShadowObservations: number;
+  minimumProfitFactor: number;
+  minimumExpectancyR: number;
+  maximumDrawdownR: number;
+  minimumWinRate?: number;
+  requirePositiveNetPnl: boolean;
+  requireIndependentShadowWindow: boolean;
+  allowAutoPromotion: boolean;
+}
+
+export interface PromotionGateInput {
+  candidateArtifact: CandidateArtifact;
+  shadowResult: ShadowEvaluationResult;
+  policy: PromotionPolicy;
+}
+
+export interface PromotionDecision {
+  decision: 'PROMOTE' | 'REJECT';
+  candidateId: string;
+  evaluatedAt: number;
+  reasons: string[];
+  rejectionReasons?: string[];
+  metrics: ShadowEvaluationMetrics;
+  policyVersion: string;
+}
+
+export interface PromotionEvidence {
+  evidenceId: string;
+  candidateId: string;
+  artifactHash: string;
+  trainingDatasetHash: string;
+  validationDatasetHash: string;
+  oosDatasetHash: string;
+  shadowDatasetHash: string;
+  shadowWindowStart: number;
+  shadowWindowEnd: number;
+  shadowMetrics: ShadowEvaluationMetrics;
+  promotionPolicyVersion: string;
+  promotionDecision: 'PROMOTE' | 'REJECT';
+  decisionReasons: string[];
+  evaluatedAt: number;
+}
+
+export interface ProductionModelState {
+  strategyId: string;
+  environment: 'paper' | 'live';
+  activeCandidateId: string;
+  activeModelVersion: string;
+  activeStrategyVersion: string;
+  activeArtifactHash: string;
+  activatedAt: number;
+  activationId: string;
+  previousCandidateId?: string;
+  previousModelVersion?: string;
+  previousArtifactHash?: string;
+  promotionEvidenceId?: string;
+}
+
+export type ModelRegistryEventType =
+  | 'CANDIDATE_REGISTERED'
+  | 'OOS_VALIDATED'
+  | 'SHADOW_STARTED'
+  | 'SHADOW_COMPLETED'
+  | 'PROMOTION_EVALUATED'
+  | 'PROMOTION_REJECTED'
+  | 'PROMOTION_ELIGIBLE'
+  | 'PRODUCTION_ACTIVATED'
+  | 'PRODUCTION_ROLLED_BACK'
+  | 'CANDIDATE_RETIRED';
+
+export interface ModelRegistryEvent {
+  eventId: string;
+  candidateId: string;
+  artifactHash: string;
+  timestamp: number;
+  eventType: ModelRegistryEventType;
+  previousStatus?: CandidateStatus;
+  newStatus: CandidateStatus;
+  reason?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface PromotionCriteria {

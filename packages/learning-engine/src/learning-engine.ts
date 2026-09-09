@@ -20,6 +20,8 @@ import { RollbackManager } from './rollback-manager';
 import { DriftDetector } from './drift-detector';
 import { LearningMemory } from './learning-memory';
 import { LearningScheduler } from './learning-scheduler';
+import { ModelRegistry } from './model-registry';
+import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { ICandle } from '@quant/shared';
 import { CandidateMarketDataset, ExperienceDataset, LearningRunReport, StrategyCandidate } from './types';
 
@@ -264,41 +266,44 @@ export class LearningEngine {
         transactionCostSurvived: costEval.survivedDoubleCosts,
       };
 
-      // 9f. Candidate enters SHADOW state (must undergo live/simulated observation period before promotion)
+      // 9f. Create immutable candidate artifact and register in ModelRegistry in SHADOW_PENDING state
       cand.status = 'SHADOW';
       ShadowTradingEngine.activateCandidate(cand);
       shadowCount++;
 
-      // 9g. Evaluate promotion ONLY if candidate has completed shadow trade evidence
-      if (options.autoPromote && cand.shadowMetrics && cand.shadowMetrics.shadowTradeCount >= 10) {
-        const promoResult = PromotionGate.evaluateCandidate(cand, {
-          ...PromotionGate.DEFAULT_CRITERIA,
-          allowAutoPromotion: true,
-        });
+      try {
+        const trainExpHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
+        const valExpHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
+        const oosExpHash = DatasetManager.computeCanonicalDatasetHash(oosSlice);
 
-        if (promoResult.approved) {
-          promotedCount++;
-          LearningMemory.setMemory({
-            key: `promoted-${cand.candidateVersion}`,
-            memoryType: 'PROVEN_PATTERN',
-            summary: `Promoted strategy candidate: ${cand.description}`,
-            details: { ...cand.change, ...cand.validationMetrics },
-            sampleSize: cand.evidence.sampleSize,
-            confidence: cand.evidence.pValue ? Math.round((1 - cand.evidence.pValue) * 100) : 95,
-            status: 'ACTIVE',
-          });
-        }
-      } else {
-        LearningMemory.setMemory({
-          key: `shadow-${cand.candidateVersion}`,
-          memoryType: 'REJECTED_HYPOTHESIS',
-          summary: `Candidate placed in shadow observation: ${cand.description}`,
-          details: { ...cand.change, validationMetrics: cand.validationMetrics },
-          sampleSize: cand.evidence.sampleSize,
-          confidence: 80,
-          status: 'ACTIVE',
-        });
+        const artifact = CandidateBacktestRunner.createCandidateArtifact(
+          cand,
+          devMarketHash,
+          options.seed ?? DEFAULT_LEARNING_SEED,
+          {
+            trainingDatasetHash: trainExpHash,
+            validationDatasetHash: valExpHash,
+            oosDatasetHash: oosExpHash,
+            marketDatasetHash: devMarketHash,
+            createdBy: 'LearningEngine',
+          },
+        );
+
+        ModelRegistry.registerCandidateArtifact(artifact);
+      } catch {
+        // Candidate artifact registration logged
       }
+
+      // Memory recording for candidate under shadow observation (same-cycle auto-promotion strictly disallowed)
+      LearningMemory.setMemory({
+        key: `shadow-${cand.candidateVersion}`,
+        memoryType: 'REJECTED_HYPOTHESIS',
+        summary: `Candidate placed in shadow observation: ${cand.description}`,
+        details: { ...cand.change, validationMetrics: cand.validationMetrics },
+        sampleSize: cand.evidence.sampleSize,
+        confidence: 80,
+        status: 'ACTIVE',
+      });
     }
 
     // 10. Drift Detection

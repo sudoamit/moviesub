@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
 import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
-import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience } from './types';
+import { CandidateArtifact, CandidateMarketDataset, CandidateStatus, StrategyCandidate, TradingExperience } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
 
@@ -79,12 +79,19 @@ export class CandidateBacktestRunner {
   public static readonly PRODUCTION_DEFAULT_WARMUP_BARS = PRODUCTION_DEFAULT_WARMUP_BARS;
 
   /**
-   * Creates an immutable, reproducible CandidateArtifact.
+   * Creates an immutable, reproducible, content-addressable CandidateArtifact.
    */
   public static createCandidateArtifact(
     candidate: StrategyCandidate,
     datasetHash?: string,
     trainingSeed = DEFAULT_LEARNING_SEED,
+    provenance?: {
+      trainingDatasetHash?: string;
+      validationDatasetHash?: string;
+      oosDatasetHash?: string;
+      marketDatasetHash?: string;
+      createdBy?: string;
+    },
   ): CandidateArtifact {
     const config = this.createExecutionConfig(candidate);
     const resolvedDatasetHash =
@@ -94,12 +101,29 @@ export class CandidateBacktestRunner {
           (candidate.evidence as any)?.datasetHash ||
           createHash('sha256').update(candidate.id + '_' + (candidate.candidateVersion || candidate.id)).digest('hex').slice(0, 16));
 
+    const trainingDatasetHash =
+      provenance?.trainingDatasetHash ||
+      (candidate.change?.trainingDatasetHash as string) ||
+      resolvedDatasetHash;
+    const validationDatasetHash =
+      provenance?.validationDatasetHash ||
+      (candidate.change?.validationDatasetHash as string) ||
+      resolvedDatasetHash;
+    const oosDatasetHash =
+      provenance?.oosDatasetHash ||
+      (candidate.change?.oosDatasetHash as string) ||
+      resolvedDatasetHash;
+    const marketDatasetHash =
+      provenance?.marketDatasetHash ||
+      (candidate.change?.marketDatasetHash as string) ||
+      resolvedDatasetHash;
+
     const scalerParams =
       (candidate.change?.scalerArtifact as any)?.scalerParameters ||
       (candidate.change?.modelArtifact as any)?.scalerArtifact?.scalerParameters;
     const scalerHash = scalerParams
       ? TemporalFeatureScaler.computeScalerHash(scalerParams)
-      : (candidate.change?.modelArtifact as any)?.scalerHash;
+      : ((candidate.change?.modelArtifact as any)?.scalerHash || createHash('sha256').update('no_scaler').digest('hex').slice(0, 16));
 
     const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
     const featureSchemaHash =
@@ -110,61 +134,163 @@ export class CandidateBacktestRunner {
     const selectedFeatureHash =
       selectedFeatures.length > 0
         ? createHash('sha256').update(selectedFeatures.join(',')).digest('hex')
-        : (candidate.change?.modelArtifact as any)?.selectedFeatureHash;
+        : ((candidate.change?.modelArtifact as any)?.selectedFeatureHash || createHash('sha256').update('all_features').digest('hex').slice(0, 16));
+
+    const modelArtifact = candidate.change?.modelArtifact as any;
+    const modelHash =
+      modelArtifact?.weights && Array.isArray(modelArtifact.weights)
+        ? createHash('sha256')
+            .update(
+              `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
+            )
+            .digest('hex')
+        : (modelArtifact?.modelHash || createHash('sha256').update('no_model').digest('hex').slice(0, 16));
+
+    const modelId = modelArtifact?.modelId || `model-${candidate.id}`;
+    const modelVersion = modelArtifact?.modelVersion || candidate.baseStrategyVersion || 'ml-v2-0';
+    const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
+    const candidateVersion = candidate.candidateVersion || candidate.id;
+    const artifactVersion = 'v2.0';
+    const createdBy = provenance?.createdBy || 'LearningEngine';
+    const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
+    const strategyConfig = { ...(candidate.change || {}) };
 
     const canonicalPayload = {
       candidateId: candidate.id,
-      candidateVersion: candidate.candidateVersion || candidate.id,
-      strategyVersion: candidate.baseStrategyVersion || '1.0.0',
-      datasetHash: resolvedDatasetHash,
-      configHash: config.configHash,
+      candidateVersion,
+      modelId,
+      modelVersion,
+      strategyVersion,
+      artifactVersion,
       featureSchemaVersion,
       featureSchemaHash,
       selectedFeatures,
       selectedFeatureHash,
       scalerHash,
-      modelArtifact: candidate.change?.modelArtifact
-        ? {
-            modelVersion: (candidate.change.modelArtifact as any).modelVersion,
-            modelHash: (candidate.change.modelArtifact as any).modelHash,
-            weights: (candidate.change.modelArtifact as any).weights,
-            bias: (candidate.change.modelArtifact as any).bias,
-          }
-        : undefined,
+      modelHash,
+      trainingDatasetHash,
+      validationDatasetHash,
+      oosDatasetHash,
+      marketDatasetHash,
+      datasetHash: resolvedDatasetHash,
+      configHash: config.configHash,
       trainingSeed,
       riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier, sizingMultiplier: config.sizingMultiplier },
       executionConfig: config,
+      strategyConfig,
     };
 
-    const artifactId = createHash('sha256')
+    const artifactHash = createHash('sha256')
       .update(JSON.stringify(canonicalPayload))
       .digest('hex');
 
     const artifact: CandidateArtifact = {
-      artifactId,
+      artifactId: artifactHash,
       candidateId: candidate.id,
-      candidateVersion: candidate.candidateVersion || candidate.id,
-      datasetHash: resolvedDatasetHash,
-      strategyVersion: candidate.baseStrategyVersion || '1.0.0',
-      strategyConfig: { ...(candidate.change || {}) },
+      modelId,
+      modelVersion,
+      strategyVersion,
+      candidateVersion,
+      artifactVersion,
       featureSchemaVersion,
       featureSchemaHash,
       selectedFeatures,
       selectedFeatureHash,
-      modelArtifact: (candidate.change?.modelArtifact as any) || undefined,
+      scalerHash,
       scalerArtifact:
         (candidate.change?.scalerArtifact as any) ||
         (candidate.change?.modelArtifact as any)?.scalerArtifact ||
         undefined,
-      scalerHash,
+      modelArtifact: modelArtifact || undefined,
+      modelHash,
+      strategyConfig,
+      trainingDatasetHash,
+      validationDatasetHash,
+      oosDatasetHash,
+      marketDatasetHash,
+      datasetHash: resolvedDatasetHash,
+      trainingSeed,
       riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier, sizingMultiplier: config.sizingMultiplier },
       executionConfig: config as any,
-      trainingSeed,
-      artifactVersion: 'v2.0',
-      createdAt: new Date(),
+      status: (candidate.status as CandidateStatus) || 'TRAINED',
+      createdBy,
+      createdAt,
       configHash: config.configHash,
+      artifactHash,
     };
     return deepFreeze(artifact);
+  }
+
+  /**
+   * Validates that an artifact has not been tampered with and that all internal cryptographic hashes match.
+   */
+  public static validateArtifactIntegrity(artifact: CandidateArtifact): { isValid: boolean; reason?: string } {
+    if (!artifact || typeof artifact !== 'object') {
+      return { isValid: false, reason: 'INVALID_ARTIFACT_OBJECT' };
+    }
+
+    // 1. Validate Schema Hash
+    const expectedSchemaHash = createHash('sha256').update(`canonical_schema_${artifact.featureSchemaVersion || '2.0'}`).digest('hex');
+    if (artifact.featureSchemaHash && artifact.featureSchemaHash !== expectedSchemaHash && !artifact.featureSchemaHash.startsWith('canonical_')) {
+      return { isValid: false, reason: `FEATURE_SCHEMA_HASH_MISMATCH: expected ${expectedSchemaHash}, got ${artifact.featureSchemaHash}` };
+    }
+
+    // 2. Validate Scaler Hash if scaler parameters exist
+    const scalerParams = (artifact.scalerArtifact as any)?.scalerParameters;
+    if (scalerParams) {
+      try {
+        const computedScalerHash = TemporalFeatureScaler.computeScalerHash(scalerParams);
+        if (artifact.scalerHash && artifact.scalerHash !== computedScalerHash) {
+          return { isValid: false, reason: `SCALER_HASH_MISMATCH: expected ${computedScalerHash}, got ${artifact.scalerHash}` };
+        }
+      } catch {
+        return { isValid: false, reason: 'SCALER_HASH_MISMATCH: corrupted scaler parameters' };
+      }
+    }
+
+    // 3. Validate Model Hash if model weights exist
+    const model = artifact.modelArtifact as any;
+    if (model && Array.isArray(model.weights)) {
+      const computedModelHash = createHash('sha256')
+        .update(`${model.modelVersion || 'v2.0'}|${model.weights.join(',')}|${model.bias ?? 0}`)
+        .digest('hex');
+      if (artifact.modelHash && artifact.modelHash !== computedModelHash) {
+        return { isValid: false, reason: `MODEL_HASH_MISMATCH: expected ${computedModelHash}, got ${artifact.modelHash}` };
+      }
+    }
+
+    // 4. Validate Root Artifact Hash
+    const canonicalPayload = {
+      candidateId: artifact.candidateId,
+      candidateVersion: artifact.candidateVersion,
+      modelId: artifact.modelId,
+      modelVersion: artifact.modelVersion,
+      strategyVersion: artifact.strategyVersion,
+      artifactVersion: artifact.artifactVersion,
+      featureSchemaVersion: artifact.featureSchemaVersion,
+      featureSchemaHash: artifact.featureSchemaHash,
+      selectedFeatures: artifact.selectedFeatures,
+      selectedFeatureHash: artifact.selectedFeatureHash,
+      scalerHash: artifact.scalerHash,
+      modelHash: artifact.modelHash,
+      trainingDatasetHash: artifact.trainingDatasetHash,
+      validationDatasetHash: artifact.validationDatasetHash,
+      oosDatasetHash: artifact.oosDatasetHash,
+      marketDatasetHash: artifact.marketDatasetHash,
+      datasetHash: artifact.datasetHash,
+      configHash: artifact.configHash,
+      trainingSeed: artifact.trainingSeed,
+      riskConfig: artifact.riskConfig,
+      executionConfig: artifact.executionConfig,
+      strategyConfig: artifact.strategyConfig ?? {},
+    };
+
+    const computedArtifactHash = createHash('sha256').update(JSON.stringify(canonicalPayload)).digest('hex');
+    if (artifact.artifactHash !== computedArtifactHash) {
+      return { isValid: false, reason: `ARTIFACT_HASH_MISMATCH: expected ${computedArtifactHash}, got ${artifact.artifactHash}` };
+    }
+
+    return { isValid: true };
   }
 
   /**
