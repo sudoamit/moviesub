@@ -876,6 +876,16 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     expect(() => {
       DatasetManager.requireCanonicalMarketDatasetHash(corruptedOHLC, '15m');
     }).toThrow(/INVALID_MARKET_DATA_OHLC/);
+
+    // Non-continuous candles with an unexplained gap (10:00, 10:15, 10:45 on 15m timeframe)
+    const gappedCandles: ICandle[] = [
+      { timestamp: new Date(baseTime), open: 100, high: 105, low: 95, close: 102, volume: 100 },
+      { timestamp: new Date(baseTime + 15 * 60000), open: 102, high: 106, low: 98, close: 104, volume: 120 },
+      { timestamp: new Date(baseTime + 45 * 60000), open: 104, high: 108, low: 101, close: 105, volume: 150 }, // 30m gap instead of 15m
+    ];
+    expect(() => {
+      DatasetManager.requireCanonicalMarketDatasetHash(gappedCandles, '15m');
+    }).toThrow(/MARKET_DATA_NOT_CONTINUOUS/);
   });
 
   // Test R — WalkForwardValidator and sliceContinuousMarketWindow validate warmupBars

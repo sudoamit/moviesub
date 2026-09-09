@@ -623,7 +623,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const fold1 = wfRes.foldArtifacts![0];
     const fold2 = wfRes.foldArtifacts![1];
 
-    expect(fold1.trainDatasetHash).not.toBe(fold2.trainDatasetHash);
+    expect(fold1.trainExperienceDatasetHash).not.toBe(fold2.trainExperienceDatasetHash);
     expect(fold1.modelVersion).not.toBe(fold2.modelVersion);
     expect(fold1.candidateConfigHash).not.toBe(fold2.candidateConfigHash);
   });
@@ -719,9 +719,10 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const fold = wfRes.foldArtifacts![0];
 
     // Real SHA-256 hashes must be hex strings of non-zero length and derived from content
-    expect(fold.trainDatasetHash).toMatch(/^[a-f0-9]{16}$/);
-    expect(fold.validationDatasetHash).toMatch(/^[a-f0-9]{16}$/);
-    expect(fold.oosDatasetHash).toMatch(/^[a-f0-9]{16}$/);
+    expect(fold.trainExperienceDatasetHash).toMatch(/^[a-f0-9]{16}$/);
+    expect(fold.validationExperienceDatasetHash).toMatch(/^[a-f0-9]{16}$/);
+    expect(fold.oosExperienceDatasetHash).toMatch(/^[a-f0-9]{16}$/);
+    expect(fold.trainMarketExecutionInputHash).toMatch(/^[a-f0-9]{16}$/);
     expect(fold.candidateConfigHash).toMatch(/^[a-f0-9]{64}$/);
     expect(fold.modelVersion).toMatch(/^ml-v2-[a-f0-9]{12}$/);
   });
@@ -889,7 +890,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     });
 
     // Training fold artifacts must be 100% identical
-    expect(resOriginal.foldArtifacts![0].trainDatasetHash).toBe(resMutated.foldArtifacts![0].trainDatasetHash);
+    expect(resOriginal.foldArtifacts![0].trainExperienceDatasetHash).toBe(resMutated.foldArtifacts![0].trainExperienceDatasetHash);
     expect(resOriginal.foldArtifacts![0].modelVersion).toBe(resMutated.foldArtifacts![0].modelVersion);
     expect(resOriginal.foldArtifacts![0].modelParameters.weights).toEqual(resMutated.foldArtifacts![0].modelParameters.weights);
     expect(resOriginal.foldArtifacts![0].candidateConfigHash).toBe(resMutated.foldArtifacts![0].candidateConfigHash);

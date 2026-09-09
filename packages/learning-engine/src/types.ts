@@ -345,10 +345,6 @@ export interface FoldArtifact {
   readonly trainMarketDatasetHash: string;
   readonly validationMarketDatasetHash: string;
   readonly oosMarketDatasetHash: string;
-  // Optional legacy aliases for backwards compatibility
-  readonly trainDatasetHash?: string;
-  readonly validationDatasetHash?: string;
-  readonly oosDatasetHash?: string;
 
   readonly featureSchemaVersion: string;
   readonly selectedFeatures: string[];
@@ -359,7 +355,7 @@ export interface FoldArtifact {
   readonly strategyVersion: string;
   readonly candidateId: string;
   readonly candidateVersion: string;
-  readonly strategyParameters: Record<string, any>;
+  readonly strategyParameters: Record<string, string | number | boolean | null | undefined>;
   readonly candidateConfigHash: string;
   readonly trainingSeed: number;
   readonly createdAt: Date;

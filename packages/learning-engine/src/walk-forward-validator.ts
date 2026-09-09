@@ -400,7 +400,23 @@ export class WalkForwardValidator {
       const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
       const trainingSeed = options.seed ?? DEFAULT_LEARNING_SEED;
 
-      // Create and freeze immutable, real FoldArtifact with explicit hashes
+      // Extract clean, deterministic primitive strategy parameters for canonical provenance
+      const cleanStrategyParams: Record<string, string | number | boolean | null | undefined> = {};
+      if (foldCandidate.change && typeof foldCandidate.change === 'object') {
+        for (const [key, value] of Object.entries(foldCandidate.change)) {
+          if (
+            typeof value === 'string' ||
+            typeof value === 'number' ||
+            typeof value === 'boolean' ||
+            value === null ||
+            value === undefined
+          ) {
+            cleanStrategyParams[key] = value;
+          }
+        }
+      }
+
+      // Create and freeze immutable, real FoldArtifact with explicit hashes (no ambiguous legacy aliases)
       const foldArtifact: FoldArtifact = Object.freeze({
         foldIndex: f + 1,
         trainExperienceDatasetHash: trainExpDatasetHash,
@@ -412,9 +428,6 @@ export class WalkForwardValidator {
         trainMarketDatasetHash,
         validationMarketDatasetHash: valMarketDatasetHash,
         oosMarketDatasetHash,
-        trainDatasetHash: trainExpDatasetHash,
-        validationDatasetHash: valExpDatasetHash,
-        oosDatasetHash: oosExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         selectedFeatures: foldSelection.retainedFeatures,
         scalerVersion,
@@ -424,7 +437,7 @@ export class WalkForwardValidator {
         strategyVersion: candidate.baseStrategyVersion || 'v2.0',
         candidateId: candidate.id,
         candidateVersion: foldCandidate.candidateVersion || foldCandidate.id,
-        strategyParameters: foldCandidate.change || {},
+        strategyParameters: cleanStrategyParams,
         candidateConfigHash,
         trainingSeed,
         createdAt: new Date(),
