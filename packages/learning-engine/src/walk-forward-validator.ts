@@ -145,12 +145,21 @@ export class WalkForwardValidator {
       throw new Error('INVALID_WALK_FORWARD_OPTIONS: WalkForwardValidator strictly requires experienceDataset and marketDataset');
     }
 
-    const experiences = options.experienceDataset.experiences || [];
     const numFolds = options.numFolds || 3;
     const embargoMs = options.embargoMs ?? (options.embargoDays ? options.embargoDays * 24 * 3600 * 1000 : 0);
     if (embargoMs < 0) {
       throw new Error(`INVALID_EMBARGO_DURATION:${embargoMs}`);
     }
+
+    // Market dataset is authoritative for the entire temporal validation timeline
+    const candles = options.marketDataset.executionCandles || [];
+    if (candles.length < Math.max(20, (numFolds + 2) * 5)) {
+      throw new Error(
+        `INSUFFICIENT_CONTINUOUS_MARKET_DATA: Market dataset requires at least ${Math.max(20, (numFolds + 2) * 5)} continuous executionCandles for ${numFolds} folds, got ${candles.length}`,
+      );
+    }
+
+    const experiences = options.experienceDataset.experiences || [];
 
     for (const exp of experiences) {
       if (exp.labelStartTimestamp === undefined || exp.labelStartTimestamp === null) {
@@ -178,11 +187,16 @@ export class WalkForwardValidator {
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
-    const candles = options.marketDataset.executionCandles || [];
-    const hasContinuousCandles = Boolean(candles && candles.length >= Math.max(20, (numFolds + 2) * 5));
+    const expectedIntervalMs =
+      options.marketDataset.expectedIntervalMs ||
+      MarketDatasetValidator.resolveTimeframeIntervalMs(options.marketDataset.timeframe || '15m');
 
-    const totalIntervals = hasContinuousCandles ? candles!.length : n;
+    const totalIntervals = candles.length;
     const foldIntervalSize = Math.floor(totalIntervals / (numFolds + 2)); // Divide into train, val, oos chunks
+    if (foldIntervalSize < 1) {
+      throw new Error('INSUFFICIENT_MARKET_DATA_FOR_FOLDS: Candle count is insufficient for fold partitioning');
+    }
+
     const folds: WalkForwardFold[] = [];
     const foldArtifacts: FoldArtifact[] = [];
 
@@ -190,97 +204,73 @@ export class WalkForwardValidator {
     let totalOOS = 0;
 
     for (let f = 0; f < numFolds; f++) {
-      let trainCandles: ICandle[] | undefined;
-      let valCandles: ICandle[] | undefined;
-      let testCandles: ICandle[] | undefined;
+      // 1. Authoritative Market Timeline Partitioning
+      const trainStartIdx = 0;
+      const trainEndIdx = (f + 1) * foldIntervalSize;
+      const valStartIdx = trainEndIdx;
+      const valEndIdx = Math.min(totalIntervals, valStartIdx + Math.max(1, Math.floor(foldIntervalSize / 2)));
+      const testStartIdx = valEndIdx;
+      const testEndIdx = Math.min(totalIntervals, testStartIdx + foldIntervalSize);
 
-      let trainWindow: MarketExecutionWindow | undefined;
-      let valWindow: MarketExecutionWindow | undefined;
-      let testWindow: MarketExecutionWindow | undefined;
-
-      let trainSlice: TradingExperience[];
-      let valRaw: TradingExperience[];
-      let testRaw: TradingExperience[];
-
-      let trainRange: [Date, Date];
-      let validateRange: [Date, Date];
-      let testRange: [Date, Date];
-
-      if (hasContinuousCandles) {
-        // Continuous Market-Data-First Partitioning: Folds are defined by the continuous market dataset windows
-        const trainStartIdx = 0;
-        const trainEndIdx = (f + 1) * foldIntervalSize;
-        const valStartIdx = trainEndIdx;
-        const valEndIdx = Math.min(totalIntervals, valStartIdx + Math.max(1, Math.floor(foldIntervalSize / 2)));
-        const testStartIdx = valEndIdx;
-        const testEndIdx = Math.min(totalIntervals, testStartIdx + foldIntervalSize);
-
-        const trainStartTs = new Date(candles![trainStartIdx].timestamp).getTime();
-        const trainEndTs = new Date(candles![trainEndIdx - 1].timestamp).getTime();
-        const valStartTs = new Date(candles![valStartIdx].timestamp).getTime();
-        const valEndTs = new Date(candles![valEndIdx - 1].timestamp).getTime();
-        const testStartTs = new Date(candles![testStartIdx].timestamp).getTime();
-        const testEndTs = new Date(candles![testEndIdx - 1].timestamp).getTime();
-
-        trainWindow = sliceContinuousMarketWindow(candles, trainStartTs, trainEndTs, 0);
-        valWindow = sliceContinuousMarketWindow(candles, valStartTs, valEndTs, 40);
-        testWindow = sliceContinuousMarketWindow(candles, testStartTs, testEndTs, 40);
-
-        trainCandles = trainWindow?.allCandles;
-        valCandles = valWindow?.allCandles;
-        testCandles = testWindow?.allCandles;
-
-        trainRange = [new Date(trainStartTs), new Date(trainEndTs)];
-        validateRange = [new Date(valStartTs), new Date(valEndTs)];
-        testRange = [new Date(testStartTs), new Date(testEndTs)];
-
-        // Supervised labels / experiences within corresponding market windows
-        trainSlice = sorted.filter((e) => {
-          const t = new Date(e.timestamp).getTime();
-          return t >= trainStartTs && t <= trainEndTs;
-        });
-        if (trainSlice.length === 0) {
-          throw new Error('INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW');
-        }
-
-        valRaw = sorted.filter((e) => {
-          const t = new Date(e.timestamp).getTime();
-          return t >= valStartTs && t <= valEndTs;
-        });
-
-        testRaw = sorted.filter((e) => {
-          const t = new Date(e.timestamp).getTime();
-          return t >= testStartTs && t <= testEndTs;
-        });
-      } else {
-        const trainStart = 0;
-        const trainEnd = (f + 1) * foldIntervalSize;
-        const valStart = trainEnd;
-        const valEnd = Math.min(n, valStart + Math.max(1, Math.floor(foldIntervalSize / 2)));
-        const testStart = valEnd;
-        const testEnd = Math.min(n, testStart + foldIntervalSize);
-
-        trainSlice = sorted.slice(trainStart, trainEnd);
-        valRaw = sorted.slice(valStart, valEnd);
-        testRaw = sorted.slice(testStart, testEnd);
-
-        trainRange = [
-          new Date(trainSlice[0]?.timestamp || 0),
-          new Date(trainSlice[trainSlice.length - 1]?.timestamp || 0),
-        ];
-        validateRange = [
-          new Date(valRaw[0]?.timestamp || trainRange[1]),
-          new Date(valRaw[valRaw.length - 1]?.timestamp || trainRange[1]),
-        ];
-        testRange = [
-          new Date(testRaw[0]?.timestamp || validateRange[1]),
-          new Date(testRaw[testRaw.length - 1]?.timestamp || validateRange[1]),
-        ];
+      if (trainEndIdx > totalIntervals || valStartIdx >= totalIntervals) {
+        throw new Error('TRAIN_MARKET_WINDOW_NOT_FOUND');
+      }
+      if (valEndIdx > totalIntervals) {
+        throw new Error('VALIDATION_MARKET_WINDOW_NOT_FOUND');
+      }
+      if (testStartIdx >= totalIntervals || testEndIdx > totalIntervals) {
+        throw new Error('OOS_MARKET_WINDOW_NOT_FOUND');
       }
 
-      if (trainSlice.length === 0 || (!hasContinuousCandles && testRaw.length === 0)) continue;
+      const trainStartTs = new Date(candles[trainStartIdx].timestamp).getTime();
+      const trainEndTs = new Date(candles[trainEndIdx - 1].timestamp).getTime();
+      const valStartTs = new Date(candles[valStartIdx].timestamp).getTime();
+      const valEndTs = new Date(candles[valEndIdx - 1].timestamp).getTime();
+      const testStartTs = new Date(candles[testStartIdx].timestamp).getTime();
+      const testEndTs = new Date(candles[testEndIdx - 1].timestamp).getTime();
 
-      // Calculate label end timestamp purge boundary for training fold
+      const trainWindow = sliceContinuousMarketWindow(candles, trainStartTs, trainEndTs, 0);
+      const valWindow = sliceContinuousMarketWindow(candles, valStartTs, valEndTs, 40);
+      const testWindow = sliceContinuousMarketWindow(candles, testStartTs, testEndTs, 40);
+
+      if (!trainWindow || !trainWindow.allCandles || trainWindow.allCandles.length === 0) {
+        throw new Error('TRAIN_MARKET_WINDOW_NOT_FOUND');
+      }
+      if (!valWindow || !valWindow.allCandles || valWindow.allCandles.length === 0) {
+        throw new Error('VALIDATION_MARKET_WINDOW_NOT_FOUND');
+      }
+      if (!testWindow || !testWindow.allCandles || testWindow.allCandles.length === 0) {
+        throw new Error('OOS_MARKET_WINDOW_NOT_FOUND');
+      }
+
+      const trainCandles = trainWindow.allCandles;
+      const valCandles = valWindow.allCandles;
+      const testCandles = testWindow.allCandles;
+
+      const trainRange: [Date, Date] = [new Date(trainStartTs), new Date(trainEndTs)];
+      const validateRange: [Date, Date] = [new Date(valStartTs), new Date(valEndTs)];
+      const testRange: [Date, Date] = [new Date(testStartTs), new Date(testEndTs)];
+
+      // 2. Join supervised experiences into authoritative market windows
+      const trainSlice = sorted.filter((e) => {
+        const t = new Date(e.timestamp).getTime();
+        return t >= trainStartTs && t <= trainEndTs;
+      });
+      if (trainSlice.length === 0) {
+        throw new Error('INSUFFICIENT_TRAINING_LABELS_FOR_MARKET_WINDOW');
+      }
+
+      const valRaw = sorted.filter((e) => {
+        const t = new Date(e.timestamp).getTime();
+        return t >= valStartTs && t <= valEndTs;
+      });
+
+      const testRaw = sorted.filter((e) => {
+        const t = new Date(e.timestamp).getTime();
+        return t >= testStartTs && t <= testEndTs;
+      });
+
+      // 3. Purge validation samples whose entry timestamp overlaps with active training labels + embargoMs
       let trainMaxLabelEnd = 0;
       for (const e of trainSlice) {
         if (e.labelEndTimestamp === undefined || e.labelEndTimestamp === null) {
@@ -290,14 +280,13 @@ export class WalkForwardValidator {
         if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
       }
 
-      // Purge validation samples whose entry timestamp overlaps with active training labels + embargoMs
       const valPurged = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd + embargoMs);
       if (valPurged.length === 0 && valRaw.length > 0) {
         throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
       }
       const valSlice = valPurged;
 
-      // Calculate label end timestamp purge boundary for validation fold
+      // 4. Purge OOS samples whose entry timestamp overlaps with active validation labels + embargoMs
       let valMaxLabelEnd = trainMaxLabelEnd;
       for (const e of valSlice) {
         if (e.labelEndTimestamp === undefined || e.labelEndTimestamp === null) {
@@ -307,14 +296,13 @@ export class WalkForwardValidator {
         if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
       }
 
-      // Purge OOS samples whose entry timestamp overlaps with active validation labels + embargoMs
       const testPurged = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd + embargoMs);
       if (testPurged.length === 0 && testRaw.length > 0) {
         throw new Error('INSUFFICIENT_PURGED_OOS_DATA');
       }
       const testSlice = testPurged;
 
-      // Genuine ML fold retraining: feature selection, scaler fit, and model training strictly on training labels
+      // 5. Genuine ML fold retraining: feature selection, scaler fit, and model training strictly on training labels
       const foldSelection = FeatureSelector.selectFeatures(trainSlice);
       const scaler = new TemporalFeatureScaler();
       scaler.fit(trainSlice);
@@ -326,48 +314,61 @@ export class WalkForwardValidator {
         }
       }
       const modelArtifact = ModelTrainer.trainModel(trainSlice, { scaler });
-
-      const trainDatasetHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
-      const valDatasetHash = DatasetManager.computeCanonicalDatasetHash(valSlice);
-      const oosDatasetHash = DatasetManager.computeCanonicalDatasetHash(testSlice);
-
-      if (!hasContinuousCandles) {
-        const trainStartTime = new Date(trainSlice[0].timestamp).getTime();
-        const trainEndTime = new Date(trainSlice[trainSlice.length - 1].timestamp).getTime();
-        const valStartTime = valSlice.length > 0 ? new Date(valSlice[0].timestamp).getTime() : trainEndTime;
-        const valEndTime = valSlice.length > 0 ? new Date(valSlice[valSlice.length - 1].timestamp).getTime() : valStartTime;
-        const testStartTime = testSlice.length > 0 ? new Date(testSlice[0].timestamp).getTime() : valEndTime;
-        const testEndTime = testSlice.length > 0 ? new Date(testSlice[testSlice.length - 1].timestamp).getTime() : testStartTime;
-
-        trainCandles = sliceContinuousCandles(candles, trainStartTime, trainEndTime, 40);
-        valCandles = sliceContinuousCandles(candles, valStartTime, valEndTime, 40);
-        testCandles = sliceContinuousCandles(candles, testStartTime, testEndTime, 40);
+      if (!modelArtifact || !modelArtifact.modelVersion) {
+        throw new Error('INVALID_MODEL_ARTIFACT: Model artifact must contain a valid modelVersion');
       }
 
-      const trainExpStart = new Date(trainSlice[0].timestamp).getTime();
-      const trainExpEnd = new Date(trainSlice[trainSlice.length - 1].timestamp).getTime();
+      // 6. Distinct Cryptographic Hashes for Experience vs Market Datasets
+      const trainExpDatasetHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
+      const valExpDatasetHash = valSlice.length > 0 ? DatasetManager.computeCanonicalDatasetHash(valSlice) : 'canonical_empty_exp_hash';
+      const oosExpDatasetHash = testSlice.length > 0 ? DatasetManager.computeCanonicalDatasetHash(testSlice) : 'canonical_empty_exp_hash';
 
-      // Build train experience dataset for ML model training and metadata
+      const trainMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(trainCandles, options.marketDataset.timeframe || '15m');
+      const valMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(valCandles, options.marketDataset.timeframe || '15m');
+      const oosMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(testCandles, options.marketDataset.timeframe || '15m');
+
+      // Sliced datasets
       const trainExpDataset: ExperienceDataset = {
         experiences: trainSlice,
-        datasetHash: trainDatasetHash,
+        datasetHash: trainExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         symbol: options.marketDataset.symbol || 'BTCUSDT',
         timeframe: options.marketDataset.timeframe || '15m',
-        startTimestamp: trainExpStart,
-        endTimestamp: trainExpEnd,
+        startTimestamp: new Date(trainSlice[0].timestamp).getTime(),
+        endTimestamp: new Date(trainSlice[trainSlice.length - 1].timestamp).getTime(),
       };
 
-      const trainCandlesSlice = trainCandles || candles;
       const trainMarketDataset: CandidateMarketDataset = {
-        executionCandles: trainCandlesSlice,
-        datasetHash: trainDatasetHash,
+        executionCandles: trainCandles,
+        datasetHash: trainMarketDatasetHash,
         timeframe: options.marketDataset.timeframe || '15m',
         symbol: options.marketDataset.symbol || 'BTCUSDT',
-        startTimestamp: trainCandlesSlice.length > 0 ? new Date(trainCandlesSlice[0].timestamp).getTime() : 0,
-        endTimestamp: trainCandlesSlice.length > 0 ? new Date(trainCandlesSlice[trainCandlesSlice.length - 1].timestamp).getTime() : 0,
+        startTimestamp: new Date(trainCandles[0].timestamp).getTime(),
+        endTimestamp: new Date(trainCandles[trainCandles.length - 1].timestamp).getTime(),
         isContinuous: true,
-        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
+        expectedIntervalMs,
+      };
+
+      const valMarketDataset: CandidateMarketDataset = {
+        executionCandles: valCandles,
+        datasetHash: valMarketDatasetHash,
+        timeframe: options.marketDataset.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        startTimestamp: new Date(valCandles[0].timestamp).getTime(),
+        endTimestamp: new Date(valCandles[valCandles.length - 1].timestamp).getTime(),
+        isContinuous: true,
+        expectedIntervalMs,
+      };
+
+      const oosMarketDataset: CandidateMarketDataset = {
+        executionCandles: testCandles,
+        datasetHash: oosMarketDatasetHash,
+        timeframe: options.marketDataset.timeframe || '15m',
+        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        startTimestamp: new Date(testCandles[0].timestamp).getTime(),
+        endTimestamp: new Date(testCandles[testCandles.length - 1].timestamp).getTime(),
+        isContinuous: true,
+        expectedIntervalMs,
       };
 
       // Retrain candidate strategy on fold strictly using fold-specific market data (NO experiences in execution)
@@ -395,14 +396,14 @@ export class WalkForwardValidator {
       // Create and freeze immutable, real FoldArtifact
       const foldArtifact: FoldArtifact = Object.freeze({
         foldIndex: f + 1,
-        trainDatasetHash,
-        validationDatasetHash: valDatasetHash,
-        oosDatasetHash,
+        trainDatasetHash: trainExpDatasetHash,
+        validationDatasetHash: valExpDatasetHash,
+        oosDatasetHash: oosExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         selectedFeatures: foldSelection.retainedFeatures,
         scalerVersion,
         scalerParameters: scalerParams,
-        modelVersion: modelArtifact.modelVersion || '2.0.0',
+        modelVersion: modelArtifact.modelVersion,
         modelParameters: { weights: modelArtifact.weights, bias: modelArtifact.bias },
         strategyVersion: candidate.baseStrategyVersion || 'v2.0',
         candidateId: candidate.id,
@@ -414,50 +415,28 @@ export class WalkForwardValidator {
       });
       foldArtifacts.push(foldArtifact);
 
-      // 1. Evaluate retrained candidate in-sample strictly on training fold market data
+      // 7. Evaluate retrained candidate in-sample strictly on training fold market data (Fail Closed: No whole dataset fallback!)
       const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: trainMarketDataset,
-        candles: trainCandles || candles,
-        evaluationStartTimestamp: trainWindow?.evaluationStartTimestamp,
-        evaluationEndTimestamp: trainWindow?.evaluationEndTimestamp,
+        candles: trainCandles,
+        evaluationStartTimestamp: trainWindow.evaluationStartTimestamp,
+        evaluationEndTimestamp: trainWindow.evaluationEndTimestamp,
       });
 
-      // 2. Evaluate frozen retrained candidate strictly on validation fold market data
-      const valCandlesSlice = valCandles || candles;
-      const valMarketDataset: CandidateMarketDataset = {
-        executionCandles: valCandlesSlice,
-        datasetHash: valDatasetHash,
-        timeframe: options.marketDataset.timeframe || '15m',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
-        startTimestamp: valCandlesSlice.length > 0 ? new Date(valCandlesSlice[0].timestamp).getTime() : 0,
-        endTimestamp: valCandlesSlice.length > 0 ? new Date(valCandlesSlice[valCandlesSlice.length - 1].timestamp).getTime() : 0,
-        isContinuous: true,
-        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
-      };
+      // 8. Evaluate frozen retrained candidate strictly on validation fold market data
       const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: valMarketDataset,
-        candles: valCandles || candles,
-        evaluationStartTimestamp: valWindow?.evaluationStartTimestamp,
-        evaluationEndTimestamp: valWindow?.evaluationEndTimestamp,
+        candles: valCandles,
+        evaluationStartTimestamp: valWindow.evaluationStartTimestamp,
+        evaluationEndTimestamp: valWindow.evaluationEndTimestamp,
       });
 
-      // 3. Evaluate frozen retrained candidate strictly out-of-sample on OOS fold market data
-      const oosCandlesSlice = testCandles || candles;
-      const oosMarketDataset: CandidateMarketDataset = {
-        executionCandles: oosCandlesSlice,
-        datasetHash: oosDatasetHash,
-        timeframe: options.marketDataset.timeframe || '15m',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
-        startTimestamp: oosCandlesSlice.length > 0 ? new Date(oosCandlesSlice[0].timestamp).getTime() : 0,
-        endTimestamp: oosCandlesSlice.length > 0 ? new Date(oosCandlesSlice[oosCandlesSlice.length - 1].timestamp).getTime() : 0,
-        isContinuous: true,
-        expectedIntervalMs: options.marketDataset.expectedIntervalMs || 15 * 60 * 1000,
-      };
+      // 9. Evaluate frozen retrained candidate strictly out-of-sample on OOS fold market data
       const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
         dataset: oosMarketDataset,
-        candles: testCandles || candles,
-        evaluationStartTimestamp: testWindow?.evaluationStartTimestamp,
-        evaluationEndTimestamp: testWindow?.evaluationEndTimestamp,
+        candles: testCandles,
+        evaluationStartTimestamp: testWindow.evaluationStartTimestamp,
+        evaluationEndTimestamp: testWindow.evaluationEndTimestamp,
       });
 
       const isExp = isEval.candidateExpectancy;

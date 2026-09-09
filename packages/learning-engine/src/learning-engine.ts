@@ -189,27 +189,40 @@ export class LearningEngine {
       const devExperiences = [...trainSlice, ...valSlice];
       const devExpStart = devExperiences.length > 0 ? new Date(devExperiences[0].timestamp).getTime() : 0;
       const devExpEnd = devExperiences.length > 0 ? new Date(devExperiences[devExperiences.length - 1].timestamp).getTime() : 0;
+      const devTimeframe = options.dataset?.timeframe || '15m';
+      const devSymbol = options.dataset?.symbol || 'BTCUSDT';
+      const devIntervalMs = MarketDatasetValidator.resolveTimeframeIntervalMs(devTimeframe);
+
       const devExpDataset: ExperienceDataset = {
         experiences: devExperiences,
         datasetHash: DatasetManager.computeCanonicalDatasetHash(devExperiences),
         featureSchemaVersion: '2.0',
-        symbol: options.dataset?.symbol || 'BTCUSDT',
-        timeframe: options.dataset?.timeframe || '15m',
+        symbol: devSymbol,
+        timeframe: devTimeframe,
         startTimestamp: devExpStart,
         endTimestamp: devExpEnd,
       };
+
       const devExecutionCandles = devCandles || options.candles || [];
+      if (devExecutionCandles.length > 0) {
+        MarketDatasetValidator.validateCandles(devExecutionCandles, devTimeframe, { expectedIntervalMs: devIntervalMs });
+      }
+
       const devMktStart = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[0].timestamp).getTime() : 0;
       const devMktEnd = devExecutionCandles.length > 0 ? new Date(devExecutionCandles[devExecutionCandles.length - 1].timestamp).getTime() : 0;
+      const devMarketHash = devExecutionCandles.length > 0
+        ? DatasetManager.computeCanonicalMarketDatasetHash(devExecutionCandles, devTimeframe)
+        : (options.dataset?.datasetHash || 'canonical_empty_market_hash');
+
       const devMarketDataset: CandidateMarketDataset = {
         executionCandles: devExecutionCandles,
-        datasetHash: options.dataset?.datasetHash || 'market_hash_dev',
-        timeframe: options.dataset?.timeframe || '15m',
-        symbol: options.dataset?.symbol || 'BTCUSDT',
+        datasetHash: devMarketHash,
+        timeframe: devTimeframe,
+        symbol: devSymbol,
         startTimestamp: devMktStart,
         endTimestamp: devMktEnd,
         isContinuous: true,
-        expectedIntervalMs: 15 * 60 * 1000,
+        expectedIntervalMs: devIntervalMs,
       };
       const wfEval = WalkForwardValidator.validate(cand, {
         experienceDataset: devExpDataset,

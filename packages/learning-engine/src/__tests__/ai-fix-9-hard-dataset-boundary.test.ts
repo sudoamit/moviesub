@@ -2,6 +2,7 @@ import { ICandle, MockMarketDataProvider } from '@quant/shared';
 import {
   CandidateBacktestRunner,
   CandidateEvaluator,
+  DatasetManager,
   MarketDatasetValidator,
   StrategyCandidate,
   TradingExperience,
@@ -637,5 +638,192 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     };
     const artModified = CandidateBacktestRunner.createCandidateArtifact(candidateModified, 'dataset_hash_m', 42);
     expect(artModified.artifactId).not.toBe(art1.artifactId);
+  });
+
+  // Test N — Market dataset hash is computed from market candles and is strictly distinct from experience dataset hash
+  test('Test N: Market dataset hash is computed strictly from market candles and is distinct from experience dataset hash', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
+    const experiences = generateExperiences(30, baseTime, 15 * 60 * 1000);
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_n',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-n',
+      type: 'THRESHOLD',
+      description: 'Test N candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_prov_n',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: DatasetManager.computeCanonicalMarketDatasetHash(candles, '15m'),
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    let receivedTrainMarketDataset: CandidateMarketDataset | null = null;
+    WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDataset,
+      marketDataset,
+      numFolds: 2,
+      fitCandidateParametersOnMarketDataset: (c, m) => {
+        if (!receivedTrainMarketDataset) receivedTrainMarketDataset = m;
+        return c;
+      },
+    });
+
+    expect(receivedTrainMarketDataset).toBeDefined();
+    // Market dataset hash must NOT equal experience dataset hash
+    expect(receivedTrainMarketDataset!.datasetHash).not.toBe(expDataset.datasetHash);
+    // Market dataset hash must match the cryptographic hash of the fold's executionCandles
+    const expectedFoldMarketHash = DatasetManager.computeCanonicalMarketDatasetHash(
+      receivedTrainMarketDataset!.executionCandles,
+      '15m',
+    );
+    expect(receivedTrainMarketDataset!.datasetHash).toBe(expectedFoldMarketHash);
+  });
+
+  // Test O — Moving experience timestamps within window does not alter market execution windows or market hashes
+  test('Test O: Shifting experience timestamps does not alter market execution windows or market dataset hashes', () => {
+    const candles = generateContinuousCandles(80, baseTime, 15 * 60 * 1000);
+    const experiencesA = generateExperiences(30, baseTime, 15 * 60 * 1000);
+    // experiencesB shifted by 1 minute (within the 15m candle intervals)
+    const experiencesB = generateExperiences(30, baseTime + 60000, 15 * 60 * 1000);
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_o',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-o',
+      type: 'THRESHOLD',
+      description: 'Test O candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: DatasetManager.computeCanonicalMarketDatasetHash(candles, '15m'),
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    const expDatasetA: ExperienceDataset = {
+      experiences: experiencesA,
+      datasetHash: 'exp_hash_o_a',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesA[0].timestamp.getTime(),
+      endTimestamp: experiencesA[experiencesA.length - 1].timestamp.getTime(),
+    };
+
+    const expDatasetB: ExperienceDataset = {
+      experiences: experiencesB,
+      datasetHash: 'exp_hash_o_b',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiencesB[0].timestamp.getTime(),
+      endTimestamp: experiencesB[experiencesB.length - 1].timestamp.getTime(),
+    };
+
+    let marketHashA: string | null = null;
+    let marketHashB: string | null = null;
+
+    WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetA,
+      marketDataset,
+      numFolds: 2,
+      fitCandidateParametersOnMarketDataset: (c, m) => {
+        if (!marketHashA) marketHashA = m.datasetHash;
+        return c;
+      },
+    });
+
+    WalkForwardValidator.validate(candidate, {
+      experienceDataset: expDatasetB,
+      marketDataset,
+      numFolds: 2,
+      fitCandidateParametersOnMarketDataset: (c, m) => {
+        if (!marketHashB) marketHashB = m.datasetHash;
+        return c;
+      },
+    });
+
+    expect(marketHashA).toBeDefined();
+    expect(marketHashB).toBeDefined();
+    // Market hashes are determined strictly by market candles, not experience timestamps
+    expect(marketHashA).toBe(marketHashB);
+  });
+
+  // Test P — Fail-closed on insufficient or unavailable fold market windows (no whole-dataset fallback)
+  test('Test P: WalkForwardValidator strictly fails closed when market candles are insufficient for requested folds', () => {
+    const candles = generateContinuousCandles(15, baseTime, 15 * 60 * 1000); // Only 15 candles
+    const experiences = generateExperiences(10, baseTime, 15 * 60 * 1000);
+
+    const candidate: StrategyCandidate = {
+      id: 'cand_test_p',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: 'v2.0-p',
+      type: 'THRESHOLD',
+      description: 'Test P candidate',
+      change: { parameter: 'minMtfScore', value: 60 },
+      evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      status: 'GENERATED',
+      createdAt: new Date(),
+    };
+
+    const expDataset: ExperienceDataset = {
+      experiences,
+      datasetHash: 'exp_hash_p',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: experiences[0].timestamp.getTime(),
+      endTimestamp: experiences[experiences.length - 1].timestamp.getTime(),
+    };
+
+    const marketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'market_hash_p',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: candles[0].timestamp.getTime(),
+      endTimestamp: candles[candles.length - 1].timestamp.getTime(),
+      isContinuous: true,
+      expectedIntervalMs: 15 * 60 * 1000,
+    };
+
+    // 4 folds on 15 candles cannot satisfy minimum market data threshold
+    expect(() => {
+      WalkForwardValidator.validate(candidate, {
+        experienceDataset: expDataset,
+        marketDataset,
+        numFolds: 4,
+      });
+    }).toThrow(/INSUFFICIENT_CONTINUOUS_MARKET_DATA/);
   });
 });

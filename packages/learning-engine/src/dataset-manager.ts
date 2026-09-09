@@ -247,6 +247,28 @@ export class DatasetManager {
 
     return crypto.createHash('sha256').update(canonicalSamplesString).digest('hex').substring(0, 16);
   }
+
+  public static computeCanonicalMarketDatasetHash(candles: any[], timeframe = '15m'): string {
+    if (!candles || candles.length === 0) return 'canonical_empty_market_hash';
+    const sorted = [...candles].sort((a, b) => {
+      const ta = typeof a.timestamp === 'number' ? a.timestamp : new Date(a.timestamp || 0).getTime();
+      const tb = typeof b.timestamp === 'number' ? b.timestamp : new Date(b.timestamp || 0).getTime();
+      return ta - tb;
+    });
+
+    const canonicalCandlesString = sorted
+      .map((c) => {
+        const ts = typeof c.timestamp === 'number' ? c.timestamp : new Date(c.timestamp || 0).getTime();
+        return `${ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume || 0}`;
+      })
+      .join('\n');
+
+    return crypto
+      .createHash('sha256')
+      .update(`${timeframe}\n${canonicalCandlesString}`)
+      .digest('hex')
+      .substring(0, 16);
+  }
 }
 
 export const TemporalDatasetBuilder = DatasetManager;
