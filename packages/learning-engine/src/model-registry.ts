@@ -7,6 +7,7 @@ import {
   ModelRegistryEvent,
   ModelRegistryEventType,
   ProductionModelState,
+  PromotionDecision,
   PromotionEvidence,
 } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
@@ -56,8 +57,8 @@ const VALID_STATUS_TRANSITIONS: Record<CandidateStatus, CandidateStatus[]> = {
   PROMOTION_ELIGIBLE: ['PROMOTED', 'REJECTED'],
   PROMOTED: ['RETIRED', 'ROLLED_BACK'],
   REACTIVATED: ['RETIRED', 'ROLLED_BACK'],
-  RETIRED: ['REACTIVATED', 'PROMOTED'], // Rollback reactivation
-  ROLLED_BACK: ['REACTIVATED', 'PROMOTED'], // Rollback reactivation
+  RETIRED: ['REACTIVATED'], // Unambiguous rollback reactivation only
+  ROLLED_BACK: ['REACTIVATED'], // Unambiguous rollback reactivation only
   REJECTED: [],
 };
 
@@ -385,32 +386,62 @@ export class ModelRegistry {
 
   /**
    * Atomically records promotion evidence and updates candidate status to PROMOTION_ELIGIBLE or REJECTED.
+   * Requires durable persistence (fails closed if persistence is not configured).
    */
   public static recordPromotionOutcome(
     candidateId: string,
     evidence: PromotionEvidence,
-    decision: any,
+    decision: PromotionDecision,
   ): void {
+    if (!decision || typeof decision !== 'object') {
+      throw new Error('INVALID_PROMOTION_DECISION: PromotionDecision cannot be null or undefined');
+    }
+    if (decision.candidateId !== candidateId) {
+      throw new Error(
+        `INVALID_PROMOTION_DECISION: Decision candidateId ${decision.candidateId} does not match ${candidateId}`,
+      );
+    }
+    if (decision.evidenceId && decision.evidenceId !== evidence.evidenceId) {
+      throw new Error(
+        `INVALID_PROMOTION_DECISION: Decision evidenceId ${decision.evidenceId} does not match evidence ${evidence.evidenceId}`,
+      );
+    }
+
     this.executeTransaction(
       () => {
         this.savePromotionEvidence(evidence);
 
-        if (
-          decision.decision === 'PROMOTE' ||
-          (decision.rejectionReasons?.length === 1 &&
-            decision.rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED'))
-        ) {
-          const candidate = this.artifacts.get(candidateId);
-          if (candidate && candidate.status !== 'PROMOTED' && candidate.status !== 'REACTIVATED') {
+        const candidate = this.artifacts.get(candidateId);
+        if (!candidate) return;
+
+        const isAutoPromoDisabledOnly =
+          decision.decision === 'REJECT' &&
+          decision.rejectionReasons?.length === 1 &&
+          decision.rejectionReasons[0].startsWith('AUTO_PROMOTION_DISABLED');
+
+        if (decision.decision === 'PROMOTE' || isAutoPromoDisabledOnly) {
+          if (
+            candidate.status !== 'PROMOTION_ELIGIBLE' &&
+            candidate.status !== 'PROMOTED' &&
+            candidate.status !== 'REACTIVATED'
+          ) {
             this.updateCandidateStatus(
               candidateId,
               'PROMOTION_ELIGIBLE',
               'Candidate passed all shadow validation criteria',
             );
           }
+        } else if (decision.decision === 'REJECT') {
+          if (candidate.status !== 'REJECTED') {
+            this.updateCandidateStatus(
+              candidateId,
+              'REJECTED',
+              decision.rejectionReasons?.join('; ') || 'Failed promotion gate validation criteria',
+            );
+          }
         }
       },
-      { requirePersistence: this.persistencePath !== null },
+      { requirePersistence: true },
     );
   }
 

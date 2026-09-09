@@ -515,9 +515,12 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(ModelRegistry.getCandidateArtifact('cand-pass-1')?.status).toBe('PROMOTION_ELIGIBLE');
     });
 
-    it('rejects candidate with explicit reasons if any criteria fails', () => {
+    it('rejects candidate with explicit reasons if any criteria fails and transitions status to REJECTED', () => {
       const candidate = createDummyCandidate('cand-fail-1');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'm_hash');
+      ModelRegistry.registerCandidateArtifact(artifact);
+      ModelRegistry.updateCandidateStatus('cand-fail-1', 'OOS_VALIDATED');
+      ModelRegistry.updateCandidateStatus('cand-fail-1', 'SHADOW_ACTIVE');
 
       const failingShadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-fail-1',
@@ -560,6 +563,9 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(decision.rejectionReasons?.some((r: string) => r.includes('PROFIT_FACTOR_BELOW_THRESHOLD'))).toBe(true);
       expect(decision.rejectionReasons?.some((r: string) => r.includes('EXPECTANCY_BELOW_THRESHOLD'))).toBe(true);
       expect(decision.rejectionReasons?.some((r: string) => r.includes('DRAWDOWN_ABOVE_LIMIT'))).toBe(true);
+
+      // Verify candidate transitioned to REJECTED
+      expect(ModelRegistry.getCandidateArtifact('cand-fail-1')?.status).toBe('REJECTED');
     });
 
     it('rejects when allowAutoPromotion is false and records AUTO_PROMOTION_DISABLED while setting PROMOTION_ELIGIBLE', () => {
@@ -942,7 +948,7 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       allowAutoPromotion: true,
     };
 
-    it('P0 #1: rejects activation and transactions when persistence is not configured', () => {
+    it('P0 #1: rejects activation, transactions, and promotion outcome recording when persistence is not configured', () => {
       ModelRegistry.setPersistencePath(null);
 
       expect(() => {
@@ -951,14 +957,13 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         });
       }).toThrow('PERSISTENCE_NOT_CONFIGURED');
 
-      // Production activation must fail closed without persistence path
+      // Production activation and promotion gate recording must fail closed without persistence path
       const candidate = createDummyCandidate('cand-no-persist');
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'mkt_hash');
       ModelRegistry.registerCandidateArtifact(artifact);
       ModelRegistry.updateCandidateStatus('cand-no-persist', 'OOS_VALIDATED');
       ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_PENDING');
       ModelRegistry.updateCandidateStatus('cand-no-persist', 'SHADOW_ACTIVE');
-      ModelRegistry.updateCandidateStatus('cand-no-persist', 'PROMOTION_ELIGIBLE');
 
       const shadowResult: ShadowEvaluationResult = {
         candidateId: 'cand-no-persist',
@@ -979,19 +984,17 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         evaluatedAt: Date.now(),
       };
 
-      const promotionDecision = PromotionGate.evaluatePromotion({
-        candidateArtifact: artifact,
-        shadowResult,
-        policy,
-      });
-
+      // Fails closed on recording outcome without persistence
       expect(() => {
-        ProductionModelActivator.activateCandidate({
-          candidateId: 'cand-no-persist',
-          promotionDecision,
+        PromotionGate.evaluatePromotion({
+          candidateArtifact: artifact,
+          shadowResult,
           policy,
         });
       }).toThrow('PERSISTENCE_NOT_CONFIGURED');
+
+      // Candidate must NOT become promotion eligible
+      expect(ModelRegistry.getCandidateArtifact('cand-no-persist')?.status).toBe('SHADOW_ACTIVE');
     });
 
     it('P0 #2: throws LEGACY_MODEL_PROMOTION_DISABLED and LEGACY_MODEL_ROLLBACK_DISABLED when legacy bypass methods are called', () => {
@@ -1101,6 +1104,16 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       // Legal: PROMOTED -> RETIRED
       expect(() => {
         ModelRegistry.updateCandidateStatus('cand-matrix', 'RETIRED');
+      }).not.toThrow();
+
+      // Illegal: RETIRED -> PROMOTED directly (must be REACTIVATED for unambiguous rollback audit trail)
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'PROMOTED');
+      }).toThrow('ILLEGAL_STATE_TRANSITION');
+
+      // Legal: RETIRED -> REACTIVATED
+      expect(() => {
+        ModelRegistry.updateCandidateStatus('cand-matrix', 'REACTIVATED');
       }).not.toThrow();
     });
   });

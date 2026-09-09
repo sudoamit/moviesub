@@ -174,12 +174,8 @@ export class PromotionGate {
       policyVersion,
     };
 
-    try {
-      if (ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId)) {
-        ModelRegistry.recordPromotionOutcome(candidateArtifact.candidateId, evidence, resultDecision);
-      }
-    } catch {
-      // Best-effort registry recording for standalone evaluation
+    if (ModelRegistry.getCandidateArtifact(candidateArtifact.candidateId)) {
+      ModelRegistry.recordPromotionOutcome(candidateArtifact.candidateId, evidence, resultDecision);
     }
 
     return resultDecision;
