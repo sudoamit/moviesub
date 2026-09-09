@@ -574,6 +574,21 @@ export class WalkForwardValidator {
     for (const val of grid) {
       const trialCandidate: StrategyCandidate = {
         ...baseCandidate,
+        symbol: baseCandidate.symbol || marketDataset?.symbol || 'BTCUSDT',
+        riskConfig:
+          baseCandidate.riskConfig ||
+          (baseCandidate.change as any)?.riskConfig || {
+            initialCapital: 100000,
+            maxRiskPerTrade: 0.01,
+            partialExitPolicy: {
+              tp1Ratio: 0.33,
+              tp2Ratio: 0.33,
+              tp3Ratio: 0.34,
+              moveStopToBreakevenOnTp1: true,
+              trailStopOnTp2: true,
+              trailStopOffsetR: 1.0,
+            },
+          },
         candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-trial-${val}`,
         change: {
           ...baseCandidate.change,
@@ -607,6 +622,21 @@ export class WalkForwardValidator {
 
     return {
       ...baseCandidate,
+      symbol: baseCandidate.symbol || marketDataset?.symbol || 'BTCUSDT',
+      riskConfig:
+        baseCandidate.riskConfig ||
+        (baseCandidate.change as any)?.riskConfig || {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        },
       candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-fold${foldIndex}`,
       change: {
         ...baseCandidate.change,

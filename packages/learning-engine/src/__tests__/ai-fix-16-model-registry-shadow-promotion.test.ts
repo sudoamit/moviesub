@@ -77,10 +77,20 @@ function createDummyCandidate(id = 'cand-test-1'): StrategyCandidate {
       scalerArtifact: { scalerParameters: scaler.getParameters() } as any,
       selectedFeatures: ['fvgSize', 'obStrength', 'rsi14'],
       trainingDatasetHash: 'hash_train_exp_default',
-      validationDatasetHash: 'hash_val_exp_default',
-      oosDatasetHash: 'hash_oos_exp_default',
-      marketDatasetHash: 'hash_mkt_dev_default',
       datasetHash: 'hash_mkt_dev_default',
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
     },
     evidence: {
       sampleSize: 100,

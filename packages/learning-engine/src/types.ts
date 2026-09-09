@@ -246,6 +246,8 @@ export interface StrategyCandidate {
   status: CandidateStatus;
   rejectionReason?: string;
   targetComponent?: string;
+  symbol?: string;
+  riskConfig?: any;
   createdAt: Date;
   promotedAt?: Date;
 }

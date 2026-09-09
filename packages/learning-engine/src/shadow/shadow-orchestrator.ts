@@ -1282,7 +1282,18 @@ export class ShadowOrchestrator {
 
     const isLong = signalSetup.direction === Direction.BULLISH;
     const isShort = signalSetup.direction === Direction.BEARISH;
-    const requiredScore = typeof ctx.artifact.executionConfig?.minMtfScore === 'number' ? ctx.artifact.executionConfig.minMtfScore : 65;
+    const rawRequiredScore =
+      ctx.artifact.executionConfig?.minMtfScore ??
+      (ctx.artifact.strategyConfig as any)?.minMtfScore ??
+      (ctx.artifact.executionConfig as any)?.minScore ??
+      (ctx.artifact.strategyConfig as any)?.minScore;
+
+    if (!hasDet && (typeof rawRequiredScore !== 'number' || !Number.isFinite(rawRequiredScore))) {
+      throw new Error(
+        `MISSING_MIN_MTF_SCORE: Candidate '${ctx.candidateId}' artifact is missing required minMtfScore in execution/strategy configuration`,
+      );
+    }
+    const requiredScore = typeof rawRequiredScore === 'number' ? rawRequiredScore : 0;
     const isActionable = (isLong || isShort) && signalSetup.score >= requiredScore;
 
     const direction: 'LONG' | 'SHORT' | 'FLAT' = isActionable ? (isLong ? 'LONG' : 'SHORT') : 'FLAT';

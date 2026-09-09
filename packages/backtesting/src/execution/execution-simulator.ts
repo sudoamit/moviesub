@@ -487,22 +487,56 @@ export class ExecutionSimulator {
     fillCounter?: number;
     eventCounter?: number;
   }): void {
-    if (typeof sequences?.nextOrderSequence === 'number' && Number.isFinite(sequences.nextOrderSequence)) {
-      this.orderCounter = Math.max(this.orderCounter, sequences.nextOrderSequence - 1);
-    } else if (typeof sequences?.orderCounter === 'number' && Number.isFinite(sequences.orderCounter)) {
-      this.orderCounter = Math.max(this.orderCounter, sequences.orderCounter);
+    if (!sequences || typeof sequences !== 'object') {
+      throw new Error('CORRUPT_EXECUTION_SEQUENCE_STATE: Invalid sequences object');
     }
 
-    if (typeof sequences?.nextFillSequence === 'number' && Number.isFinite(sequences.nextFillSequence)) {
-      this.fillCounter = Math.max(this.fillCounter, sequences.nextFillSequence - 1);
-    } else if (typeof sequences?.fillCounter === 'number' && Number.isFinite(sequences.fillCounter)) {
-      this.fillCounter = Math.max(this.fillCounter, sequences.fillCounter);
+    // 1. Order sequence validation
+    const hasNextOrd = typeof sequences.nextOrderSequence === 'number' && Number.isFinite(sequences.nextOrderSequence);
+    const hasOrdCounter = typeof sequences.orderCounter === 'number' && Number.isFinite(sequences.orderCounter);
+    if (hasNextOrd && hasOrdCounter) {
+      if (sequences.nextOrderSequence !== sequences.orderCounter! + 1) {
+        throw new Error(
+          `CORRUPT_EXECUTION_SEQUENCE_STATE: Contradictory order sequence state (nextOrderSequence=${sequences.nextOrderSequence} != orderCounter=${sequences.orderCounter} + 1)`,
+        );
+      }
+      this.orderCounter = sequences.orderCounter!;
+    } else if (hasNextOrd) {
+      this.orderCounter = Math.max(0, sequences.nextOrderSequence! - 1);
+    } else if (hasOrdCounter) {
+      this.orderCounter = sequences.orderCounter!;
     }
 
-    if (typeof sequences?.nextEventSequence === 'number' && Number.isFinite(sequences.nextEventSequence)) {
-      this.eventCounter = Math.max(this.eventCounter, sequences.nextEventSequence - 1);
-    } else if (typeof sequences?.eventCounter === 'number' && Number.isFinite(sequences.eventCounter)) {
-      this.eventCounter = Math.max(this.eventCounter, sequences.eventCounter);
+    // 2. Fill sequence validation
+    const hasNextFill = typeof sequences.nextFillSequence === 'number' && Number.isFinite(sequences.nextFillSequence);
+    const hasFillCounter = typeof sequences.fillCounter === 'number' && Number.isFinite(sequences.fillCounter);
+    if (hasNextFill && hasFillCounter) {
+      if (sequences.nextFillSequence !== sequences.fillCounter! + 1) {
+        throw new Error(
+          `CORRUPT_EXECUTION_SEQUENCE_STATE: Contradictory fill sequence state (nextFillSequence=${sequences.nextFillSequence} != fillCounter=${sequences.fillCounter} + 1)`,
+        );
+      }
+      this.fillCounter = sequences.fillCounter!;
+    } else if (hasNextFill) {
+      this.fillCounter = Math.max(0, sequences.nextFillSequence! - 1);
+    } else if (hasFillCounter) {
+      this.fillCounter = sequences.fillCounter!;
+    }
+
+    // 3. Event sequence validation
+    const hasNextEvt = typeof sequences.nextEventSequence === 'number' && Number.isFinite(sequences.nextEventSequence);
+    const hasEvtCounter = typeof sequences.eventCounter === 'number' && Number.isFinite(sequences.eventCounter);
+    if (hasNextEvt && hasEvtCounter) {
+      if (sequences.nextEventSequence !== sequences.eventCounter! + 1) {
+        throw new Error(
+          `CORRUPT_EXECUTION_SEQUENCE_STATE: Contradictory event sequence state (nextEventSequence=${sequences.nextEventSequence} != eventCounter=${sequences.eventCounter} + 1)`,
+        );
+      }
+      this.eventCounter = sequences.eventCounter!;
+    } else if (hasNextEvt) {
+      this.eventCounter = Math.max(0, sequences.nextEventSequence! - 1);
+    } else if (hasEvtCounter) {
+      this.eventCounter = sequences.eventCounter!;
     }
   }
 

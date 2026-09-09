@@ -121,11 +121,24 @@ export class SignalGenerator {
             ? entryPrice - baseStopDist * 4.0
             : entryPrice + baseStopDist * 4.0);
 
+        const sigScore = det.score ?? 80;
+        const configMinScore =
+          options.strategyConfig?.minMtfScore ??
+          options.strategyConfig?.minScore;
+        if (typeof configMinScore === 'number' && Number.isFinite(configMinScore) && sigScore < configMinScore) {
+          return SignalGenerator.createNoTradeSignal(
+            symbol,
+            executionTf,
+            `Signal score (${sigScore}) below configured candidate minMtfScore (${configMinScore})`,
+            decisionTimestamp,
+          );
+        }
+
         return {
           id: det.id || `sig_${currTime}`,
           symbol,
           direction: det.direction,
-          score: det.score ?? 80,
+          score: sigScore,
           grade: det.grade ?? SignalGrade.A_PLUS,
           entryZone: det.entryZone ?? {
             min: entryPrice,
@@ -426,6 +439,21 @@ export class SignalGenerator {
       reasoning.confirmedChecklist.push(`ICT Killzone: ${session.badge} (${session.timeRange})`);
     } else if (session.activeSession === 'NSE_LUNCH_CHOP') {
       reasoning.confirmedChecklist.push(`⚠️ Midday Chop Session: Exercise lower position sizing`);
+    }
+
+    // Candidate Strategy Constraint: Enforce candidate minMtfScore if configured
+    const configMinScore =
+      options.strategyConfig?.minMtfScore ??
+      options.strategyConfig?.minScore;
+    if (typeof configMinScore === 'number' && Number.isFinite(configMinScore)) {
+      if (totalScore < configMinScore) {
+        return SignalGenerator.createNoTradeSignal(
+          symbol,
+          executionTf,
+          `Signal score (${totalScore}) below configured candidate minMtfScore (${configMinScore})`,
+          decisionTimestamp,
+        );
+      }
     }
 
     const finalDirection = grade === SignalGrade.NO_TRADE ? Direction.NEUTRAL : candidateDir;

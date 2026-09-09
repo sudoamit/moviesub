@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
 import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
-import { DEFAULT_PARTIAL_EXIT_POLICY } from '@quant/risk-engine';
+import { DEFAULT_PARTIAL_EXIT_POLICY, TradeLifecycleManager } from '@quant/risk-engine';
 import { CandidateArtifact, CandidateMarketDataset, CandidateStatus, StrategyCandidate, TradingExperience } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
@@ -53,6 +53,8 @@ export interface ICandidateBacktestOptions {
   symbol?: string;
   timeframe?: string;
   initialCapital?: number;
+  riskConfig?: any;
+  provenance?: any;
 }
 
 export interface IDeterministicTestFixtureOptions {
@@ -99,6 +101,8 @@ export class CandidateBacktestRunner {
       oosDatasetHash?: string;
       marketDatasetHash?: string;
       createdBy?: string;
+      symbol?: string;
+      riskConfig?: any;
     },
   ): CandidateArtifact {
     const config = this.createExecutionConfig(candidate);
@@ -181,6 +185,7 @@ export class CandidateBacktestRunner {
       (candidate as any).symbol ||
       (candidate.change as any)?.symbol ||
       (candidate as any).strategyConfig?.symbol ||
+      provenance?.symbol ||
       config.symbol;
 
     if (candidateSymbol) {
@@ -206,7 +211,10 @@ export class CandidateBacktestRunner {
       (strategyConfig as any).strategy = (candidate as any).strategy;
     }
 
-    const candidateRisk = (candidate as any).riskConfig || (candidate.change as any)?.riskConfig;
+    const candidateRisk =
+      (candidate as any).riskConfig ||
+      (candidate.change as any)?.riskConfig ||
+      provenance?.riskConfig;
     const resolvedRiskConfig = candidateRisk ? { ...candidateRisk } : {};
 
     const canonicalPayload = {
@@ -443,6 +451,80 @@ export class CandidateBacktestRunner {
   }
 
   /**
+   * Preflight validation for CandidateArtifact execution configuration.
+   * Enforces strict fail-closed requirements before BacktestSimulator is invoked.
+   */
+  public static validateCandidateExecutionConfig(
+    artifactOrCandidate: StrategyCandidate | CandidateArtifact,
+    options?: ICandidateBacktestOptions,
+  ): void {
+    if (!artifactOrCandidate || typeof artifactOrCandidate !== 'object') {
+      throw new Error('CANDIDATE_CONFIG_INVALID: Candidate or artifact is undefined/null');
+    }
+
+    const candidateId =
+      (artifactOrCandidate as any).id || (artifactOrCandidate as CandidateArtifact).candidateId || 'unknown';
+
+    // 1. Symbol validation
+    const symbol =
+      (options as any)?.symbol ||
+      (options as any)?.marketDataset?.symbol ||
+      (options as any)?.dataset?.symbol ||
+      (artifactOrCandidate as any).executionConfig?.symbol ||
+      (artifactOrCandidate as any).strategyConfig?.symbol ||
+      (artifactOrCandidate as any).change?.symbol ||
+      (artifactOrCandidate as any).symbol;
+
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidateId}' is missing authoritative symbol`);
+    }
+
+    // 2. Risk Configuration Validation (Strict Fail-Closed)
+    const riskConfig =
+      ((artifactOrCandidate as any).riskConfig && Object.keys((artifactOrCandidate as any).riskConfig).length > 0
+        ? (artifactOrCandidate as any).riskConfig
+        : undefined) ||
+      ((artifactOrCandidate as any).change?.riskConfig && Object.keys((artifactOrCandidate as any).change.riskConfig).length > 0
+        ? (artifactOrCandidate as any).change.riskConfig
+        : undefined) ||
+      ((options as any)?.riskConfig && Object.keys((options as any).riskConfig).length > 0
+        ? (options as any).riskConfig
+        : undefined);
+
+    if (!riskConfig || typeof riskConfig !== 'object' || Object.keys(riskConfig).length === 0) {
+      throw new Error(`CANDIDATE_RISK_CONFIG_MISSING: Candidate '${candidateId}' is missing authoritative riskConfig`);
+    }
+
+    const initialCapital = (riskConfig as any).initialCapital ?? options?.initialCapital;
+    if (typeof initialCapital !== 'number' || !Number.isFinite(initialCapital) || initialCapital <= 0) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' riskConfig is missing valid initialCapital`,
+      );
+    }
+
+    const maxRiskPerTrade = (riskConfig as any).maxRiskPerTrade;
+    if (typeof maxRiskPerTrade !== 'number' || !Number.isFinite(maxRiskPerTrade) || maxRiskPerTrade <= 0) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' riskConfig is missing valid maxRiskPerTrade`,
+      );
+    }
+
+    const partialPolicy = (riskConfig as any).partialExitPolicy;
+    if (!partialPolicy) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' riskConfig is missing partialExitPolicy`,
+      );
+    }
+
+    const policyVal = TradeLifecycleManager.validatePartialExitPolicy(partialPolicy);
+    if (!policyVal.isValid) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' partialExitPolicy is invalid: ${policyVal.reason}`,
+      );
+    }
+  }
+
+  /**
    * Replays candidate execution strictly through the authoritative BacktestSimulator engine
    * using continuous market candles and the immutable CandidateArtifact as the single source of truth.
    *
@@ -484,7 +566,14 @@ export class CandidateBacktestRunner {
     const artifact: CandidateArtifact =
       candidateOrArtifact && 'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
         ? (candidateOrArtifact as CandidateArtifact)
-        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate, resolvedHash);
+        : this.createCandidateArtifact(candidateOrArtifact as StrategyCandidate, resolvedHash, {
+            ...options?.provenance,
+            symbol: options?.symbol || options?.marketDataset?.symbol || options?.dataset?.symbol,
+            riskConfig: options?.riskConfig,
+          });
+
+    // 1b. Preflight validation for CandidateArtifact execution configuration (Fail-Closed)
+    this.validateCandidateExecutionConfig(artifact, options);
 
     const config: CandidateExecutionConfig = artifact.executionConfig as any;
     const riskConfig = artifact.riskConfig;

@@ -173,7 +173,36 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-cand-fixture',
       type: 'THRESHOLD',
       description: 'Authoritative candidate fixture',
-      change: { parameter: 'minMtfScore', value: 70 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: {
+        parameter: 'minMtfScore',
+        value: 70,
+        symbol: 'BTCUSDT',
+        riskConfig: {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        },
+      },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -1034,15 +1063,32 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const provider = new MockMarketDataProvider({ seed: 42 });
     const candles = await provider.getHistoricalCandles('NIFTY', '15m', 250);
 
+    const testRiskConfig = {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    };
+
     const baseCandidate: StrategyCandidate = {
       id: 'base-strat-strict',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-strict',
       type: 'THRESHOLD',
       description: 'Strict baseline strategy',
+      symbol: 'NIFTY',
+      riskConfig: testRiskConfig,
       change: {
         parameter: 'minMtfScore',
         value: 85, // Very strict score threshold
+        symbol: 'NIFTY',
+        riskConfig: testRiskConfig,
       },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
@@ -1055,9 +1101,13 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-permissive',
       type: 'THRESHOLD',
       description: 'Permissive candidate strategy with lower score threshold',
+      symbol: 'NIFTY',
+      riskConfig: testRiskConfig,
       change: {
         parameter: 'minMtfScore',
         value: 50, // Permissive score threshold
+        symbol: 'NIFTY',
+        riskConfig: testRiskConfig,
       },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
@@ -1586,7 +1636,20 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-wc',
       type: 'THRESHOLD',
       description: 'Warmup test',
-      change: { parameter: 'minMtfScore', value: 70 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: { parameter: 'minMtfScore', value: 70, symbol: 'BTCUSDT', riskConfig: { initialCapital: 100000, maxRiskPerTrade: 0.01, partialExitPolicy: { tp1Ratio: 0.33, tp2Ratio: 0.33, tp3Ratio: 0.34, moveStopToBreakevenOnTp1: true, trailStopOnTp2: true, trailStopOffsetR: 1.0 } } },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -1969,10 +2032,36 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-base',
       type: 'BASELINE',
       description: 'Base production strategy',
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
       change: {
         minMtfScore: 50,
         stopLossAtrMultiplier: 1.0,
         sizingMultiplier: 1.0,
+        symbol: 'BTCUSDT',
+        riskConfig: {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        },
       },
       evidence: { sampleSize: 200, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'PROMOTED',

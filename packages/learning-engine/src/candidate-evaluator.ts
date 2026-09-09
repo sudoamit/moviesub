@@ -35,17 +35,33 @@ export class CandidateEvaluator {
   /**
    * Constructs a canonical frozen baseline benchmark strategy candidate.
    */
-  public static createBaselineBenchmarkCandidate(baseStrategyVersion: string = 'v2.0'): StrategyCandidate {
+  public static createBaselineBenchmarkCandidate(baseStrategyVersion: string = 'v2.0', symbol: string = 'BTCUSDT'): StrategyCandidate {
+    const riskConfig = {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    };
     return {
       id: `baseline-${baseStrategyVersion}`,
       baseStrategyVersion,
       candidateVersion: `baseline-${baseStrategyVersion}`,
       type: 'BASELINE',
       description: `Baseline Benchmark Strategy (${baseStrategyVersion})`,
+      symbol,
+      riskConfig,
       change: {
         action: 'BASELINE_BENCHMARK',
         stopLossAtrMultiplier: 1.0,
         sizingMultiplier: 1.0,
+        symbol,
+        riskConfig,
       },
       evidence: { sampleSize: 0, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'PROMOTED',
@@ -95,8 +111,31 @@ export class CandidateEvaluator {
       };
     }
 
+    const defaultRisk = {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    };
+    const resolvedSymbol =
+      options?.symbol ||
+      dataset?.symbol ||
+      (candidate as any).symbol ||
+      (candidate as any).change?.symbol ||
+      'BTCUSDT';
+    const resolvedRisk =
+      (candidate as any).riskConfig ||
+      (candidate as any).change?.riskConfig ||
+      defaultRisk;
+
     // 1. Evaluate baseline strategy benchmark on authoritative BacktestSimulator using continuous market candles
-    const baselineCandidate = options?.baselineCandidate || this.createBaselineBenchmarkCandidate(baseStrategyVersion);
+    const baselineCandidate = options?.baselineCandidate || this.createBaselineBenchmarkCandidate(baseStrategyVersion, resolvedSymbol);
     const baselineRes = CandidateBacktestRunner.runCandidateBacktest(baselineCandidate, {
       dataset,
       candles,
@@ -104,8 +143,9 @@ export class CandidateEvaluator {
       evaluationEndTimestamp,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
-      symbol: options?.symbol,
+      symbol: resolvedSymbol,
       timeframe: options?.timeframe,
+      riskConfig: (baselineCandidate as any).riskConfig || defaultRisk,
     });
 
     const baselineExpectancy = baselineRes.expectancyR;
@@ -118,8 +158,9 @@ export class CandidateEvaluator {
       evaluationEndTimestamp,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
-      symbol: options?.symbol,
+      symbol: resolvedSymbol,
       timeframe: options?.timeframe,
+      riskConfig: resolvedRisk,
     });
 
     if (backtestRes.totalTrades === 0) {
