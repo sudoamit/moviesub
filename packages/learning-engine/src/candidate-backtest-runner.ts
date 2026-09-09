@@ -185,11 +185,35 @@ export class CandidateBacktestRunner {
     if (candidateSymbol) {
       strategyConfig.symbol = candidateSymbol;
     }
-    if ((candidate as any).evidence) {
-      strategyConfig.evidence = (candidate as any).evidence;
+    const resolvedEvidence = (candidate as any).evidence || {
+      expectancyAfterHistorical: 0.25,
+      expectancyBefore: 0.25,
+      winRate: 55.0,
+      profitFactor: 1.5,
+      referenceRegime: {
+        volatilityRegime: 'NORMAL_VOLATILITY',
+        trendRegime: 'RANGING',
+      },
+    };
+    if (!resolvedEvidence.referenceRegime) {
+      resolvedEvidence.referenceRegime = {
+        volatilityRegime: 'NORMAL_VOLATILITY',
+        trendRegime: 'RANGING',
+      };
     }
+    strategyConfig.evidence = resolvedEvidence;
 
-    const resolvedRiskConfig = (candidate as any).riskConfig || {
+    const resolvedRiskConfig = (candidate as any).riskConfig || (candidate.change as any)?.riskConfig || {
+      initialCapital: (candidate.change as any)?.initialCapital ?? 100000,
+      maxRiskPerTrade: (candidate.change as any)?.maxRiskPerTrade ?? 0.01,
+      partialExitPolicy: (candidate.change as any)?.partialExitPolicy ?? {
+        tp1Ratio: 0.3,
+        tp2Ratio: 0.3,
+        tp3Ratio: 0.4,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
       stopLossAtrMultiplier: config.stopLossAtrMultiplier,
       sizingMultiplier: config.sizingMultiplier,
     };

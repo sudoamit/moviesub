@@ -145,6 +145,11 @@ export class ShadowOrchestrator {
     const hasAlreadyTp2 = existingOrders.some((o: any) => o.exitTarget === 'TP2');
     const hasAlreadyTp3 = existingOrders.some((o: any) => o.exitTarget === 'TP3');
 
+    const filledTargets = new Set((lot.partialFills || []).map((fill) => fill.targetType));
+    const hasFilledTp1 = filledTargets.has('TP1');
+    const hasFilledTp2 = filledTargets.has('TP2');
+    const hasFilledTp3 = filledTargets.has('TP3');
+
     // Restore is reconstructible: fill any missing resting order from the lot,
     // while preserving the exact orders already restored from persistence.
     if (!hasStop) {
@@ -167,7 +172,7 @@ export class ShadowOrchestrator {
         : lot.initialQuantity - tp1Qty;
     const tp3Qty = policy.tp3Ratio > 0 ? lot.initialQuantity - (tp1Qty + tp2Qty) : 0;
 
-    if (!hasAlreadyTp1 && tp1Qty > 0 && typeof lot.tp1 === 'number' && lot.tp1 > 0) {
+    if (!hasAlreadyTp1 && !hasFilledTp1 && tp1Qty > 0 && typeof lot.tp1 === 'number' && lot.tp1 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -181,7 +186,7 @@ export class ShadowOrchestrator {
       });
     }
 
-    if (!hasAlreadyTp2 && tp2Qty > 0 && typeof lot.tp2 === 'number' && lot.tp2 > 0) {
+    if (!hasAlreadyTp2 && !hasFilledTp2 && tp2Qty > 0 && typeof lot.tp2 === 'number' && lot.tp2 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -194,7 +199,7 @@ export class ShadowOrchestrator {
       });
     }
 
-    if (!hasAlreadyTp3 && tp3Qty > 0 && typeof lot.tp3 === 'number' && lot.tp3 > 0) {
+    if (!hasAlreadyTp3 && !hasFilledTp3 && tp3Qty > 0 && typeof lot.tp3 === 'number' && lot.tp3 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -288,7 +293,26 @@ export class ShadowOrchestrator {
       processingLatencyMs: 5,
     };
 
-    // 3. Baseline metrics check (Strict Fail-Closed)
+    // 3. Risk Configuration Validation (Strict Fail-Closed — No synthetic defaults)
+    if (!artifact.riskConfig) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' artifact is missing riskConfig`);
+    }
+    const riskCfg = artifact.riskConfig as any;
+    if (typeof riskCfg.initialCapital !== 'number' || !Number.isFinite(riskCfg.initialCapital) || riskCfg.initialCapital <= 0) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid initialCapital`);
+    }
+    if (typeof riskCfg.maxRiskPerTrade !== 'number' || !Number.isFinite(riskCfg.maxRiskPerTrade) || riskCfg.maxRiskPerTrade <= 0) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid maxRiskPerTrade`);
+    }
+    if (!riskCfg.partialExitPolicy) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing partialExitPolicy`);
+    }
+    const partialPolicyVal = TradeLifecycleManager.validatePartialExitPolicy(riskCfg.partialExitPolicy);
+    if (!partialPolicyVal.isValid) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' partialExitPolicy is invalid: ${partialPolicyVal.reason}`);
+    }
+
+    // 4. Baseline metrics check (Strict Fail-Closed)
     const baselineExpectancy =
       options?.baselineExpectancyR ??
       (artifact as any).evidence?.expectancyAfterHistorical ??
@@ -311,7 +335,21 @@ export class ShadowOrchestrator {
       (artifact as any).evidence?.profitFactor ??
       (artifact.strategyConfig as any)?.evidence?.profitFactor;
 
-    // 4. Initialize ShadowLedger
+    // Reference regime validation from immutable candidate evidence
+    const referenceRegime =
+      (artifact as any).evidence?.referenceRegime ??
+      (artifact as any).evidence?.primaryRegime ??
+      (artifact.strategyConfig as any)?.referenceRegime ??
+      (artifact.strategyConfig as any)?.evidence?.referenceRegime ??
+      (artifact.strategyConfig as any)?.evidence?.primaryRegime;
+
+    if (!referenceRegime || !referenceRegime.volatilityRegime || !referenceRegime.trendRegime) {
+      throw new Error(
+        `REFERENCE_REGIME_MISSING: Candidate '${candidateId}' artifact is missing immutable reference regime evidence (volatilityRegime and trendRegime required)`,
+      );
+    }
+
+    // 5. Initialize ShadowLedger
     const persistencePath =
       options?.persistenceFilePath ||
       (this.options.persistenceDir ? path.join(this.options.persistenceDir, `shadow-${candidateId}.json`) : undefined);
@@ -326,7 +364,7 @@ export class ShadowOrchestrator {
       persistencePath,
     });
 
-    // 5. Initialize Authoritative ExecutionSimulator
+    // 6. Initialize Authoritative ExecutionSimulator
     const execSim = new ExecutionSimulator(
       fillModel,
       ambiguityMode,
@@ -334,14 +372,16 @@ export class ShadowOrchestrator {
       `shadow_${candidateId}`,
     );
 
-    // 6. Restore persisted state and pending orders into ExecutionSimulator
+    // 7. Restore persisted state, fills, and pending orders into ExecutionSimulator
     const recoveredCandles = [...ledger.getRecentCandles()];
     const frozenLot = ledger.getActiveLot();
     const recoveredActiveLot = frozenLot ? ShadowOrchestrator.thawPositionLot(frozenLot) : null;
     const recoveredRegimeHistory = [...ledger.getRegimeHistory()];
     const recoveredFeatureVectors = [...ledger.getFeatureVectors().map((v) => [...v])];
     const recoveredPendingOrders = [...ledger.getPendingOrders()];
+    const recoveredFills = [...ledger.getFills()];
     execSim.restoreOrders(recoveredPendingOrders);
+    execSim.restoreFills(recoveredFills);
 
     if (recoveredActiveLot && recoveredActiveLot.remainingQuantity > 0) {
       const partialPolicy = (artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
@@ -377,17 +417,19 @@ export class ShadowOrchestrator {
         profitFactor: typeof baselineProfitFactor === 'number' ? baselineProfitFactor : Number.NaN,
       },
       referenceRegime: {
-        volatilityRegime: 'NORMAL_VOLATILITY',
-        trendRegime: 'RANGING',
+        volatilityRegime: referenceRegime.volatilityRegime,
+        trendRegime: referenceRegime.trendRegime,
       },
       tradeCounter: ledger.getTrades().length,
     };
 
     this.activeCandidates.set(candidateId, context);
 
-    // Emit SHADOW_STARTED audit event
+    // Emit SHADOW_STARTED audit event with deterministic audit ID
+    const marketTs = ledger.getLastMarketTimestamp() || 0;
+    const seq = ledger.getAuditEvents().length + 1;
     ledger.recordAuditEvent({
-      eventId: `evt-start-${candidateId}-${Date.now()}`,
+      eventId: `evt_${candidateId}_SHADOW_STARTED_${marketTs}_${seq}`,
       candidateId,
       candidateVersion: artifact.candidateVersion,
       strategyVersion: artifact.strategyVersion,
@@ -439,7 +481,14 @@ export class ShadowOrchestrator {
       if (order.exitTarget === 'ENTRY') {
         const isLong = order.side === 'BUY';
         const refPrice = order.referencePrice || (order as any).calculatedEntryOptimal || fill.price;
-        const initialStop = (order as any).calculatedStopLoss ?? (isLong ? fill.price * 0.98 : fill.price * 1.02);
+        const initialStop = (order as any).calculatedStopLoss;
+        if (typeof initialStop !== 'number' || !Number.isFinite(initialStop)) {
+          throw new Error(`SHADOW_RISK_CONFIG_MISSING: Active entry order '${order.orderId}' is missing valid calculatedStopLoss`);
+        }
+        const tp1 = (order as any).calculatedTp1;
+        if (typeof tp1 !== 'number' || !Number.isFinite(tp1)) {
+          throw new Error(`SHADOW_RISK_CONFIG_MISSING: Active entry order '${order.orderId}' is missing valid calculatedTp1`);
+        }
 
         const dummySignal: any = {
           id: order.tradeId,
@@ -447,7 +496,7 @@ export class ShadowOrchestrator {
           direction: isLong ? Direction.BULLISH : Direction.BEARISH,
           stopLoss: initialStop,
           takeProfits: {
-            tp1: (order as any).calculatedTp1,
+            tp1,
             tp2: (order as any).calculatedTp2,
             tp3: (order as any).calculatedTp3,
           },
@@ -622,17 +671,37 @@ export class ShadowOrchestrator {
     // Order submitted at candle close T will execute on candle T+1
     const newOrders: IOrder[] = [];
     if (!ctx.activeLot && (candidateSignal.direction === 'LONG' || candidateSignal.direction === 'SHORT')) {
+      if (typeof candidateSignal.stopLoss !== 'number' || !Number.isFinite(candidateSignal.stopLoss) || candidateSignal.stopLoss <= 0) {
+        throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' directional signal is missing stopLoss`);
+      }
+      const tp1 = candidateSignal.targets?.tp1 ?? candidateSignal.takeProfit;
+      if (typeof tp1 !== 'number' || !Number.isFinite(tp1) || tp1 <= 0) {
+        throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' directional signal is missing takeProfit target`);
+      }
+
       ctx.tradeCounter++;
       const tradeId = `shadow_trade_${candidateId}_${ctx.tradeCounter}`;
       const side = candidateSignal.direction === 'LONG' ? 'BUY' : 'SELL';
       const entryPrice = candle.close;
-      const stopPrice =
-        candidateSignal.stopLoss ??
-        (side === 'BUY' ? entryPrice * 0.98 : entryPrice * 1.02);
-      const riskPerShare = Math.abs(entryPrice - stopPrice) || 1.0;
-      const capital = (ctx.artifact.riskConfig as any)?.initialCapital ?? 10000;
-      const riskFraction = (ctx.artifact.riskConfig as any)?.maxRiskPerTrade ?? 0.01;
-      const initialQty = Math.max(1, Math.floor((capital * riskFraction) / riskPerShare));
+      const stopPrice = candidateSignal.stopLoss;
+
+      const riskCfg = ctx.artifact.riskConfig as any;
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: riskCfg.initialCapital,
+        riskPercentage: (riskCfg.maxRiskPerTrade <= 0.2 ? riskCfg.maxRiskPerTrade * 100 : riskCfg.maxRiskPerTrade),
+        entryPrice,
+        stopLoss: stopPrice,
+        lotSize: riskCfg.lotSize || 1,
+        contractSize: riskCfg.contractSize || 1,
+        maxRiskPercentage: (riskCfg.maxAccountRiskLimit ?? 0.05) * 100,
+        maxLeverage: riskCfg.maxLeverage || 10,
+        regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
+      });
+
+      if (!sizing.isValid || sizing.roundedUnits <= 0) {
+        throw new Error(`SHADOW_RISK_CONFIG_MISSING: PositionSizer failed to calculate valid position: ${sizing.rejectionReason || 'Invalid sizing'}`);
+      }
+      const initialQty = sizing.roundedUnits;
 
       const entryOrder = ctx.execSim.submitOrder({
         tradeId,
@@ -645,7 +714,7 @@ export class ShadowOrchestrator {
         exitTarget: 'ENTRY',
       });
       (entryOrder as any).calculatedStopLoss = stopPrice;
-      (entryOrder as any).calculatedTp1 = candidateSignal.targets?.tp1 ?? candidateSignal.takeProfit;
+      (entryOrder as any).calculatedTp1 = tp1;
       (entryOrder as any).calculatedTp2 = candidateSignal.targets?.tp2;
       (entryOrder as any).calculatedTp3 = candidateSignal.targets?.tp3;
       newOrders.push(entryOrder);
@@ -683,13 +752,26 @@ export class ShadowOrchestrator {
     // 8. Rolling Window & Multi-Tier Drift Detection
     const detectedDrifts: DriftEvent[] = [];
 
-    // A. Performance Drift
+    // A. Multi-Horizon Performance Drift (SHORT, MEDIUM, LONG)
     const rollingShort = ctx.ledger.computeRollingMetrics(
       'SHORT',
       this.options.windowConfig?.shortWindowSize || 20,
       ctx.baselineMetrics.expectancyR,
       ctx.baselineMetrics.winRate,
     );
+    const rollingMedium = ctx.ledger.computeRollingMetrics(
+      'MEDIUM',
+      this.options.windowConfig?.mediumWindowSize || 50,
+      ctx.baselineMetrics.expectancyR,
+      ctx.baselineMetrics.winRate,
+    );
+    const rollingLong = ctx.ledger.computeRollingMetrics(
+      'LONG',
+      this.options.windowConfig?.longWindowSize || 100,
+      ctx.baselineMetrics.expectancyR,
+      ctx.baselineMetrics.winRate,
+    );
+
     if (rollingShort) {
       const perfDrifts = PerformanceDriftDetector.evaluatePerformanceDrift(
         candidateId,
@@ -699,6 +781,33 @@ export class ShadowOrchestrator {
         now,
       );
       detectedDrifts.push(...perfDrifts);
+    }
+    if (rollingMedium) {
+      const mediumDrifts = PerformanceDriftDetector.evaluatePerformanceDrift(
+        candidateId,
+        rollingMedium,
+        ctx.baselineMetrics,
+        this.options.performanceThresholds,
+        now,
+      ).map((d) => ({
+        ...d,
+        details: `[MEDIUM_HORIZON] Persistent degradation: ${d.details}`,
+      }));
+      detectedDrifts.push(...mediumDrifts);
+    }
+    if (rollingLong) {
+      const longDrifts = PerformanceDriftDetector.evaluatePerformanceDrift(
+        candidateId,
+        rollingLong,
+        ctx.baselineMetrics,
+        this.options.performanceThresholds,
+        now,
+      ).map((d) => ({
+        ...d,
+        severity: 'CRITICAL' as const,
+        details: `[LONG_HORIZON] Structural degradation: ${d.details}`,
+      }));
+      detectedDrifts.push(...longDrifts);
     }
 
     // B. Feature Drift
@@ -760,10 +869,11 @@ export class ShadowOrchestrator {
       this.executePaperRollback(ctx, nextHealth.statusReason || 'CRITICAL_DRIFT_FAILURE', now);
     }
 
-    // 11. Audit event emission
+    // 11. Audit event emission with deterministic IDs
     if (closedTrades.length > 0) {
+      const seq = ctx.ledger.getAuditEvents().length + 1;
       ctx.ledger.recordAuditEvent({
-        eventId: `evt-trade-close-${candidateId}-${candleTime}`,
+        eventId: `evt_${candidateId}_SHADOW_TRADE_CLOSED_${candleTime}_${seq}`,
         candidateId,
         candidateVersion: ctx.artifact.candidateVersion,
         strategyVersion: ctx.artifact.strategyVersion,
@@ -785,8 +895,9 @@ export class ShadowOrchestrator {
           ? 'SHADOW_FAILED'
           : 'SHADOW_OBSERVATION';
 
+      const seq = ctx.ledger.getAuditEvents().length + 1;
       ctx.ledger.recordAuditEvent({
-        eventId: `evt-health-${candidateId}-${candleTime}-${nextHealth.status}`,
+        eventId: `evt_${candidateId}_${eventType}_${candleTime}_${seq}`,
         candidateId,
         candidateVersion: ctx.artifact.candidateVersion,
         strategyVersion: ctx.artifact.strategyVersion,
@@ -899,11 +1010,16 @@ export class ShadowOrchestrator {
       observationsCount: observations.length,
     };
 
+    const minObs = this.options.windowConfig?.minObservationsForEvaluation || 30;
+    const minTrades = this.options.windowConfig?.minTradesForEvaluation || 10;
+    const obsSufficient = observations.length >= minObs;
+    const sampleInsufficient = trades.length < minTrades || !obsSufficient;
+
     const isHealthy =
       baselineComplete &&
       health.status === 'HEALTHY' &&
-      trades.length >= (this.options.windowConfig?.minTradesForEvaluation || 10);
-    const sampleInsufficient = trades.length < (this.options.windowConfig?.minTradesForEvaluation || 10);
+      !sampleInsufficient;
+
     const reasons: string[] = [];
     if (!baselineComplete) {
       reasons.push('SHADOW_BASELINE_MISSING: immutable baseline evidence is incomplete');
@@ -912,7 +1028,10 @@ export class ShadowOrchestrator {
     }
 
     const shadowDatasetHash = ctx.ledger.getShadowDatasetHash();
-    const marketDatasetHash = ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash || shadowDatasetHash;
+    const marketDatasetHash = ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash;
+    if (!marketDatasetHash) {
+      throw new Error(`MISSING_DATASET_HASH: Candidate artifact '${candidateId}' is missing marketDatasetHash`);
+    }
 
     return {
       candidateId,
@@ -931,8 +1050,8 @@ export class ShadowOrchestrator {
         marketDatasetHash,
         startTimestamp,
         endTimestamp,
-        minimumObservations: this.options.windowConfig?.minObservationsForEvaluation || 30,
-        minimumTrades: this.options.windowConfig?.minTradesForEvaluation || 10,
+        minimumObservations: minObs,
+        minimumTrades: minTrades,
       },
       shadowDatasetHash,
       shadowStartTimestamp: startTimestamp,
@@ -961,8 +1080,10 @@ export class ShadowOrchestrator {
       updatedAt: now,
     });
 
+    const marketTs = ctx.ledger.getLastMarketTimestamp() || 0;
+    const seq = ctx.ledger.getAuditEvents().length + 1;
     ctx.ledger.recordAuditEvent({
-      eventId: `evt-stop-${candidateId}-${now}`,
+      eventId: `evt_${candidateId}_SHADOW_STOPPED_${marketTs}_${seq}`,
       candidateId,
       candidateVersion: ctx.artifact.candidateVersion,
       strategyVersion: ctx.artifact.strategyVersion,
@@ -999,6 +1120,17 @@ export class ShadowOrchestrator {
     symbol: string,
     policy = DEFAULT_PARTIAL_EXIT_POLICY,
   ): void {
+    const exitFilledQty = (lot.partialFills || [])
+      .filter((f) => f.targetType !== 'ENTRY')
+      .reduce((sum, f) => sum + (f.quantity || 0), 0);
+    const conservedSum = Number((exitFilledQty + lot.remainingQuantity).toFixed(4));
+    const expectedInitial = Number(lot.initialQuantity.toFixed(4));
+    if (conservedSum !== expectedInitial) {
+      throw new Error(
+        `SHADOW_EXECUTION_STATE_MISMATCH: Conservation of quantity violated: exit fills (${exitFilledQty}) + remaining (${lot.remainingQuantity}) = ${conservedSum} !== initial (${expectedInitial})`,
+      );
+    }
+
     const seenTargets = new Set<string>();
     for (const order of orders) {
       if (order.tradeId !== lot.tradeId || order.symbol !== symbol || order.quantity <= 0) {
@@ -1142,20 +1274,22 @@ export class ShadowOrchestrator {
     ctx.ledger.setActiveLot(null);
     ctx.ledger.setPendingOrders([]);
 
-    // 2. Mark candidate REJECTED in ModelRegistry
+    // 2. Mark candidate REJECTED in ModelRegistry (strict fail-closed)
     try {
       ModelRegistry.updateCandidateStatus(
         ctx.candidateId,
         'REJECTED',
         `AUTOMATIC_PAPER_ROLLBACK: ${reason}`,
       );
-    } catch {
-      // Status update recorded
+    } catch (err: any) {
+      throw new Error(`PAPER_ROLLBACK_PERSISTENCE_FAILURE: Failed to persist candidate rollback status: ${err.message}`);
     }
 
     // 3. Record PAPER_ROLLBACK audit event
+    const marketTs = ctx.ledger.getLastMarketTimestamp() || 0;
+    const seq = ctx.ledger.getAuditEvents().length + 1;
     ctx.ledger.recordAuditEvent({
-      eventId: `evt-rollback-${ctx.candidateId}-${now}`,
+      eventId: `evt_${ctx.candidateId}_PAPER_ROLLBACK_${marketTs}_${seq}`,
       candidateId: ctx.candidateId,
       candidateVersion: ctx.artifact.candidateVersion,
       strategyVersion: ctx.artifact.strategyVersion,

@@ -456,6 +456,9 @@ export interface ShadowEvaluationResult {
   rejectionReason?: string;
   window: ShadowEvaluationWindow;
   shadowDatasetHash: string;
+  shadowMarketDatasetHash?: string;
+  shadowFeatureObservationHash?: string;
+  shadowExecutionEvidenceHash?: string;
   shadowStartTimestamp: number;
   shadowEndTimestamp: number;
   evaluatedAt: number;

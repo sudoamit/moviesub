@@ -420,6 +420,42 @@ export class ExecutionSimulator {
     );
   }
 
+  restoreFill(fill: IFill): void {
+    if (!fill || !fill.fillId) return;
+    this.fills.push({ ...fill });
+    const match = fill.fillId.match(/_fill_(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10);
+      if (!isNaN(idx) && idx > this.fillCounter) {
+        this.fillCounter = idx;
+      }
+    }
+  }
+
+  restoreFills(fills: IFill[]): void {
+    for (const f of fills) {
+      this.restoreFill(f);
+    }
+  }
+
+  restoreEvent(event: IExecutionEvent): void {
+    if (!event || !event.eventId) return;
+    this.events.push({ ...event });
+    const match = event.eventId.match(/_evt_(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10);
+      if (!isNaN(idx) && idx > this.eventCounter) {
+        this.eventCounter = idx;
+      }
+    }
+  }
+
+  restoreEvents(events: IExecutionEvent[]): void {
+    for (const ev of events) {
+      this.restoreEvent(ev);
+    }
+  }
+
   getAllOrders(): IOrder[] {
     return Array.from(this.orders.values());
   }

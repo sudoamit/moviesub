@@ -313,17 +313,41 @@ export class ShadowLedger {
     return deepFreeze(metrics);
   }
 
-  public getShadowDatasetHash(): string {
+  public getShadowMarketDatasetHash(): string {
     const hash = createHash('sha256');
-    hash.update(`shadow_stream_${this.symbol}_${this.candidateId}`);
+    hash.update(`shadow_market_${this.symbol}_${this.candidateId}`);
     for (const c of this.recentCandles) {
       const ts = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
       hash.update(`${ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume}`);
     }
+    return hash.digest('hex');
+  }
+
+  public getShadowFeatureObservationHash(): string {
+    const hash = createHash('sha256');
+    hash.update(`shadow_features_${this.symbol}_${this.candidateId}`);
     for (const o of this.observations) {
       hash.update(`${o.marketTimestamp}|${o.featureVectorHash}`);
     }
     return hash.digest('hex');
+  }
+
+  public getShadowExecutionEvidenceHash(): string {
+    const hash = createHash('sha256');
+    hash.update(`shadow_exec_${this.symbol}_${this.candidateId}`);
+    for (const f of this.fills) {
+      hash.update(`${f.fillId}|${f.price}|${f.quantity}|${f.timestamp}|${f.fee}|${f.slippage}`);
+    }
+    return hash.digest('hex');
+  }
+
+  public getShadowDatasetHash(): string {
+    const mktHash = this.getShadowMarketDatasetHash();
+    const featHash = this.getShadowFeatureObservationHash();
+    const execHash = this.getShadowExecutionEvidenceHash();
+    return createHash('sha256')
+      .update(`${this.candidateId}|${this.symbol}|${mktHash}|${featHash}|${execHash}`)
+      .digest('hex');
   }
 
   public calculateMedianR(): number {
