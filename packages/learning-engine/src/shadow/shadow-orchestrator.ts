@@ -10,6 +10,7 @@ import {
 } from '@quant/backtesting';
 import {
   DEFAULT_PARTIAL_EXIT_POLICY,
+  IPartialExitPolicy,
   PositionLot,
   PositionSizer,
   TradeLifecycleManager,
@@ -126,19 +127,20 @@ export class ShadowOrchestrator {
     execSim: ExecutionSimulator,
     lot: PositionLot,
     symbol: string,
-    policy = DEFAULT_PARTIAL_EXIT_POLICY,
+    policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
     timestamp: number,
-  ): void {
+  ): IOrder[] {
     const isLong = lot.direction === Direction.BULLISH;
     const exitSide = isLong ? 'SELL' : 'BUY';
     const remainingQty = lot.remainingQuantity;
-    if (remainingQty <= 0) return;
+    if (remainingQty <= 0) return [];
 
     const val = TradeLifecycleManager.validatePartialExitPolicy(policy);
     if (!val.isValid) {
       throw new Error(`Invalid partial exit policy: ${val.reason}`);
     }
 
+    const createdOrders: IOrder[] = [];
     const existingOrders = execSim.getTradeOrders(lot.tradeId);
     const hasStop = existingOrders.some((o: IOrder) => o.orderType === 'STOP');
     const hasAlreadyTp1 = existingOrders.some((o: any) => o.exitTarget === 'TP1');
@@ -153,7 +155,7 @@ export class ShadowOrchestrator {
     // Restore is reconstructible: fill any missing resting order from the lot,
     // while preserving the exact orders already restored from persistence.
     if (!hasStop) {
-      execSim.submitOrder({
+      const stopOrder = execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
         side: exitSide,
@@ -163,6 +165,7 @@ export class ShadowOrchestrator {
         timestamp,
         exitTarget: lot.currentStopLoss === lot.entryPrice ? 'TRAILING_STOP' : 'SL',
       });
+      createdOrders.push(stopOrder);
     }
 
     const tp1Qty = Math.round(lot.initialQuantity * policy.tp1Ratio);
@@ -173,7 +176,7 @@ export class ShadowOrchestrator {
     const tp3Qty = policy.tp3Ratio > 0 ? lot.initialQuantity - (tp1Qty + tp2Qty) : 0;
 
     if (!hasAlreadyTp1 && !hasFilledTp1 && tp1Qty > 0 && typeof lot.tp1 === 'number' && lot.tp1 > 0) {
-      execSim.submitOrder({
+      const tp1Order = execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
         side: exitSide,
@@ -184,10 +187,11 @@ export class ShadowOrchestrator {
         exitTarget: 'TP1',
         referencePrice: lot.entryPrice,
       });
+      createdOrders.push(tp1Order);
     }
 
     if (!hasAlreadyTp2 && !hasFilledTp2 && tp2Qty > 0 && typeof lot.tp2 === 'number' && lot.tp2 > 0) {
-      execSim.submitOrder({
+      const tp2Order = execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
         side: exitSide,
@@ -197,10 +201,11 @@ export class ShadowOrchestrator {
         timestamp,
         exitTarget: 'TP2',
       });
+      createdOrders.push(tp2Order);
     }
 
     if (!hasAlreadyTp3 && !hasFilledTp3 && tp3Qty > 0 && typeof lot.tp3 === 'number' && lot.tp3 > 0) {
-      execSim.submitOrder({
+      const tp3Order = execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
         side: exitSide,
@@ -210,7 +215,10 @@ export class ShadowOrchestrator {
         timestamp,
         exitTarget: 'TP3',
       });
+      createdOrders.push(tp3Order);
     }
+
+    return createdOrders;
   }
 
   /**
@@ -335,19 +343,44 @@ export class ShadowOrchestrator {
       (artifact as any).evidence?.profitFactor ??
       (artifact.strategyConfig as any)?.evidence?.profitFactor;
 
-    // Reference regime validation from immutable candidate evidence
-    const referenceRegime =
+    // Reference regime validation from immutable candidate evidence with robust normalization
+    const rawRefRegime =
       (artifact as any).evidence?.referenceRegime ??
       (artifact as any).evidence?.primaryRegime ??
       (artifact.strategyConfig as any)?.referenceRegime ??
       (artifact.strategyConfig as any)?.evidence?.referenceRegime ??
       (artifact.strategyConfig as any)?.evidence?.primaryRegime;
 
-    if (!referenceRegime || !referenceRegime.volatilityRegime || !referenceRegime.trendRegime) {
+    if (!rawRefRegime || !rawRefRegime.volatilityRegime) {
       throw new Error(
         `REFERENCE_REGIME_MISSING: Candidate '${candidateId}' artifact is missing immutable reference regime evidence (volatilityRegime and trendRegime required)`,
       );
     }
+
+    const volStr = String(rawRefRegime.volatilityRegime).toUpperCase();
+    const normalizedVol =
+      volStr === 'NORMAL' || volStr === 'NORMAL_VOLATILITY'
+        ? 'NORMAL_VOLATILITY'
+        : volStr === 'LOW' || volStr === 'LOW_VOLATILITY'
+        ? 'LOW_VOLATILITY'
+        : volStr === 'HIGH' || volStr === 'HIGH_VOLATILITY'
+        ? 'HIGH_VOLATILITY'
+        : (volStr as any);
+
+    const trendStr = rawRefRegime.trendRegime ? String(rawRefRegime.trendRegime).toUpperCase() : undefined;
+    const normalizedTrend =
+      trendStr === 'BULLISH' || trendStr === 'TRENDING_BULLISH'
+        ? 'TRENDING_BULLISH'
+        : trendStr === 'BEARISH' || trendStr === 'TRENDING_BEARISH'
+        ? 'TRENDING_BEARISH'
+        : trendStr === 'RANGING'
+        ? 'RANGING'
+        : (trendStr as any);
+
+    const referenceRegime = {
+      volatilityRegime: normalizedVol,
+      trendRegime: normalizedTrend,
+    };
 
     // 5. Initialize ShadowLedger
     const persistencePath =
@@ -380,56 +413,48 @@ export class ShadowOrchestrator {
     const recoveredFeatureVectors = [...ledger.getFeatureVectors().map((v) => [...v])];
     const recoveredPendingOrders = [...ledger.getPendingOrders()];
     const recoveredFills = [...ledger.getFills()];
+    const recoveredSequences = ledger.getExecutionSequences();
+    if (recoveredSequences) {
+      execSim.setExecutionSequences(recoveredSequences);
+    }
     execSim.restoreOrders(recoveredPendingOrders);
     execSim.restoreFills(recoveredFills);
 
     if (recoveredActiveLot && recoveredActiveLot.remainingQuantity > 0) {
-      const partialPolicy = (artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
       ShadowOrchestrator.submitRestingExitOrders(
         execSim,
         recoveredActiveLot,
         symbol,
-        partialPolicy,
+        (artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY,
         ledger.getLastMarketTimestamp() || Date.now(),
-      );
-      const liveOrders = execSim.getTradeOrders(recoveredActiveLot.tradeId);
-      ShadowOrchestrator.validateRestoredExecutionState(
-        recoveredActiveLot,
-        liveOrders,
-        symbol,
-        partialPolicy,
       );
     }
 
-    const context: ActiveCandidateContext = {
+    // 8. Register Active Candidate Context
+    const ctx: ActiveCandidateContext = {
       candidateId,
       artifact,
       ledger,
       execSim,
       candles: recoveredCandles,
-      regimeHistory: recoveredRegimeHistory,
-      featureVectors: recoveredFeatureVectors,
-      activeLot: recoveredActiveLot,
       featureBaseline: options?.featureBaseline,
       baselineMetrics: {
         expectancyR: baselineExpectancy,
-        winRate: typeof baselineWinRate === 'number' ? baselineWinRate : Number.NaN,
-        profitFactor: typeof baselineProfitFactor === 'number' ? baselineProfitFactor : Number.NaN,
+        winRate: baselineWinRate ?? 50.0,
+        profitFactor: baselineProfitFactor ?? 1.0,
       },
-      referenceRegime: {
-        volatilityRegime: referenceRegime.volatilityRegime,
-        trendRegime: referenceRegime.trendRegime,
-      },
-      tradeCounter: ledger.getTrades().length,
+      referenceRegime,
+      regimeHistory: recoveredRegimeHistory,
+      featureVectors: recoveredFeatureVectors,
+      activeLot: recoveredActiveLot,
+      tradeCounter: recoveredActiveLot ? 1 : 0,
     };
 
-    this.activeCandidates.set(candidateId, context);
+    this.activeCandidates.set(candidateId, ctx);
 
-    // Emit SHADOW_STARTED audit event with deterministic audit ID
-    const marketTs = ledger.getLastMarketTimestamp() || 0;
-    const seq = ledger.getAuditEvents().length + 1;
+    // 9. Initial Shadow Audit Event
     ledger.recordAuditEvent({
-      eventId: `evt_${candidateId}_SHADOW_STARTED_${marketTs}_${seq}`,
+      eventId: `evt_${candidateId}_SHADOW_STARTED_${Date.now()}_1`,
       candidateId,
       candidateVersion: artifact.candidateVersion,
       strategyVersion: artifact.strategyVersion,
@@ -467,6 +492,7 @@ export class ShadowOrchestrator {
 
     // 2. Authoritative Execution Simulation on Incoming Candle Bar (Next-Candle Execution)
     // Execute pending resting orders against incoming candle before computing new close-of-candle signals
+    const newOrders: IOrder[] = [];
     const closedTrades: IBacktestTrade[] = [];
     const execBarRes = ctx.execSim.processSingleExecutionBar(candle);
     const newFills = execBarRes.fills;
@@ -517,13 +543,14 @@ export class ShadowOrchestrator {
         );
 
         // Submit resting exit orders (SL, TP1, TP2, TP3)
-        ShadowOrchestrator.submitRestingExitOrders(
+        const restingOrders = ShadowOrchestrator.submitRestingExitOrders(
           ctx.execSim,
           ctx.activeLot,
           symbol,
           partialPolicy,
           fill.timestamp,
         );
+        newOrders.push(...restingOrders);
       } else {
         // Exit order filled (SL, TP1, TP2, TP3, TRAILING_STOP)
         if (ctx.activeLot && ctx.activeLot.tradeId === order.tradeId) {
@@ -627,22 +654,22 @@ export class ShadowOrchestrator {
     let featureVectorHash = createHash('sha256').update(`feat_schema_${ctx.artifact.featureSchemaHash}`).digest('hex');
     let featureVector: number[] = [];
 
-    if (ctx.candles.length >= 20) {
-      try {
-        const snapshot = SnapshotBuilder.buildSnapshot({
-          symbol,
-          executionCandles: ctx.candles,
-        });
-        const extracted = CanonicalMLEngineV2.extractFeatures(snapshot);
-        const mlFeatures = CanonicalMLEngineV2.toArray(extracted);
-        if (mlFeatures && mlFeatures.length > 0) {
-          featureVector = mlFeatures;
-          featureVectorHash = createHash('sha256').update(JSON.stringify(mlFeatures)).digest('hex');
-          ctx.featureVectors.push(mlFeatures);
-        }
-      } catch {
-        // Feature extraction warmup
+    const requiredWarmup = 20;
+    if (ctx.candles.length >= requiredWarmup) {
+      const snapshot = SnapshotBuilder.buildSnapshot({
+        symbol,
+        executionCandles: ctx.candles,
+      });
+      const extracted = CanonicalMLEngineV2.extractFeatures(snapshot);
+      const mlFeatures = CanonicalMLEngineV2.toArray(extracted);
+      if (!mlFeatures || mlFeatures.length === 0) {
+        throw new Error(
+          `FEATURE_EXTRACTION_FAILED: Candidate '${candidateId}' produced empty feature vector after warmup (${ctx.candles.length} candles)`,
+        );
       }
+      featureVector = mlFeatures;
+      featureVectorHash = createHash('sha256').update(JSON.stringify(mlFeatures)).digest('hex');
+      ctx.featureVectors.push(mlFeatures);
     }
 
     // 4. Candidate Signal Generation using Authoritative Candidate Strategy
@@ -669,7 +696,6 @@ export class ShadowOrchestrator {
 
     // 6. Submit New Orders (if no active position and signal is directional)
     // Order submitted at candle close T will execute on candle T+1
-    const newOrders: IOrder[] = [];
     if (!ctx.activeLot && (candidateSignal.direction === 'LONG' || candidateSignal.direction === 'SHORT')) {
       if (typeof candidateSignal.stopLoss !== 'number' || !Number.isFinite(candidateSignal.stopLoss) || candidateSignal.stopLoss <= 0) {
         throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' directional signal is missing stopLoss`);
@@ -915,6 +941,7 @@ export class ShadowOrchestrator {
     ctx.ledger.setRecentCandles(ctx.candles.slice(-100));
     ctx.ledger.setRegimeHistory(ctx.regimeHistory.slice(-50));
     ctx.ledger.setFeatureVectors(ctx.featureVectors.slice(-50));
+    ctx.ledger.setExecutionSequences(ctx.execSim.getExecutionSequences());
     ctx.ledger.saveToFile();
 
     return {
@@ -1094,6 +1121,7 @@ export class ShadowOrchestrator {
       metadata: { reason },
     });
 
+    ctx.ledger.setExecutionSequences(ctx.execSim.getExecutionSequences());
     ctx.ledger.saveToFile();
     this.activeCandidates.delete(candidateId);
   }
@@ -1218,7 +1246,11 @@ export class ShadowOrchestrator {
     candle: ICandle,
     symbol: string,
   ): ShadowSignalSnapshot {
-    if (ctx.candles.length < 15) {
+    const hasDet = !!(
+      (ctx.artifact.strategyConfig as any)?.deterministicSignal ||
+      (ctx.artifact.strategyConfig as any)?.deterministicSignals
+    );
+    if (!hasDet && ctx.candles.length < 15) {
       return { direction: 'FLAT' };
     }
 
@@ -1226,6 +1258,8 @@ export class ShadowOrchestrator {
     const strategyConfig = {
       ...(ctx.artifact.strategyConfig || {}),
       ...(ctx.artifact.executionConfig || {}),
+      deterministicSignal: (ctx.artifact.strategyConfig as any)?.deterministicSignal,
+      deterministicSignals: (ctx.artifact.strategyConfig as any)?.deterministicSignals,
       minMtfScore: ctx.artifact.executionConfig?.minMtfScore,
       stopLossAtrMultiplier: ctx.artifact.executionConfig?.stopLossAtrMultiplier,
       sizingMultiplier: ctx.artifact.executionConfig?.sizingMultiplier,
@@ -1243,7 +1277,7 @@ export class ShadowOrchestrator {
       executionCandles: ctx.candles,
       strategyConfig,
       scoringWeights: (ctx.artifact.strategyConfig as any)?.scoringWeights,
-      minimumCandles: 15,
+      minimumCandles: hasDet ? 1 : 15,
     });
 
     const isLong = signalSetup.direction === Direction.BULLISH;

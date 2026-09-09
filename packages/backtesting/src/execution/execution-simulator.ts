@@ -393,7 +393,9 @@ export class ExecutionSimulator {
   }
 
   restoreOrder(order: IOrder): void {
-    if (!order || !order.orderId) return;
+    if (!order || !order.orderId) {
+      throw new Error('CORRUPT_EXECUTION_ORDER: Missing order or orderId during state restoration');
+    }
     this.orders.set(order.orderId, { ...order });
     const match = order.orderId.match(/_ord_(\d+)$/);
     if (match) {
@@ -405,6 +407,9 @@ export class ExecutionSimulator {
   }
 
   restoreOrders(orders: IOrder[]): void {
+    if (!Array.isArray(orders)) {
+      throw new Error('CORRUPT_EXECUTION_ORDERS: Invalid orders array during state restoration');
+    }
     for (const ord of orders) {
       this.restoreOrder(ord);
     }
@@ -421,7 +426,9 @@ export class ExecutionSimulator {
   }
 
   restoreFill(fill: IFill): void {
-    if (!fill || !fill.fillId) return;
+    if (!fill || !fill.fillId) {
+      throw new Error('CORRUPT_EXECUTION_FILL: Missing fill or fillId during state restoration');
+    }
     this.fills.push({ ...fill });
     const match = fill.fillId.match(/_fill_(\d+)$/);
     if (match) {
@@ -433,13 +440,18 @@ export class ExecutionSimulator {
   }
 
   restoreFills(fills: IFill[]): void {
+    if (!Array.isArray(fills)) {
+      throw new Error('CORRUPT_EXECUTION_FILLS: Invalid fills array during state restoration');
+    }
     for (const f of fills) {
       this.restoreFill(f);
     }
   }
 
   restoreEvent(event: IExecutionEvent): void {
-    if (!event || !event.eventId) return;
+    if (!event || !event.eventId) {
+      throw new Error('CORRUPT_EXECUTION_EVENT: Missing event or eventId during state restoration');
+    }
     this.events.push({ ...event });
     const match = event.eventId.match(/_evt_(\d+)$/);
     if (match) {
@@ -451,8 +463,46 @@ export class ExecutionSimulator {
   }
 
   restoreEvents(events: IExecutionEvent[]): void {
+    if (!Array.isArray(events)) {
+      throw new Error('CORRUPT_EXECUTION_EVENTS: Invalid events array during state restoration');
+    }
     for (const ev of events) {
       this.restoreEvent(ev);
+    }
+  }
+
+  getExecutionSequences(): { nextOrderSequence: number; nextFillSequence: number; nextEventSequence: number } {
+    return {
+      nextOrderSequence: this.orderCounter + 1,
+      nextFillSequence: this.fillCounter + 1,
+      nextEventSequence: this.eventCounter + 1,
+    };
+  }
+
+  setExecutionSequences(sequences: {
+    nextOrderSequence?: number;
+    nextFillSequence?: number;
+    nextEventSequence?: number;
+    orderCounter?: number;
+    fillCounter?: number;
+    eventCounter?: number;
+  }): void {
+    if (typeof sequences?.nextOrderSequence === 'number' && Number.isFinite(sequences.nextOrderSequence)) {
+      this.orderCounter = Math.max(this.orderCounter, sequences.nextOrderSequence - 1);
+    } else if (typeof sequences?.orderCounter === 'number' && Number.isFinite(sequences.orderCounter)) {
+      this.orderCounter = Math.max(this.orderCounter, sequences.orderCounter);
+    }
+
+    if (typeof sequences?.nextFillSequence === 'number' && Number.isFinite(sequences.nextFillSequence)) {
+      this.fillCounter = Math.max(this.fillCounter, sequences.nextFillSequence - 1);
+    } else if (typeof sequences?.fillCounter === 'number' && Number.isFinite(sequences.fillCounter)) {
+      this.fillCounter = Math.max(this.fillCounter, sequences.fillCounter);
+    }
+
+    if (typeof sequences?.nextEventSequence === 'number' && Number.isFinite(sequences.nextEventSequence)) {
+      this.eventCounter = Math.max(this.eventCounter, sequences.nextEventSequence - 1);
+    } else if (typeof sequences?.eventCounter === 'number' && Number.isFinite(sequences.eventCounter)) {
+      this.eventCounter = Math.max(this.eventCounter, sequences.eventCounter);
     }
   }
 

@@ -55,6 +55,11 @@ export class ShadowLedger {
   private pendingOrders: IOrder[] = [];
   private regimeHistory: RegimeObservation[] = [];
   private featureVectors: (readonly number[])[] = [];
+  private executionSequences: {
+    readonly nextOrderSequence: number;
+    readonly nextFillSequence: number;
+    readonly nextEventSequence: number;
+  } | null = null;
 
   constructor(params: {
     candidateId: string;
@@ -414,6 +419,14 @@ export class ShadowLedger {
     this.featureVectors = vectors.map((v) => deepFreeze([...v]));
   }
 
+  public getExecutionSequences(): { nextOrderSequence: number; nextFillSequence: number; nextEventSequence: number } | null {
+    return this.executionSequences ? { ...this.executionSequences } : null;
+  }
+
+  public setExecutionSequences(sequences: { nextOrderSequence: number; nextFillSequence: number; nextEventSequence: number } | null): void {
+    this.executionSequences = sequences ? { ...sequences } : null;
+  }
+
   /**
    * Saves authoritative shadow state atomically to disk.
    */
@@ -444,6 +457,7 @@ export class ShadowLedger {
       pendingOrders: this.pendingOrders,
       regimeHistory: this.regimeHistory,
       featureVectors: this.featureVectors,
+      executionSequences: this.executionSequences ? { ...this.executionSequences } : undefined,
       savedAt: Date.now(),
     };
 
@@ -545,6 +559,7 @@ export class ShadowLedger {
       this.pendingOrders = (data.pendingOrders || []).map((o) => deepFreeze({ ...o }) as IOrder);
       this.regimeHistory = (data.regimeHistory || []).map((h) => deepFreeze({ ...h }));
       this.featureVectors = (data.featureVectors || []).map((v) => deepFreeze([...v]) as number[]);
+      this.executionSequences = data.executionSequences ? { ...data.executionSequences } : null;
     } catch (err: any) {
       throw new Error(`SHADOW_LEDGER_CORRUPT: Failed to hydrate shadow ledger: ${err.message}`);
     }

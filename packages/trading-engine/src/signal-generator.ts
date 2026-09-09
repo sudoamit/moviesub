@@ -155,6 +155,12 @@ export class SignalGenerator {
           state: SignalState.ACTIVE,
         } as any;
       }
+      return SignalGenerator.createNoTradeSignal(
+        symbol,
+        executionTf,
+        'No deterministic signal configured for timestamp',
+        decisionTimestamp,
+      );
     }
 
     const minCandles = options.minimumCandles !== undefined ? options.minimumCandles : 20;

@@ -207,6 +207,11 @@ export interface ShadowLedgerData {
   readonly pendingOrders?: readonly IOrder[];
   readonly regimeHistory?: readonly RegimeObservation[];
   readonly featureVectors?: readonly (readonly number[])[];
+  readonly executionSequences?: {
+    readonly nextOrderSequence: number;
+    readonly nextFillSequence: number;
+    readonly nextEventSequence: number;
+  };
   readonly savedAt: number;
 }
 

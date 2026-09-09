@@ -62,10 +62,26 @@ function createDummyCandidate(id = 'cand-shadow-101'): StrategyCandidate {
       sampleSize: 100,
       expectancyBefore: 0.2,
       expectancyAfterHistorical: 0.45,
+      winRate: 0.6,
+      profitFactor: 1.5,
+      referenceRegime: {
+        volatilityRegime: 'NORMAL',
+        trendRegime: 'BULLISH',
+      },
+    },
+    riskConfig: {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+      },
     },
     status: 'SHADOW_PENDING',
     createdAt: new Date(),
-  };
+  } as any;
 }
 
 describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () => {
@@ -607,23 +623,27 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
     });
 
     it('Test 23: deterministic replay produces identical observations, trades, and hashes', () => {
-      const candidate = createDummyCandidate('cand-determ-replay');
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_001');
-      ModelRegistry.registerCandidateArtifact(artifact);
+      const candidate1 = createDummyCandidate('cand-determ-replay-1');
+      const artifact1 = CandidateBacktestRunner.createCandidateArtifact(candidate1, 'hash_mkt_shadow_001');
+      ModelRegistry.registerCandidateArtifact(artifact1);
+
+      const candidate2 = createDummyCandidate('cand-determ-replay-2');
+      const artifact2 = CandidateBacktestRunner.createCandidateArtifact(candidate2, 'hash_mkt_shadow_001');
+      ModelRegistry.registerCandidateArtifact(artifact2);
 
       const candles = generateContinuousCandles(1700000000000, 30);
 
       // Run 1
       const orch1 = new ShadowOrchestrator();
-      orch1.startCandidate(candidate.id);
-      for (const c of candles) orch1.processCandle(candidate.id, c);
-      const obs1 = orch1.getCandidateLedger(candidate.id)?.getObservations();
+      orch1.startCandidate(candidate1.id);
+      for (const c of candles) orch1.processCandle(candidate1.id, c);
+      const obs1 = orch1.getCandidateLedger(candidate1.id)?.getObservations();
 
       // Run 2
       const orch2 = new ShadowOrchestrator();
-      orch2.startCandidate(candidate.id);
-      for (const c of candles) orch2.processCandle(candidate.id, c);
-      const obs2 = orch2.getCandidateLedger(candidate.id)?.getObservations();
+      orch2.startCandidate(candidate2.id);
+      for (const c of candles) orch2.processCandle(candidate2.id, c);
+      const obs2 = orch2.getCandidateLedger(candidate2.id)?.getObservations();
 
       expect(obs1?.length).toBe(obs2?.length);
       expect(obs1?.map((o) => o.featureVectorHash)).toEqual(obs2?.map((o) => o.featureVectorHash));

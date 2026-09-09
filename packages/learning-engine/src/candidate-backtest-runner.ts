@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
 import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
+import { DEFAULT_PARTIAL_EXIT_POLICY } from '@quant/risk-engine';
 import { CandidateArtifact, CandidateMarketDataset, CandidateStatus, StrategyCandidate, TradingExperience } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
@@ -185,38 +186,28 @@ export class CandidateBacktestRunner {
     if (candidateSymbol) {
       strategyConfig.symbol = candidateSymbol;
     }
-    const resolvedEvidence = (candidate as any).evidence || {
-      expectancyAfterHistorical: 0.25,
-      expectancyBefore: 0.25,
-      winRate: 55.0,
-      profitFactor: 1.5,
-      referenceRegime: {
-        volatilityRegime: 'NORMAL_VOLATILITY',
-        trendRegime: 'RANGING',
-      },
-    };
-    if (!resolvedEvidence.referenceRegime) {
-      resolvedEvidence.referenceRegime = {
-        volatilityRegime: 'NORMAL_VOLATILITY',
-        trendRegime: 'RANGING',
-      };
-    }
-    strategyConfig.evidence = resolvedEvidence;
 
-    const resolvedRiskConfig = (candidate as any).riskConfig || (candidate.change as any)?.riskConfig || {
-      initialCapital: (candidate.change as any)?.initialCapital ?? 100000,
-      maxRiskPerTrade: (candidate.change as any)?.maxRiskPerTrade ?? 0.01,
-      partialExitPolicy: (candidate.change as any)?.partialExitPolicy ?? {
-        tp1Ratio: 0.3,
-        tp2Ratio: 0.3,
-        tp3Ratio: 0.4,
-        moveStopToBreakevenOnTp1: true,
-        trailStopOnTp2: true,
-        trailStopOffsetR: 1.0,
-      },
-      stopLossAtrMultiplier: config.stopLossAtrMultiplier,
-      sizingMultiplier: config.sizingMultiplier,
-    };
+    if ((candidate as any).evidence) {
+      strategyConfig.evidence = (candidate as any).evidence;
+    }
+    if ((candidate as any).deterministicSignal) {
+      (strategyConfig as any).deterministicSignal = (candidate as any).deterministicSignal;
+    }
+    if ((candidate as any).deterministicSignals) {
+      (strategyConfig as any).deterministicSignals = (candidate as any).deterministicSignals;
+    }
+    if ((candidate as any).strategyConfig?.deterministicSignal) {
+      (strategyConfig as any).deterministicSignal = (candidate as any).strategyConfig.deterministicSignal;
+    }
+    if ((candidate as any).strategyConfig?.deterministicSignals) {
+      (strategyConfig as any).deterministicSignals = (candidate as any).strategyConfig.deterministicSignals;
+    }
+    if ((candidate as any).strategy) {
+      (strategyConfig as any).strategy = (candidate as any).strategy;
+    }
+
+    const candidateRisk = (candidate as any).riskConfig || (candidate.change as any)?.riskConfig;
+    const resolvedRiskConfig = candidateRisk ? { ...candidateRisk } : {};
 
     const canonicalPayload = {
       candidateId: candidate.id,
@@ -556,7 +547,7 @@ export class CandidateBacktestRunner {
       warmupBars,
       candidateArtifact: artifact,
       minScore: config.minMtfScore,
-      stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
+      stopLossAtrMultiplier: (riskConfig?.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
       sizingMultiplier: config.sizingMultiplier,
       highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
       filterRegime: config.filterRegime,
@@ -724,7 +715,7 @@ export class CandidateBacktestRunner {
       warmupBars,
       candidateArtifact: artifact,
       minScore: config.minMtfScore,
-      stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
+      stopLossAtrMultiplier: (riskConfig?.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
       sizingMultiplier: config.sizingMultiplier,
       highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
       filterRegime: config.filterRegime,
