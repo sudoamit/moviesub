@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { IBacktestTrade, ICandle } from '@quant/shared';
 import { IFill, IOrder } from '@quant/backtesting';
 import { PositionLot } from '@quant/risk-engine';
@@ -17,6 +17,7 @@ import {
   ShadowWindowMetrics,
 } from './shadow-types';
 import { ShadowHealthMachine } from './shadow-health-machine';
+import { RegimeObservation } from './regime-drift-detector';
 
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
   Object.freeze(obj);
@@ -52,7 +53,7 @@ export class ShadowLedger {
   private activeLot: PositionLot | null = null;
   private recentCandles: ICandle[] = [];
   private pendingOrders: IOrder[] = [];
-  private regimeHistory: any[] = [];
+  private regimeHistory: RegimeObservation[] = [];
   private featureVectors: (readonly number[])[] = [];
 
   constructor(params: {
@@ -61,15 +62,18 @@ export class ShadowLedger {
     strategyVersion: string;
     featureSchemaHash: string;
     artifactHash: string;
-    symbol?: string;
+    symbol: string;
     persistencePath?: string;
   }) {
+    if (!params.symbol || typeof params.symbol !== 'string' || params.symbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: ShadowLedger requires a valid authoritative symbol`);
+    }
     this.candidateId = params.candidateId;
     this.candidateVersion = params.candidateVersion;
     this.strategyVersion = params.strategyVersion;
     this.featureSchemaHash = params.featureSchemaHash;
     this.artifactHash = params.artifactHash;
-    this.symbol = params.symbol || 'BTCUSDT';
+    this.symbol = params.symbol.trim().toUpperCase();
     this.persistencePath = params.persistencePath || null;
     this.health = ShadowHealthMachine.createInitialState(params.candidateId);
     if (this.persistencePath && fs.existsSync(this.persistencePath)) {
@@ -273,6 +277,11 @@ export class ShadowLedger {
     const longRatio = Number((longTrades / tradeCount).toFixed(2));
     const shortRatio = Number((1 - longRatio).toFixed(2));
 
+    const totalFeesInWindow = this.fills.reduce((sum, f) => sum + (f.fee || 0), 0);
+    const totalSlippageInWindow = this.fills.reduce((sum, f) => sum + (f.slippage || 0), 0);
+    const averageFees = tradeCount > 0 ? Number((totalFeesInWindow / tradeCount).toFixed(4)) : 0;
+    const averageSlippage = tradeCount > 0 ? Number((totalSlippageInWindow / tradeCount).toFixed(4)) : 0;
+
     const metrics: ShadowWindowMetrics = {
       candidateId: this.candidateId,
       windowType,
@@ -285,8 +294,8 @@ export class ShadowLedger {
       winRate,
       profitFactor,
       maxDrawdown: Number(maxDrawdownR.toFixed(2)),
-      averageSlippage: 0,
-      averageFees: 0,
+      averageSlippage,
+      averageFees,
       averageR,
       averageHoldingTimeMs,
       signalFrequency: Number((tradeCount / Math.max(1, this.observations.length)).toFixed(3)),
@@ -304,12 +313,41 @@ export class ShadowLedger {
     return deepFreeze(metrics);
   }
 
+  public getShadowDatasetHash(): string {
+    const hash = createHash('sha256');
+    hash.update(`shadow_stream_${this.symbol}_${this.candidateId}`);
+    for (const c of this.recentCandles) {
+      const ts = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
+      hash.update(`${ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume}`);
+    }
+    for (const o of this.observations) {
+      hash.update(`${o.marketTimestamp}|${o.featureVectorHash}`);
+    }
+    return hash.digest('hex');
+  }
+
+  public calculateMedianR(): number {
+    const rVals = this.trades
+      .map((t) => t.pnlRMultiple ?? (t as any).realizedR)
+      .filter((r) => typeof r === 'number' && !isNaN(r));
+    if (rVals.length === 0) return 0;
+    const sorted = [...rVals].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) {
+      return sorted[mid];
+    }
+    return Number(((sorted[mid - 1] + sorted[mid]) / 2).toFixed(4));
+  }
+
   public getSymbol(): string {
     return this.symbol;
   }
 
   public setSymbol(symbol: string): void {
-    this.symbol = symbol;
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Symbol cannot be empty`);
+    }
+    this.symbol = symbol.trim().toUpperCase();
   }
 
   public getActiveLot(): Readonly<PositionLot> | null {
@@ -336,11 +374,11 @@ export class ShadowLedger {
     this.pendingOrders = orders.map((o) => deepFreeze({ ...o }));
   }
 
-  public getRegimeHistory(): readonly any[] {
+  public getRegimeHistory(): readonly RegimeObservation[] {
     return deepFreeze([...this.regimeHistory]);
   }
 
-  public setRegimeHistory(history: readonly any[]): void {
+  public setRegimeHistory(history: readonly RegimeObservation[]): void {
     this.regimeHistory = history.map((h) => deepFreeze({ ...h }));
   }
 

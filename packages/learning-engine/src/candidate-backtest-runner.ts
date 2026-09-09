@@ -11,6 +11,10 @@ export interface CandidateExecutionConfig {
   candidateVersion: string;
   strategyVersion?: string;
   configHash: string;
+  symbol?: string;
+  fillModel?: string;
+  ambiguityMode?: string;
+  latencyMs?: number;
   minMtfScore?: number;
   stopLossAtrMultiplier?: number;
   enablePartialTp1Trailing?: boolean;
@@ -123,6 +127,7 @@ export class CandidateBacktestRunner {
       resolvedDatasetHash;
 
     const marketDatasetHash =
+      (datasetHash && datasetHash !== 'canonical_default_hash' ? datasetHash : undefined) ||
       provenance?.marketDatasetHash ||
       (candidate.change?.marketDatasetHash as string) ||
       resolvedDatasetHash;
@@ -171,6 +176,24 @@ export class CandidateBacktestRunner {
     const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
     const strategyConfig = { ...((candidate as any).strategyConfig || {}), ...(candidate.change || {}) };
 
+    const candidateSymbol =
+      (candidate as any).symbol ||
+      (candidate.change as any)?.symbol ||
+      (candidate as any).strategyConfig?.symbol ||
+      config.symbol;
+
+    if (candidateSymbol) {
+      strategyConfig.symbol = candidateSymbol;
+    }
+    if ((candidate as any).evidence) {
+      strategyConfig.evidence = (candidate as any).evidence;
+    }
+
+    const resolvedRiskConfig = (candidate as any).riskConfig || {
+      stopLossAtrMultiplier: config.stopLossAtrMultiplier,
+      sizingMultiplier: config.sizingMultiplier,
+    };
+
     const canonicalPayload = {
       candidateId: candidate.id,
       candidateVersion,
@@ -191,7 +214,7 @@ export class CandidateBacktestRunner {
       datasetHash: resolvedDatasetHash,
       configHash: config.configHash,
       trainingSeed,
-      riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier, sizingMultiplier: config.sizingMultiplier },
+      riskConfig: resolvedRiskConfig,
       executionConfig: config,
       strategyConfig,
     };
@@ -226,14 +249,16 @@ export class CandidateBacktestRunner {
       marketDatasetHash,
       datasetHash: resolvedDatasetHash,
       trainingSeed,
-      riskConfig: { stopLossAtrMultiplier: config.stopLossAtrMultiplier, sizingMultiplier: config.sizingMultiplier },
+      riskConfig: resolvedRiskConfig,
       executionConfig: config as any,
       status: (candidate.status as CandidateStatus) || 'TRAINED',
       createdBy,
       createdAt,
       configHash: config.configHash,
       artifactHash,
-    };
+      ...((candidate as any).evidence ? { evidence: (candidate as any).evidence } : {}),
+      ...(candidateSymbol ? { symbol: candidateSymbol } : {}),
+    } as any;
     return deepFreeze(artifact);
   }
 
@@ -366,11 +391,29 @@ export class CandidateBacktestRunner {
     });
     const configHash = createHash('sha256').update(hashPayload).digest('hex');
 
+    const symbol =
+      (candidate as any).symbol ||
+      (change as any).symbol ||
+      (candidate as any).executionConfig?.symbol ||
+      (candidate as any).strategyConfig?.symbol;
+
     return {
       candidateId: candidate.id,
       candidateVersion: candidate.candidateVersion || candidate.id,
       strategyVersion: candidate.baseStrategyVersion || '1.0.0',
       configHash,
+      symbol,
+      fillModel: (change as any).fillModel || (candidate as any).fillModel || 'OHLC_PATH',
+      ambiguityMode:
+        (change as any).ambiguityMode ||
+        (candidate as any).ambiguityMode ||
+        'CONSERVATIVE',
+      latencyMs:
+        typeof (change as any).latencyMs === 'number'
+          ? (change as any).latencyMs
+          : typeof (candidate as any).latencyMs === 'number'
+            ? (candidate as any).latencyMs
+            : 15,
       minMtfScore,
       stopLossAtrMultiplier,
       enablePartialTp1Trailing: change.parameter === 'enablePartialTp1Trailing',

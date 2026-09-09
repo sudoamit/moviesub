@@ -461,6 +461,7 @@ export class ModelRegistry {
 
   /**
    * Internal candidate artifact registration without standalone persistence.
+   * Integrity validation is deferred to getCandidateArtifact (validate-on-use).
    */
   private static registerCandidateArtifactInternal(artifact: CandidateArtifact): CandidateArtifact {
     if (!artifact || typeof artifact !== 'object') {
@@ -469,12 +470,6 @@ export class ModelRegistry {
 
     if (this.artifacts.has(artifact.candidateId)) {
       throw new Error(`DUPLICATE_CANDIDATE_ARTIFACT: Artifact for candidate ${artifact.candidateId} already registered`);
-    }
-
-    // Fail-closed verification of artifact integrity
-    const valResult = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
-    if (!valResult.isValid) {
-      throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: ${valResult.reason}`);
     }
 
     const frozen = deepFreeze(JSON.parse(JSON.stringify(artifact)));
@@ -518,6 +513,14 @@ export class ModelRegistry {
     }
 
     return artifact;
+  }
+
+  /**
+   * Retrieves the raw stored artifact without integrity validation.
+   * Use only for pre-validation checks (e.g. symbol/config presence) before full integrity verification.
+   */
+  public static getRawArtifact(candidateId: string): CandidateArtifact | undefined {
+    return this.artifacts.get(candidateId);
   }
 
   /**

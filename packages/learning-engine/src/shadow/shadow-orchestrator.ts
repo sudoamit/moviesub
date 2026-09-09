@@ -120,6 +120,95 @@ export class ShadowOrchestrator {
   }
 
   /**
+   * Submits resting protective stop and take profit target orders for an active position lot.
+   */
+  public static submitRestingExitOrders(
+    execSim: ExecutionSimulator,
+    lot: PositionLot,
+    symbol: string,
+    policy = DEFAULT_PARTIAL_EXIT_POLICY,
+    timestamp: number,
+  ): void {
+    const isLong = lot.direction === Direction.BULLISH;
+    const exitSide = isLong ? 'SELL' : 'BUY';
+    const remainingQty = lot.remainingQuantity;
+    if (remainingQty <= 0) return;
+
+    const val = TradeLifecycleManager.validatePartialExitPolicy(policy);
+    if (!val.isValid) {
+      throw new Error(`Invalid partial exit policy: ${val.reason}`);
+    }
+
+    const existingOrders = execSim.getTradeOrders(lot.tradeId);
+    const hasStop = existingOrders.some((o: IOrder) => o.orderType === 'STOP');
+    const hasAlreadyTp1 = existingOrders.some((o: any) => o.exitTarget === 'TP1');
+    const hasAlreadyTp2 = existingOrders.some((o: any) => o.exitTarget === 'TP2');
+    const hasAlreadyTp3 = existingOrders.some((o: any) => o.exitTarget === 'TP3');
+
+    // Restore is reconstructible: fill any missing resting order from the lot,
+    // while preserving the exact orders already restored from persistence.
+    if (!hasStop) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'STOP',
+        stopPrice: lot.currentStopLoss,
+        quantity: remainingQty,
+        timestamp,
+        exitTarget: lot.currentStopLoss === lot.entryPrice ? 'TRAILING_STOP' : 'SL',
+      });
+    }
+
+    const tp1Qty = Math.round(lot.initialQuantity * policy.tp1Ratio);
+    const tp2Qty =
+      policy.tp3Ratio > 0
+        ? Math.round(lot.initialQuantity * policy.tp2Ratio)
+        : lot.initialQuantity - tp1Qty;
+    const tp3Qty = policy.tp3Ratio > 0 ? lot.initialQuantity - (tp1Qty + tp2Qty) : 0;
+
+    if (!hasAlreadyTp1 && tp1Qty > 0 && typeof lot.tp1 === 'number' && lot.tp1 > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp1,
+        quantity: Math.min(remainingQty, tp1Qty),
+        timestamp,
+        exitTarget: 'TP1',
+        referencePrice: lot.entryPrice,
+      });
+    }
+
+    if (!hasAlreadyTp2 && tp2Qty > 0 && typeof lot.tp2 === 'number' && lot.tp2 > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp2,
+        quantity: Math.min(remainingQty, tp2Qty),
+        timestamp,
+        exitTarget: 'TP2',
+      });
+    }
+
+    if (!hasAlreadyTp3 && tp3Qty > 0 && typeof lot.tp3 === 'number' && lot.tp3 > 0) {
+      execSim.submitOrder({
+        tradeId: lot.tradeId,
+        symbol,
+        side: exitSide,
+        orderType: 'LIMIT',
+        price: lot.tp3,
+        quantity: Math.min(remainingQty, tp3Qty),
+        timestamp,
+        exitTarget: 'TP3',
+      });
+    }
+  }
+
+  /**
    * Registers and starts a candidate approved for shadow execution.
    */
   public startCandidate(
@@ -133,9 +222,46 @@ export class ShadowOrchestrator {
     },
   ): void {
     // 1. Retrieve and validate candidate artifact from ModelRegistry
+    // First get raw artifact to check symbol/executionConfig before integrity validation (fail-closed on missing identity)
+    const rawArtifact = ModelRegistry.getRawArtifact(candidateId);
+    if (!rawArtifact) {
+      throw new Error(`CANDIDATE_NOT_FOUND: Candidate artifact '${candidateId}' not found in registry`);
+    }
+
+    // 2. Resolve Dynamic Symbol & Execution Configuration (Strict Fail-Closed) — before integrity check
+    const symbol =
+      (rawArtifact as any).symbol ||
+      (rawArtifact.executionConfig as any)?.symbol ||
+      (rawArtifact.strategyConfig as any)?.symbol ||
+      (rawArtifact as any).provenance?.symbol;
+
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' artifact does not declare an authoritative symbol`);
+    }
+
+    const execConfig = rawArtifact.executionConfig as any;
+    if (!execConfig) {
+      throw new Error(`MISSING_EXECUTION_CONFIG: Candidate '${candidateId}' artifact is missing authoritative executionConfig`);
+    }
+    const fillModel = execConfig.fillModel;
+    if (!fillModel) {
+      throw new Error(`MISSING_FILL_MODEL: Candidate '${candidateId}' executionConfig is missing fillModel`);
+    }
+    if (!execConfig.ambiguityMode) {
+      throw new Error(`MISSING_AMBIGUITY_MODE: Candidate '${candidateId}' executionConfig is missing ambiguityMode`);
+    }
+    if (typeof execConfig.latencyMs !== 'number' || !Number.isFinite(execConfig.latencyMs)) {
+      throw new Error(`MISSING_LATENCY_CONFIG: Candidate '${candidateId}' executionConfig is missing latencyMs`);
+    }
+
+    // Now perform full integrity validation
     const artifact = ModelRegistry.getCandidateArtifact(candidateId);
     if (!artifact) {
       throw new Error(`CANDIDATE_NOT_FOUND: Candidate artifact '${candidateId}' not found in registry`);
+    }
+
+    if (!artifact.executionConfig) {
+      throw new Error(`MISSING_EXECUTION_CONFIG: Candidate '${candidateId}' artifact does not contain executionConfig`);
     }
 
     const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
@@ -156,22 +282,36 @@ export class ShadowOrchestrator {
       );
     }
 
-    // 2. Resolve Dynamic Symbol & Execution Configuration
-    const symbol =
-      (artifact as any).symbol ||
-      (artifact.executionConfig as any)?.symbol ||
-      (artifact.strategyConfig as any)?.symbol ||
-      'BTCUSDT';
-
-    const execConfig = (artifact.executionConfig as any) || {};
-    const fillModel = execConfig.fillModel || FillModel.OHLC_PATH;
-    const ambiguityMode = execConfig.ambiguityMode || SameCandleAmbiguityMode.CONSERVATIVE;
+    const ambiguityMode = execConfig.ambiguityMode as SameCandleAmbiguityMode;
     const latency = {
-      submissionLatencyMs: execConfig.latencyMs ?? 15,
+      submissionLatencyMs: execConfig.latencyMs,
       processingLatencyMs: 5,
     };
 
-    // 3. Initialize ShadowLedger
+    // 3. Baseline metrics check (Strict Fail-Closed)
+    const baselineExpectancy =
+      options?.baselineExpectancyR ??
+      (artifact as any).evidence?.expectancyAfterHistorical ??
+      (artifact as any).evidence?.expectancyBefore ??
+      (artifact.strategyConfig as any)?.evidence?.expectancyAfterHistorical ??
+      (artifact.strategyConfig as any)?.evidence?.expectancyBefore;
+
+    if (baselineExpectancy === undefined || typeof baselineExpectancy !== 'number' || isNaN(baselineExpectancy)) {
+      throw new Error(
+        `SHADOW_BASELINE_MISSING: Candidate '${candidateId}' artifact is missing baseline performance evidence (expectancy)`,
+      );
+    }
+
+    const baselineWinRate =
+      options?.baselineWinRate ??
+      (artifact as any).evidence?.winRate ??
+      (artifact.strategyConfig as any)?.evidence?.winRate;
+    const baselineProfitFactor =
+      options?.baselineProfitFactor ??
+      (artifact as any).evidence?.profitFactor ??
+      (artifact.strategyConfig as any)?.evidence?.profitFactor;
+
+    // 4. Initialize ShadowLedger
     const persistencePath =
       options?.persistenceFilePath ||
       (this.options.persistenceDir ? path.join(this.options.persistenceDir, `shadow-${candidateId}.json`) : undefined);
@@ -186,7 +326,7 @@ export class ShadowOrchestrator {
       persistencePath,
     });
 
-    // 4. Initialize Authoritative ExecutionSimulator
+    // 5. Initialize Authoritative ExecutionSimulator
     const execSim = new ExecutionSimulator(
       fillModel,
       ambiguityMode,
@@ -194,11 +334,32 @@ export class ShadowOrchestrator {
       `shadow_${candidateId}`,
     );
 
-    // 5. Restore persisted state if recovering from existing ledger
+    // 6. Restore persisted state and pending orders into ExecutionSimulator
     const recoveredCandles = [...ledger.getRecentCandles()];
-    const recoveredActiveLot = ledger.getActiveLot() ? { ...ledger.getActiveLot()! } : null;
+    const frozenLot = ledger.getActiveLot();
+    const recoveredActiveLot = frozenLot ? ShadowOrchestrator.thawPositionLot(frozenLot) : null;
     const recoveredRegimeHistory = [...ledger.getRegimeHistory()];
     const recoveredFeatureVectors = [...ledger.getFeatureVectors().map((v) => [...v])];
+    const recoveredPendingOrders = [...ledger.getPendingOrders()];
+    execSim.restoreOrders(recoveredPendingOrders);
+
+    if (recoveredActiveLot && recoveredActiveLot.remainingQuantity > 0) {
+      const partialPolicy = (artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
+      ShadowOrchestrator.submitRestingExitOrders(
+        execSim,
+        recoveredActiveLot,
+        symbol,
+        partialPolicy,
+        ledger.getLastMarketTimestamp() || Date.now(),
+      );
+      const liveOrders = execSim.getTradeOrders(recoveredActiveLot.tradeId);
+      ShadowOrchestrator.validateRestoredExecutionState(
+        recoveredActiveLot,
+        liveOrders,
+        symbol,
+        partialPolicy,
+      );
+    }
 
     const context: ActiveCandidateContext = {
       candidateId,
@@ -211,9 +372,9 @@ export class ShadowOrchestrator {
       activeLot: recoveredActiveLot,
       featureBaseline: options?.featureBaseline,
       baselineMetrics: {
-        expectancyR: options?.baselineExpectancyR ?? 0.25,
-        winRate: options?.baselineWinRate ?? 50.0,
-        profitFactor: options?.baselineProfitFactor ?? 1.3,
+        expectancyR: baselineExpectancy,
+        winRate: typeof baselineWinRate === 'number' ? baselineWinRate : Number.NaN,
+        profitFactor: typeof baselineProfitFactor === 'number' ? baselineProfitFactor : Number.NaN,
       },
       referenceRegime: {
         volatilityRegime: 'NORMAL_VOLATILITY',
@@ -254,12 +415,7 @@ export class ShadowOrchestrator {
       throw new Error(`CANDIDATE_NOT_ACTIVE: Candidate '${candidateId}' is not running in shadow orchestrator`);
     }
 
-    const symbol =
-      ctx.ledger.getSymbol() ||
-      (ctx.artifact as any).symbol ||
-      (ctx.artifact.executionConfig as any)?.symbol ||
-      (candle as any).symbol ||
-      'BTCUSDT';
+    const symbol = ctx.ledger.getSymbol();
 
     // 1. Strict Causal Market Candle Validation (Fail-closed)
     this.validateCandleStrict(candle, ctx.candles, symbol);
@@ -273,116 +429,143 @@ export class ShadowOrchestrator {
     const execBarRes = ctx.execSim.processSingleExecutionBar(candle);
     const newFills = execBarRes.fills;
 
-    // Process Fills and manage Trade Lifecycles
+    // Process Fills and manage Trade Lifecycles authoritatively
+    const partialPolicy = (ctx.artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
+
     for (const fill of newFills) {
       const order = ctx.execSim.getOrder(fill.orderId);
       if (!order) continue;
 
       if (order.exitTarget === 'ENTRY') {
-        // Entry filled -> Open PositionLot & submit resting Stop Loss and TP Limit orders
         const isLong = order.side === 'BUY';
-        const entryPrice = fill.price;
-        const stopLossPrice =
-          (order as any).calculatedStopLoss ??
-          (isLong ? entryPrice * 0.98 : entryPrice * 1.02);
-        const tp1Price =
-          (order as any).calculatedTp1 ??
-          (isLong ? entryPrice * 1.02 : entryPrice * 0.98);
-        const tp2Price = (order as any).calculatedTp2 ?? (isLong ? entryPrice * 1.04 : entryPrice * 0.96);
-        const tp3Price = (order as any).calculatedTp3 ?? 0;
+        const refPrice = order.referencePrice || (order as any).calculatedEntryOptimal || fill.price;
+        const initialStop = (order as any).calculatedStopLoss ?? (isLong ? fill.price * 0.98 : fill.price * 1.02);
 
-        ctx.activeLot = {
-          id: `lot_${order.tradeId}`,
-          tradeId: order.tradeId,
+        const dummySignal: any = {
+          id: order.tradeId,
           symbol,
-          entryPrice,
-          initialQuantity: fill.quantity,
-          remainingQuantity: fill.quantity,
-          initialStopLoss: stopLossPrice,
-          currentStopLoss: stopLossPrice,
-          tp1: tp1Price,
-          tp2: tp2Price,
-          tp3: tp3Price,
-          realizedPnl: 0,
-          unrealizedPnl: 0,
-          realizedR: 0,
-          status: 'OPEN',
-          openedAt: candleTime,
           direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-          entryTime: candleTime,
-          partialFills: [],
-          events: [],
-          mae: 0,
-          mfe: 0,
+          stopLoss: initialStop,
+          takeProfits: {
+            tp1: (order as any).calculatedTp1,
+            tp2: (order as any).calculatedTp2,
+            tp3: (order as any).calculatedTp3,
+          },
+          entryZone: { optimal: refPrice, min: refPrice, max: refPrice },
         };
 
-        // Submit resting exit orders
-        const exitSide = isLong ? 'SELL' : 'BUY';
-        ctx.execSim.submitOrder({
-          tradeId: order.tradeId,
+        // createPositionLot returns a mutable lot; ensure it stays mutable for fill tracking
+        ctx.activeLot = ShadowOrchestrator.thawPositionLot(
+          TradeLifecycleManager.createPositionLot(
+            dummySignal,
+            fill.price,
+            fill.quantity,
+            fill.timestamp,
+            order.orderId,
+            fill.fee,
+            fill.slippage,
+          ),
+        );
+
+        // Submit resting exit orders (SL, TP1, TP2, TP3)
+        ShadowOrchestrator.submitRestingExitOrders(
+          ctx.execSim,
+          ctx.activeLot,
           symbol,
-          side: exitSide,
-          orderType: 'STOP',
-          stopPrice: stopLossPrice,
-          quantity: fill.quantity,
-          timestamp: candleTime,
-          exitTarget: 'SL',
-        });
-        ctx.execSim.submitOrder({
-          tradeId: order.tradeId,
-          symbol,
-          side: exitSide,
-          orderType: 'LIMIT',
-          price: tp1Price,
-          quantity: fill.quantity,
-          timestamp: candleTime,
-          exitTarget: 'TP1',
-        });
-      } else if (
-        order.exitTarget === 'SL' ||
-        order.exitTarget === 'TP1' ||
-        order.exitTarget === 'TP2' ||
-        order.exitTarget === 'TRAILING_STOP'
-      ) {
-        // Exit order filled -> Complete trade lifecycle
+          partialPolicy,
+          fill.timestamp,
+        );
+      } else {
+        // Exit order filled (SL, TP1, TP2, TP3, TRAILING_STOP)
         if (ctx.activeLot && ctx.activeLot.tradeId === order.tradeId) {
           const isLong = ctx.activeLot.direction === Direction.BULLISH;
-          const exitPrice = fill.price;
-          const initialRisk = Math.abs(ctx.activeLot.entryPrice - ctx.activeLot.initialStopLoss);
-          const priceDiff = isLong ? exitPrice - ctx.activeLot.entryPrice : ctx.activeLot.entryPrice - exitPrice;
-          const pnl = priceDiff * fill.quantity - (fill.fee || 0);
-          const pnlR = initialRisk > 0 ? (priceDiff * fill.quantity) / (initialRisk * ctx.activeLot.initialQuantity) : 0;
+          const fillQty = fill.quantity;
+          const chunkDiff = isLong
+            ? fill.price - ctx.activeLot.entryPrice
+            : ctx.activeLot.entryPrice - fill.price;
+          const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
+          const initialRiskPerUnit = Math.max(
+            0.0001,
+            Math.abs(ctx.activeLot.entryPrice - ctx.activeLot.initialStopLoss),
+          );
+          const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
 
-          const exitReason =
-            order.exitTarget === 'SL'
-              ? SignalState.SL_HIT
-              : order.exitTarget === 'TP1'
-              ? SignalState.TP1_HIT
-              : order.exitTarget === 'TP2'
-              ? SignalState.TP2_HIT
-              : SignalState.INVALIDATED;
+          ctx.activeLot.realizedPnl = Number((ctx.activeLot.realizedPnl + grossPnl).toFixed(2));
+          ctx.activeLot.remainingQuantity = Number(
+            Math.max(0, ctx.activeLot.remainingQuantity - fillQty).toFixed(4),
+          );
 
-          const trade: IBacktestTrade = {
-            id: ctx.activeLot.tradeId,
-            entryTime: new Date(ctx.activeLot.entryTime),
-            exitTime: new Date(candleTime),
-            direction: ctx.activeLot.direction,
-            entryPrice: ctx.activeLot.entryPrice,
-            exitPrice,
-            positionSize: fill.quantity,
-            stopLoss: ctx.activeLot.initialStopLoss,
-            takeProfit: ctx.activeLot.tp1,
-            pnl: Number(pnl.toFixed(2)),
-            pnlRMultiple: Number(pnlR.toFixed(2)),
-            grossPnL: Number((priceDiff * fill.quantity).toFixed(2)),
-            netPnL: Number(pnl.toFixed(2)),
-            realizedR: Number(pnlR.toFixed(2)),
-            exitReason,
-            exitFees: fill.fee || 0,
-            exitSlippage: fill.slippage || 0,
+          const targetType =
+            order.exitTarget ||
+            (order.orderType === 'STOP'
+              ? ctx.activeLot.currentStopLoss === ctx.activeLot.entryPrice
+                ? 'TRAILING_STOP'
+                : 'SL'
+              : 'TP1');
+
+          const newFillRecord = {
+            fillId: fill.fillId,
+            targetType: targetType as any,
+            timestamp: fill.timestamp,
+            price: fill.price,
+            quantity: fillQty,
+            remainingQuantity: ctx.activeLot.remainingQuantity,
+            realizedPnl: grossPnl,
+            realizedR: chunkR,
+            fee: fill.fee,
+            slippage: fill.slippage,
+            exitOrderId: fill.orderId,
+            exitOrderCreatedAt: fill.exitOrderCreatedAt,
+            exitOrderSubmittedAt: fill.exitOrderSubmittedAt,
+            exitTriggerTimestamp: fill.exitTriggerTimestamp,
+            exitFillTimestamp: fill.exitFillTimestamp,
+            segmentIndex: fill.segmentIndex,
+            segmentType: fill.segmentType,
           };
-          closedTrades.push(trade);
-          ctx.activeLot = null;
+
+          ctx.activeLot.partialFills = [...(ctx.activeLot.partialFills || []), newFillRecord];
+
+          if (ctx.activeLot.remainingQuantity <= 0) {
+            ctx.activeLot.status = 'CLOSED';
+            ctx.activeLot.closedAt = fill.timestamp;
+            ctx.activeLot.unrealizedPnl = 0;
+            ctx.execSim.cancelTradeOrders(ctx.activeLot.tradeId);
+
+            const lastFill = ctx.activeLot.partialFills[ctx.activeLot.partialFills.length - 1];
+
+            const exitReason =
+              (lastFill?.targetType as string) === 'SL' ||
+              (lastFill?.targetType as string) === 'STOP' ||
+              lastFill?.targetType === 'STOP_LOSS'
+                ? SignalState.SL_HIT
+                : (lastFill?.targetType as string) === 'TP1'
+                ? SignalState.TP1_HIT
+                : (lastFill?.targetType as string) === 'TP2'
+                ? SignalState.TP2_HIT
+                : (lastFill?.targetType as string) === 'TP3'
+                ? SignalState.TP3_HIT
+                : SignalState.INVALIDATED;
+
+            const tradeRecord = TradeLifecycleManager.createCompletedTrade(
+              ctx.activeLot,
+              exitReason,
+              String(ctx.execSim['fillModel']),
+              String(ctx.execSim['ambiguityMode']),
+            );
+
+            closedTrades.push(tradeRecord);
+            ctx.activeLot = null;
+          } else {
+            ctx.activeLot.status = 'PARTIALLY_CLOSED';
+            if (targetType === 'TP1' && partialPolicy.moveStopToBreakevenOnTp1) {
+              ctx.activeLot.currentStopLoss = ctx.activeLot.entryPrice;
+              const slOrder = ctx.execSim.getTradeOrders(ctx.activeLot.tradeId).find((o) => o.orderType === 'STOP');
+              if (slOrder) {
+                slOrder.stopPrice = ctx.activeLot.entryPrice;
+                (slOrder as any).exitTarget = 'TRAILING_STOP';
+              }
+            }
+          }
         }
       }
     }
@@ -615,8 +798,9 @@ export class ShadowOrchestrator {
       });
     }
 
-    // 12. Atomic persistence to disk including restart state
+    // 12. Atomic persistence to disk including restart state and pending orders
     ctx.ledger.setActiveLot(ctx.activeLot);
+    ctx.ledger.setPendingOrders(ctx.execSim.getAllOrders().filter((o) => o.status === 'PENDING'));
     ctx.ledger.setRecentCandles(ctx.candles.slice(-100));
     ctx.ledger.setRegimeHistory(ctx.regimeHistory.slice(-50));
     ctx.ledger.setFeatureVectors(ctx.featureVectors.slice(-50));
@@ -646,6 +830,10 @@ export class ShadowOrchestrator {
     }
 
     const health = ctx.ledger.getHealthState();
+    const baselineComplete =
+      Number.isFinite(ctx.baselineMetrics.expectancyR) &&
+      Number.isFinite(ctx.baselineMetrics.winRate) &&
+      Number.isFinite(ctx.baselineMetrics.profitFactor);
     const trades = ctx.ledger.getTrades();
     const observations = ctx.ledger.getObservations();
     const allFills = ctx.ledger.getFills();
@@ -661,6 +849,7 @@ export class ShadowOrchestrator {
     const totalPnL = Number(trades.reduce((sum, t) => sum + t.pnl, 0).toFixed(2));
     const winRate = trades.length > 0 ? Number(((wins.length / trades.length) * 100).toFixed(1)) : 0;
     const expectancyR = trades.length > 0 ? Number((rMultiples.reduce((sum, r) => sum + r, 0) / trades.length).toFixed(3)) : 0;
+    const medianR = ctx.ledger.calculateMedianR();
     const profitFactor =
       grossLoss === 0
         ? grossProfit > 0
@@ -702,7 +891,7 @@ export class ShadowOrchestrator {
       maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
       expectancy: expectancyR,
       averageR: expectancyR,
-      medianR: expectancyR,
+      medianR,
       largestLoss,
       largestWin,
       fees: totalFees,
@@ -710,27 +899,42 @@ export class ShadowOrchestrator {
       observationsCount: observations.length,
     };
 
-    const isHealthy = health.status === 'HEALTHY' && trades.length >= (this.options.windowConfig?.minTradesForEvaluation || 10);
+    const isHealthy =
+      baselineComplete &&
+      health.status === 'HEALTHY' &&
+      trades.length >= (this.options.windowConfig?.minTradesForEvaluation || 10);
+    const sampleInsufficient = trades.length < (this.options.windowConfig?.minTradesForEvaluation || 10);
     const reasons: string[] = [];
-    if (isHealthy) {
+    if (!baselineComplete) {
+      reasons.push('SHADOW_BASELINE_MISSING: immutable baseline evidence is incomplete');
+    } else if (isHealthy) {
       reasons.push('Shadow candidate maintained healthy performance, feature stability, and zero critical drift');
     }
+
+    const shadowDatasetHash = ctx.ledger.getShadowDatasetHash();
+    const marketDatasetHash = ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash || shadowDatasetHash;
 
     return {
       candidateId,
       passed: isHealthy,
       metrics,
       reasons,
-      rejectionReason: !isHealthy ? health.statusReason || `Shadow candidate is not healthy (status: ${health.status})` : undefined,
+      rejectionReason: !isHealthy
+        ? sampleInsufficient
+          ? 'INSUFFICIENT_SAMPLE_SIZE'
+          : !baselineComplete
+          ? 'SHADOW_BASELINE_MISSING'
+          : health.statusReason || `Shadow candidate is not healthy (status: ${health.status})`
+        : undefined,
       window: {
         candidateId,
-        marketDatasetHash: ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash || 'shadow_mkt_hash',
+        marketDatasetHash,
         startTimestamp,
         endTimestamp,
         minimumObservations: this.options.windowConfig?.minObservationsForEvaluation || 30,
         minimumTrades: this.options.windowConfig?.minTradesForEvaluation || 10,
       },
-      shadowDatasetHash: ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash || 'shadow_mkt_hash',
+      shadowDatasetHash,
       shadowStartTimestamp: startTimestamp,
       shadowEndTimestamp: endTimestamp,
       evaluatedAt: now,
@@ -744,7 +948,12 @@ export class ShadowOrchestrator {
     const ctx = this.activeCandidates.get(candidateId);
     if (!ctx) return;
 
+    // Cancel all orders in ExecutionSimulator and clear lot
+    ctx.execSim.cancelAllOrders();
     ctx.activeLot = null;
+    ctx.ledger.setActiveLot(null);
+    ctx.ledger.setPendingOrders([]);
+
     ctx.ledger.setHealthState({
       ...ctx.ledger.getHealthState(),
       status: 'STOPPED',
@@ -770,6 +979,55 @@ export class ShadowOrchestrator {
 
   public getCandidateLedger(candidateId: string): ShadowLedger | undefined {
     return this.activeCandidates.get(candidateId)?.ledger;
+  }
+
+  /**
+   * Returns a fully mutable deep copy of a PositionLot, unfreezing all nested arrays and objects.
+   */
+  public static thawPositionLot(lot: Readonly<PositionLot>): PositionLot {
+    return {
+      ...lot,
+      partialFills: lot.partialFills ? lot.partialFills.map((f) => ({ ...f })) : [],
+      events: (lot as any).events ? [...(lot as any).events] : [],
+      entrySnapshot: lot.entrySnapshot ? { ...lot.entrySnapshot } : undefined,
+    } as PositionLot;
+  }
+
+  public static validateRestoredExecutionState(
+    lot: Readonly<PositionLot>,
+    orders: readonly IOrder[],
+    symbol: string,
+    policy = DEFAULT_PARTIAL_EXIT_POLICY,
+  ): void {
+    const seenTargets = new Set<string>();
+    for (const order of orders) {
+      if (order.tradeId !== lot.tradeId || order.symbol !== symbol || order.quantity <= 0) {
+        throw new Error(`SHADOW_EXECUTION_STATE_MISMATCH: Restored order identity or quantity does not match active lot`);
+      }
+      if (order.exitTarget && seenTargets.has(order.exitTarget)) {
+        throw new Error(`SHADOW_EXECUTION_STATE_MISMATCH: Duplicate restored exit target '${order.exitTarget}'`);
+      }
+      if (order.exitTarget) seenTargets.add(order.exitTarget);
+    }
+
+    const stopOrder = orders.find((order) => order.orderType === 'STOP');
+    if (!stopOrder || stopOrder.quantity !== lot.remainingQuantity) {
+      throw new Error(`SHADOW_EXECUTION_STATE_MISMATCH: Restored protective stop does not cover remaining quantity`);
+    }
+
+    const filledTargets = new Set(lot.partialFills.map((fill) => fill.targetType));
+    const targetOrders: Array<{ target: 'TP1' | 'TP2' | 'TP3'; price: number; ratio: number }> = [
+      { target: 'TP1', price: lot.tp1, ratio: policy.tp1Ratio },
+      { target: 'TP2', price: lot.tp2, ratio: policy.tp2Ratio },
+      { target: 'TP3', price: lot.tp3, ratio: policy.tp3Ratio },
+    ];
+    for (const target of targetOrders) {
+      if (filledTargets.has(target.target) || target.ratio <= 0) continue;
+      const order = orders.find((candidate) => candidate.exitTarget === target.target);
+      if (order && order.price !== target.price) {
+        throw new Error(`SHADOW_EXECUTION_STATE_MISMATCH: Restored ${target.target} price does not match active lot`);
+      }
+    }
   }
 
   private validateCandleStrict(candle: ICandle, candleHistory: readonly ICandle[], expectedSymbol?: string): void {
@@ -878,8 +1136,11 @@ export class ShadowOrchestrator {
   private executePaperRollback(ctx: ActiveCandidateContext, reason: string, now: number): void {
     if (!this.options.enableAutomaticPaperRollback) return;
 
-    // 1. Cancel active paper position and pending orders (paper only)
+    // 1. Cancel active paper position and pending orders in ExecutionSimulator and ledger
+    ctx.execSim.cancelAllOrders();
     ctx.activeLot = null;
+    ctx.ledger.setActiveLot(null);
+    ctx.ledger.setPendingOrders([]);
 
     // 2. Mark candidate REJECTED in ModelRegistry
     try {

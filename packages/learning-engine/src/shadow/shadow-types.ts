@@ -2,6 +2,7 @@ import { IBacktestTrade, ICandle } from '@quant/shared';
 import { IExecutionEvent, PositionLot } from '@quant/risk-engine';
 import { IFill, IOrder } from '@quant/backtesting';
 import { ShadowEvaluationMetrics } from '../types';
+import { RegimeObservation } from './regime-drift-detector';
 
 export const SHADOW_SCHEMA_VERSION = '1.0';
 
@@ -204,7 +205,7 @@ export interface ShadowLedgerData {
   readonly activeLot?: PositionLot | null;
   readonly recentCandles?: readonly ICandle[];
   readonly pendingOrders?: readonly IOrder[];
-  readonly regimeHistory?: readonly any[];
+  readonly regimeHistory?: readonly RegimeObservation[];
   readonly featureVectors?: readonly (readonly number[])[];
   readonly savedAt: number;
 }

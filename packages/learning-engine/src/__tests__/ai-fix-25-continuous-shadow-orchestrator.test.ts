@@ -54,6 +54,7 @@ function createDummyCandidate(id = 'cand-shadow-101'): StrategyCandidate {
     change: {
       parameter: 'minMtfScore',
       value: 75,
+      symbol: 'BTCUSDT',
       datasetHash: 'hash_mkt_shadow_001',
       marketDatasetHash: 'hash_mkt_shadow_001',
     },
@@ -485,6 +486,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
         strategyVersion: artifact.strategyVersion,
         featureSchemaHash: artifact.featureSchemaHash,
         artifactHash: artifact.artifactHash,
+        symbol: 'BTCUSDT',
       });
       ledger2.loadFromFile(ledgerFile);
 
@@ -505,6 +507,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
         strategyVersion: artifact.strategyVersion,
         featureSchemaHash: artifact.featureSchemaHash,
         artifactHash: artifact.artifactHash,
+        symbol: 'BTCUSDT',
       });
 
       expect(() => {
@@ -800,6 +803,310 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       const ledger2 = orch2.getCandidateLedger(candidate.id);
       expect(ledger2?.getActiveLot()?.tradeId).toBe(ledger1?.getActiveLot()?.tradeId);
       expect(ledger2?.getRecentCandles().length).toBe(ledger1?.getRecentCandles().length);
+    });
+
+    it('P0-1 Crash/Restart Equivalence: restored ExecutionSimulator executes restored pending SL order with exact equivalence to uninterrupted execution', () => {
+      const baseTs = 1700000000000;
+      const candidate1 = createDummyCandidate('cand-uninterrupted');
+      const candidate2 = createDummyCandidate('cand-interrupted');
+      const signalDef = {
+        timestamp: new Date(baseTs + 15 * 900000),
+        direction: Direction.BULLISH,
+        score: 90,
+        stopLoss: 95,
+        takeProfits: { tp1: 180, tp2: 190, tp3: 200 },
+        state: SignalState.ACTIVE,
+      };
+      (candidate1 as any).strategyConfig = { deterministicSignal: signalDef };
+      (candidate2 as any).strategyConfig = { deterministicSignal: signalDef };
+
+      const art1 = CandidateBacktestRunner.createCandidateArtifact(candidate1, 'hash_mkt_equiv');
+      const art2 = CandidateBacktestRunner.createCandidateArtifact(candidate2, 'hash_mkt_equiv');
+      ModelRegistry.registerCandidateArtifact(art1);
+      ModelRegistry.registerCandidateArtifact(art2);
+
+      const candles: ICandle[] = [];
+      for (let i = 0; i < 17; i++) {
+        const p = 100 + i * 2;
+        candles.push({
+          timestamp: new Date(baseTs + i * 900000),
+          open: p,
+          high: p + 2,
+          low: p - 1,
+          close: p + 1.5,
+          volume: 1000,
+        });
+      }
+      // Candle 17 crashes through stop loss (Low: 80 < SL: 95)
+      const stopHitCandle: ICandle = {
+        timestamp: new Date(baseTs + 17 * 900000),
+        open: 110,
+        high: 111,
+        low: 80,
+        close: 85,
+        volume: 5000,
+      };
+
+      // 1. Uninterrupted Execution
+      const orchUninterrupted = new ShadowOrchestrator();
+      orchUninterrupted.startCandidate(candidate1.id);
+      for (const c of candles) {
+        orchUninterrupted.processCandle(candidate1.id, c);
+      }
+      orchUninterrupted.processCandle(candidate1.id, stopHitCandle);
+      const uninterruptedTrades = orchUninterrupted.getCandidateLedger(candidate1.id)?.getTrades() || [];
+      expect(uninterruptedTrades.length).toBe(1);
+
+      // 2. Interrupted Execution with Crash and Restart
+      const pPathInterrupted = path.join(testDir, 'shadow-cand-interrupted.json');
+      const orchInterrupted1 = new ShadowOrchestrator();
+      orchInterrupted1.startCandidate(candidate2.id, { persistenceFilePath: pPathInterrupted });
+      for (const c of candles) {
+        orchInterrupted1.processCandle(candidate2.id, c);
+      }
+      // Candidate 2 has open position and pending orders persisted to disk
+
+      // Restart new orchestrator from persisted file
+      const orchInterrupted2 = new ShadowOrchestrator();
+      orchInterrupted2.startCandidate(candidate2.id, { persistenceFilePath: pPathInterrupted });
+      orchInterrupted2.processCandle(candidate2.id, stopHitCandle);
+      const interruptedTrades = orchInterrupted2.getCandidateLedger(candidate2.id)?.getTrades() || [];
+      expect(interruptedTrades.length).toBe(1);
+
+      // Verify exact equivalence between uninterrupted and interrupted executions
+      expect(interruptedTrades[0].exitPrice).toBe(uninterruptedTrades[0].exitPrice);
+      expect(interruptedTrades[0].pnl).toBe(uninterruptedTrades[0].pnl);
+      expect(interruptedTrades[0].exitReason).toBe(uninterruptedTrades[0].exitReason);
+      expect(interruptedTrades[0].netPnL).toBe(uninterruptedTrades[0].netPnL);
+    });
+
+    it('P0-2 & P1-3 Authoritative Trade Lifecycle: evaluates full scale-out TP1 -> TP2 -> TP3 -> closed', () => {
+      const baseTs = 1700000000000;
+      const candidate = createDummyCandidate('cand-scaleout');
+      (candidate as any).strategyConfig = {
+        deterministicSignal: {
+          timestamp: new Date(baseTs + 15 * 900000),
+          direction: Direction.BULLISH,
+          score: 95,
+          stopLoss: 90,
+          takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+          state: SignalState.ACTIVE,
+        },
+      };
+      (candidate as any).riskConfig = {
+        initialCapital: 10000,
+        maxRiskPerTrade: 0.05,
+        partialExitPolicy: {
+          tp1Ratio: 0.3333,
+          tp2Ratio: 0.3333,
+          tp3Ratio: 0.3334,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      };
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_scaleout');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orchestrator = new ShadowOrchestrator();
+      orchestrator.startCandidate(candidate.id);
+
+      // Candles 0-14: Warmup
+      for (let i = 0; i < 15; i++) {
+        orchestrator.processCandle(candidate.id, {
+          timestamp: new Date(baseTs + i * 900000),
+          open: 100,
+          high: 102,
+          low: 98,
+          close: 100,
+          volume: 1000,
+        });
+      }
+      // Candle 15: Entry signal generated & entry order placed
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(baseTs + 15 * 900000),
+        open: 100,
+        high: 102,
+        low: 98,
+        close: 100,
+        volume: 1000,
+      });
+
+      // Candle 16: Entry executes (Open: 100). SL: 90, TP1: 110, TP2: 120, TP3: 130 submitted
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(baseTs + 16 * 900000),
+        open: 100,
+        high: 105,
+        low: 99,
+        close: 104,
+        volume: 1000,
+      });
+
+      const ledger = orchestrator.getCandidateLedger(candidate.id);
+      expect(ledger?.getActiveLot()).toBeDefined();
+
+      // Candle 17: Price rallies to 112 -> TP1 hit! Stop moves to breakeven (100)
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(baseTs + 17 * 900000),
+        open: 105,
+        high: 115,
+        low: 104,
+        close: 112,
+        volume: 2000,
+      });
+      expect(ledger?.getActiveLot()?.status).toBe('PARTIALLY_CLOSED');
+      expect(ledger?.getActiveLot()?.currentStopLoss).toBeCloseTo(ledger?.getActiveLot()?.entryPrice || 100, 1);
+
+      // Candle 18: Price rallies to 125 -> TP2 hit!
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(baseTs + 18 * 900000),
+        open: 112,
+        high: 125,
+        low: 111,
+        close: 122,
+        volume: 2000,
+      });
+      expect(ledger?.getActiveLot()?.status).toBe('PARTIALLY_CLOSED');
+
+      // Candle 19: Price rallies to 135 -> TP3 hit! Position completely closed
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(baseTs + 19 * 900000),
+        open: 122,
+        high: 135,
+        low: 121,
+        close: 132,
+        volume: 2000,
+      });
+      expect(ledger?.getActiveLot()).toBeNull();
+
+      const trades = ledger?.getTrades() || [];
+      expect(trades.length).toBe(1);
+      expect(trades[0].pnl).toBeGreaterThan(0);
+      expect(trades[0].realizedR).toBeGreaterThan(0);
+    });
+
+    it('P1-4: missing symbol fails closed', () => {
+      const candidate = createDummyCandidate('cand-no-symbol');
+      delete (candidate.change as any).symbol;
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_no_sym');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orchestrator = new ShadowOrchestrator();
+      expect(() => {
+        orchestrator.startCandidate(candidate.id);
+      }).toThrow('MISSING_SYMBOL');
+    });
+
+    it('P1-5: missing execution config fails closed', () => {
+      const candidate = createDummyCandidate('cand-no-exec-cfg');
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_no_exec');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      jest.spyOn(ModelRegistry, 'getCandidateArtifact').mockReturnValueOnce({
+        ...artifact,
+        executionConfig: undefined as any,
+      });
+
+      const orchestrator = new ShadowOrchestrator();
+      expect(() => {
+        orchestrator.startCandidate(candidate.id);
+      }).toThrow('MISSING_EXECUTION_CONFIG');
+    });
+
+    it('P1-6: shadowDatasetHash derives from actual shadow observations', () => {
+      const candidate = createDummyCandidate('cand-ds-hash');
+      (candidate.change as any).marketDatasetHash = 'training_mkt_hash_abc';
+      (candidate.change as any).datasetHash = 'training_mkt_hash_abc';
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'training_mkt_hash_abc');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orchestrator = new ShadowOrchestrator();
+      orchestrator.startCandidate(candidate.id);
+
+      const candles = generateContinuousCandles(1700000000000, 20);
+      for (const c of candles) {
+        orchestrator.processCandle(candidate.id, c);
+      }
+
+      const evalRes = orchestrator.evaluateCandidate(candidate.id);
+      expect(evalRes.shadowDatasetHash).toBeDefined();
+      expect(evalRes.shadowDatasetHash.length).toBe(64);
+      // shadowDatasetHash must be distinct from training marketDatasetHash
+      expect(evalRes.shadowDatasetHash).not.toBe('training_mkt_hash_abc');
+      expect(evalRes.window.marketDatasetHash).toBe('training_mkt_hash_abc');
+    });
+
+    it('P1-7: missing baseline metrics fails closed', () => {
+      const candidate = createDummyCandidate('cand-no-baseline');
+      delete (candidate.evidence as any).expectancyBefore;
+      delete (candidate.evidence as any).expectancyAfterHistorical;
+      delete (candidate.evidence as any).winRate;
+      delete (candidate.evidence as any).profitFactor;
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_no_base');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orchestrator = new ShadowOrchestrator();
+      expect(() => {
+        orchestrator.startCandidate(candidate.id);
+      }).toThrow('SHADOW_BASELINE_MISSING');
+    });
+
+    it('P1-8: median R is computed mathematically distinct from mean expectancy R', () => {
+      const ledger = new ShadowLedger({
+        candidateId: 'cand-median-test',
+        candidateVersion: 'v1.0',
+        strategyVersion: 'v1.0',
+        featureSchemaHash: 'schema_123',
+        artifactHash: 'art_123',
+        symbol: 'BTCUSDT',
+      });
+
+      // Odd number of trades: [1R, 2R, 9R] -> Median = 2R, Mean = 4R
+      ledger.recordClosedTrades([
+        { id: 't1', pnl: 100, pnlRMultiple: 1.0 } as any,
+        { id: 't2', pnl: 200, pnlRMultiple: 2.0 } as any,
+        { id: 't3', pnl: 900, pnlRMultiple: 9.0 } as any,
+      ]);
+      expect(ledger.calculateMedianR()).toBe(2.0);
+
+      // Even number of trades: [1R, 2R, 9R, 10R] -> Median = (2 + 9) / 2 = 5.5R
+      ledger.recordClosedTrades([
+        { id: 't4', pnl: 1000, pnlRMultiple: 10.0 } as any,
+      ]);
+      expect(ledger.calculateMedianR()).toBe(5.5);
+    });
+
+    it('P1-9: stopCandidate cancels all ExecutionSimulator pending orders and clears ledger', () => {
+      const baseTs = 1700000000000;
+      const candidate = createDummyCandidate('cand-stop-cleanup');
+      (candidate as any).strategyConfig = {
+        deterministicSignal: {
+          timestamp: new Date(baseTs + 15 * 900000),
+          direction: Direction.BULLISH,
+          score: 90,
+          stopLoss: 90,
+          takeProfits: { tp1: 150, tp2: 160, tp3: 170 },
+          state: SignalState.ACTIVE,
+        },
+      };
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_stop');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orchestrator = new ShadowOrchestrator();
+      orchestrator.startCandidate(candidate.id);
+
+      const candles = generateContinuousCandles(baseTs, 17);
+      for (const c of candles) {
+        orchestrator.processCandle(candidate.id, c);
+      }
+
+      const ledgerBefore = orchestrator.getCandidateLedger(candidate.id);
+      expect(ledgerBefore?.getActiveLot()).toBeDefined();
+
+      orchestrator.stopCandidate(candidate.id, 'Operator stopped candidate');
+      expect(orchestrator.getCandidateLedger(candidate.id)).toBeUndefined();
+      expect(ledgerBefore?.getActiveLot()).toBeNull();
+      expect(ledgerBefore?.getPendingOrders().length).toBe(0);
     });
 
     it('P0-7: evaluateCandidate computes real financial metrics strictly from trade and fill ledgers (zero synthetic placeholders)', () => {

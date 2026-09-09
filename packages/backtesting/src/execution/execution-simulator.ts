@@ -381,6 +381,35 @@ export class ExecutionSimulator {
     return count;
   }
 
+  cancelAllOrders(): number {
+    let count = 0;
+    for (const order of this.orders.values()) {
+      if (order.status === 'PENDING') {
+        order.status = 'CANCELLED';
+        count++;
+      }
+    }
+    return count;
+  }
+
+  restoreOrder(order: IOrder): void {
+    if (!order || !order.orderId) return;
+    this.orders.set(order.orderId, { ...order });
+    const match = order.orderId.match(/_ord_(\d+)$/);
+    if (match) {
+      const idx = parseInt(match[1], 10);
+      if (!isNaN(idx) && idx > this.orderCounter) {
+        this.orderCounter = idx;
+      }
+    }
+  }
+
+  restoreOrders(orders: IOrder[]): void {
+    for (const ord of orders) {
+      this.restoreOrder(ord);
+    }
+  }
+
   getOrder(orderId: string): IOrder | undefined {
     return this.orders.get(orderId);
   }
@@ -389,6 +418,10 @@ export class ExecutionSimulator {
     return Array.from(this.orders.values()).filter(
       (o) => o.tradeId === tradeId && o.status === 'PENDING',
     );
+  }
+
+  getAllOrders(): IOrder[] {
+    return Array.from(this.orders.values());
   }
 
   getAllFills(): IFill[] {

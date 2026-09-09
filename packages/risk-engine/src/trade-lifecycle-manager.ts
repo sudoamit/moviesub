@@ -1,4 +1,4 @@
-import { Direction, ICandle, ISignalSetup, SignalState } from '@quant/shared';
+import { Direction, ICandle, IBacktestTrade, ISignalSetup, SignalState } from '@quant/shared';
 import {
   IEntryExecutionSnapshot,
   IExecutionEvent,
@@ -138,6 +138,60 @@ export class TradeLifecycleManager {
       mae: 0,
       mfe: 0,
       entrySnapshot,
+    };
+  }
+
+  static createCompletedTrade(
+    lot: PositionLot,
+    exitReason: SignalState,
+    fillModel?: string,
+    ambiguityMode?: string,
+    tradeId = lot.tradeId,
+  ): IBacktestTrade {
+    const firstFill = lot.partialFills[0];
+    const lastFill = lot.partialFills[lot.partialFills.length - 1];
+    const totalFees = lot.partialFills.reduce((sum, fill) => sum + fill.fee, 0);
+    const totalSlippage = lot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0);
+    const initialRisk = Math.abs(lot.entryPrice - lot.initialStopLoss) * lot.initialQuantity;
+    const netPnl = Number((lot.realizedPnl - totalFees).toFixed(2));
+
+    return {
+      id: tradeId,
+      direction: lot.direction,
+      entryTime: new Date(lot.openedAt),
+      entryPrice: lot.entryPrice,
+      exitTime: new Date(lot.closedAt || lastFill?.timestamp || lot.openedAt),
+      exitPrice: lastFill?.price || lot.entryPrice,
+      stopLoss: lot.initialStopLoss,
+      takeProfit: lot.tp2,
+      positionSize: lot.initialQuantity,
+      marginRequired: Number(((lot.initialQuantity * lot.entryPrice) / 5).toFixed(2)),
+      riskAmount: Number(initialRisk.toFixed(2)),
+      pnl: netPnl,
+      pnlRMultiple: Number((netPnl / Math.max(1, initialRisk)).toFixed(2)),
+      exitReason,
+      signalTimestamp: new Date(lot.entrySnapshot?.signalTimestamp || lot.openedAt),
+      orderCreatedAt: new Date(lot.entrySnapshot?.orderCreatedAt || lot.openedAt),
+      orderSubmittedAt: new Date(lot.entrySnapshot?.orderSubmittedAt || lot.openedAt),
+      entryFillTimestamp: new Date(lot.entrySnapshot?.executionTimestamp || lot.openedAt),
+      entryReferencePrice: lot.entrySnapshot?.referencePrice || lot.entryPrice,
+      entryFillPrice: lot.entrySnapshot?.entryPrice || lot.entryPrice,
+      entryFees: lot.entrySnapshot?.fee ?? firstFill?.fee ?? 0,
+      entrySlippage: lot.entrySnapshot?.slippage ?? firstFill?.slippage ?? 0,
+      exitOrderTimestamp: new Date(lastFill?.timestamp || lot.closedAt || lot.openedAt),
+      exitOrderCreatedAt: new Date(lastFill?.exitOrderCreatedAt || lastFill?.timestamp || lot.openedAt),
+      exitOrderSubmittedAt: new Date(lastFill?.exitOrderSubmittedAt || lastFill?.timestamp || lot.openedAt),
+      exitTriggerTimestamp: new Date(lastFill?.exitTriggerTimestamp || lastFill?.timestamp || lot.openedAt),
+      exitFillTimestamp: new Date(lastFill?.exitFillTimestamp || lastFill?.timestamp || lot.openedAt),
+      exitFillPrice: lastFill?.price || lot.entryPrice,
+      exitFees: totalFees - (firstFill?.fee || 0),
+      exitSlippage: totalSlippage - (firstFill?.slippage || 0),
+      grossPnL: lot.realizedPnl,
+      netPnL: netPnl,
+      realizedR: Number((netPnl / Math.max(1, initialRisk)).toFixed(2)),
+      fillModel,
+      ambiguityMode,
+      entrySnapshot: lot.entrySnapshot,
     };
   }
 
