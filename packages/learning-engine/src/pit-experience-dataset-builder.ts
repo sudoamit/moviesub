@@ -172,8 +172,16 @@ export class PITExperienceDatasetBuilder {
       throw new Error(`MISSING_STRATEGY_VERSION: Example '${raw.exampleId}' is missing authoritative strategyVersion`);
     }
 
+    if (raw.label !== 0 && raw.label !== 1) {
+      throw new Error(`INVALID_BINARY_LABEL: Example '${raw.exampleId}' must have binary label 0 or 1, got ${raw.label}`);
+    }
+
     if (raw.outcomeR === undefined || typeof raw.outcomeR !== 'number' || !Number.isFinite(raw.outcomeR)) {
       throw new Error(`MISSING_OUTCOME_R: Example '${raw.exampleId}' is missing authoritative outcomeR (finite number required)`);
+    }
+
+    if (!raw.exitType || typeof raw.exitType !== 'string' || raw.exitType.trim() === '') {
+      throw new Error(`MISSING_EXIT_TYPE: Example '${raw.exampleId}' is missing authoritative exitType`);
     }
 
     if (!raw.regime || typeof raw.regime !== 'string' || raw.regime.trim() === '') {
@@ -200,7 +208,7 @@ export class PITExperienceDatasetBuilder {
       marketDatasetHash: raw.marketDatasetHash,
       strategyVersion: raw.strategyVersion,
       candidateVersion: raw.candidateVersion,
-      label: raw.label >= 0.5 ? 1.0 : 0.0,
+      label: raw.label,
       outcomeR: raw.outcomeR,
       exitType: raw.exitType,
       regime: raw.regime,

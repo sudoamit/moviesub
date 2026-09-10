@@ -150,14 +150,14 @@ export class SelfImprovingRetrainingPipeline {
     if (!config.executionConfig.ambiguityMode || typeof config.executionConfig.ambiguityMode !== 'string') {
       throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.ambiguityMode is required');
     }
-    if (typeof config.executionConfig.latencyMs !== 'number' || !Number.isFinite(config.executionConfig.latencyMs) || config.executionConfig.latencyMs < 0) {
-      throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.latencyMs must be non-negative');
+    if (!config.timeframe || typeof config.timeframe !== 'string' || config.timeframe.trim().length === 0) {
+      throw new Error('MISSING_TIMEFRAME: config.timeframe must be a non-empty string');
     }
 
     const configHash = crypto.createHash('sha256').update(canonicalJsonStringify(config)).digest('hex').substring(0, 16);
     const mktHash = DatasetManager.requireCanonicalMarketDatasetHash(
       candles as ICandle[],
-      config.timeframe || '15m',
+      config.timeframe,
     );
     const expHash = PITExperienceDatasetBuilder.computeDatasetHash(rawExamples);
     const strategyVersion = config.baseStrategyVersion;
@@ -320,6 +320,38 @@ export class SelfImprovingRetrainingPipeline {
           if (e.outcomeR === undefined || e.outcomeR === null || !Number.isFinite(e.outcomeR)) {
             throw new Error(`MISSING_OUTCOME_R_PROVENANCE: Training example '${e.exampleId}' lacks validated outcomeR for walk-forward validation`);
           }
+          if (!e.exitType || typeof e.exitType !== 'string' || e.exitType.trim() === '') {
+            throw new Error(`MISSING_EXIT_TYPE_PROVENANCE: Training example '${e.exampleId}' lacks validated exitType for walk-forward validation`);
+          }
+
+          let quantFeatures: Record<string, number>;
+          if (Array.isArray(e.features)) {
+            const names = e.featureNames && e.featureNames.length === e.features.length
+              ? e.featureNames
+              : CANONICAL_FEATURE_NAMES_V2;
+            if (e.features.length !== names.length) {
+              throw new Error(`FEATURE_DIMENSION_MISMATCH: Example '${e.exampleId}' has ${e.features.length} features but expected ${names.length}`);
+            }
+            quantFeatures = {};
+            for (let i = 0; i < names.length; i++) {
+              const val = e.features[i];
+              if (val === undefined || val === null || typeof val !== 'number' || !Number.isFinite(val)) {
+                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${names[i]}'`);
+              }
+              quantFeatures[names[i]] = val;
+            }
+          } else if (e.features && typeof e.features === 'object') {
+            quantFeatures = {};
+            for (const [k, v] of Object.entries(e.features as Record<string, unknown>)) {
+              if (v === undefined || v === null || typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${k}'`);
+              }
+              quantFeatures[k] = v;
+            }
+          } else {
+            throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' has invalid features structure`);
+          }
+
           return {
             id: e.exampleId,
             timestamp: new Date(e.decisionTimestamp),
@@ -329,14 +361,10 @@ export class SelfImprovingRetrainingPipeline {
             outcome: {
               pnlR: e.outcomeR,
               realizedR: e.outcomeR,
-              exitType: e.exitType || (e.outcomeR > 0 ? 'TP' : 'SL'),
+              exitType: e.exitType,
             },
             marketState: {
-              quant: Array.isArray(e.features)
-                ? Object.fromEntries(
-                    (e.featureNames || CANONICAL_FEATURE_NAMES_V2).map((name: string, i: number) => [name, e.features[i] ?? 0.5]),
-                  )
-                : (e.features || {}),
+              quant: quantFeatures,
             },
           };
         });
@@ -365,6 +393,8 @@ export class SelfImprovingRetrainingPipeline {
           experienceDataset: devExpDataset,
           marketDataset: devMarketDataset,
           embargoMs: config.embargoMs,
+          numFolds: config.numFolds,
+          warmupBars: config.warmupBars,
         });
 
         const minValTrades = config.minValidationTrades !== undefined ? config.minValidationTrades : 0;

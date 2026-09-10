@@ -85,8 +85,9 @@ function generateTestExamples(startTs: number, count: number, intervalMs = 90000
         obStrength: 0.7 + (r - 0.5) * 0.2,
         rvol: 1.2 + (r - 0.5) * 0.8,
       },
-      label: r > 0.45 ? 1.0 : 0.0,
+      label: r > 0.45 ? 1 : 0,
       outcomeR: r > 0.45 ? 1.5 : -1.0,
+      exitType: r > 0.45 ? 'TP1' : 'SL',
       regime: i % 2 === 0 ? 'TRENDING_BULLISH' : 'RANGING',
       volatilityBucket: 'NORMAL',
       source: 'HISTORICAL',
@@ -201,6 +202,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
       marketDatasetHash: 'test_market_dataset_hash',
       strategyVersion: 'v2.0',
       outcomeR: 1.0,
+      exitType: 'TP1',
       regime: 'TRENDING_BULLISH',
       volatilityBucket: 'NORMAL',
       source: 'HISTORICAL' as const,
@@ -848,6 +850,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
       marketDatasetHash: 'test_market_dataset_hash',
       strategyVersion: 'v2.0',
       outcomeR: 1.0,
+      exitType: 'TP1',
       regime: 'TRENDING_BULLISH',
       volatilityBucket: 'NORMAL',
       source: 'HISTORICAL' as const,
@@ -863,7 +866,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
         labelStartTimestamp: t0 + 1000,
         labelEndTimestamp: t0 + 3600000,
         features: { smcScore: NaN },
-        label: 1.0,
+        label: 1,
       });
     }).toThrow(/INVALID_FEATURE_VALUE/);
 
@@ -878,7 +881,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
         labelStartTimestamp: t0 + 1000,
         labelEndTimestamp: t0 + 3600000,
         features: { smcScore: 0.5 },
-        label: 1.0,
+        label: 1,
       });
     }).toThrow(/MISSING_FEATURE_SCHEMA_HASH/);
 
@@ -893,8 +896,176 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
         labelStartTimestamp: t0 + 1000,
         labelEndTimestamp: t0 + 3600000,
         features: { smcScore: 0.5 },
-        label: 1.0,
+        label: 1,
       });
     }).toThrow(/MISSING_OUTCOME_R/);
   });
+
+  it('Test 39 (P1 #4): PITExperienceDatasetBuilder rejects non-binary labels (no coercion allowed)', () => {
+    const t0 = 1700000000000;
+    const baseMeta = {
+      featureSchemaHash: 'test_feat_schema_hash',
+      marketDatasetHash: 'test_market_dataset_hash',
+      strategyVersion: 'v2.0',
+      outcomeR: 1.0,
+      exitType: 'TP1',
+      regime: 'TRENDING_BULLISH',
+      volatilityBucket: 'NORMAL',
+      source: 'HISTORICAL' as const,
+      decisionTimestamp: t0,
+      featureTimestamp: t0,
+      labelStartTimestamp: t0 + 1000,
+      labelEndTimestamp: t0 + 3600000,
+      features: { smcScore: 0.5 },
+    };
+
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_label_99',
+        label: 99 as any,
+      });
+    }).toThrow(/INVALID_BINARY_LABEL/);
+
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_label_minus_100',
+        label: -100 as any,
+      });
+    }).toThrow(/INVALID_BINARY_LABEL/);
+
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_label_half',
+        label: 0.5 as any,
+      });
+    }).toThrow(/INVALID_BINARY_LABEL/);
+  });
+
+  it('Test 40 (P1 #3): PITExperienceDatasetBuilder rejects missing or empty exitType', () => {
+    const t0 = 1700000000000;
+    const baseMeta = {
+      featureSchemaHash: 'test_feat_schema_hash',
+      marketDatasetHash: 'test_market_dataset_hash',
+      strategyVersion: 'v2.0',
+      outcomeR: 1.0,
+      regime: 'TRENDING_BULLISH',
+      volatilityBucket: 'NORMAL',
+      source: 'HISTORICAL' as const,
+      decisionTimestamp: t0,
+      featureTimestamp: t0,
+      labelStartTimestamp: t0 + 1000,
+      labelEndTimestamp: t0 + 3600000,
+      features: { smcScore: 0.5 },
+      label: 1,
+    };
+
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_no_exit',
+        exitType: undefined as any,
+      });
+    }).toThrow(/MISSING_EXIT_TYPE/);
+
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_empty_exit',
+        exitType: '   ',
+      });
+    }).toThrow(/MISSING_EXIT_TYPE/);
+  });
+
+  it('Test 41 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing fillModel without fallback', () => {
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig(
+        'c_test',
+        '1.0.0',
+        'v1',
+        'BTCUSDT',
+        undefined as any,
+        'CONSERVATIVE',
+        50,
+      );
+    }).toThrow(/MISSING_FILL_MODEL/);
+  });
+
+  it('Test 42 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing ambiguityMode without fallback', () => {
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig(
+        'c_test',
+        '1.0.0',
+        'v1',
+        'BTCUSDT',
+        'OHLC_PATH',
+        undefined as any,
+        50,
+      );
+    }).toThrow(/MISSING_AMBIGUITY_MODE/);
+  });
+
+  it('Test 43 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing or invalid latencyMs without fallback', () => {
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig(
+        'c_test',
+        '1.0.0',
+        'v1',
+        'BTCUSDT',
+        'OHLC_PATH',
+        'CONSERVATIVE',
+        undefined as any,
+      );
+    }).toThrow(/MISSING_LATENCY_MS/);
+
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig(
+        'c_test',
+        '1.0.0',
+        'v1',
+        'BTCUSDT',
+        'OHLC_PATH',
+        'CONSERVATIVE',
+        -10,
+      );
+    }).toThrow(/MISSING_LATENCY_MS/);
+  });
+
+  it('Test 44 (P1 #5): SelfImprovingRetrainingPipeline rejects missing timeframe without default fallback', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const configWithoutTimeframe = { ...baseConfig, timeframe: undefined as any };
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, configWithoutTimeframe),
+    ).rejects.toThrow(/MISSING_TIMEFRAME/);
+  });
+
+  it('Test 45 (P0 #1): SelfImprovingRetrainingPipeline rejects missing feature value in WFV without 0.5 fallback', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const rawExamples = generateTestExamples(1700000000000, 50);
+    // Introduce missing feature in one example
+    const examples = rawExamples.map((ex, idx) =>
+      idx === 5 ? ({ ...ex, features: { ...ex.features, smcScore: undefined } } as unknown as TrainingExample) : ex,
+    );
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow(/MISSING_FEATURE_VALUE/);
+  });
+
+  it('Test 46 (P1 #3): SelfImprovingRetrainingPipeline rejects missing exitType in WFV without P&L inference', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const rawExamples = generateTestExamples(1700000000000, 50);
+    const examples = rawExamples.map((ex, idx) =>
+      idx === 7 ? ({ ...ex, exitType: undefined } as unknown as TrainingExample) : ex,
+    );
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow(/MISSING_EXIT_TYPE_PROVENANCE/);
+  });
 });
+

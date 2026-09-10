@@ -141,27 +141,35 @@ export class CandidateArtifactBuilder {
     }
 
     const fillModel =
-      (candidate.executionConfig as Record<string, unknown>)?.fillModel as string ||
-      (options?.executionConfig as Record<string, unknown>)?.fillModel as string ||
+      ((candidate.executionConfig as Record<string, unknown>)?.fillModel as string) ||
+      ((options?.executionConfig as Record<string, unknown>)?.fillModel as string) ||
       (change.fillModel as string) ||
-      (rawCandidate.fillModel as string) ||
-      'OHLC_PATH';
+      (rawCandidate.fillModel as string);
+
+    if (!fillModel || typeof fillModel !== 'string' || fillModel.trim() === '') {
+      throw new Error(`MISSING_FILL_MODEL: Candidate '${candidate.id}' is missing authoritative fillModel`);
+    }
+
     const ambiguityMode =
-      (candidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
-      (options?.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
+      ((candidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
+      ((options?.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       (change.ambiguityMode as string) ||
-      (rawCandidate.ambiguityMode as string) ||
-      'CONSERVATIVE';
-    const latencyMs =
-      typeof (candidate.executionConfig as Record<string, unknown>)?.latencyMs === 'number'
-        ? ((candidate.executionConfig as Record<string, unknown>).latencyMs as number)
-        : typeof (options?.executionConfig as Record<string, unknown>)?.latencyMs === 'number'
-          ? ((options?.executionConfig as Record<string, unknown>).latencyMs as number)
-          : typeof change.latencyMs === 'number'
-            ? change.latencyMs
-            : typeof rawCandidate.latencyMs === 'number'
-              ? (rawCandidate.latencyMs as number)
-              : 50;
+      (rawCandidate.ambiguityMode as string);
+
+    if (!ambiguityMode || typeof ambiguityMode !== 'string' || ambiguityMode.trim() === '') {
+      throw new Error(`MISSING_AMBIGUITY_MODE: Candidate '${candidate.id}' is missing authoritative ambiguityMode`);
+    }
+
+    const rawLatency =
+      (candidate.executionConfig as Record<string, unknown>)?.latencyMs ??
+      (options?.executionConfig as Record<string, unknown>)?.latencyMs ??
+      change.latencyMs ??
+      rawCandidate.latencyMs;
+
+    if (typeof rawLatency !== 'number' || !Number.isFinite(rawLatency) || rawLatency < 0) {
+      throw new Error(`MISSING_LATENCY_MS: Candidate '${candidate.id}' is missing authoritative latencyMs (non-negative number required)`);
+    }
+    const latencyMs = rawLatency;
 
     // Canonical SHA-256 hash over candidate parameters using canonical JSON serialization
     const hashPayload = canonicalJsonStringify({

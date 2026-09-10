@@ -723,7 +723,7 @@ export interface TrainingExample {
   readonly candidateVersion?: string;
   readonly label: number; // 1.0 (win/favorable) or 0.0 (loss)
   readonly outcomeR: number; // realized or counterfactual R-multiple (mandatory finite number)
-  readonly exitType?: string; // e.g. TP1, TP2, TP3, SL, TRAILING_STOP
+  readonly exitType: string; // e.g. TP1, TP2, TP3, SL, TRAILING_STOP (mandatory authoritative provenance)
   readonly regime: string;
   readonly volatilityBucket: string;
   readonly source: 'HISTORICAL' | 'SHADOW';
@@ -843,6 +843,8 @@ export interface RetrainingRunConfig {
   readonly executionConfig: CandidateExecutionConfig;
   readonly baseCandidate?: StrategyCandidate | ValidatedCandidateArtifact;
   readonly seed?: number;
+  readonly numFolds?: number;
+  readonly warmupBars?: number;
   readonly minValidationTrades?: number;
   readonly minOOSTrades?: number;
   readonly minValidationExpectancyR?: number;
