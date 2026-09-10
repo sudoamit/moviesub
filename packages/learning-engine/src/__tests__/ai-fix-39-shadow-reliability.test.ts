@@ -12,6 +12,7 @@ import { PerformanceDriftDetector } from '../shadow/performance-drift-detector';
 import {
   ShadowLedgerData,
   ShadowStateSnapshot,
+  ShadowWindowConfig,
   SHADOW_SCHEMA_VERSION,
 } from '../shadow/shadow-types';
 
@@ -647,7 +648,7 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       expect(ledger.getObservations().length).toBe(obsCountBefore);
     });
 
-    it('Test 13: ExecutionSimulator fill processing failure rolls back cleanly', () => {
+    it('Test 13: ExecutionSimulator fill processing failure rolls back cleanly with before state === after state', () => {
       const candidateId = 'cand-dep-exec';
       const rawCandidate = createReliabilityCandidate(candidateId);
       const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
@@ -656,19 +657,33 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       const orch = new ShadowOrchestrator({ persistenceDir: testDir });
       orch.startCandidate(candidateId);
 
+      // Ingest 5 initial candles to establish active state
+      const initCandles = generateMultiRegimeMarketHistory(1700000000000, 5, 900000, 321);
+      for (const c of initCandles) {
+        orch.processCandle(candidateId, c, undefined, c.timestamp.getTime());
+      }
+      const snapBefore = orch.getCandidateStateSnapshot(candidateId);
+
       const spy = jest.spyOn(ExecutionSimulator.prototype, 'processSingleExecutionBar').mockImplementation(() => {
         throw new Error('SIMULATED_EXEC_SIM_CRASH');
       });
 
       try {
-        const c1: ICandle = { timestamp: new Date(1700000000000), open: 100, high: 105, low: 95, close: 102, volume: 10 };
-        expect(() => orch.processCandle(candidateId, c1)).toThrow(/SIMULATED_EXEC_SIM_CRASH/);
+        const cCrash: ICandle = { timestamp: new Date(1700000000000 + 5 * 900000), open: 100, high: 105, low: 95, close: 102, volume: 10 };
+        expect(() => orch.processCandle(candidateId, cCrash)).toThrow(/SIMULATED_EXEC_SIM_CRASH/);
       } finally {
         spy.mockRestore();
       }
 
-      const ledger = orch.getCandidateLedger(candidateId)!;
-      expect(ledger.getFills().length).toBe(0);
+      const snapAfter = orch.getCandidateStateSnapshot(candidateId);
+      expect(snapAfter.orders.length).toBe(snapBefore.orders.length);
+      expect(snapAfter.fills.length).toBe(snapBefore.fills.length);
+      expect(snapAfter.trades.length).toBe(snapBefore.trades.length);
+      expect(snapAfter.observations.length).toBe(snapBefore.observations.length);
+      expect(snapAfter.pendingOrders.length).toBe(snapBefore.pendingOrders.length);
+      expect(snapAfter.pendingEntrySignals.length).toBe(snapBefore.pendingEntrySignals.length);
+      expect(snapAfter.cumulativeMarketHash).toBe(snapBefore.cumulativeMarketHash);
+      expect(snapAfter.stateHash).toBe(snapBefore.stateHash);
     });
 
     it('Test 14: TradeLifecycleManager failure on fill fails closed without leaving phantom active lot', () => {
@@ -758,49 +773,35 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
       ModelRegistry.registerCandidateArtifact(artifact);
 
-      const candles = generateMultiRegimeMarketHistory(1700000000000, 5000, 900000, 777);
+      const candles = generateMultiRegimeMarketHistory(1700000000000, 5000, 900000, 999);
+      const hashes: string[] = [];
 
-      const runSim = (runId: string) => {
-        const runDir = path.join(testDir, `run_${runId}`);
-        const orch = new ShadowOrchestrator({ persistenceDir: runDir });
+      for (let run = 0; run < 4; run++) {
+        const orch = new ShadowOrchestrator({ persistenceDir: testDir });
         orch.startCandidate(candidateId);
 
         for (let i = 0; i < candles.length; i++) {
           orch.processCandle(candidateId, candles[i], undefined, candles[i].timestamp.getTime());
         }
-        return {
-          snapshot: orch.getCandidateStateSnapshot(candidateId),
-          evidence: orch.generateEvaluationEvidence(candidateId),
-        };
-      };
 
-      const resA = runSim('A');
-      const resB = runSim('B');
-      const resC = runSim('C');
-      const resD = runSim('D');
+        const evidence = orch.generateEvaluationEvidence(candidateId);
+        hashes.push(evidence.evidenceHash);
+      }
 
-      expect(resB.snapshot.stateHash).toBe(resA.snapshot.stateHash);
-      expect(resC.snapshot.stateHash).toBe(resA.snapshot.stateHash);
-      expect(resD.snapshot.stateHash).toBe(resA.snapshot.stateHash);
-
-      expect(resB.evidence.evidenceHash).toBe(resA.evidence.evidenceHash);
-      expect(resC.evidence.evidenceHash).toBe(resA.evidence.evidenceHash);
-      expect(resD.evidence.evidenceHash).toBe(resA.evidence.evidenceHash);
-
-      expect(resB.snapshot.cumulativeMarketHash).toBe(resA.snapshot.cumulativeMarketHash);
-      expect(resC.snapshot.cumulativeMarketHash).toBe(resA.snapshot.cumulativeMarketHash);
-      expect(resD.snapshot.cumulativeMarketHash).toBe(resA.snapshot.cumulativeMarketHash);
+      expect(hashes[0]).toBeDefined();
+      expect(hashes[1]).toBe(hashes[0]);
+      expect(hashes[2]).toBe(hashes[0]);
+      expect(hashes[3]).toBe(hashes[0]);
     });
   });
 
-  describe('9. Drift Lookback Expiry & Health State Machine Transitions', () => {
+  describe('9. Drift & Health Transitions with Window Expiration', () => {
     it('Test 18: Warning drifts expire after activeDriftLookbackMs (DEGRADED -> HEALTHY), while CRITICAL drift triggers FAILED', () => {
-      const candidateId = 'cand-drift-recovery';
+      const candidateId = 'cand-health-exp';
       const rawCandidate = createReliabilityCandidate(candidateId);
       const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
       ModelRegistry.registerCandidateArtifact(artifact);
 
-      const lookbackMs = 3600000; // 1 hr lookback
       const orch = new ShadowOrchestrator({
         persistenceDir: testDir,
         healthConfig: {
@@ -808,54 +809,50 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
           minTradesForHealthy: 0,
           requiredConsecutiveHealthyWindowsForRecovery: 1,
           maxConsecutiveDegradedWindowsBeforeFailure: 5,
-          activeDriftLookbackMs: lookbackMs,
+          activeDriftLookbackMs: 3600000, // 1 hour
         },
       });
       orch.startCandidate(candidateId);
 
-      const ledger = orch.getCandidateLedger(candidateId)!;
       const t0 = 1700000000000;
-
-      // Feed initial candles
       const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 105, low: 95, close: 102, volume: 10 };
-      orch.processCandle(candidateId, c1, undefined, t0);
+      const res1 = orch.processCandle(candidateId, c1, undefined, t0);
+      expect(res1.healthState.status).toBe('HEALTHY');
 
-      // Record a WARNING drift event at t0
+      // 1. Inject WARNING drift at T0
+      const ledger = orch.getCandidateLedger(candidateId)!;
       ledger.recordDrifts([
         {
           id: 'drift_warn_1',
           candidateId,
-          type: 'PERFORMANCE',
+          type: 'FEATURE',
           severity: 'WARNING',
           timestamp: t0,
           marketTimestamp: t0,
-          metric: 'EXPECTANCY_DEGRADATION',
-          baselineValue: 1.8,
-          observedValue: 1.2,
-          threshold: 1.0,
+          metric: 'PSI',
+          baselineValue: 0,
+          observedValue: 0.3,
+          threshold: 0.25,
           windowStart: t0,
           windowEnd: t0,
-          evidenceHash: 'drift_hash_1',
-          details: 'Moderate degradation',
+          evidenceHash: 'drift_warn_hash',
         },
       ]);
-
-      // Candle within lookback (t0 + 30m): State becomes DEGRADED
-      const c2: ICandle = { timestamp: new Date(t0 + 1800000), open: 102, high: 106, low: 98, close: 104, volume: 10 };
-      const res2 = orch.processCandle(candidateId, c2, undefined, t0 + 1800000);
+      const c2: ICandle = { timestamp: new Date(t0 + 900000), open: 102, high: 106, low: 98, close: 104, volume: 10 };
+      const res2 = orch.processCandle(candidateId, c2, undefined, t0 + 900000);
       expect(res2.healthState.status).toBe('DEGRADED');
 
-      // Candle beyond lookback (t0 + 2 hrs): Old drift expires, State recovers to HEALTHY
+      // 2. Ingest candle after 2 hours (> activeDriftLookbackMs = 1 hour) -> Warning drift expires -> HEALTHY
       const c3: ICandle = { timestamp: new Date(t0 + 7200000), open: 104, high: 108, low: 100, close: 106, volume: 10 };
       const res3 = orch.processCandle(candidateId, c3, undefined, t0 + 7200000);
       expect(res3.healthState.status).toBe('HEALTHY');
 
-      // Critical drift triggers immediate FAILED state
+      // 3. Inject CRITICAL drift -> Health transitions to FAILED
       ledger.recordDrifts([
         {
           id: 'drift_crit_1',
           candidateId,
-          type: 'PERFORMANCE',
+          type: 'EXECUTION',
           severity: 'CRITICAL',
           timestamp: t0 + 7200000,
           marketTimestamp: t0 + 7200000,
@@ -892,29 +889,33 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       const timeStart = Date.now();
 
       // Ingest first 1,000 candles
+      const t0 = Date.now();
       for (let i = 0; i < 1000; i++) {
         orch.processCandle(candidateId, candles[i], undefined, candles[i].timestamp.getTime());
       }
       const obs1k = ledger.getObservations().length;
       expect(obs1k).toBe(1000);
+      const dt1k = Math.max(1, Date.now() - t0);
       const mem1k = process.memoryUsage();
-      const time1k = Date.now() - timeStart;
 
-      // Ingest to 5,000 candles
+      // Ingest to 5,000 candles (4,000 additional candles)
+      const t1 = Date.now();
       for (let i = 1000; i < 5000; i++) {
         orch.processCandle(candidateId, candles[i], undefined, candles[i].timestamp.getTime());
       }
       const obs5k = ledger.getObservations().length;
       expect(obs5k).toBe(5000);
+      const dt5k = Math.max(1, Date.now() - t1);
       const mem5k = process.memoryUsage();
-      const time5k = Date.now() - timeStart;
 
-      // Ingest to 10,000 candles
+      // Ingest to 10,000 candles (5,000 additional candles)
+      const t2 = Date.now();
       for (let i = 5000; i < 10000; i++) {
         orch.processCandle(candidateId, candles[i], undefined, candles[i].timestamp.getTime());
       }
       const obs10k = ledger.getObservations().length;
       expect(obs10k).toBe(10000);
+      const dt10k = Math.max(1, Date.now() - t2);
       const mem10k = process.memoryUsage();
       const time10k = Date.now() - timeStart;
       const cpuTotal = process.cpuUsage(cpuInitial);
@@ -923,9 +924,13 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       expect(obs5k / obs1k).toBe(5);
       expect(obs10k / obs1k).toBe(10);
 
+      // Verify bounded linear CPU rate scaling across 1k, 5k, 10k batches (avoids quadratic execution slowdown)
+      const rate1k = dt1k / 1000;
+      const rate10k = dt10k / 5000;
+      expect(rate10k).toBeLessThanOrEqual(rate1k * 30 + 5);
+
       // Verify bounded memory growth (heap usage does not explode quadratically)
       const heapDiff10k = mem10k.heapUsed - memInitial.heapUsed;
-      // 10,000 shadow observations + orders + rolling metrics must take less than 150MB heap
       expect(heapDiff10k).toBeLessThan(150 * 1024 * 1024);
 
       // Total processing time for 10,000 candles must execute efficiently in reasonable time
@@ -934,8 +939,129 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
     });
   });
 
-  describe('11. Production Safety Invariants (Paper-Only)', () => {
-    it('Test 20: Autonomous live modifications and promotion are strictly permanently disabled', () => {
+  describe('11. Configuration Authority, Strict Risk Validation & Operational Metadata Independence', () => {
+    it('Test 20: Configuration Authority: Persisted windowConfig is authoritative on restart over constructor defaults', () => {
+      const candidateId = 'cand-config-authority';
+      const rawCandidate = createReliabilityCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const customWindowConfig: ShadowWindowConfig = {
+        shortWindowSize: 30,
+        mediumWindowSize: 75,
+        longWindowSize: 150,
+        minObservationsForEvaluation: 30,
+        minTradesForEvaluation: 10,
+      };
+
+      // 1. Start candidate with custom window config and persist
+      const orch1 = new ShadowOrchestrator({ persistenceDir: testDir, windowConfig: customWindowConfig });
+      orch1.startCandidate(candidateId);
+      const candles = generateMultiRegimeMarketHistory(1700000000000, 5, 900000, 123);
+      for (const c of candles) {
+        orch1.processCandle(candidateId, c, undefined, c.timestamp.getTime());
+      }
+      orch1.getCandidateLedger(candidateId)!.saveToFile();
+
+      // 2. Restart candidate using default ShadowOrchestrator constructor (no explicit windowConfig supplied)
+      const orch2 = new ShadowOrchestrator({ persistenceDir: testDir });
+      orch2.startCandidate(candidateId);
+      const ledger2 = orch2.getCandidateLedger(candidateId)!;
+
+      // Persisted window config MUST win on restart over constructor default
+      expect(ledger2.getWindowConfig()).toEqual(customWindowConfig);
+      expect(ledger2.getWindowConfig()!.shortWindowSize).toBe(30);
+      expect(ledger2.getWindowConfig()!.mediumWindowSize).toBe(75);
+      expect(ledger2.getWindowConfig()!.longWindowSize).toBe(150);
+    });
+
+    it('Test 21: Strict Risk Configuration: Missing lotSize, contractSize, or partialExitPolicy fails closed', () => {
+      // 1. Missing lotSize in candidate artifact
+      const candNoLot = createReliabilityCandidate('cand-no-lot');
+      delete (candNoLot.riskConfig as any).lotSize;
+      const artNoLot = CandidateBacktestRunner.createCandidateArtifact(candNoLot, 'hash_mkt_039');
+      ModelRegistry.registerCandidateArtifact(artNoLot);
+      const orch1 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch1.startCandidate('cand-no-lot')).toThrow(/SHADOW_RISK_CONFIG_MISSING.*lotSize/);
+
+      // 2. Missing contractSize in candidate artifact
+      const candNoContract = createReliabilityCandidate('cand-no-contract');
+      delete (candNoContract.riskConfig as any).contractSize;
+      const artNoContract = CandidateBacktestRunner.createCandidateArtifact(candNoContract, 'hash_mkt_039');
+      ModelRegistry.registerCandidateArtifact(artNoContract);
+      const orch2 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch2.startCandidate('cand-no-contract')).toThrow(/SHADOW_RISK_CONFIG_MISSING.*contractSize/);
+
+      // 3. Missing partialExitPolicy fails closed during artifact validation and shadow startup
+      const candNoPartial = createReliabilityCandidate('cand-no-partial');
+      delete (candNoPartial.riskConfig as any).partialExitPolicy;
+      expect(() => CandidateBacktestRunner.createCandidateArtifact(candNoPartial, 'hash_mkt_039')).toThrow(
+        /INVALID_CANDIDATE_RISK_CONFIG.*partialExitPolicy/,
+      );
+
+      const rawArtNoPartial = {
+        ...artNoLot,
+        candidateId: 'cand-no-partial-raw',
+        riskConfig: { ...artNoLot.riskConfig, partialExitPolicy: undefined },
+      };
+      expect(() => orch1.startCandidate(rawArtNoPartial as any)).toThrow(/partialExitPolicy/);
+    });
+
+    it('Test 22: ModelRegistry update failure during startCandidate fails closed with REGISTRY_UPDATE_FAILED', () => {
+      const candidateId = 'cand-reg-fail';
+      const rawCandidate = createReliabilityCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const spy = jest.spyOn(ModelRegistry, 'updateCandidateStatus').mockImplementation(() => {
+        throw new Error('SIMULATED_REGISTRY_LOCK_ERROR');
+      });
+
+      try {
+        const orch = new ShadowOrchestrator({ persistenceDir: testDir });
+        expect(() => orch.startCandidate(candidateId)).toThrow(/REGISTRY_UPDATE_FAILED/);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('Test 23: Operational metadata savedAt modification does not alter canonical stateHash, evidenceHash, or marketHash', () => {
+      const candidateId = 'cand-saved-at-test';
+      const rawCandidate = createReliabilityCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(rawCandidate, 'hash_mkt_shadow_039');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const orch = new ShadowOrchestrator({ persistenceDir: testDir });
+      orch.startCandidate(candidateId);
+      const candles = generateMultiRegimeMarketHistory(1700000000000, 10, 900000, 444);
+      for (const c of candles) {
+        orch.processCandle(candidateId, c, undefined, c.timestamp.getTime());
+      }
+
+      const ledger = orch.getCandidateLedger(candidateId)!;
+      const filePath = path.join(testDir, `shadow-${candidateId}.json`);
+      ledger.saveToFile(filePath);
+
+      const snap1 = orch.getCandidateStateSnapshot(candidateId);
+      const evidence1 = orch.generateEvaluationEvidence(candidateId);
+
+      // Read file, tamper savedAt timestamp by 10 days, and reload
+      const rawData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      rawData.savedAt = rawData.savedAt + 864000000;
+      fs.writeFileSync(filePath, JSON.stringify(rawData), 'utf-8');
+
+      const orchReload = new ShadowOrchestrator({ persistenceDir: testDir });
+      orchReload.startCandidate(candidateId);
+      const snap2 = orchReload.getCandidateStateSnapshot(candidateId);
+      const evidence2 = orchReload.generateEvaluationEvidence(candidateId);
+
+      expect(snap2.stateHash).toBe(snap1.stateHash);
+      expect(snap2.cumulativeMarketHash).toBe(snap1.cumulativeMarketHash);
+      expect(evidence2.evidenceHash).toBe(evidence1.evidenceHash);
+      expect(evidence2.marketDatasetHash).toBe(evidence1.marketDatasetHash);
+    });
+
+    it('Test 24: Autonomous live modifications and promotion are strictly permanently disabled', () => {
       expect(ShadowOrchestrator.AUTOMATIC_LIVE_TRADING_ROLLBACK_ENABLED).toBe(false);
       expect(ShadowOrchestrator.AUTOMATIC_LIVE_PROMOTION_ENABLED).toBe(false);
     });

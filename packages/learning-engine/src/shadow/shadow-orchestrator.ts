@@ -9,7 +9,6 @@ import {
   SameCandleAmbiguityMode,
 } from '@quant/backtesting';
 import {
-  DEFAULT_PARTIAL_EXIT_POLICY,
   IPartialExitPolicy,
   PositionLot,
   PositionSizer,
@@ -116,7 +115,6 @@ export class ShadowOrchestrator {
 
   constructor(options: ShadowOrchestratorOptions = {}) {
     this.options = {
-      windowConfig: DEFAULT_SHADOW_WINDOW_CONFIG,
       performanceThresholds: DEFAULT_PERFORMANCE_DRIFT_THRESHOLDS,
       featureThresholds: DEFAULT_FEATURE_DRIFT_THRESHOLDS,
       regimeThresholds: DEFAULT_REGIME_DRIFT_THRESHOLDS,
@@ -134,7 +132,7 @@ export class ShadowOrchestrator {
     execSim: ExecutionSimulator,
     lot: PositionLot,
     symbol: string,
-    policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
+    policy: IPartialExitPolicy,
     timestamp: number,
   ): IOrder[] {
     const isLong = lot.direction === Direction.BULLISH;
@@ -235,6 +233,7 @@ export class ShadowOrchestrator {
   public startCandidate(
     candidate: string | ValidatedCandidateArtifact,
     options?: {
+      windowConfig?: ShadowWindowConfig;
       featureBaseline?: FeatureDriftBaseline;
       baselineExpectancyR?: number;
       baselineWinRate?: number;
@@ -280,8 +279,10 @@ export class ShadowOrchestrator {
           'SHADOW_ACTIVE',
           'Continuous Shadow Orchestrator started shadow stream',
         );
-      } catch {
-        // Continue if running in standalone test mode
+      } catch (err: unknown) {
+        throw new Error(
+          `REGISTRY_UPDATE_FAILED: Failed to transition candidate '${candidateId}' from SHADOW_PENDING to SHADOW_ACTIVE: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     } else if (validatedArtifact.status !== 'SHADOW_ACTIVE') {
       throw new Error(
@@ -304,13 +305,22 @@ export class ShadowOrchestrator {
       persistencePath,
     });
 
-    // Risk Configuration Validation (Strict Fail-Closed — No synthetic defaults)
+    // Risk Configuration Validation (Strict Fail-Closed — No hidden or synthetic defaults)
     const riskCfg = validatedArtifact.riskConfig;
     if (typeof riskCfg.initialCapital !== 'number' || !Number.isFinite(riskCfg.initialCapital) || riskCfg.initialCapital <= 0) {
       throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid initialCapital`);
     }
     if (typeof riskCfg.maxRiskPerTrade !== 'number' || !Number.isFinite(riskCfg.maxRiskPerTrade) || riskCfg.maxRiskPerTrade <= 0) {
       throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid maxRiskPerTrade`);
+    }
+    if (typeof riskCfg.lotSize !== 'number' || !Number.isFinite(riskCfg.lotSize) || riskCfg.lotSize <= 0) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid lotSize`);
+    }
+    if (typeof riskCfg.contractSize !== 'number' || !Number.isFinite(riskCfg.contractSize) || riskCfg.contractSize <= 0) {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing valid contractSize`);
+    }
+    if (!riskCfg.partialExitPolicy || typeof riskCfg.partialExitPolicy !== 'object') {
+      throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' riskConfig is missing partialExitPolicy`);
     }
     const partialPolicyVal = TradeLifecycleManager.validatePartialExitPolicy(riskCfg.partialExitPolicy);
     if (!partialPolicyVal.isValid) {
@@ -412,9 +422,11 @@ export class ShadowOrchestrator {
     }
     ledger.setReferenceRegime(referenceRegime);
 
-    // Strict windowConfig resolution (Options -> Persisted Ledger -> Candidate Artifact -> Canonical Default)
+    // Strict windowConfig resolution (Explicit Options -> Persisted Ledger -> Candidate Artifact Evidence -> Canonical Default ONLY for brand-new shadow state)
     let resolvedWindowConfig: ShadowWindowConfig;
-    if (this.options.windowConfig) {
+    if (options?.windowConfig) {
+      resolvedWindowConfig = options.windowConfig;
+    } else if (this.options.windowConfig) {
       resolvedWindowConfig = this.options.windowConfig;
     } else if (ledger.getWindowConfig()) {
       resolvedWindowConfig = ledger.getWindowConfig()!;
@@ -475,7 +487,7 @@ export class ShadowOrchestrator {
         execSim,
         recoveredActiveLot,
         symbol,
-        validatedArtifact.riskConfig.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY,
+        validatedArtifact.riskConfig.partialExitPolicy,
         lastMktTs,
       );
     }
@@ -578,7 +590,7 @@ export class ShadowOrchestrator {
     const newFills = execBarRes.fills;
 
     // Process Fills and manage Trade Lifecycles authoritatively via TradeLifecycleManager
-    const partialPolicy = ctx.artifact.riskConfig.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
+    const partialPolicy = ctx.artifact.riskConfig.partialExitPolicy;
 
     for (const fill of newFills) {
       const order = ctx.execSim.getOrder(fill.orderId);
@@ -731,8 +743,8 @@ export class ShadowOrchestrator {
         riskPercentage: (riskCfg.maxRiskPerTrade <= 0.2 ? riskCfg.maxRiskPerTrade * 100 : riskCfg.maxRiskPerTrade),
         entryPrice,
         stopLoss: stopPrice,
-        lotSize: riskCfg.lotSize ?? 1,
-        contractSize: riskCfg.contractSize ?? 1,
+        lotSize: riskCfg.lotSize,
+        contractSize: riskCfg.contractSize,
         maxRiskPercentage: riskCfg.maxAccountRiskLimit !== undefined ? riskCfg.maxAccountRiskLimit * 100 : undefined,
         maxLeverage: riskCfg.maxLeverage,
         regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
@@ -1274,7 +1286,7 @@ export class ShadowOrchestrator {
     lot: Readonly<PositionLot>,
     orders: readonly IOrder[],
     symbol: string,
-    policy = DEFAULT_PARTIAL_EXIT_POLICY,
+    policy: IPartialExitPolicy,
   ): void {
     const exitFilledQty = (lot.partialFills || [])
       .filter((f) => f.targetType !== 'ENTRY')
