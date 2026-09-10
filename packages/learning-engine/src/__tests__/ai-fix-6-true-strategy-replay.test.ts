@@ -325,7 +325,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       id: 'cand_low_prob',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-prob-40',
-      type: 'MODEL',
+      type: 'FILTER',
       description: 'Probability 0.40',
       symbol: 'BTCUSDT',
       riskConfig: {
@@ -1072,10 +1072,13 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
     weights[0] = 2.0;
 
     const testModelArtifact = {
+      modelId: 'model_market_only',
       modelVersion: 'ml-v2-market-only',
       weights,
       bias: 0,
       featureSchemaVersion: '2.0',
+      featureSchemaHash: 'dummy_feat_schema_hash_market_only',
+      selectedFeatures: ['smcScore', 'mtfAlignment', 'rvol'],
       sampleCount: 100,
       trainLoss: 0.1,
       trainedAt: new Date(0),
@@ -1102,6 +1105,8 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       },
       change: {
         modelArtifact: testModelArtifact,
+        selectedFeatures: ['smcScore', 'mtfAlignment', 'rvol'],
+        featureSchemaHash: 'dummy_feat_schema_hash_market_only',
         minProbability: 0.4,
         minMtfScore: 0,
         symbol: 'BTCUSDT',

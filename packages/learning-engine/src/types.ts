@@ -310,9 +310,31 @@ export interface SimulatedBacktestOutcome {
   readonly trades: IBacktestTrade[];
 }
 
+export interface ScalerArtifact {
+  readonly scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }>;
+  readonly [key: string]: unknown;
+}
+
+export interface ModelArtifact {
+  readonly modelId: string;
+  readonly modelVersion: string;
+  readonly weights?: number[];
+  readonly bias?: number;
+  readonly scalerArtifact?: ScalerArtifact;
+  readonly featureSchemaHash?: string;
+  readonly scalerHash?: string;
+  readonly selectedFeatures?: string[];
+  readonly selectedFeatureHash?: string;
+  readonly [key: string]: unknown;
+}
+
 export interface CandidateRiskConfig {
   readonly initialCapital: number;
   readonly maxRiskPerTrade: number;
+  readonly lotSize?: number;
+  readonly contractSize?: number;
+  readonly maxAccountRiskLimit?: number;
+  readonly maxLeverage?: number;
   readonly partialExitPolicy: {
     readonly tp1Ratio: number;
     readonly tp2Ratio: number;
@@ -378,8 +400,8 @@ export interface CandidateArtifact {
   readonly selectedFeatures: string[];
   readonly selectedFeatureHash: string;
   readonly scalerHash: string;
-  readonly scalerArtifact?: Record<string, unknown>;
-  readonly modelArtifact?: Record<string, unknown>;
+  readonly scalerArtifact?: ScalerArtifact | Record<string, unknown>;
+  readonly modelArtifact?: ModelArtifact | Record<string, unknown>;
   readonly modelHash: string;
   readonly strategyConfig: CandidateStrategyConfig | Record<string, unknown>;
   readonly trainingDatasetHash: string;

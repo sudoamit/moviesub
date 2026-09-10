@@ -23,6 +23,7 @@ export interface IModelTrainingOptions {
 }
 
 export interface ITrainedModelArtifact {
+  modelId?: string;
   modelVersion: string;
   modelHash?: string;
   weights: number[];
@@ -174,6 +175,7 @@ export class ModelTrainer {
     const modelVersion = `ml-v2-${modelHashShort}`;
 
     return {
+      modelId: `model-${modelHashShort}`,
       modelVersion,
       modelHash: fullModelHash,
       weights: roundedWeights,

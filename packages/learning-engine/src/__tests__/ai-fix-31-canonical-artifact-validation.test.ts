@@ -441,4 +441,119 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
       expect(promoDecision.decision).toBe('PROMOTE');
     });
   });
+
+  describe('P1 Hardening: Strict ML Metadata Provenance & Canonical Serializer Invariants', () => {
+    test('P1-1: ML candidate missing selectedFeatures fails closed with SELECTED_FEATURES_MISSING', () => {
+      const mlCandidateMissingFeatures = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          minMtfScore: 75,
+          datasetHash: 'dataset_hash_unified_001',
+          featureSchemaHash: 'schema_hash_123',
+          modelArtifact: {
+            modelId: 'model_linear_001',
+            modelVersion: 'ml-v2.0',
+            weights: [0.5, -0.2, 0.1],
+            bias: 0.05,
+          },
+        },
+      });
+
+      expect(() => CandidateArtifactBuilder.build(mlCandidateMissingFeatures)).toThrow(/SELECTED_FEATURES_MISSING/);
+    });
+
+    test('P1-2: ML candidate missing featureSchemaHash fails closed with FEATURE_SCHEMA_HASH_MISSING', () => {
+      const mlCandidateMissingSchemaHash = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          minMtfScore: 75,
+          datasetHash: 'dataset_hash_unified_001',
+          selectedFeatures: ['smcScore', 'mtfAlignment'],
+          modelArtifact: {
+            modelId: 'model_linear_001',
+            modelVersion: 'ml-v2.0',
+            weights: [0.5, -0.2],
+            bias: 0.05,
+          },
+        },
+      });
+
+      expect(() => CandidateArtifactBuilder.build(mlCandidateMissingSchemaHash)).toThrow(/FEATURE_SCHEMA_HASH_MISSING/);
+    });
+
+    test('P1-3: ML candidate missing modelId or modelVersion fails closed', () => {
+      const mlCandidateNoModelId = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          minMtfScore: 75,
+          datasetHash: 'dataset_hash_unified_001',
+          selectedFeatures: ['smcScore', 'mtfAlignment'],
+          featureSchemaHash: 'schema_hash_123',
+          modelArtifact: {
+            modelVersion: 'ml-v2.0',
+            weights: [0.5, -0.2],
+            bias: 0.05,
+          },
+        },
+      });
+      expect(() => CandidateArtifactBuilder.build(mlCandidateNoModelId)).toThrow(/MODEL_ID_MISSING/);
+
+      const mlCandidateNoModelVer = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          minMtfScore: 75,
+          datasetHash: 'dataset_hash_unified_001',
+          selectedFeatures: ['smcScore', 'mtfAlignment'],
+          featureSchemaHash: 'schema_hash_123',
+          modelArtifact: {
+            modelId: 'model_linear_001',
+            weights: [0.5, -0.2],
+            bias: 0.05,
+          },
+        },
+      });
+      expect(() => CandidateArtifactBuilder.build(mlCandidateNoModelVer)).toThrow(/MODEL_VERSION_MISSING/);
+    });
+
+    test('P1-6: Canonical JSON serializer yields byte-identical artifactHash regardless of key insertion order', () => {
+      const cand1 = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          minMtfScore: 75,
+          datasetHash: 'dataset_hash_unified_001',
+          selectedFeatures: ['smcScore', 'mtfAlignment'],
+          featureSchemaHash: 'schema_hash_123',
+          modelArtifact: {
+            modelId: 'model_linear_001',
+            modelVersion: 'ml-v2.0',
+            weights: [0.5, -0.2],
+            bias: 0.05,
+          },
+        },
+      });
+
+      const art1 = CandidateArtifactBuilder.build(cand1);
+      expect(art1.artifactHash).toBeDefined();
+
+      // Pass same object with shuffled keys
+      const cand2 = createValidCandidate({
+        type: 'MODEL',
+        change: {
+          modelArtifact: {
+            bias: 0.05,
+            weights: [0.5, -0.2],
+            modelVersion: 'ml-v2.0',
+            modelId: 'model_linear_001',
+          },
+          featureSchemaHash: 'schema_hash_123',
+          selectedFeatures: ['smcScore', 'mtfAlignment'],
+          datasetHash: 'dataset_hash_unified_001',
+          minMtfScore: 75,
+        },
+      });
+
+      const art2 = CandidateArtifactBuilder.build(cand2);
+      expect(art2.artifactHash).toBe(art1.artifactHash);
+    });
+  });
 });

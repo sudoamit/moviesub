@@ -8,6 +8,7 @@ import {
   ValidatedCandidateArtifact,
 } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
+import { canonicalJsonStringify } from './canonical-serializer';
 
 export class CandidateArtifactValidator {
   /**
@@ -325,7 +326,9 @@ export class CandidateArtifactValidator {
       strategyConfig: stratConfig,
     };
 
-    const computedArtifactHash = createHash('sha256').update(JSON.stringify(canonicalPayload)).digest('hex');
+    const computedArtifactHash = createHash('sha256')
+      .update(canonicalJsonStringify(canonicalPayload))
+      .digest('hex');
     if (typeof art.artifactHash !== 'string' || art.artifactHash.trim() === '') {
       throw new Error(`ARTIFACT_HASH_MISSING: Candidate '${candidateId}' is missing artifactHash`);
     }

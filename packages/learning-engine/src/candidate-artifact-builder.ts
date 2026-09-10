@@ -5,12 +5,15 @@ import {
   CandidateRiskConfig,
   CandidateStatus,
   CandidateStrategyConfig,
+  ModelArtifact,
+  ScalerArtifact,
   StrategyCandidate,
   ValidatedCandidateArtifact,
 } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
 import { CandidateArtifactValidator } from './candidate-artifact-validator';
+import { canonicalJsonStringify } from './canonical-serializer';
 
 export interface CandidateArtifactBuildOptions {
   datasetHash?: string;
@@ -31,9 +34,9 @@ export interface CandidateArtifactBuildOptions {
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
   Object.freeze(obj);
   for (const key of Object.getOwnPropertyNames(obj)) {
-    const val = (obj as any)[key];
+    const val = (obj as Record<string, unknown>)[key];
     if (val !== null && (typeof val === 'object' || typeof val === 'function') && !Object.isFrozen(val)) {
-      deepFreeze(val);
+      deepFreeze(val as object);
     }
   }
   return obj;
@@ -58,24 +61,24 @@ export class CandidateArtifactBuilder {
       throw new Error(`CANDIDATE_VERSION_MISSING: Candidate '${candidate.id}' is missing candidateVersion`);
     }
 
-    const change = candidate.change || {};
+    const change = (candidate.change || {}) as Record<string, unknown>;
     const minMtfScore =
       change.parameter === 'minMtfScore'
         ? (typeof change.fittedValue === 'number'
             ? change.fittedValue
             : typeof change.value === 'number'
-              ? change.value
+              ? (change.value as number)
               : undefined)
         : typeof change.minMtfScore === 'number'
-          ? change.minMtfScore
+          ? (change.minMtfScore as number)
           : typeof change.minScore === 'number'
-            ? change.minScore
-            : typeof (candidate as any).minMtfScore === 'number'
-              ? (candidate as any).minMtfScore
-              : typeof (candidate as any).strategyConfig?.minMtfScore === 'number'
-                ? (candidate as any).strategyConfig.minMtfScore
-                : typeof (candidate as any).executionConfig?.minMtfScore === 'number'
-                  ? (candidate as any).executionConfig.minMtfScore
+            ? (change.minScore as number)
+            : typeof (candidate as unknown as Record<string, unknown>).minMtfScore === 'number'
+              ? ((candidate as unknown as Record<string, unknown>).minMtfScore as number)
+              : typeof ((candidate as unknown as Record<string, unknown>).strategyConfig as Record<string, unknown>)?.minMtfScore === 'number'
+                ? (((candidate as unknown as Record<string, unknown>).strategyConfig as Record<string, unknown>).minMtfScore as number)
+                : typeof ((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>)?.minMtfScore === 'number'
+                  ? (((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>).minMtfScore as number)
                   : undefined;
 
     if (minMtfScore === undefined || !Number.isFinite(minMtfScore)) {
@@ -122,31 +125,32 @@ export class CandidateArtifactBuilder {
       (candidate.type === 'REGIME' && change.includeRegime ? 'INCLUDE' : 'EXCLUDE');
     const conditionRules = (change.conditionRules as string[]) || [];
 
+    const rawCandidate = candidate as unknown as Record<string, unknown>;
     const symbol =
       options?.symbol ||
       options?.provenance?.symbol ||
-      (candidate as any).symbol ||
-      (change as any).symbol ||
-      (candidate as any).executionConfig?.symbol ||
-      (candidate as any).strategyConfig?.symbol ||
-      (candidate as any).instrument?.symbol;
+      (candidate as unknown as Record<string, unknown>).symbol ||
+      change.symbol ||
+      (rawCandidate.executionConfig as Record<string, unknown>)?.symbol ||
+      (rawCandidate.strategyConfig as Record<string, unknown>)?.symbol ||
+      (rawCandidate.instrument as Record<string, unknown>)?.symbol;
 
     if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
       throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidate.id}' is missing authoritative symbol`);
     }
 
-    const fillModel = (change as any).fillModel || (candidate as any).fillModel || 'OHLC_PATH';
+    const fillModel = (change.fillModel as string) || (rawCandidate.fillModel as string) || 'OHLC_PATH';
     const ambiguityMode =
-      (change as any).ambiguityMode || (candidate as any).ambiguityMode || 'CONSERVATIVE';
+      (change.ambiguityMode as string) || (rawCandidate.ambiguityMode as string) || 'CONSERVATIVE';
     const latencyMs =
-      typeof (change as any).latencyMs === 'number'
-        ? (change as any).latencyMs
-        : typeof (candidate as any).latencyMs === 'number'
-          ? (candidate as any).latencyMs
+      typeof change.latencyMs === 'number'
+        ? change.latencyMs
+        : typeof rawCandidate.latencyMs === 'number'
+          ? (rawCandidate.latencyMs as number)
           : 50;
 
-    // Canonical SHA-256 hash over candidate parameters
-    const hashPayload = JSON.stringify({
+    // Canonical SHA-256 hash over candidate parameters using canonical JSON serialization
+    const hashPayload = canonicalJsonStringify({
       id: candidate.id,
       candidateVersion: candidate.candidateVersion,
       type: candidate.type,
@@ -167,7 +171,8 @@ export class CandidateArtifactBuilder {
       fittedValue: typeof change.fittedValue === 'number' ? change.fittedValue : undefined,
       fittedOnFold: change.fittedOnFold,
       modelArtifactId:
-        (change.modelArtifact as any)?.modelVersion || (change.modelArtifact as any)?.modelId,
+        (change.modelArtifact as ModelArtifact | undefined)?.modelVersion ||
+        (change.modelArtifact as ModelArtifact | undefined)?.modelId,
       changeValues: Object.keys(change)
         .sort()
         .map((k) => [k, change[k]]),
@@ -207,14 +212,17 @@ export class CandidateArtifactBuilder {
     const trainingSeed = options?.trainingSeed ?? DEFAULT_LEARNING_SEED;
     const provenance = options?.provenance;
 
+    const rawCandidate = candidate as unknown as Record<string, unknown>;
+    const candidateChange = candidate.change as Record<string, unknown> | undefined;
+
     const resolvedDatasetHash =
       datasetHash ||
       provenance?.marketDatasetHash ||
       provenance?.trainingDatasetHash ||
-      (candidate.change?.marketDatasetHash as string) ||
-      (candidate.change?.datasetHash as string) ||
-      (candidate as any).datasetHash ||
-      (candidate.change?.trainingDatasetHash as string);
+      (candidateChange?.marketDatasetHash as string) ||
+      (candidateChange?.datasetHash as string) ||
+      (rawCandidate.datasetHash as string) ||
+      (candidateChange?.trainingDatasetHash as string);
 
     if (!resolvedDatasetHash || typeof resolvedDatasetHash !== 'string' || resolvedDatasetHash.trim() === '') {
       throw new Error(`DATASET_HASH_MISSING: Candidate '${candidate.id}' is missing authoritative dataset provenance hash`);
@@ -222,28 +230,28 @@ export class CandidateArtifactBuilder {
 
     const trainingDatasetHash =
       provenance?.trainingDatasetHash ||
-      (candidate.change?.trainingDatasetHash as string) ||
+      (candidateChange?.trainingDatasetHash as string) ||
       resolvedDatasetHash;
 
     const validationDatasetHash =
       provenance?.validationDatasetHash ||
-      (candidate.change?.validationDatasetHash as string) ||
+      (candidateChange?.validationDatasetHash as string) ||
       resolvedDatasetHash;
 
     const oosDatasetHash =
       provenance?.oosDatasetHash ||
-      (candidate.change?.oosDatasetHash as string) ||
+      (candidateChange?.oosDatasetHash as string) ||
       resolvedDatasetHash;
 
     const marketDatasetHash =
       (datasetHash && datasetHash !== 'canonical_default_hash' ? datasetHash : undefined) ||
       provenance?.marketDatasetHash ||
-      (candidate.change?.marketDatasetHash as string) ||
+      (candidateChange?.marketDatasetHash as string) ||
       resolvedDatasetHash;
 
     const candidateRisk =
       candidate.riskConfig ||
-      candidate.change?.riskConfig ||
+      (candidateChange?.riskConfig as CandidateRiskConfig | undefined) ||
       options?.riskConfig ||
       options?.provenance?.riskConfig;
 
@@ -258,32 +266,49 @@ export class CandidateArtifactBuilder {
       partialExitPolicy: candidateRisk.partialExitPolicy,
     } as CandidateRiskConfig);
 
-    const candidateChange = candidate.change as Record<string, any> | undefined;
-    const modelArtifact = candidateChange?.modelArtifact;
+    const modelArtifact = candidateChange?.modelArtifact as ModelArtifact | undefined;
     const scalerArtifact =
-      candidateChange?.scalerArtifact ||
-      candidateChange?.modelArtifact?.scalerArtifact ||
+      (candidateChange?.scalerArtifact as ScalerArtifact | undefined) ||
+      (candidateChange?.modelArtifact as ModelArtifact | undefined)?.scalerArtifact ||
       undefined;
-
-    const selectedFeatures: string[] = [...(candidateChange?.selectedFeatures || [])];
-    if (selectedFeatures.length === 0 && modelArtifact?.selectedFeatures) {
-      selectedFeatures.push(...modelArtifact.selectedFeatures);
-    }
-    if (selectedFeatures.length === 0) {
-      selectedFeatures.push('smcScore', 'mtfAlignment', 'rvol');
-    }
-    const selectedFeatureHash = createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
-
-    const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
-    const featureSchemaHash =
-      modelArtifact?.featureSchemaHash ||
-      candidateChange?.featureSchemaHash ||
-      createHash('sha256').update(`schema_${featureSchemaVersion}_${selectedFeatures.join(',')}`).digest('hex');
 
     const isMlCandidate =
       candidate.type === 'MODEL' ||
       modelArtifact !== undefined ||
       scalerArtifact !== undefined;
+
+    const selectedFeatures: string[] = [];
+    if (Array.isArray(candidateChange?.selectedFeatures)) {
+      selectedFeatures.push(...(candidateChange.selectedFeatures as string[]));
+    }
+    if (selectedFeatures.length === 0 && modelArtifact?.selectedFeatures && Array.isArray(modelArtifact.selectedFeatures)) {
+      selectedFeatures.push(...modelArtifact.selectedFeatures);
+    }
+
+    if (selectedFeatures.length === 0) {
+      if (isMlCandidate) {
+        throw new Error(`SELECTED_FEATURES_MISSING: ML candidate '${candidate.id}' must explicitly specify selectedFeatures`);
+      } else {
+        selectedFeatures.push('none');
+      }
+    }
+    const selectedFeatureHash = createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
+
+    const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
+    let featureSchemaHash =
+      modelArtifact?.featureSchemaHash ||
+      (candidateChange?.featureSchemaHash as string | undefined) ||
+      (rawCandidate.featureSchemaHash as string | undefined);
+
+    if (isMlCandidate) {
+      if (!featureSchemaHash || typeof featureSchemaHash !== 'string' || featureSchemaHash.trim() === '') {
+        throw new Error(
+          `FEATURE_SCHEMA_HASH_MISSING: ML candidate '${candidate.id}' must explicitly specify authoritative featureSchemaHash`,
+        );
+      }
+    } else {
+      featureSchemaHash = featureSchemaHash || 'none';
+    }
 
     let scalerHash = 'none';
     let modelHash = 'none';
@@ -294,8 +319,8 @@ export class CandidateArtifactBuilder {
       const scalerParams = scalerArtifact?.scalerParameters;
       if (scalerParams) {
         scalerHash = TemporalFeatureScaler.computeScalerHash(scalerParams);
-      } else if (candidateChange?.scalerHash) {
-        scalerHash = candidateChange.scalerHash;
+      } else if (candidateChange?.scalerHash && typeof candidateChange.scalerHash === 'string') {
+        scalerHash = candidateChange.scalerHash as string;
       }
 
       if (modelArtifact?.weights && Array.isArray(modelArtifact.weights)) {
@@ -304,12 +329,21 @@ export class CandidateArtifactBuilder {
             `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
           )
           .digest('hex');
-      } else if (candidateChange?.modelHash) {
-        modelHash = candidateChange.modelHash;
+      } else if (candidateChange?.modelHash && typeof candidateChange.modelHash === 'string') {
+        modelHash = candidateChange.modelHash as string;
       }
 
-      modelId = modelArtifact?.modelId || `model-${candidate.id}`;
-      modelVersion = modelArtifact?.modelVersion || candidate.baseStrategyVersion || 'ml-v2-0';
+      const mId = modelArtifact?.modelId || (candidateChange?.modelId as string | undefined);
+      if (!mId || typeof mId !== 'string' || mId.trim() === '') {
+        throw new Error(`MODEL_ID_MISSING: ML candidate '${candidate.id}' is missing modelArtifact.modelId`);
+      }
+      modelId = mId;
+
+      const mVer = modelArtifact?.modelVersion || (candidateChange?.modelVersion as string | undefined);
+      if (!mVer || typeof mVer !== 'string' || mVer.trim() === '') {
+        throw new Error(`MODEL_VERSION_MISSING: ML candidate '${candidate.id}' is missing modelArtifact.modelVersion`);
+      }
+      modelVersion = mVer;
     }
 
     const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
@@ -318,9 +352,8 @@ export class CandidateArtifactBuilder {
     const createdBy = provenance?.createdBy || 'LearningEngine';
     const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
 
-    const rawCandidate = candidate as Record<string, any>;
-    const stratConfigObj = {
-      ...(rawCandidate.strategyConfig || {}),
+    const stratConfigObj: Record<string, unknown> = {
+      ...((rawCandidate.strategyConfig as Record<string, unknown>) || {}),
       ...(candidateChange || {}),
       symbol: config.symbol,
       minMtfScore: config.minMtfScore,
@@ -335,7 +368,7 @@ export class CandidateArtifactBuilder {
       stratConfigObj.evidence = candidate.evidence;
     }
 
-    const strategyConfig: CandidateStrategyConfig = stratConfigObj;
+    const strategyConfig: CandidateStrategyConfig = stratConfigObj as unknown as CandidateStrategyConfig;
 
     const canonicalPayload = {
       candidateId: candidate.id,
@@ -363,7 +396,7 @@ export class CandidateArtifactBuilder {
     };
 
     const artifactHash = createHash('sha256')
-      .update(JSON.stringify(canonicalPayload))
+      .update(canonicalJsonStringify(canonicalPayload))
       .digest('hex');
 
     const rawArtifact: CandidateArtifact = {
@@ -404,3 +437,4 @@ export class CandidateArtifactBuilder {
     return CandidateArtifactValidator.validate(frozen);
   }
 }
+

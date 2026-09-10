@@ -1044,8 +1044,11 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
         value: 70,
         symbol: 'BTCUSDT',
         riskConfig: defaultRiskConfig,
+        selectedFeatures: ['smcScore', 'mtfAlignment', 'rvol'],
+        featureSchemaHash: createHash('sha256').update('schema_2.0_smcScore,mtfAlignment,rvol').digest('hex'),
         modelArtifact: {
           modelId: 'm1',
+          modelVersion: 'ml-v2.0',
           featureSchemaHash: createHash('sha256').update('schema_2.0_smcScore,mtfAlignment,rvol').digest('hex'),
           selectedFeatureHash: createHash('sha256').update('smcScore,mtfAlignment,rvol').digest('hex'),
           scalerHash: 'none',
@@ -1138,7 +1141,9 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       ...candA,
       change: {
         ...candA.change,
-        modelArtifact: { modelId: 'model_a', weights: [1, 2, 3], bias: 0.5 } as any,
+        selectedFeatures: ['smcScore'],
+        featureSchemaHash: 'schema_hash_123',
+        modelArtifact: { modelId: 'model_a', modelVersion: 'ml-v2.0', weights: [1, 2, 3], bias: 0.5 } as any,
       },
     };
     const artWithModel = CandidateBacktestRunner.createCandidateArtifact(candWithModel, 'dataset_hash_alpha', 42);

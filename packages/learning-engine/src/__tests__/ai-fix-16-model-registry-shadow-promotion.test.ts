@@ -47,11 +47,13 @@ function generateContinuousCandles(
 
 function createDummyModelArtifact(): ITrainedModelArtifact {
   return {
+    modelId: 'model_dummy_1',
     modelVersion: 'v2.1-model',
     modelHash: 'dummy_model_hash_123',
     weights: [0.5, 0.3, -0.2],
     bias: 0.1,
     featureSchemaVersion: '2.0',
+    featureSchemaHash: 'dummy_feature_schema_hash_123',
     sampleCount: 200,
     trainLoss: 0.15,
     trainedAt: new Date(1700000000000),
