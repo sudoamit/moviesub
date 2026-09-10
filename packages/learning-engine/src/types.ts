@@ -411,6 +411,12 @@ export interface CandidateArtifact {
   readonly oosDatasetHash: string;
   readonly marketDatasetHash: string;
   readonly datasetHash: string; // compatibility alias
+  readonly trainingMarketDatasetHash?: string;
+  readonly validationMarketDatasetHash?: string;
+  readonly oosMarketDatasetHash?: string;
+  readonly trainingExperienceDatasetHash?: string;
+  readonly validationExperienceDatasetHash?: string;
+  readonly oosExperienceDatasetHash?: string;
   readonly trainingSeed: number;
   readonly candidateSeed?: number;
   readonly parentCandidateId?: string;

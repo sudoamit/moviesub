@@ -17,6 +17,9 @@ import { TemporalFeatureScaler } from '../feature-scaler';
 import { FeatureSelector } from '../feature-selector';
 import { ModelTrainer } from '../model-trainer';
 import { CandidateBacktestRunner } from '../candidate-backtest-runner';
+import { CandidateArtifactBuilder } from '../candidate-artifact-builder';
+import { CandidateArtifactValidator } from '../candidate-artifact-validator';
+import { RetrainingRunStore } from '../retraining-run-store';
 import { ModelRegistry } from '../model-registry';
 import { MonteCarloEngine } from '../monte-carlo-engine';
 import { WalkForwardValidator } from '../walk-forward-validator';
@@ -100,7 +103,7 @@ function generateTestExamples(startTs: number, count: number, intervalMs = 90000
   return examples;
 }
 
-describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () => {
+describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   let testDir: string;
 
   beforeEach(() => {
@@ -981,55 +984,75 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
 
   it('Test 41 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing fillModel without fallback', () => {
     expect(() => {
-      CandidateArtifactBuilder.createExecutionConfig(
-        'c_test',
-        '1.0.0',
-        'v1',
-        'BTCUSDT',
-        undefined as any,
-        'CONSERVATIVE',
-        50,
-      );
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'c_test',
+        candidateVersion: '1.0.0',
+        baseStrategyVersion: 'v1',
+        symbol: 'BTCUSDT',
+        type: 'PARAM',
+        executionConfig: {
+          symbol: 'BTCUSDT',
+          fillModel: undefined as any,
+          ambiguityMode: 'CONSERVATIVE',
+          latencyMs: 50,
+          minMtfScore: 0.5,
+        } as any,
+      } as any);
     }).toThrow(/MISSING_FILL_MODEL/);
   });
 
   it('Test 42 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing ambiguityMode without fallback', () => {
     expect(() => {
-      CandidateArtifactBuilder.createExecutionConfig(
-        'c_test',
-        '1.0.0',
-        'v1',
-        'BTCUSDT',
-        'OHLC_PATH',
-        undefined as any,
-        50,
-      );
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'c_test',
+        candidateVersion: '1.0.0',
+        baseStrategyVersion: 'v1',
+        symbol: 'BTCUSDT',
+        type: 'PARAM',
+        executionConfig: {
+          symbol: 'BTCUSDT',
+          fillModel: 'OHLC_PATH',
+          ambiguityMode: undefined as any,
+          latencyMs: 50,
+          minMtfScore: 0.5,
+        } as any,
+      } as any);
     }).toThrow(/MISSING_AMBIGUITY_MODE/);
   });
 
   it('Test 43 (P0 #2): CandidateArtifactBuilder.createExecutionConfig rejects missing or invalid latencyMs without fallback', () => {
     expect(() => {
-      CandidateArtifactBuilder.createExecutionConfig(
-        'c_test',
-        '1.0.0',
-        'v1',
-        'BTCUSDT',
-        'OHLC_PATH',
-        'CONSERVATIVE',
-        undefined as any,
-      );
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'c_test',
+        candidateVersion: '1.0.0',
+        baseStrategyVersion: 'v1',
+        symbol: 'BTCUSDT',
+        type: 'PARAM',
+        executionConfig: {
+          symbol: 'BTCUSDT',
+          fillModel: 'OHLC_PATH',
+          ambiguityMode: 'CONSERVATIVE',
+          latencyMs: undefined as any,
+          minMtfScore: 0.5,
+        } as any,
+      } as any);
     }).toThrow(/MISSING_LATENCY_MS/);
 
     expect(() => {
-      CandidateArtifactBuilder.createExecutionConfig(
-        'c_test',
-        '1.0.0',
-        'v1',
-        'BTCUSDT',
-        'OHLC_PATH',
-        'CONSERVATIVE',
-        -10,
-      );
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'c_test',
+        candidateVersion: '1.0.0',
+        baseStrategyVersion: 'v1',
+        symbol: 'BTCUSDT',
+        type: 'PARAM',
+        executionConfig: {
+          symbol: 'BTCUSDT',
+          fillModel: 'OHLC_PATH',
+          ambiguityMode: 'CONSERVATIVE',
+          latencyMs: -10,
+          minMtfScore: 0.5,
+        } as any,
+      } as any);
     }).toThrow(/MISSING_LATENCY_MS/);
   });
 
@@ -1067,5 +1090,171 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
       SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
     ).rejects.toThrow(/MISSING_EXIT_TYPE_PROVENANCE/);
   });
+
+  it('Test 47 (P1 #1): Model parameter sensitivity: changing single weight or bias changes modelHash deterministically', () => {
+    const weights1 = [0.1, 0.2, 0.3, 0.4];
+    const bias1 = 0.05;
+    const hash1 = ModelTrainer.computeModelHash(weights1, bias1, 'scaler_hash_1');
+
+    // Change single weight
+    const weights2 = [0.1, 0.2, 0.30001, 0.4];
+    const hash2 = ModelTrainer.computeModelHash(weights2, bias1, 'scaler_hash_1');
+    expect(hash1).not.toBe(hash2);
+
+    // Change bias
+    const hash3 = ModelTrainer.computeModelHash(weights1, 0.05001, 'scaler_hash_1');
+    expect(hash1).not.toBe(hash3);
+
+    // Deterministic equality
+    const hash1Again = ModelTrainer.computeModelHash(weights1, bias1, 'scaler_hash_1');
+    expect(hash1).toBe(hash1Again);
+  });
+
+  it('Test 48 (P1 #1): Feature schema sensitivity: changing feature order or names changes featureSchemaHash deterministically', () => {
+    const schema1 = ['smcScore', 'mtfAlignment', 'volatilityAtr'];
+    const hash1 = ModelTrainer.computeFeatureSchemaHash(schema1, '2.0');
+
+    // Change feature order
+    const schema2 = ['mtfAlignment', 'smcScore', 'volatilityAtr'];
+    const hash2 = ModelTrainer.computeFeatureSchemaHash(schema2, '2.0');
+    expect(hash1).not.toBe(hash2);
+
+    // Change feature name
+    const schema3 = ['smcScore', 'mtfAlignment', 'volatilityAtrRatio'];
+    const hash3 = ModelTrainer.computeFeatureSchemaHash(schema3, '2.0');
+    expect(hash1).not.toBe(hash3);
+
+    // Change schema version
+    const hash4 = ModelTrainer.computeFeatureSchemaHash(schema1, '2.1');
+    expect(hash1).not.toBe(hash4);
+  });
+
+  it('Test 49 (P1 #2): Durable RetrainingRunStore survives restart and enables full run auditability', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retrain-store-test-'));
+    const persistPath = path.join(tmpDir, 'retraining_runs.json');
+
+    try {
+      SelfImprovingRetrainingPipeline.reset();
+      SelfImprovingRetrainingPipeline.setPersistencePath(persistPath);
+
+      const candles = generateTestCandles(1700000000000, 100);
+      const examples = generateTestExamples(1700000000000, 50);
+
+      const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+      const runId = result.runRecord.runId;
+      expect(runId).toBeDefined();
+
+      // Verify file exists on disk
+      expect(fs.existsSync(persistPath)).toBe(true);
+
+      // Simulate process crash / restart
+      SelfImprovingRetrainingPipeline.reset();
+      expect(SelfImprovingRetrainingPipeline.getRunRecord(runId)).toBeUndefined();
+
+      // Hydrate from disk
+      SelfImprovingRetrainingPipeline.setPersistencePath(persistPath);
+      const restored = SelfImprovingRetrainingPipeline.getRunRecord(runId);
+      expect(restored).toBeDefined();
+      expect(restored?.runId).toBe(runId);
+      expect(restored?.status).toBe('COMPLETED');
+      expect(restored?.marketDatasetHash).toBe(result.runRecord.marketDatasetHash);
+      expect(restored?.experienceDatasetHash).toBe(result.runRecord.experienceDatasetHash);
+      expect(restored?.candidateIds.length).toBeGreaterThan(0);
+      expect(restored?.configHash).toBe(result.runRecord.configHash);
+    } finally {
+      SelfImprovingRetrainingPipeline.reset();
+      if (fs.existsSync(persistPath)) fs.unlinkSync(persistPath);
+      if (fs.existsSync(tmpDir)) fs.rmdirSync(tmpDir);
+    }
+  });
+
+  it('Test 50 (P1 #3): Atomic Retraining Run Transaction Boundary prevents partial registry mutations', async () => {
+    ModelRegistry.reset();
+    SelfImprovingRetrainingPipeline.reset();
+
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+    expect(result.createdArtifacts.length).toBeGreaterThan(0);
+
+    // All created artifacts are committed in ModelRegistry
+    for (const art of result.createdArtifacts) {
+      expect(ModelRegistry.getCandidateArtifact(art.candidateId)).toBeDefined();
+    }
+  });
+
+  it('Test 51 (P1 #4): Candidate artifacts include explicit multi-dataset market and experience partition hashes', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+    expect(result.createdArtifacts.length).toBeGreaterThan(0);
+    const art = result.createdArtifacts[0];
+
+    expect(art.trainingMarketDatasetHash).toBeDefined();
+    expect(art.validationMarketDatasetHash).toBeDefined();
+    expect(art.oosMarketDatasetHash).toBeDefined();
+    expect(art.trainingExperienceDatasetHash).toBeDefined();
+    expect(art.validationExperienceDatasetHash).toBeDefined();
+    expect(art.oosExperienceDatasetHash).toBeDefined();
+    expect(art.marketDatasetHash).toBeDefined();
+    expect(art.trainingDatasetHash).toBeDefined();
+  });
+
+  it('Test 52 (P1 #5): Unbound feature array without featureNames or valid schema hash fails closed', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const rawExamples = generateTestExamples(1700000000000, 50);
+    // Convert feature object to an unbound feature array with invalid schema hash
+    const examples = rawExamples.map((ex, idx) =>
+      idx === 3
+        ? ({
+            ...ex,
+            features: [0.5, 0.5, 0.5],
+            featureNames: undefined,
+            featureSchemaHash: 'unbound_unknown_hash',
+          } as unknown as TrainingExample)
+        : ex,
+    );
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow(/MISSING_FEATURE_NAMES_PROVENANCE/);
+  });
+
+  it('Test 53 (P2): Invalid fillModel enum value throws INVALID_FILL_MODEL without fallback', () => {
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'cand_test_enum',
+        baseStrategyVersion: 'v2.0',
+        candidateVersion: '1.0.0',
+        type: 'PARAM',
+        symbol: 'BTCUSDT',
+        riskConfig: baseConfig.riskConfig,
+        executionConfig: {
+          ...baseConfig.executionConfig,
+          fillModel: 'OHLC_PTAH' as any, // typo
+        },
+      } as any);
+    }).toThrow(/INVALID_FILL_MODEL/);
+  });
+
+  it('Test 54 (P2): Invalid ambiguityMode enum value throws INVALID_AMBIGUITY_MODE without fallback', () => {
+    expect(() => {
+      CandidateArtifactBuilder.createExecutionConfig({
+        id: 'cand_test_enum_2',
+        baseStrategyVersion: 'v2.0',
+        candidateVersion: '1.0.0',
+        type: 'PARAM',
+        symbol: 'BTCUSDT',
+        riskConfig: baseConfig.riskConfig,
+        executionConfig: {
+          ...baseConfig.executionConfig,
+          ambiguityMode: 'AGGRESIVE' as any, // typo
+        },
+      } as any);
+    }).toThrow(/INVALID_AMBIGUITY_MODE/);
+  });
 });
+
 

@@ -33,6 +33,7 @@ import { CandidateArtifactValidator } from './candidate-artifact-validator';
 import { ModelRegistry } from './model-registry';
 import { DatasetManager } from './dataset-manager';
 import { canonicalJsonStringify } from './canonical-serializer';
+import { RetrainingRunStore } from './retraining-run-store';
 
 export interface PipelineExecutionResult {
   readonly runRecord: RetrainingRunRecord;
@@ -50,21 +51,48 @@ export class SelfImprovingRetrainingPipeline {
   public static readonly AUTOMATIC_LIVE_ROLLBACK_ENABLED = false;
 
   private static activeRuns: Set<string> = new Set();
-  private static runHistory: Map<string, RetrainingRunRecord> = new Map();
 
   /**
    * Resets active run concurrency locks and run history (for isolated test teardown).
    */
   public static reset(): void {
     this.activeRuns.clear();
-    this.runHistory.clear();
+    RetrainingRunStore.reset();
+  }
+
+  /**
+   * Sets or clears the durable persistence file path for retraining run history.
+   */
+  public static setPersistencePath(filePath: string | null): void {
+    RetrainingRunStore.setPersistencePath(filePath);
+  }
+
+  /**
+   * Returns current persistence file path for retraining run history.
+   */
+  public static getPersistencePath(): string | null {
+    return RetrainingRunStore.getPersistencePath();
+  }
+
+  /**
+   * Hydrates retraining run history from durable storage.
+   */
+  public static loadHistoryFromFile(filePath: string): void {
+    RetrainingRunStore.loadFromFile(filePath);
   }
 
   /**
    * Retrieves a durable RetrainingRunRecord by run ID.
    */
   public static getRunRecord(runId: string): RetrainingRunRecord | undefined {
-    return this.runHistory.get(runId);
+    return RetrainingRunStore.getRun(runId);
+  }
+
+  /**
+   * Lists all durable RetrainingRunRecords in chronological order.
+   */
+  public static listRunRecords(): RetrainingRunRecord[] {
+    return RetrainingRunStore.listRuns();
   }
 
   /**
@@ -229,12 +257,8 @@ export class SelfImprovingRetrainingPipeline {
         }
         const scalerHash = TemporalFeatureScaler.computeScalerHash(scalerParams);
         const scalerArtifact: ScalerArtifact = { scalerParameters: scalerParams };
-        const modelHash =
-          trainedModel.modelHash ||
-          crypto.createHash('sha256').update(trainedModel.modelVersion).digest('hex').substring(0, 16);
-        const featureSchemaHash =
-          trainedModel.featureSchemaHash ||
-          crypto.createHash('sha256').update('canonical_schema_v2.0').digest('hex');
+        const modelHash = trainedModel.modelHash;
+        const featureSchemaHash = trainedModel.featureSchemaHash;
         const featureSchemaVersion = trainedModel.featureSchemaVersion || '2.0';
         const feats = hyp.selectedFeatures ? [...hyp.selectedFeatures] : [...selectedFeatures];
         const selectedFeatureHash = crypto
@@ -277,10 +301,17 @@ export class SelfImprovingRetrainingPipeline {
 
       // Partition Market Candles for Development (Train + Validation) vs OOS based on temporal dataset boundaries
       const trainStartTs = splits.training.startTimestamp;
+      const trainEndTs = splits.training.endTimestamp;
       const valStartTs = splits.validation.startTimestamp;
       const valEndTs = splits.validation.endTimestamp;
       const oosStartTs = splits.oos.startTimestamp;
       const oosEndTs = splits.oos.endTimestamp;
+
+      const trainCandles = (sliceContinuousCandles(candles as ICandle[], trainStartTs, trainEndTs, 40) ||
+        candles.filter((c) => {
+          const t = new Date(c.timestamp).getTime();
+          return t >= trainStartTs && t <= trainEndTs;
+        })) as ICandle[];
 
       const devCandles = (sliceContinuousCandles(candles as ICandle[], trainStartTs, valEndTs, 40) ||
         candles.filter((c) => {
@@ -300,7 +331,11 @@ export class SelfImprovingRetrainingPipeline {
           return t >= oosStartTs && t <= oosEndTs;
         })) as ICandle[];
 
+      const trainMktHash = DatasetManager.requireCanonicalMarketDatasetHash(trainCandles, config.timeframe);
       const devMktHash = DatasetManager.requireCanonicalMarketDatasetHash(devCandles, config.timeframe);
+      const valMktHash = DatasetManager.requireCanonicalMarketDatasetHash(valCandles, config.timeframe);
+      const oosMktHash = DatasetManager.requireCanonicalMarketDatasetHash(oosCandles, config.timeframe);
+      const canonicalV2SchemaHash = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
 
       for (const trainRes of trainingResults) {
         const hyp = trainRes.hypothesis;
@@ -326,12 +361,15 @@ export class SelfImprovingRetrainingPipeline {
 
           let quantFeatures: Record<string, number>;
           if (Array.isArray(e.features)) {
-            const names = e.featureNames && e.featureNames.length === e.features.length
-              ? e.featureNames
-              : CANONICAL_FEATURE_NAMES_V2;
-            if (e.features.length !== names.length) {
-              throw new Error(`FEATURE_DIMENSION_MISMATCH: Example '${e.exampleId}' has ${e.features.length} features but expected ${names.length}`);
+            let names: readonly string[];
+            if (e.featureNames && Array.isArray(e.featureNames) && e.featureNames.length === e.features.length) {
+              names = e.featureNames;
+            } else if (!e.featureNames && e.featureSchemaHash === canonicalV2SchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
+              names = CANONICAL_FEATURE_NAMES_V2;
+            } else {
+              throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Example '${e.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
             }
+
             quantFeatures = {};
             for (let i = 0; i < names.length; i++) {
               const val = e.features[i];
@@ -342,7 +380,7 @@ export class SelfImprovingRetrainingPipeline {
             }
           } else if (e.features && typeof e.features === 'object') {
             quantFeatures = {};
-            for (const [k, v] of Object.entries(e.features as Record<string, unknown>)) {
+            for (const [k, v] of Object.entries(e.features as unknown as Record<string, unknown>)) {
               if (v === undefined || v === null || typeof v !== 'number' || !Number.isFinite(v)) {
                 throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${k}'`);
               }
@@ -447,7 +485,6 @@ export class SelfImprovingRetrainingPipeline {
       currentStatus = 'OOS_EVALUATION';
       const oosResults: CandidateOOSResult[] = [];
       const createdArtifacts: ValidatedCandidateArtifact[] = [];
-      const oosMarketHash = DatasetManager.requireCanonicalMarketDatasetHash(oosCandles, config.timeframe);
 
       for (const passed of passedHypotheses) {
         const hyp = passed.hyp;
@@ -499,7 +536,7 @@ export class SelfImprovingRetrainingPipeline {
           oosProfitFactor: oosEval.profitFactor,
           oosMaxDrawdownPercent: oosEval.maxDrawdownPercent,
           oosTradeCount: oosEval.simulatedRMultiples.length,
-          oosMarketDatasetHash: oosMarketHash,
+          oosMarketDatasetHash: oosMktHash,
           executionDerived: true,
           monteCarloRuinProbability: mcRuinProb,
           isMonteCarloAvailable,
@@ -507,7 +544,7 @@ export class SelfImprovingRetrainingPipeline {
         };
         oosResults.push(oosRes);
 
-        // 9. Candidate Artifact Creation & ModelRegistry Registration
+        // 9. Candidate Artifact Creation
         currentStatus = 'CANDIDATE_ARTIFACT_CREATED';
         const candidateWithMetrics: StrategyCandidate = {
           ...candidateObj,
@@ -532,15 +569,31 @@ export class SelfImprovingRetrainingPipeline {
             validationDatasetHash: splits.validation.datasetHash,
             oosDatasetHash: splits.oos.datasetHash,
             marketDatasetHash: devMktHash,
+            trainingMarketDatasetHash: trainMktHash,
+            validationMarketDatasetHash: valMktHash,
+            oosMarketDatasetHash: oosMktHash,
+            trainingExperienceDatasetHash: splits.training.datasetHash,
+            validationExperienceDatasetHash: splits.validation.datasetHash,
+            oosExperienceDatasetHash: splits.oos.datasetHash,
             createdBy: 'SelfImprovingRetrainingPipeline',
           },
         );
 
         const validatedArtifact = CandidateArtifactValidator.validate(artifact);
         createdArtifacts.push(validatedArtifact);
+      }
 
+      // 10. Atomic ModelRegistry Transaction Registration
+      if (createdArtifacts.length > 0) {
         currentStatus = 'REGISTERED';
-        ModelRegistry.registerCandidateArtifact(validatedArtifact);
+        ModelRegistry.executeTransaction(
+          () => {
+            for (const artifact of createdArtifacts) {
+              ModelRegistry.registerCandidateArtifact(artifact);
+            }
+          },
+          { requirePersistence: false },
+        );
       }
 
       const selectedCandidateId = createdArtifacts.length > 0 ? createdArtifacts[0].candidateId : undefined;
@@ -572,7 +625,7 @@ export class SelfImprovingRetrainingPipeline {
         status: finalStatus,
       });
 
-      this.runHistory.set(runId, runRecord);
+      RetrainingRunStore.saveRun(runRecord);
 
       return {
         runRecord,
@@ -598,7 +651,7 @@ export class SelfImprovingRetrainingPipeline {
         status: 'FAILED',
         failureReason: err instanceof Error ? err.message : String(err),
       });
-      this.runHistory.set(runId, failedRecord);
+      RetrainingRunStore.saveRun(failedRecord);
       throw err;
     } finally {
       this.activeRuns.delete(lockKey);

@@ -14,6 +14,8 @@ import { NoTradePrediction, TradingExperience } from './types';
 import { IDatasetSample } from './dataset-manager';
 import { TemporalFeatureScaler } from './feature-scaler';
 
+import { canonicalJsonStringify } from './canonical-serializer';
+
 export interface IModelTrainingOptions {
   epochs?: number;
   learningRate?: number;
@@ -25,11 +27,11 @@ export interface IModelTrainingOptions {
 export interface ITrainedModelArtifact {
   modelId?: string;
   modelVersion: string;
-  modelHash?: string;
+  modelHash: string;
   weights: number[];
   bias: number;
   featureSchemaVersion: string;
-  featureSchemaHash?: string;
+  featureSchemaHash: string;
   selectedFeatures?: string[];
   selectedFeatureHash?: string;
   scalerHash?: string;
@@ -46,6 +48,39 @@ export interface ITrainedModelArtifact {
 }
 
 export class ModelTrainer {
+  /**
+   * Computes authoritative SHA-256 hash over exact model parameters and scaler linkage.
+   */
+  public static computeModelHash(
+    weights: readonly number[],
+    bias: number,
+    scalerHash: string = 'none',
+    modelVersion?: string,
+  ): string {
+    const payload = canonicalJsonStringify({
+      weights: weights.map((w) => (Number.isFinite(w) ? Number(w.toFixed(8)) : 0)),
+      bias: Number.isFinite(bias) ? Number(bias.toFixed(8)) : 0,
+      scalerHash: scalerHash || 'none',
+      ...(modelVersion ? { modelVersion } : {}),
+    });
+    return crypto.createHash('sha256').update(payload).digest('hex');
+  }
+
+  /**
+   * Computes authoritative SHA-256 hash over exact feature schema names, ordering, and version.
+   */
+  public static computeFeatureSchemaHash(
+    featureNames: readonly string[],
+    schemaVersion: string = '2.0',
+  ): string {
+    const payload = canonicalJsonStringify({
+      schemaVersion,
+      featureNames: [...featureNames],
+      dimension: featureNames.length,
+    });
+    return crypto.createHash('sha256').update(payload).digest('hex');
+  }
+
   /**
    * Trains a canonical 28-dimensional logistic model on an EXPLICIT temporal training dataset slice
    * consuming the fitted TemporalFeatureScaler to ensure normalized, leakage-free feature scaling.
@@ -66,11 +101,20 @@ export class ModelTrainer {
       const defaultWeights = CANONICAL_FEATURE_NAMES_V2.map((_, i) =>
         Number((Math.sin(i + 1) * 0.1).toFixed(4)),
       );
+      const defaultBias = 0.1;
+      const emptyModelHash = ModelTrainer.computeModelHash(defaultWeights, defaultBias, 'none');
+      const emptySchemaHash = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
       return {
+        modelId: `model-${emptyModelHash.substring(0, 12)}`,
         modelVersion: 'ml-v2-empty',
+        modelHash: emptyModelHash,
         weights: defaultWeights,
-        bias: 0.1,
+        bias: defaultBias,
         featureSchemaVersion: '2.0',
+        featureSchemaHash: emptySchemaHash,
+        selectedFeatures: [...CANONICAL_FEATURE_NAMES_V2],
+        selectedFeatureHash: crypto.createHash('sha256').update(CANONICAL_FEATURE_NAMES_V2.join(',')).digest('hex'),
+        scalerHash: 'none',
         sampleCount: 0,
         trainLoss: 0.693,
         trainedAt: new Date(0),
@@ -156,10 +200,7 @@ export class ModelTrainer {
     const roundedBias = Number(bias.toFixed(5));
 
     const scalerHash = TemporalFeatureScaler.computeScalerHash(scalerParameters);
-    const featureSchemaHash = crypto
-      .createHash('sha256')
-      .update('canonical_schema_v2.0_' + CANONICAL_FEATURE_NAMES_V2.join(','))
-      .digest('hex');
+    const featureSchemaHash = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
     const selectedFeatureHash = crypto
       .createHash('sha256')
       .update(CANONICAL_FEATURE_NAMES_V2.join(','))
@@ -169,8 +210,7 @@ export class ModelTrainer {
       .update(`dataset_${samples.length}_${samples[0]?.label ?? 0}`)
       .digest('hex');
 
-    const modelContentStr = `samples:${samples.length}_w:${roundedWeights.join(',')}_b:${roundedBias}_loss:${finalLoss.toFixed(4)}_schema:2.0_scaler:${scalerHash}`;
-    const fullModelHash = crypto.createHash('sha256').update(modelContentStr).digest('hex');
+    const fullModelHash = ModelTrainer.computeModelHash(roundedWeights, roundedBias, scalerHash);
     const modelHashShort = fullModelHash.substring(0, 12);
     const modelVersion = `ml-v2-${modelHashShort}`;
 

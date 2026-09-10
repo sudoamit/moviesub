@@ -9,6 +9,8 @@ import {
 } from './types';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { canonicalJsonStringify } from './canonical-serializer';
+import { ALLOWED_AMBIGUITY_MODES, ALLOWED_FILL_MODELS } from './candidate-artifact-builder';
+import { ModelTrainer } from './model-trainer';
 
 export class CandidateArtifactValidator {
   /**
@@ -131,14 +133,14 @@ export class CandidateArtifactValidator {
       );
     }
 
-    // Fill model and ambiguity mode
-    const fillModel = execConfig.fillModel;
-    if (fillModel !== 'OHLC_PATH' && fillModel !== 'NEXT_BAR_OPEN') {
+    // Fill model and ambiguity mode validation against canonical sets
+    const fillModel = execConfig.fillModel as string;
+    if (!fillModel || typeof fillModel !== 'string' || !ALLOWED_FILL_MODELS.has(fillModel)) {
       throw new Error(`INVALID_FILL_MODEL: Candidate '${candidateId}' has invalid fillModel '${fillModel}'`);
     }
 
-    const ambiguityMode = execConfig.ambiguityMode;
-    if (ambiguityMode !== 'CONSERVATIVE' && ambiguityMode !== 'AGGRESSIVE') {
+    const ambiguityMode = execConfig.ambiguityMode as string;
+    if (!ambiguityMode || typeof ambiguityMode !== 'string' || !ALLOWED_AMBIGUITY_MODES.has(ambiguityMode)) {
       throw new Error(
         `INVALID_AMBIGUITY_MODE: Candidate '${candidateId}' has invalid ambiguityMode '${ambiguityMode}'`,
       );
@@ -239,12 +241,18 @@ export class CandidateArtifactValidator {
           `MODEL_ARTIFACT_MISSING: Candidate '${candidateId}' has modelHash '${modelHash}' but is missing modelArtifact with weights`,
         );
       }
-      const computedModelHash = createHash('sha256')
+      const canonicalModelHash = ModelTrainer.computeModelHash(
+        model.weights,
+        model.bias ?? 0,
+        scalerHash,
+        model.modelVersion,
+      );
+      const legacyModelHash = createHash('sha256')
         .update(`${model.modelVersion || 'v2.0'}|${model.weights.join(',')}|${model.bias ?? 0}`)
         .digest('hex');
-      if (modelHash !== computedModelHash) {
+      if (modelHash !== canonicalModelHash && modelHash !== legacyModelHash) {
         throw new Error(
-          `MODEL_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedModelHash}, got ${modelHash}`,
+          `MODEL_HASH_MISMATCH: Candidate '${candidateId}' expected ${canonicalModelHash}, got ${modelHash}`,
         );
       }
     } else if (art.modelArtifact && Array.isArray((art.modelArtifact as any).weights) && (art.modelArtifact as any).weights.length > 0) {
@@ -318,6 +326,12 @@ export class CandidateArtifactValidator {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash: art.marketDatasetHash,
+      ...(art.trainingMarketDatasetHash ? { trainingMarketDatasetHash: art.trainingMarketDatasetHash } : {}),
+      ...(art.validationMarketDatasetHash ? { validationMarketDatasetHash: art.validationMarketDatasetHash } : {}),
+      ...(art.oosMarketDatasetHash ? { oosMarketDatasetHash: art.oosMarketDatasetHash } : {}),
+      ...(art.trainingExperienceDatasetHash ? { trainingExperienceDatasetHash: art.trainingExperienceDatasetHash } : {}),
+      ...(art.validationExperienceDatasetHash ? { validationExperienceDatasetHash: art.validationExperienceDatasetHash } : {}),
+      ...(art.oosExperienceDatasetHash ? { oosExperienceDatasetHash: art.oosExperienceDatasetHash } : {}),
       datasetHash,
       configHash: execConfig.configHash,
       trainingSeed,

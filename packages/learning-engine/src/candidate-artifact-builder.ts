@@ -14,6 +14,25 @@ import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
 import { CandidateArtifactValidator } from './candidate-artifact-validator';
 import { canonicalJsonStringify } from './canonical-serializer';
+import { ModelTrainer } from './model-trainer';
+
+export const ALLOWED_FILL_MODELS: ReadonlySet<string> = new Set([
+  'OHLC_PATH',
+  'NEXT_BAR_OPEN',
+  'NEXT_BAR_MARKET',
+  'LIMIT_TOUCH',
+  'LIMIT_WITH_SLIPPAGE',
+  'LOWER_TIMEFRAME',
+  'TICK_ACCURATE',
+]);
+
+export const ALLOWED_AMBIGUITY_MODES: ReadonlySet<string> = new Set([
+  'CONSERVATIVE',
+  'OPTIMISTIC',
+  'OHLC_PATH',
+  'LOWER_TIMEFRAME',
+  'AGGRESSIVE',
+]);
 
 export interface CandidateArtifactBuildOptions {
   datasetHash?: string;
@@ -23,6 +42,12 @@ export interface CandidateArtifactBuildOptions {
     validationDatasetHash?: string;
     oosDatasetHash?: string;
     marketDatasetHash?: string;
+    trainingMarketDatasetHash?: string;
+    validationMarketDatasetHash?: string;
+    oosMarketDatasetHash?: string;
+    trainingExperienceDatasetHash?: string;
+    validationExperienceDatasetHash?: string;
+    oosExperienceDatasetHash?: string;
     createdBy?: string;
     symbol?: string;
     riskConfig?: CandidateRiskConfig | Record<string, unknown>;
@@ -149,6 +174,9 @@ export class CandidateArtifactBuilder {
     if (!fillModel || typeof fillModel !== 'string' || fillModel.trim() === '') {
       throw new Error(`MISSING_FILL_MODEL: Candidate '${candidate.id}' is missing authoritative fillModel`);
     }
+    if (!ALLOWED_FILL_MODELS.has(fillModel)) {
+      throw new Error(`INVALID_FILL_MODEL: Candidate '${candidate.id}' has invalid fillModel '${fillModel}'. Allowed: ${Array.from(ALLOWED_FILL_MODELS).join(', ')}`);
+    }
 
     const ambiguityMode =
       ((candidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
@@ -158,6 +186,9 @@ export class CandidateArtifactBuilder {
 
     if (!ambiguityMode || typeof ambiguityMode !== 'string' || ambiguityMode.trim() === '') {
       throw new Error(`MISSING_AMBIGUITY_MODE: Candidate '${candidate.id}' is missing authoritative ambiguityMode`);
+    }
+    if (!ALLOWED_AMBIGUITY_MODES.has(ambiguityMode)) {
+      throw new Error(`INVALID_AMBIGUITY_MODE: Candidate '${candidate.id}' has invalid ambiguityMode '${ambiguityMode}'. Allowed: ${Array.from(ALLOWED_AMBIGUITY_MODES).join(', ')}`);
     }
 
     const rawLatency =
@@ -271,6 +302,39 @@ export class CandidateArtifactBuilder {
       (candidateChange?.marketDatasetHash as string) ||
       resolvedDatasetHash;
 
+    const trainingMarketDatasetHash =
+      provenance?.trainingMarketDatasetHash ||
+      provenance?.trainingDatasetHash ||
+      (candidateChange?.trainingMarketDatasetHash as string) ||
+      trainingDatasetHash;
+
+    const validationMarketDatasetHash =
+      provenance?.validationMarketDatasetHash ||
+      provenance?.validationDatasetHash ||
+      (candidateChange?.validationMarketDatasetHash as string) ||
+      validationDatasetHash;
+
+    const oosMarketDatasetHash =
+      provenance?.oosMarketDatasetHash ||
+      provenance?.oosDatasetHash ||
+      (candidateChange?.oosMarketDatasetHash as string) ||
+      oosDatasetHash;
+
+    const trainingExperienceDatasetHash =
+      provenance?.trainingExperienceDatasetHash ||
+      (candidateChange?.trainingExperienceDatasetHash as string) ||
+      trainingDatasetHash;
+
+    const validationExperienceDatasetHash =
+      provenance?.validationExperienceDatasetHash ||
+      (candidateChange?.validationExperienceDatasetHash as string) ||
+      validationDatasetHash;
+
+    const oosExperienceDatasetHash =
+      provenance?.oosExperienceDatasetHash ||
+      (candidateChange?.oosExperienceDatasetHash as string) ||
+      oosDatasetHash;
+
     const candidateRisk =
       candidate.riskConfig ||
       (candidateChange?.riskConfig as CandidateRiskConfig | undefined) ||
@@ -324,9 +388,7 @@ export class CandidateArtifactBuilder {
 
     if (isMlCandidate) {
       if (!featureSchemaHash || typeof featureSchemaHash !== 'string' || featureSchemaHash.trim() === '') {
-        throw new Error(
-          `FEATURE_SCHEMA_HASH_MISSING: ML candidate '${candidate.id}' must explicitly specify authoritative featureSchemaHash`,
-        );
+        featureSchemaHash = ModelTrainer.computeFeatureSchemaHash(selectedFeatures, featureSchemaVersion);
       }
     } else {
       featureSchemaHash = featureSchemaHash || 'none';
@@ -345,14 +407,17 @@ export class CandidateArtifactBuilder {
         scalerHash = candidateChange.scalerHash as string;
       }
 
-      if (modelArtifact?.weights && Array.isArray(modelArtifact.weights)) {
-        modelHash = createHash('sha256')
-          .update(
-            `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
-          )
-          .digest('hex');
+      if (modelArtifact?.weights && Array.isArray(modelArtifact.weights) && typeof modelArtifact.bias === 'number') {
+        modelHash = ModelTrainer.computeModelHash(
+          modelArtifact.weights,
+          modelArtifact.bias,
+          scalerHash,
+          modelArtifact.modelVersion,
+        );
       } else if (candidateChange?.modelHash && typeof candidateChange.modelHash === 'string') {
         modelHash = candidateChange.modelHash as string;
+      } else if (modelArtifact?.modelHash && typeof modelArtifact.modelHash === 'string') {
+        modelHash = modelArtifact.modelHash as string;
       }
 
       const mId = modelArtifact?.modelId || (candidateChange?.modelId as string | undefined);
@@ -409,6 +474,12 @@ export class CandidateArtifactBuilder {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash,
+      trainingMarketDatasetHash,
+      validationMarketDatasetHash,
+      oosMarketDatasetHash,
+      trainingExperienceDatasetHash,
+      validationExperienceDatasetHash,
+      oosExperienceDatasetHash,
       datasetHash: resolvedDatasetHash,
       configHash: config.configHash,
       trainingSeed,
@@ -442,6 +513,12 @@ export class CandidateArtifactBuilder {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash,
+      trainingMarketDatasetHash,
+      validationMarketDatasetHash,
+      oosMarketDatasetHash,
+      trainingExperienceDatasetHash,
+      validationExperienceDatasetHash,
+      oosExperienceDatasetHash,
       datasetHash: resolvedDatasetHash,
       trainingSeed,
       riskConfig: resolvedRiskConfig,

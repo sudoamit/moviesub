@@ -234,7 +234,12 @@ export class PITExperienceDatasetBuilder {
 
     const canonicalString = sorted
       .map((e) => {
-        const featStr = e.features.map((v) => v.toFixed(5)).join(',');
+        const featStr = Array.isArray(e.features)
+          ? e.features.map((v) => (typeof v === 'number' && Number.isFinite(v) ? v.toFixed(5) : String(v))).join(',')
+          : Object.entries((e.features as unknown as Record<string, unknown>) || {})
+              .sort(([k1], [k2]) => k1.localeCompare(k2))
+              .map(([k, v]) => `${k}:${typeof v === 'number' && Number.isFinite(v) ? (v as number).toFixed(5) : String(v)}`)
+              .join(',');
         return `${e.exampleId}|${e.decisionTimestamp}|${e.featureTimestamp}|${e.labelStartTimestamp}|${e.labelEndTimestamp}|${featStr}|${e.label}|${e.outcomeR ?? 0}|${e.regime}|${e.volatilityBucket}`;
       })
       .join('\n');

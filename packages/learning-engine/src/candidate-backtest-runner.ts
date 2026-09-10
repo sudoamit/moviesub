@@ -87,6 +87,12 @@ export class CandidateBacktestRunner {
       validationDatasetHash?: string;
       oosDatasetHash?: string;
       marketDatasetHash?: string;
+      trainingMarketDatasetHash?: string;
+      validationMarketDatasetHash?: string;
+      oosMarketDatasetHash?: string;
+      trainingExperienceDatasetHash?: string;
+      validationExperienceDatasetHash?: string;
+      oosExperienceDatasetHash?: string;
       createdBy?: string;
       symbol?: string;
       riskConfig?: CandidateRiskConfig | Record<string, unknown>;

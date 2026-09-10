@@ -35,8 +35,13 @@ export class CandidateEvaluator {
   /**
    * Constructs a canonical frozen baseline benchmark strategy candidate.
    */
-  public static createBaselineBenchmarkCandidate(baseStrategyVersion: string = 'v2.0', symbol: string = 'BTCUSDT'): StrategyCandidate {
-    const riskConfig = {
+  public static createBaselineBenchmarkCandidate(
+    baseStrategyVersion: string = 'v2.0',
+    symbol: string = 'BTCUSDT',
+    riskConfigParam?: any,
+    executionConfigParam?: any,
+  ): StrategyCandidate {
+    const riskConfig = riskConfigParam || {
       initialCapital: 100000,
       maxRiskPerTrade: 0.01,
       partialExitPolicy: {
@@ -48,6 +53,10 @@ export class CandidateEvaluator {
         trailStopOffsetR: 1.0,
       },
     };
+    const fillModel = executionConfigParam?.fillModel || 'OHLC_PATH';
+    const ambiguityMode = executionConfigParam?.ambiguityMode || 'CONSERVATIVE';
+    const latencyMs = typeof executionConfigParam?.latencyMs === 'number' ? executionConfigParam.latencyMs : 50;
+
     return {
       id: `baseline-${baseStrategyVersion}`,
       baseStrategyVersion,
@@ -56,6 +65,17 @@ export class CandidateEvaluator {
       description: `Baseline Benchmark Strategy (${baseStrategyVersion})`,
       symbol,
       riskConfig,
+      executionConfig: {
+        candidateId: `baseline-${baseStrategyVersion}`,
+        candidateVersion: `baseline-${baseStrategyVersion}`,
+        strategyVersion: baseStrategyVersion,
+        symbol,
+        fillModel,
+        ambiguityMode,
+        latencyMs,
+        minMtfScore: 0,
+        configHash: 'baseline_exec_config',
+      },
       change: {
         action: 'BASELINE_BENCHMARK',
         minMtfScore: 0,
@@ -63,6 +83,9 @@ export class CandidateEvaluator {
         sizingMultiplier: 1.0,
         symbol,
         riskConfig,
+        fillModel,
+        ambiguityMode,
+        latencyMs,
       },
       evidence: { sampleSize: 0, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'PROMOTED',
@@ -89,11 +112,11 @@ export class CandidateEvaluator {
     },
   ): ICandidateEvaluationResult {
     const candidateId = 'artifactId' in candidate ? candidate.candidateId : candidate.id;
-    const baseStrategyVersion = 'artifactId' in candidate ? candidate.strategyVersion : candidate.baseStrategyVersion;
-    const candles = Array.isArray(marketData) ? marketData : marketData.candles;
     const dataset = Array.isArray(marketData) ? undefined : marketData.dataset;
-    const evaluationStartTimestamp = options?.evaluationStartTimestamp ?? (Array.isArray(marketData) ? undefined : marketData.evaluationStartTimestamp);
-    const evaluationEndTimestamp = options?.evaluationEndTimestamp ?? (Array.isArray(marketData) ? undefined : marketData.evaluationEndTimestamp);
+    const candles = Array.isArray(marketData) ? marketData : (marketData.candles || dataset?.executionCandles || []);
+    const baseStrategyVersion = (candidate as any).baseStrategyVersion || (candidate as any).strategyVersion || 'v2.0';
+    const evaluationStartTimestamp = !Array.isArray(marketData) ? marketData.evaluationStartTimestamp : options?.evaluationStartTimestamp;
+    const evaluationEndTimestamp = !Array.isArray(marketData) ? marketData.evaluationEndTimestamp : options?.evaluationEndTimestamp;
 
     const minimumCandles = options?.minimumCandles ?? 50;
     if ((!candles || candles.length < minimumCandles) && !dataset) {
@@ -136,7 +159,14 @@ export class CandidateEvaluator {
       defaultRisk;
 
     // 1. Evaluate baseline strategy benchmark on authoritative BacktestSimulator using continuous market candles
-    const baselineCandidate = options?.baselineCandidate || this.createBaselineBenchmarkCandidate(baseStrategyVersion, resolvedSymbol);
+    const baselineCandidate =
+      options?.baselineCandidate ||
+      this.createBaselineBenchmarkCandidate(
+        baseStrategyVersion,
+        resolvedSymbol,
+        resolvedRisk,
+        (candidate as any).executionConfig,
+      );
     const baselineRes = CandidateBacktestRunner.runCandidateBacktest(baselineCandidate, {
       dataset,
       candles,
