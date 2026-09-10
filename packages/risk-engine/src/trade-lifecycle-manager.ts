@@ -196,6 +196,124 @@ export class TradeLifecycleManager {
   }
 
   /**
+   * Authoritatively processes an exit fill on an active PositionLot from ExecutionSimulator.
+   * Manages trade economics (P&L, realized R, remaining quantity), partial fills, breakeven stop moves, and trade completion.
+   */
+  static processExitFill(
+    lot: PositionLot,
+    fill: {
+      fillId: string;
+      orderId: string;
+      targetType?: string;
+      price: number;
+      quantity: number;
+      timestamp: number;
+      fee?: number;
+      slippage?: number;
+      exitOrderCreatedAt?: number;
+      exitOrderSubmittedAt?: number;
+      exitTriggerTimestamp?: number;
+      exitFillTimestamp?: number;
+      segmentIndex?: number;
+      segmentType?: string;
+    },
+    policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
+    fillModel?: string,
+    ambiguityMode?: string,
+  ): {
+    lot: PositionLot;
+    completedTrade?: IBacktestTrade;
+    isClosed: boolean;
+    isBreakevenStopTriggered: boolean;
+  } {
+    const isLong = lot.direction === Direction.BULLISH;
+    const fillQty = fill.quantity;
+    const chunkDiff = isLong
+      ? fill.price - lot.entryPrice
+      : lot.entryPrice - fill.price;
+    const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
+    const initialRiskPerUnit = Math.max(
+      0.0001,
+      Math.abs(lot.entryPrice - lot.initialStopLoss),
+    );
+    const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
+
+    lot.realizedPnl = Number((lot.realizedPnl + grossPnl).toFixed(2));
+    lot.remainingQuantity = Number(
+      Math.max(0, lot.remainingQuantity - fillQty).toFixed(4),
+    );
+
+    const targetType = (fill.targetType as any) || 'TP1';
+
+    const newFillRecord: IPartialFillRecord = {
+      fillId: fill.fillId,
+      targetType: targetType as any,
+      timestamp: fill.timestamp,
+      price: fill.price,
+      quantity: fillQty,
+      remainingQuantity: lot.remainingQuantity,
+      realizedPnl: grossPnl,
+      realizedR: chunkR,
+      fee: fill.fee || 0,
+      slippage: fill.slippage || 0,
+      exitOrderId: fill.orderId,
+      exitOrderCreatedAt: fill.exitOrderCreatedAt,
+      exitOrderSubmittedAt: fill.exitOrderSubmittedAt,
+      exitTriggerTimestamp: fill.exitTriggerTimestamp,
+      exitFillTimestamp: fill.exitFillTimestamp,
+      segmentIndex: fill.segmentIndex,
+      segmentType: fill.segmentType,
+    };
+
+    lot.partialFills = [...(lot.partialFills || []), newFillRecord];
+
+    let completedTrade: IBacktestTrade | undefined;
+    let isClosed = false;
+    let isBreakevenStopTriggered = false;
+
+    if (lot.remainingQuantity <= 0) {
+      isClosed = true;
+      lot.status = 'CLOSED';
+      lot.closedAt = fill.timestamp;
+      lot.unrealizedPnl = 0;
+
+      const lastFill = lot.partialFills[lot.partialFills.length - 1];
+      const exitReason =
+        (lastFill?.targetType as string) === 'SL' ||
+        (lastFill?.targetType as string) === 'STOP' ||
+        lastFill?.targetType === 'STOP_LOSS'
+          ? SignalState.SL_HIT
+          : (lastFill?.targetType as string) === 'TP1'
+          ? SignalState.TP1_HIT
+          : (lastFill?.targetType as string) === 'TP2'
+          ? SignalState.TP2_HIT
+          : (lastFill?.targetType as string) === 'TP3'
+          ? SignalState.TP3_HIT
+          : SignalState.INVALIDATED;
+
+      completedTrade = TradeLifecycleManager.createCompletedTrade(
+        lot,
+        exitReason,
+        fillModel,
+        ambiguityMode,
+      );
+    } else {
+      lot.status = 'PARTIALLY_CLOSED';
+      if (targetType === 'TP1' && policy.moveStopToBreakevenOnTp1) {
+        lot.currentStopLoss = lot.entryPrice;
+        isBreakevenStopTriggered = true;
+      }
+    }
+
+    return {
+      lot,
+      completedTrade,
+      isClosed,
+      isBreakevenStopTriggered,
+    };
+  }
+
+  /**
    * @deprecated Synthetic lifecycle tick evaluation is disabled for backtesting.
    * Backtesting MUST use ExecutionSimulator and FillModelEngine directly for authoritative order execution.
    */

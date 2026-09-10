@@ -73,7 +73,11 @@ function createDummyCandidate(id = 'cand-shadow-101'): StrategyCandidate {
     },
     riskConfig: {
       initialCapital: 1000000,
-      maxRiskPerTrade: 0.05,
+      maxRiskPerTrade: 0.01,
+      maxAccountRiskLimit: 0.05,
+      lotSize: 1,
+      contractSize: 1,
+      maxLeverage: 10,
       partialExitPolicy: {
         tp1Ratio: 0.33,
         tp2Ratio: 0.33,
@@ -820,7 +824,11 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       (candidate.change as any).minMtfScore = 50;
       (candidate as any).riskConfig = {
         initialCapital: 1000000,
-        maxRiskPerTrade: 0.05,
+        maxRiskPerTrade: 0.01,
+        maxAccountRiskLimit: 0.05,
+        lotSize: 1,
+        contractSize: 1,
+        maxLeverage: 10,
         partialExitPolicy: {
           tp1Ratio: 0.3333,
           tp2Ratio: 0.3333,
@@ -895,7 +903,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       expect(evalRes.shadowDatasetHash.length).toBe(64);
       // shadowDatasetHash must be distinct from training marketDatasetHash
       expect(evalRes.shadowDatasetHash).not.toBe('training_mkt_hash_abc');
-      expect(evalRes.window.marketDatasetHash).toBe('training_mkt_hash_abc');
+      expect(evalRes.window.marketDatasetHash).toBe(evalRes.shadowDatasetHash);
     });
 
     it('P1-7: missing baseline metrics fails closed', () => {

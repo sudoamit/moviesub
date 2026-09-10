@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { createHash } from 'crypto';
-import { Direction, IBacktestTrade, ICandle, SignalState } from '@quant/shared';
+import { Direction, IBacktestTrade, ICandle, ISignalSetup, SignalState } from '@quant/shared';
 import {
   ExecutionSimulator,
   FillModel,
@@ -89,6 +89,7 @@ interface ActiveCandidateContext {
   readonly candles: ICandle[];
   readonly regimeHistory: RegimeObservation[];
   readonly featureVectors: number[][];
+  readonly pendingEntrySignals: Map<string, ISignalSetup>;
   activeLot: PositionLot | null;
   featureBaseline?: FeatureDriftBaseline;
   baselineMetrics: {
@@ -308,7 +309,7 @@ export class ShadowOrchestrator {
       (validatedArtifact.strategyConfig as any)?.evidence?.expectancyAfterHistorical ??
       (validatedArtifact.strategyConfig as any)?.evidence?.expectancyBefore;
 
-    if (baselineExpectancy === undefined || typeof baselineExpectancy !== 'number' || isNaN(baselineExpectancy)) {
+    if (baselineExpectancy === undefined || typeof baselineExpectancy !== 'number' || !Number.isFinite(baselineExpectancy)) {
       throw new Error(
         `SHADOW_BASELINE_MISSING: Candidate '${candidateId}' artifact is missing baseline performance evidence (expectancy)`,
       );
@@ -319,10 +320,22 @@ export class ShadowOrchestrator {
       (validatedArtifact as any).evidence?.winRate ??
       (validatedArtifact.strategyConfig as any)?.evidence?.winRate;
 
+    if (baselineWinRate === undefined || typeof baselineWinRate !== 'number' || !Number.isFinite(baselineWinRate)) {
+      throw new Error(
+        `SHADOW_BASELINE_MISSING: Candidate '${candidateId}' artifact is missing baseline performance evidence (winRate)`,
+      );
+    }
+
     const baselineProfitFactor =
       options?.baselineProfitFactor ??
       (validatedArtifact as any).evidence?.profitFactor ??
       (validatedArtifact.strategyConfig as any)?.evidence?.profitFactor;
+
+    if (baselineProfitFactor === undefined || typeof baselineProfitFactor !== 'number' || !Number.isFinite(baselineProfitFactor)) {
+      throw new Error(
+        `SHADOW_BASELINE_MISSING: Candidate '${candidateId}' artifact is missing baseline performance evidence (profitFactor)`,
+      );
+    }
 
     // Reference regime validation from immutable candidate evidence with robust normalization
     const rawRefRegime =
@@ -418,11 +431,12 @@ export class ShadowOrchestrator {
       ledger,
       execSim,
       candles: recoveredCandles,
+      pendingEntrySignals: new Map(),
       featureBaseline: options?.featureBaseline,
       baselineMetrics: {
         expectancyR: baselineExpectancy,
-        winRate: baselineWinRate ?? 50.0,
-        profitFactor: baselineProfitFactor ?? 1.0,
+        winRate: baselineWinRate,
+        profitFactor: baselineProfitFactor,
       },
       referenceRegime,
       regimeHistory: recoveredRegimeHistory,
@@ -433,9 +447,11 @@ export class ShadowOrchestrator {
 
     this.activeCandidates.set(candidateId, ctx);
 
-    // Initial Shadow Audit Event
+    // Initial Shadow Audit Event with deterministic candidate/market timestamp/sequence
+    const initialMarketTs = ledger.getLastMarketTimestamp() || 0;
+    const seq = ledger.getAuditEvents().length + 1;
     ledger.recordAuditEvent({
-      eventId: `evt_${candidateId}_SHADOW_STARTED_${Date.now()}_1`,
+      eventId: `evt_${candidateId}_SHADOW_STARTED_${initialMarketTs}_${seq}`,
       candidateId,
       candidateVersion: validatedArtifact.candidateVersion,
       strategyVersion: validatedArtifact.strategyVersion,
@@ -504,7 +520,7 @@ export class ShadowOrchestrator {
     const execBarRes = ctx.execSim.processSingleExecutionBar(candle);
     const newFills = execBarRes.fills;
 
-    // Process Fills and manage Trade Lifecycles authoritatively
+    // Process Fills and manage Trade Lifecycles authoritatively via TradeLifecycleManager
     const partialPolicy = (ctx.artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
 
     for (const fill of newFills) {
@@ -512,34 +528,15 @@ export class ShadowOrchestrator {
       if (!order) continue;
 
       if (order.exitTarget === 'ENTRY') {
-        const isLong = order.side === 'BUY';
-        const refPrice = order.referencePrice || (order as any).calculatedEntryOptimal || fill.price;
-        const initialStop = (order as any).calculatedStopLoss;
-        if (typeof initialStop !== 'number' || !Number.isFinite(initialStop)) {
-          throw new Error(`SHADOW_RISK_CONFIG_MISSING: Active entry order '${order.orderId}' is missing valid calculatedStopLoss`);
-        }
-        const tp1 = (order as any).calculatedTp1;
-        if (typeof tp1 !== 'number' || !Number.isFinite(tp1)) {
-          throw new Error(`SHADOW_RISK_CONFIG_MISSING: Active entry order '${order.orderId}' is missing valid calculatedTp1`);
+        const actualSignal = ctx.pendingEntrySignals.get(order.tradeId);
+        if (!actualSignal) {
+          throw new Error(`MISSING_ENTRY_SIGNAL: Actual SignalGenerator output for trade '${order.tradeId}' not found`);
         }
 
-        const dummySignal: any = {
-          id: order.tradeId,
-          symbol,
-          direction: isLong ? Direction.BULLISH : Direction.BEARISH,
-          stopLoss: initialStop,
-          takeProfits: {
-            tp1,
-            tp2: (order as any).calculatedTp2,
-            tp3: (order as any).calculatedTp3,
-          },
-          entryZone: { optimal: refPrice, min: refPrice, max: refPrice },
-        };
-
-        // createPositionLot returns a mutable lot; ensure it stays mutable for fill tracking
+        // Initialize authoritative PositionLot directly from actual signal setup output
         ctx.activeLot = ShadowOrchestrator.thawPositionLot(
           TradeLifecycleManager.createPositionLot(
-            dummySignal,
+            actualSignal,
             fill.price,
             fill.quantity,
             fill.timestamp,
@@ -548,6 +545,7 @@ export class ShadowOrchestrator {
             fill.slippage,
           ),
         );
+        ctx.pendingEntrySignals.delete(order.tradeId);
 
         // Submit resting exit orders (SL, TP1, TP2, TP3)
         const restingOrders = ShadowOrchestrator.submitRestingExitOrders(
@@ -561,23 +559,6 @@ export class ShadowOrchestrator {
       } else {
         // Exit order filled (SL, TP1, TP2, TP3, TRAILING_STOP)
         if (ctx.activeLot && ctx.activeLot.tradeId === order.tradeId) {
-          const isLong = ctx.activeLot.direction === Direction.BULLISH;
-          const fillQty = fill.quantity;
-          const chunkDiff = isLong
-            ? fill.price - ctx.activeLot.entryPrice
-            : ctx.activeLot.entryPrice - fill.price;
-          const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
-          const initialRiskPerUnit = Math.max(
-            0.0001,
-            Math.abs(ctx.activeLot.entryPrice - ctx.activeLot.initialStopLoss),
-          );
-          const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
-
-          ctx.activeLot.realizedPnl = Number((ctx.activeLot.realizedPnl + grossPnl).toFixed(2));
-          ctx.activeLot.remainingQuantity = Number(
-            Math.max(0, ctx.activeLot.remainingQuantity - fillQty).toFixed(4),
-          );
-
           const targetType =
             order.exitTarget ||
             (order.orderType === 'STOP'
@@ -586,68 +567,33 @@ export class ShadowOrchestrator {
                 : 'SL'
               : 'TP1');
 
-          const newFillRecord = {
-            fillId: fill.fillId,
-            targetType: targetType as any,
-            timestamp: fill.timestamp,
-            price: fill.price,
-            quantity: fillQty,
-            remainingQuantity: ctx.activeLot.remainingQuantity,
-            realizedPnl: grossPnl,
-            realizedR: chunkR,
-            fee: fill.fee,
-            slippage: fill.slippage,
-            exitOrderId: fill.orderId,
-            exitOrderCreatedAt: fill.exitOrderCreatedAt,
-            exitOrderSubmittedAt: fill.exitOrderSubmittedAt,
-            exitTriggerTimestamp: fill.exitTriggerTimestamp,
-            exitFillTimestamp: fill.exitFillTimestamp,
-            segmentIndex: fill.segmentIndex,
-            segmentType: fill.segmentType,
-          };
+          const exitResult = TradeLifecycleManager.processExitFill(
+            ctx.activeLot,
+            {
+              ...fill,
+              targetType,
+            },
+            partialPolicy,
+            String(ctx.execSim['fillModel']),
+            String(ctx.execSim['ambiguityMode']),
+          );
 
-          ctx.activeLot.partialFills = [...(ctx.activeLot.partialFills || []), newFillRecord];
+          ctx.activeLot = exitResult.lot;
 
-          if (ctx.activeLot.remainingQuantity <= 0) {
-            ctx.activeLot.status = 'CLOSED';
-            ctx.activeLot.closedAt = fill.timestamp;
-            ctx.activeLot.unrealizedPnl = 0;
-            ctx.execSim.cancelTradeOrders(ctx.activeLot.tradeId);
-
-            const lastFill = ctx.activeLot.partialFills[ctx.activeLot.partialFills.length - 1];
-
-            const exitReason =
-              (lastFill?.targetType as string) === 'SL' ||
-              (lastFill?.targetType as string) === 'STOP' ||
-              lastFill?.targetType === 'STOP_LOSS'
-                ? SignalState.SL_HIT
-                : (lastFill?.targetType as string) === 'TP1'
-                ? SignalState.TP1_HIT
-                : (lastFill?.targetType as string) === 'TP2'
-                ? SignalState.TP2_HIT
-                : (lastFill?.targetType as string) === 'TP3'
-                ? SignalState.TP3_HIT
-                : SignalState.INVALIDATED;
-
-            const tradeRecord = TradeLifecycleManager.createCompletedTrade(
-              ctx.activeLot,
-              exitReason,
-              String(ctx.execSim['fillModel']),
-              String(ctx.execSim['ambiguityMode']),
-            );
-
-            closedTrades.push(tradeRecord);
-            ctx.activeLot = null;
-          } else {
-            ctx.activeLot.status = 'PARTIALLY_CLOSED';
-            if (targetType === 'TP1' && partialPolicy.moveStopToBreakevenOnTp1) {
-              ctx.activeLot.currentStopLoss = ctx.activeLot.entryPrice;
-              const slOrder = ctx.execSim.getTradeOrders(ctx.activeLot.tradeId).find((o) => o.orderType === 'STOP');
-              if (slOrder) {
-                slOrder.stopPrice = ctx.activeLot.entryPrice;
-                (slOrder as any).exitTarget = 'TRAILING_STOP';
-              }
+          if (exitResult.isBreakevenStopTriggered) {
+            const slOrder = ctx.execSim.getTradeOrders(ctx.activeLot.tradeId).find((o) => o.orderType === 'STOP');
+            if (slOrder) {
+              slOrder.stopPrice = ctx.activeLot.entryPrice;
+              (slOrder as any).exitTarget = 'TRAILING_STOP';
             }
+          }
+
+          if (exitResult.isClosed) {
+            ctx.execSim.cancelTradeOrders(ctx.activeLot.tradeId);
+            if (exitResult.completedTrade) {
+              closedTrades.push(exitResult.completedTrade);
+            }
+            ctx.activeLot = null;
           }
         }
       }
@@ -655,6 +601,7 @@ export class ShadowOrchestrator {
 
     // 3. Append Candle & Extract Causal Features / Regime
     ctx.candles.push(candle);
+    ctx.ledger.recordCandle(candle);
     const regimeObs = RegimeDriftDetector.classifyCausalRegime(ctx.candles);
     ctx.regimeHistory.push(regimeObs);
 
@@ -675,12 +622,14 @@ export class ShadowOrchestrator {
         );
       }
       featureVector = mlFeatures;
-      featureVectorHash = createHash('sha256').update(JSON.stringify(mlFeatures)).digest('hex');
+      featureVectorHash = createHash('sha256').update(canonicalJsonStringify(mlFeatures)).digest('hex');
       ctx.featureVectors.push(mlFeatures);
     }
 
     // 4. Candidate Signal Generation using Authoritative Candidate Strategy
-    const candidateSignal = this.generateCandidateSignal(ctx, candle, symbol);
+    const candidateSignalRes = this.generateCandidateSignal(ctx, candle, symbol);
+    const candidateSignal = candidateSignalRes.snapshot;
+    const signalSetup = candidateSignalRes.signalSetup;
 
     // 5. Candidate vs Production Comparison (if production signal provided)
     let comparison: CandidateProductionComparison | undefined;
@@ -724,10 +673,10 @@ export class ShadowOrchestrator {
         riskPercentage: (riskCfg.maxRiskPerTrade <= 0.2 ? riskCfg.maxRiskPerTrade * 100 : riskCfg.maxRiskPerTrade),
         entryPrice,
         stopLoss: stopPrice,
-        lotSize: riskCfg.lotSize ?? 1,
-        contractSize: riskCfg.contractSize ?? 1,
-        maxRiskPercentage: (riskCfg.maxAccountRiskLimit ?? 0.05) * 100,
-        maxLeverage: riskCfg.maxLeverage || 10,
+        lotSize: riskCfg.lotSize,
+        contractSize: riskCfg.contractSize,
+        maxRiskPercentage: riskCfg.maxAccountRiskLimit !== undefined ? riskCfg.maxAccountRiskLimit * 100 : undefined,
+        maxLeverage: riskCfg.maxLeverage,
         regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
       });
 
@@ -735,6 +684,17 @@ export class ShadowOrchestrator {
         throw new Error(`SHADOW_RISK_CONFIG_MISSING: PositionSizer failed to calculate valid position: ${sizing.rejectionReason || 'Invalid sizing'}`);
       }
       const initialQty = sizing.roundedUnits;
+
+      if (!signalSetup) {
+        throw new Error(`MISSING_SIGNAL_SETUP: Signal setup was not produced for actionable signal on trade '${tradeId}'`);
+      }
+      // Retain authoritative SignalGenerator setup for lifecycle lot creation on entry fill
+      const actualSignalSetup: ISignalSetup = {
+        ...signalSetup,
+        symbol,
+        id: tradeId,
+      };
+      ctx.pendingEntrySignals.set(tradeId, actualSignalSetup);
 
       const entryOrder = ctx.execSim.submitOrder({
         tradeId,
@@ -746,10 +706,6 @@ export class ShadowOrchestrator {
         timestamp: candleTime,
         exitTarget: 'ENTRY',
       });
-      (entryOrder as any).calculatedStopLoss = stopPrice;
-      (entryOrder as any).calculatedTp1 = tp1;
-      (entryOrder as any).calculatedTp2 = candidateSignal.targets?.tp2;
-      (entryOrder as any).calculatedTp3 = candidateSignal.targets?.tp3;
       newOrders.push(entryOrder);
     }
 
@@ -844,7 +800,31 @@ export class ShadowOrchestrator {
     }
 
     // B. Feature Drift
-    if (ctx.featureBaseline && ctx.featureVectors.length >= 25) {
+    const isMlCandidate =
+      !!ctx.artifact.modelArtifact ||
+      !!ctx.artifact.scalerArtifact ||
+      (Array.isArray(ctx.artifact.selectedFeatures) &&
+        ctx.artifact.selectedFeatures.length > 0 &&
+        ctx.artifact.selectedFeatures[0] !== 'none');
+
+    if (isMlCandidate && !ctx.featureBaseline) {
+      detectedDrifts.push({
+        id: `drift_feat_unavail_${candidateId}_${candleTime}`,
+        candidateId,
+        type: 'FEATURE',
+        severity: 'WARNING',
+        timestamp: now,
+        marketTimestamp: candleTime,
+        metric: 'FEATURE_DRIFT_UNAVAILABLE',
+        baselineValue: 0,
+        observedValue: 0,
+        threshold: 0,
+        windowStart: candleTime,
+        windowEnd: candleTime,
+        evidenceHash: createHash('sha256').update(`FEATURE_DRIFT_UNAVAILABLE|${candidateId}|${candleTime}`).digest('hex'),
+        details: `FEATURE_DRIFT_UNAVAILABLE: ML candidate '${candidateId}' is missing authoritative featureBaseline for drift evaluation`,
+      });
+    } else if (ctx.featureBaseline && ctx.featureVectors.length >= 25) {
       const featDrifts = FeatureDriftDetector.evaluateFeatureDrift(
         candidateId,
         ctx.featureVectors.slice(-50),
@@ -885,13 +865,21 @@ export class ShadowOrchestrator {
       ctx.ledger.recordDrifts(detectedDrifts);
     }
 
-    // 9. Health State Machine Evaluation
+    // 9. Health State Machine Evaluation (Evaluates Currently Active Drift Conditions)
     const prevHealth = ctx.ledger.getHealthState();
+    // Active drifts include newly detected drifts from the current evaluation cycle
+    // and any unexpired ledger drifts within the current rolling window horizon
+    const activeDriftLookbackMs = 3600000;
+    const unexpiredLedgerDrifts = ctx.ledger
+      .getDrifts()
+      .filter((d) => d.severity === 'CRITICAL' && Math.abs(candleTime - d.marketTimestamp) <= activeDriftLookbackMs);
+    const activeDrifts = [...unexpiredLedgerDrifts, ...detectedDrifts];
+
     const nextHealth = ShadowHealthMachine.evaluateNextState(
       prevHealth,
       ctx.ledger.getObservations().length,
       ctx.ledger.getTrades().length,
-      ctx.ledger.getDrifts(),
+      activeDrifts,
       this.options.healthConfig,
       now,
     );
@@ -1049,23 +1037,30 @@ export class ShadowOrchestrator {
     const obsSufficient = observations.length >= minObs;
     const sampleInsufficient = trades.length < minTrades || !obsSufficient;
 
+    const isMlCandidate =
+      !!ctx.artifact.modelArtifact ||
+      !!ctx.artifact.scalerArtifact ||
+      (Array.isArray(ctx.artifact.selectedFeatures) &&
+        ctx.artifact.selectedFeatures.length > 0 &&
+        ctx.artifact.selectedFeatures[0] !== 'none');
+    const featureBaselineMissing = isMlCandidate && !ctx.featureBaseline;
+
     const isHealthy =
       baselineComplete &&
+      !featureBaselineMissing &&
       health.status === 'HEALTHY' &&
       !sampleInsufficient;
 
     const reasons: string[] = [];
     if (!baselineComplete) {
       reasons.push('SHADOW_BASELINE_MISSING: immutable baseline evidence is incomplete');
+    } else if (featureBaselineMissing) {
+      reasons.push('FEATURE_DRIFT_UNAVAILABLE: ML candidate is missing authoritative featureBaseline');
     } else if (isHealthy) {
       reasons.push('Shadow candidate maintained healthy performance, feature stability, and zero critical drift');
     }
 
     const shadowDatasetHash = ctx.ledger.getShadowDatasetHash();
-    const marketDatasetHash = ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash;
-    if (!marketDatasetHash) {
-      throw new Error(`MISSING_DATASET_HASH: Candidate artifact '${candidateId}' is missing marketDatasetHash`);
-    }
 
     return {
       candidateId,
@@ -1077,11 +1072,13 @@ export class ShadowOrchestrator {
           ? 'INSUFFICIENT_SAMPLE_SIZE'
           : !baselineComplete
           ? 'SHADOW_BASELINE_MISSING'
+          : featureBaselineMissing
+          ? 'FEATURE_DRIFT_UNAVAILABLE'
           : health.statusReason || `Shadow candidate is not healthy (status: ${health.status})`
         : undefined,
       window: {
         candidateId,
-        marketDatasetHash,
+        marketDatasetHash: shadowDatasetHash,
         startTimestamp,
         endTimestamp,
         minimumObservations: minObs,
@@ -1110,11 +1107,7 @@ export class ShadowOrchestrator {
 
     const startTimestamp = observations.length > 0 ? observations[0].marketTimestamp : 0;
     const endTimestamp = observations.length > 0 ? observations[observations.length - 1].marketTimestamp : 0;
-
-    const marketDatasetHash = ctx.artifact.marketDatasetHash || ctx.artifact.datasetHash;
-    if (!marketDatasetHash) {
-      throw new Error(`MISSING_DATASET_HASH: Candidate artifact '${candidateId}' is missing marketDatasetHash`);
-    }
+    const shadowDatasetHash = ctx.ledger.getShadowDatasetHash();
 
     const rawEvidence = {
       candidateId: ctx.artifact.candidateId,
@@ -1128,8 +1121,8 @@ export class ShadowOrchestrator {
       regimeDriftEvents: drifts.filter((d) => d.type === 'REGIME'),
       executionDriftEvents: drifts.filter((d) => d.type === 'EXECUTION'),
       healthState: health,
-      marketDatasetHash,
-      shadowDatasetHash: evalResult.shadowDatasetHash,
+      marketDatasetHash: shadowDatasetHash,
+      shadowDatasetHash,
       stateHash: ctx.ledger.getStateHash(),
     };
 
@@ -1301,13 +1294,15 @@ export class ShadowOrchestrator {
     ctx: ActiveCandidateContext,
     candle: ICandle,
     symbol: string,
-  ): ShadowSignalSnapshot {
+  ): { snapshot: ShadowSignalSnapshot; signalSetup?: ISignalSetup } {
     const hasDet = !!(
       (ctx.artifact.strategyConfig as any)?.deterministicSignal ||
       (ctx.artifact.strategyConfig as any)?.deterministicSignals
     );
     if (!hasDet && ctx.candles.length < 15) {
-      return { direction: 'FLAT' };
+      return {
+        snapshot: { direction: 'FLAT' },
+      };
     }
 
     // Extract candidate strategy configuration
@@ -1359,13 +1354,16 @@ export class ShadowOrchestrator {
         : undefined;
 
     return {
-      direction,
-      confidence,
-      score: signalSetup.score,
-      stopLoss: signalSetup.stopLoss,
-      takeProfit: signalSetup.takeProfits?.tp1,
-      targets: signalSetup.takeProfits,
-      regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
+      snapshot: {
+        direction,
+        confidence,
+        score: signalSetup.score,
+        stopLoss: signalSetup.stopLoss,
+        takeProfit: signalSetup.takeProfits?.tp1,
+        targets: signalSetup.takeProfits,
+        regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
+      },
+      signalSetup,
     };
   }
 

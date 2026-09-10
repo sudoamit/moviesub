@@ -327,5 +327,6 @@ export interface ShadowLedgerData {
     readonly nextFillSequence: number;
     readonly nextEventSequence: number;
   };
+  readonly cumulativeMarketHash?: string;
   readonly savedAt: number;
 }

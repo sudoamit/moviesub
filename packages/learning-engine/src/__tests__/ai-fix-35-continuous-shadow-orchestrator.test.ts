@@ -97,7 +97,11 @@ function createDummyCandidate(id = 'cand-shadow-35'): StrategyCandidate {
     },
     riskConfig: {
       initialCapital: 1000000,
-      maxRiskPerTrade: 0.05,
+      maxRiskPerTrade: 0.01,
+      maxAccountRiskLimit: 0.05,
+      lotSize: 1,
+      contractSize: 1,
+      maxLeverage: 10,
       partialExitPolicy: {
         tp1Ratio: 0.33,
         tp2Ratio: 0.33,
@@ -627,15 +631,15 @@ describe('AI Fix 35 — Continuous Shadow Orchestrator + Drift Detection', () =>
         id: 'crit-drift-1',
         candidateId: candidate.id,
         timestamp: Date.now(),
-        marketTimestamp: Date.now(),
+        marketTimestamp: 1700000000000,
         type: 'PERFORMANCE',
         severity: 'CRITICAL',
         metric: 'expectancyR',
         baselineValue: 0.5,
         observedValue: -0.5,
         threshold: 0.3,
-        windowStart: Date.now() - 1000,
-        windowEnd: Date.now(),
+        windowStart: 1700000000000 - 1000,
+        windowEnd: 1700000000000,
         evidenceHash: 'hash_crit',
       };
       ledger.recordDrifts([criticalDrift]);

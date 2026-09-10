@@ -61,6 +61,7 @@ export class ShadowLedger {
     readonly nextFillSequence: number;
     readonly nextEventSequence: number;
   } | null = null;
+  private cumulativeMarketHash: string = '';
 
   constructor(params: {
     candidateId: string;
@@ -322,14 +323,23 @@ export class ShadowLedger {
     return deepFreeze(metrics);
   }
 
+  /**
+   * Incrementally updates the cumulative rolling market dataset hash chain on every processed candle.
+   * Ensures complete evaluation window provenance across any number of candles without keeping all candles in memory.
+   */
+  public recordCandle(candle: ICandle): void {
+    const ts = candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
+    const prev = this.cumulativeMarketHash || `genesis_${this.symbol}_${this.candidateId}`;
+    this.cumulativeMarketHash = createHash('sha256')
+      .update(`${prev}|${ts}|${candle.open}|${candle.high}|${candle.low}|${candle.close}|${candle.volume}`)
+      .digest('hex');
+  }
+
   public getShadowMarketDatasetHash(): string {
-    const hash = createHash('sha256');
-    hash.update(`shadow_market_${this.symbol}_${this.candidateId}`);
-    for (const c of this.recentCandles) {
-      const ts = c.timestamp instanceof Date ? c.timestamp.getTime() : new Date(c.timestamp).getTime();
-      hash.update(`${ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume}`);
-    }
-    return hash.digest('hex');
+    return (
+      this.cumulativeMarketHash ||
+      createHash('sha256').update(`empty_market_${this.symbol}_${this.candidateId}`).digest('hex')
+    );
   }
 
   public getShadowFeatureObservationHash(): string {
@@ -479,6 +489,7 @@ export class ShadowLedger {
       regimeHistory: this.regimeHistory,
       featureVectors: this.featureVectors,
       executionSequences: this.executionSequences ? { ...this.executionSequences } : undefined,
+      cumulativeMarketHash: this.cumulativeMarketHash,
       savedAt: Date.now(),
     };
 
@@ -581,6 +592,7 @@ export class ShadowLedger {
       this.regimeHistory = (data.regimeHistory || []).map((h) => deepFreeze({ ...h }));
       this.featureVectors = (data.featureVectors || []).map((v) => deepFreeze([...v]) as number[]);
       this.executionSequences = data.executionSequences ? { ...data.executionSequences } : null;
+      this.cumulativeMarketHash = data.cumulativeMarketHash || '';
     } catch (err: any) {
       throw new Error(`SHADOW_LEDGER_CORRUPT: Failed to hydrate shadow ledger: ${err.message}`);
     }
