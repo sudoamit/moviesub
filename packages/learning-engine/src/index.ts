@@ -39,3 +39,6 @@ export * from './production-model-activator';
 export * from './experiments';
 export * from './research';
 export * from './shadow';
+export * from './pit-experience-dataset-builder';
+export * from './candidate-hypothesis-generator';
+export * from './self-improving-retraining-pipeline';

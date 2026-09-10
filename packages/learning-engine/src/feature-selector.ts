@@ -12,7 +12,10 @@ export class FeatureSelector {
     const importances = FeatureAnalyzer.analyze(experiences);
     const n = experiences.length;
 
-    const totalR = experiences.reduce((sum, e) => sum + e.outcome.pnlR, 0);
+    const totalR = (experiences as any[]).reduce(
+      (sum, e) => sum + (e.outcome?.pnlR ?? e.outcomeR ?? e.labelContinuousR ?? 0),
+      0,
+    );
     const baselineExpectancy = n > 0 ? Number((totalR / n).toFixed(2)) : 0;
 
     const retainedFeatures: string[] = [];
@@ -37,16 +40,19 @@ export class FeatureSelector {
     }
 
     // Evaluate feature subset performance experimentally on retained dimensions
-    const evaluatedRetained = experiences.filter((e) => {
+    const evaluatedRetained = (experiences as any[]).filter((e) => {
       // Check if all core retained features meet signal quality criteria
-      const quant = e.marketState?.quant || {};
+      const quant = e.features ?? e.marketState?.quant ?? {};
       return retainedFeatures.every((fName) => {
         const val = quant[fName as keyof typeof quant];
         return val === undefined || typeof val !== 'number' || val >= 0.35;
       });
     });
 
-    const evaluatedSumR = evaluatedRetained.reduce((sum, e) => sum + e.outcome.pnlR, 0);
+    const evaluatedSumR = evaluatedRetained.reduce(
+      (sum, e) => sum + (e.outcome?.pnlR ?? e.outcomeR ?? e.labelContinuousR ?? 0),
+      0,
+    );
     const optimizedExpectancy =
       evaluatedRetained.length > 0
         ? Number((evaluatedSumR / evaluatedRetained.length).toFixed(2))

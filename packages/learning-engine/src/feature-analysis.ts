@@ -20,16 +20,19 @@ export class FeatureAnalyzer {
     }
 
     const n = experiences.length;
-    const rMultiples = experiences.map((e) => e.outcome.pnlR);
+    const rMultiples = experiences.map((e: any) => e.outcome?.pnlR ?? e.outcomeR ?? e.labelContinuousR ?? 0);
     const meanR = rMultiples.reduce((a, b) => a + b, 0) / n;
 
     const featureScores: { name: string; score: number }[] = [];
 
     for (const featName of CANONICAL_FEATURE_NAMES_V2) {
       const featValues: number[] = [];
-      for (const e of experiences) {
+      for (const e of experiences as any[]) {
         const featVal =
-          e.marketState?.quant?.[featName] ?? (e.marketState as any)?.[featName] ?? 0.5;
+          e.features?.[featName] ??
+          e.marketState?.quant?.[featName] ??
+          (e.marketState as any)?.[featName] ??
+          0.5;
         featValues.push(typeof featVal === 'number' ? featVal : 0.5);
       }
 

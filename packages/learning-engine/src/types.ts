@@ -1,5 +1,5 @@
 import { Direction, ICandle, IBacktestTrade, ISignalSetup, MarketRegimeType, Timeframe } from '@quant/shared';
-import { PointInTimeMarketSnapshot } from '@quant/trading-engine';
+export { PointInTimeMarketSnapshot } from '@quant/trading-engine';
 
 export type SimulatedTrade = IBacktestTrade;
 
@@ -701,4 +701,175 @@ export interface LearningRunReport {
   errorReport: IErrorReport;
   driftReport: DriftReport;
   summary: string;
+}
+
+// ============================================================================
+// PHASE 9: SELF-IMPROVING RETRAINING & CANDIDATE GENERATION DOMAIN CONTRACTS
+// ============================================================================
+
+export interface TrainingExample {
+  readonly exampleId: string;
+  readonly decisionTimestamp: number;
+  readonly featureTimestamp: number;
+  readonly labelStartTimestamp: number;
+  readonly labelEndTimestamp: number;
+  readonly features: readonly number[];
+  readonly featureNames: readonly string[];
+  readonly featureSchemaHash: string;
+  readonly marketDatasetHash: string;
+  readonly strategyVersion: string;
+  readonly candidateVersion?: string;
+  readonly label: number; // 1.0 (win/favorable) or 0.0 (loss)
+  readonly outcomeR?: number; // realized or counterfactual R-multiple
+  readonly regime?: string;
+  readonly volatilityBucket?: string;
+  readonly source: 'HISTORICAL' | 'SHADOW';
+}
+
+export interface TrainingDataset {
+  readonly datasetId: string;
+  readonly datasetHash: string;
+  readonly examples: readonly TrainingExample[];
+  readonly startTimestamp: number;
+  readonly endTimestamp: number;
+  readonly featureSchemaHash: string;
+  readonly featureNames: readonly string[];
+  readonly sampleCount: number;
+  readonly symbol: string;
+  readonly timeframe: string;
+}
+
+export interface ValidationDataset {
+  readonly datasetId: string;
+  readonly datasetHash: string;
+  readonly examples: readonly TrainingExample[];
+  readonly startTimestamp: number;
+  readonly endTimestamp: number;
+  readonly featureSchemaHash: string;
+  readonly sampleCount: number;
+  readonly purgedOverlapCount: number;
+  readonly embargoMs: number;
+}
+
+export interface OOSDataset {
+  readonly datasetId: string;
+  readonly datasetHash: string;
+  readonly examples: readonly TrainingExample[];
+  readonly startTimestamp: number;
+  readonly endTimestamp: number;
+  readonly featureSchemaHash: string;
+  readonly sampleCount: number;
+  readonly purgedOverlapCount: number;
+  readonly embargoMs: number;
+}
+
+export interface CandidateHypothesis {
+  readonly hypothesisId: string;
+  readonly hypothesisHash: string;
+  readonly candidateId: string;
+  readonly baseStrategyVersion: string;
+  readonly candidateVersion: string;
+  readonly type: StrategyCandidateType;
+  readonly description: string;
+  readonly parameterChanges: Readonly<Record<string, unknown>>;
+  readonly selectedFeatures?: readonly string[];
+  readonly modelType?: 'LOGISTIC_V2' | 'GBM' | 'LINEAR';
+  readonly modelHyperparameters?: Readonly<Record<string, unknown>>;
+  readonly regimeFilters?: readonly string[];
+  readonly entryFilters?: Readonly<Record<string, unknown>>;
+  readonly exitOverrides?: Readonly<Record<string, unknown>>;
+  readonly sourceTrainWindow: {
+    readonly startTimestamp: number;
+    readonly endTimestamp: number;
+    readonly trainingDatasetHash: string;
+  };
+}
+
+export interface CandidateTrainingResult {
+  readonly hypothesis: CandidateHypothesis;
+  readonly modelArtifact: ModelArtifact;
+  readonly scalerArtifact: ScalerArtifact;
+  readonly modelHash: string;
+  readonly scalerHash: string;
+  readonly selectedFeatureHash: string;
+  readonly trainingLoss: number;
+  readonly trainingSampleCount: number;
+  readonly trainedAt: number;
+}
+
+export interface CandidateValidationResult {
+  readonly hypothesisId: string;
+  readonly passed: boolean;
+  readonly validationExpectancyR: number;
+  readonly validationWinRate: number;
+  readonly validationProfitFactor: number;
+  readonly validationMaxDrawdownR: number;
+  readonly validationTradeCount: number;
+  readonly walkForwardExpectancyR: number;
+  readonly walkForwardFoldsPassed: number;
+  readonly walkForwardTotalFolds: number;
+  readonly rejectionReason?: string;
+  readonly simulatedRMultiples: readonly number[];
+}
+
+export interface CandidateOOSResult {
+  readonly hypothesisId: string;
+  readonly oosExpectancyR: number;
+  readonly oosWinRate: number;
+  readonly oosProfitFactor: number;
+  readonly oosMaxDrawdownPercent: number;
+  readonly oosTradeCount: number;
+  readonly oosMarketDatasetHash: string;
+  readonly executionDerived: boolean;
+  readonly monteCarloRuinProbability: number;
+  readonly transactionCostSurvived: boolean;
+}
+
+export interface RetrainingRunConfig {
+  readonly maxCandidates: number;
+  readonly maxTrainingRuns: number;
+  readonly maxFeatureCombinations: number;
+  readonly maxHyperparameterCombinations: number;
+  readonly embargoMs: number;
+  readonly experienceCutoffTimestamp?: number;
+  readonly baseStrategyVersion: string;
+  readonly symbol: string;
+  readonly timeframe: string;
+  readonly seed?: number;
+  readonly minValidationTrades?: number;
+  readonly minOOSTrades?: number;
+  readonly minValidationExpectancyR?: number;
+  readonly minValidationProfitFactor?: number;
+}
+
+export type RetrainingRunStatus =
+  | 'IDLE'
+  | 'DATASET_BUILDING'
+  | 'DATASET_VALIDATED'
+  | 'TRAINING'
+  | 'VALIDATION'
+  | 'WALK_FORWARD'
+  | 'OOS_EVALUATION'
+  | 'CANDIDATE_ARTIFACT_CREATED'
+  | 'REGISTERED'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'REJECTED';
+
+export interface RetrainingRunRecord {
+  readonly runId: string;
+  readonly startedAt: number;
+  readonly completedAt?: number;
+  readonly marketDatasetHash: string;
+  readonly experienceDatasetHash: string;
+  readonly trainingWindow: { readonly start: number; readonly end: number };
+  readonly validationWindow: { readonly start: number; readonly end: number };
+  readonly oosWindow: { readonly start: number; readonly end: number };
+  readonly candidateIds: readonly string[];
+  readonly selectedCandidateId?: string;
+  readonly modelVersions: readonly string[];
+  readonly configHash: string;
+  readonly resultHash?: string;
+  readonly status: RetrainingRunStatus;
+  readonly failureReason?: string;
 }

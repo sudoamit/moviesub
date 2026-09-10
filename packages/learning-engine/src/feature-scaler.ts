@@ -56,12 +56,26 @@ export class TemporalFeatureScaler {
       const feats = 'features' in item ? item.features : item.marketState?.quant;
       if (!feats || typeof feats !== 'object') continue;
 
-      for (const [key, val] of Object.entries(feats)) {
-        if (typeof val === 'number' && Number.isFinite(val)) {
-          if (!featureValuesMap.has(key)) {
-            featureValuesMap.set(key, []);
+      if (Array.isArray(feats)) {
+        const names = (item as any).featureNames || [];
+        for (let idx = 0; idx < feats.length; idx++) {
+          const val = feats[idx];
+          const key = names[idx] || String(idx);
+          if (typeof val === 'number' && Number.isFinite(val)) {
+            if (!featureValuesMap.has(key)) {
+              featureValuesMap.set(key, []);
+            }
+            featureValuesMap.get(key)!.push(val);
           }
-          featureValuesMap.get(key)!.push(val);
+        }
+      } else {
+        for (const [key, val] of Object.entries(feats)) {
+          if (typeof val === 'number' && Number.isFinite(val)) {
+            if (!featureValuesMap.has(key)) {
+              featureValuesMap.set(key, []);
+            }
+            featureValuesMap.get(key)!.push(val);
+          }
         }
       }
     }

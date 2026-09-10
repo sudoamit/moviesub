@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { ICandle } from '@quant/shared';
 import {
   CandidateMarketDataset,
@@ -323,6 +324,10 @@ export class WalkForwardValidator {
       if (!modelArtifact || !modelArtifact.modelVersion) {
         throw new Error('INVALID_MODEL_ARTIFACT: Model artifact must contain a valid modelVersion');
       }
+      modelArtifact.selectedFeatures = foldSelection.retainedFeatures;
+      modelArtifact.selectedFeatureHash = createHash('sha256')
+        .update(foldSelection.retainedFeatures.join(','))
+        .digest('hex');
 
       // 6. Distinct Cryptographic Hashes for Experience vs Market Datasets (P1 #15 & #16)
       const trainExpDatasetHash = DatasetManager.computeCanonicalDatasetHash(trainSlice);
@@ -597,8 +602,9 @@ export class WalkForwardValidator {
           parameter: paramName,
           value: val,
           fittedValue: val,
-          modelArtifact: baseCandidate.type === 'MODEL' ? modelArtifact : baseCandidate.change?.modelArtifact,
-          selectedFeatures,
+          modelArtifact: (modelArtifact || baseCandidate.change?.modelArtifact) as any,
+          scalerArtifact: (modelArtifact?.scalerArtifact || baseCandidate.change?.scalerArtifact) as any,
+          selectedFeatures: (modelArtifact?.selectedFeatures || selectedFeatures || baseCandidate.change?.selectedFeatures) as any,
         },
       };
 
@@ -646,8 +652,9 @@ export class WalkForwardValidator {
         fittedSampleCount: marketCandles?.length ?? 0,
         fittedValue: bestValue,
         fittedObjective: Number.isFinite(bestObjective) ? Number(bestObjective.toFixed(4)) : 0,
-        modelArtifact: baseCandidate.type === 'MODEL' ? modelArtifact : baseCandidate.change?.modelArtifact,
-        selectedFeatures,
+        modelArtifact: (modelArtifact || baseCandidate.change?.modelArtifact) as any,
+        scalerArtifact: (modelArtifact?.scalerArtifact || baseCandidate.change?.scalerArtifact) as any,
+        selectedFeatures: (modelArtifact?.selectedFeatures || selectedFeatures || baseCandidate.change?.selectedFeatures) as any,
       },
     };
   }
