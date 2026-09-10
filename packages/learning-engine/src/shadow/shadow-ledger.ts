@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHash, randomUUID } from 'crypto';
-import { IBacktestTrade, ICandle } from '@quant/shared';
+import { IBacktestTrade, ICandle, ISignalSetup } from '@quant/shared';
 import { IFill, IOrder } from '@quant/backtesting';
 import { PositionLot } from '@quant/risk-engine';
 import {
@@ -18,6 +18,7 @@ import {
 } from './shadow-types';
 import { ShadowHealthMachine } from './shadow-health-machine';
 import { RegimeObservation } from './regime-drift-detector';
+import { FeatureDriftBaseline } from './feature-drift-detector';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
@@ -54,6 +55,19 @@ export class ShadowLedger {
   private activeLot: PositionLot | null = null;
   private recentCandles: ICandle[] = [];
   private pendingOrders: IOrder[] = [];
+  private pendingEntrySignals: Map<string, ISignalSetup> = new Map();
+  private baselineMetrics?: {
+    expectancyR: number;
+    winRate: number;
+    profitFactor: number;
+    maxDrawdownR?: number;
+  };
+  private featureBaseline?: FeatureDriftBaseline;
+  private referenceRegime?: {
+    volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY';
+    trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING';
+  };
+  private windowConfig?: ShadowWindowConfig;
   private regimeHistory: RegimeObservation[] = [];
   private featureVectors: (readonly number[])[] = [];
   private executionSequences: {
@@ -326,12 +340,22 @@ export class ShadowLedger {
   /**
    * Incrementally updates the cumulative rolling market dataset hash chain on every processed candle.
    * Ensures complete evaluation window provenance across any number of candles without keeping all candles in memory.
+   * Uses canonical JSON serialization for byte-level deterministic hashing.
    */
   public recordCandle(candle: ICandle): void {
     const ts = candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
     const prev = this.cumulativeMarketHash || `genesis_${this.symbol}_${this.candidateId}`;
+    const payload = {
+      previousHash: prev,
+      timestamp: ts,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+    };
     this.cumulativeMarketHash = createHash('sha256')
-      .update(`${prev}|${ts}|${candle.open}|${candle.high}|${candle.low}|${candle.close}|${candle.volume}`)
+      .update(canonicalJsonStringify(payload))
       .digest('hex');
   }
 
@@ -343,21 +367,31 @@ export class ShadowLedger {
   }
 
   public getShadowFeatureObservationHash(): string {
-    const hash = createHash('sha256');
-    hash.update(`shadow_features_${this.symbol}_${this.candidateId}`);
-    for (const o of this.observations) {
-      hash.update(`${o.marketTimestamp}|${o.featureVectorHash}`);
-    }
-    return hash.digest('hex');
+    const payload = {
+      symbol: this.symbol,
+      candidateId: this.candidateId,
+      observations: this.observations.map((o) => ({
+        marketTimestamp: o.marketTimestamp,
+        featureVectorHash: o.featureVectorHash,
+      })),
+    };
+    return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
   }
 
   public getShadowExecutionEvidenceHash(): string {
-    const hash = createHash('sha256');
-    hash.update(`shadow_exec_${this.symbol}_${this.candidateId}`);
-    for (const f of this.fills) {
-      hash.update(`${f.fillId}|${f.price}|${f.quantity}|${f.timestamp}|${f.fee}|${f.slippage}`);
-    }
-    return hash.digest('hex');
+    const payload = {
+      symbol: this.symbol,
+      candidateId: this.candidateId,
+      fills: this.fills.map((f) => ({
+        fillId: f.fillId,
+        price: f.price,
+        quantity: f.quantity,
+        timestamp: f.timestamp,
+        fee: f.fee,
+        slippage: f.slippage,
+      })),
+    };
+    return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
   }
 
   public getShadowDatasetHash(): string {
@@ -381,7 +415,10 @@ export class ShadowLedger {
       tradeCount: this.trades.length,
       health: this.health,
       activeLot: this.activeLot,
+      pendingOrdersCount: this.pendingOrders.length,
+      pendingSignalsCount: this.pendingEntrySignals.size,
       executionSequences: this.executionSequences,
+      cumulativeMarketHash: this.cumulativeMarketHash,
     };
     return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
   }
@@ -432,6 +469,54 @@ export class ShadowLedger {
 
   public setPendingOrders(orders: readonly IOrder[]): void {
     this.pendingOrders = orders.map((o) => deepFreeze({ ...o }));
+  }
+
+  public getPendingEntrySignals(): Map<string, ISignalSetup> {
+    const copy = new Map<string, ISignalSetup>();
+    for (const [k, v] of this.pendingEntrySignals.entries()) {
+      copy.set(k, { ...v });
+    }
+    return copy;
+  }
+
+  public setPendingEntrySignals(signals: Map<string, ISignalSetup> | readonly (readonly [string, ISignalSetup])[]): void {
+    this.pendingEntrySignals = new Map();
+    const entries = signals instanceof Map ? signals.entries() : signals;
+    for (const [k, v] of entries) {
+      this.pendingEntrySignals.set(k, deepFreeze({ ...v }));
+    }
+  }
+
+  public getBaselineMetrics(): { expectancyR: number; winRate: number; profitFactor: number; maxDrawdownR?: number } | undefined {
+    return this.baselineMetrics ? { ...this.baselineMetrics } : undefined;
+  }
+
+  public setBaselineMetrics(metrics: { expectancyR: number; winRate: number; profitFactor: number; maxDrawdownR?: number } | undefined): void {
+    this.baselineMetrics = metrics ? deepFreeze({ ...metrics }) : undefined;
+  }
+
+  public getFeatureBaseline(): FeatureDriftBaseline | undefined {
+    return this.featureBaseline ? deepFreeze({ ...this.featureBaseline }) : undefined;
+  }
+
+  public setFeatureBaseline(baseline: FeatureDriftBaseline | undefined): void {
+    this.featureBaseline = baseline ? deepFreeze({ ...baseline }) : undefined;
+  }
+
+  public getReferenceRegime(): { volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY'; trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING' } | undefined {
+    return this.referenceRegime ? { ...this.referenceRegime } : undefined;
+  }
+
+  public setReferenceRegime(regime: { volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY'; trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING' } | undefined): void {
+    this.referenceRegime = regime ? deepFreeze({ ...regime }) : undefined;
+  }
+
+  public getWindowConfig(): ShadowWindowConfig | undefined {
+    return this.windowConfig ? { ...this.windowConfig } : undefined;
+  }
+
+  public setWindowConfig(config: ShadowWindowConfig | undefined): void {
+    this.windowConfig = config ? deepFreeze({ ...config }) : undefined;
   }
 
   public getRegimeHistory(): readonly RegimeObservation[] {
@@ -486,6 +571,11 @@ export class ShadowLedger {
       activeLot: this.activeLot,
       recentCandles: this.recentCandles,
       pendingOrders: this.pendingOrders,
+      pendingEntrySignals: Array.from(this.pendingEntrySignals.entries()),
+      baselineMetrics: this.baselineMetrics,
+      featureBaseline: this.featureBaseline,
+      referenceRegime: this.referenceRegime,
+      windowConfig: this.windowConfig,
       regimeHistory: this.regimeHistory,
       featureVectors: this.featureVectors,
       executionSequences: this.executionSequences ? { ...this.executionSequences } : undefined,
@@ -589,6 +679,13 @@ export class ShadowLedger {
       this.activeLot = data.activeLot ? (deepFreeze({ ...data.activeLot }) as PositionLot) : null;
       this.recentCandles = (data.recentCandles || []).map((c) => deepFreeze({ ...c }) as ICandle);
       this.pendingOrders = (data.pendingOrders || []).map((o) => deepFreeze({ ...o }) as IOrder);
+      this.pendingEntrySignals = new Map(
+        (data.pendingEntrySignals || []).map(([k, v]) => [k, deepFreeze({ ...v }) as ISignalSetup]),
+      );
+      this.baselineMetrics = data.baselineMetrics ? deepFreeze({ ...data.baselineMetrics }) : undefined;
+      this.featureBaseline = data.featureBaseline ? deepFreeze({ ...data.featureBaseline }) : undefined;
+      this.referenceRegime = data.referenceRegime ? deepFreeze({ ...data.referenceRegime }) : undefined;
+      this.windowConfig = data.windowConfig ? deepFreeze({ ...data.windowConfig }) : undefined;
       this.regimeHistory = (data.regimeHistory || []).map((h) => deepFreeze({ ...h }));
       this.featureVectors = (data.featureVectors || []).map((v) => deepFreeze([...v]) as number[]);
       this.executionSequences = data.executionSequences ? { ...data.executionSequences } : null;

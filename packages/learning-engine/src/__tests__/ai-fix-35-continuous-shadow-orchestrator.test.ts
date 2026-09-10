@@ -864,5 +864,240 @@ describe('AI Fix 35 — Continuous Shadow Orchestrator + Drift Detection', () =>
       expect(evidence.observationCount).toBe(35);
       expect(evidence.stateHash).toBeDefined();
     });
+
+    it('Test 28: P0 #1 Pending entry signals are persisted and restored across restart across candle boundaries', async () => {
+      const candidateId = 'cand-pending-signal-restart';
+      const candidate = createDummyCandidate(candidateId);
+      (candidate.change as any).minMtfScore = 50;
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const persistenceFilePath = path.join(testDir, `shadow-${candidateId}.json`);
+      const orchestrator1 = new ShadowOrchestrator({ persistenceDir: testDir });
+      orchestrator1.startCandidate(candidateId, { persistenceFilePath });
+
+      const provider = new MockMarketDataProvider({ seed: 777 });
+      const marketCandles = await provider.getHistoricalCandles('BTCUSDT', '15m', 45);
+
+      // Process candles until an entry order is submitted
+      let orderCandleIdx = -1;
+      for (let i = 0; i < marketCandles.length; i++) {
+        orchestrator1.processCandle(candidateId, marketCandles[i]);
+        const ledger = orchestrator1.getCandidateLedger(candidateId)!;
+        if (ledger.getPendingEntrySignals().size > 0) {
+          orderCandleIdx = i;
+          break;
+        }
+      }
+
+      expect(orderCandleIdx).toBeGreaterThan(0);
+
+      // Check that a pending entry order and signal exists before restart
+      const ledger1 = orchestrator1.getCandidateLedger(candidateId)!;
+      const pendingSignalsBefore = ledger1.getPendingEntrySignals();
+      expect(pendingSignalsBefore.size).toBe(1);
+
+      // Simulate abrupt process crash / restart:
+      // Create a brand new orchestrator and restart candidate from persistence
+      const orchestrator2 = new ShadowOrchestrator({ persistenceDir: testDir });
+      orchestrator2.startCandidate(candidateId, { persistenceFilePath });
+
+      const ledger2 = orchestrator2.getCandidateLedger(candidateId)!;
+      const pendingSignalsRestored = ledger2.getPendingEntrySignals();
+      expect(pendingSignalsRestored.size).toBe(1);
+
+      // Now process candle T+1: this should trigger entry fill without throwing MISSING_ENTRY_SIGNAL
+      expect(() => {
+        const res = orchestrator2.processCandle(candidateId, marketCandles[orderCandleIdx + 1]);
+        expect(res.newFills.length).toBe(1);
+        expect(res.openPositionsCount).toBe(1);
+      }).not.toThrow();
+    });
+
+    it('Test 29: P0 #2 Baseline metrics and feature baseline are fully persisted for self-contained restart', () => {
+      const candidateId = 'cand-baseline-self-contained';
+      const candidate = createDummyCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const persistenceFilePath = path.join(testDir, `shadow-${candidateId}.json`);
+      const orchestrator1 = new ShadowOrchestrator({ persistenceDir: testDir });
+
+      const customFeatureBaseline: FeatureDriftBaseline = {
+        featureSchemaHash: artifact.featureSchemaHash,
+        featureNames: ['f1', 'f2'],
+        distributions: {
+          f1: {
+            featureName: 'f1',
+            mean: 10.5,
+            stdDev: 1.2,
+            min: 5.0,
+            max: 15.0,
+            binEdges: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            binProbabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+          },
+          f2: {
+            featureName: 'f2',
+            mean: 20.5,
+            stdDev: 2.3,
+            min: 10.0,
+            max: 30.0,
+            binEdges: [10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30],
+            binProbabilities: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+          },
+        },
+        sampleCount: 100,
+      };
+
+      // Start with explicit baseline options
+      orchestrator1.startCandidate(candidateId, {
+        featureBaseline: customFeatureBaseline,
+        baselineExpectancyR: 1.85,
+        baselineWinRate: 0.62,
+        baselineProfitFactor: 2.15,
+        persistenceFilePath,
+      });
+
+      const candles = generateContinuousCandles(1700000000000, 30);
+      for (let i = 0; i < 25; i++) {
+        orchestrator1.processCandle(candidateId, candles[i]);
+      }
+
+      // Abrupt restart: create orchestrator2 with ZERO baseline options supplied
+      const orchestrator2 = new ShadowOrchestrator({ persistenceDir: testDir });
+      // Calling startCandidate without any baseline options should succeed self-contained
+      expect(() => orchestrator2.startCandidate(candidateId, { persistenceFilePath })).not.toThrow();
+
+      const ledger2 = orchestrator2.getCandidateLedger(candidateId)!;
+      expect(ledger2.getBaselineMetrics()?.expectancyR).toBe(1.85);
+      expect(ledger2.getBaselineMetrics()?.winRate).toBe(0.62);
+      expect(ledger2.getBaselineMetrics()?.profitFactor).toBe(2.15);
+      expect(ledger2.getFeatureBaseline()?.distributions.f1.mean).toBe(10.5);
+
+      // Further processing must not produce FEATURE_DRIFT_UNAVAILABLE
+      const result = orchestrator2.processCandle(candidateId, candles[25]);
+      const unavailableDrifts = result.activeDrifts?.filter((d) => d.metric === 'FEATURE_DRIFT_UNAVAILABLE') || [];
+      expect(unavailableDrifts.length).toBe(0);
+    });
+
+    it('Test 30: P1 #1 StartCandidate fails closed (SHADOW_EXECUTION_STATE_CORRUPT) when active lot exists without valid market timestamp', () => {
+      const candidateId = 'cand-corrupt-market-ts';
+      const candidate = createDummyCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const persistenceFilePath = path.join(testDir, `shadow-${candidateId}.json`);
+
+      // Write corrupt persistence file with active lot and missing lastMarketTimestamp
+      const corruptData = {
+        version: '1.0',
+        candidateId,
+        candidateVersion: '1.0.0',
+        strategyVersion: '1.0.0',
+        featureSchemaHash: artifact.featureSchemaHash,
+        artifactHash: artifact.artifactHash,
+        symbol: 'BTCUSDT',
+        cumulativeMarketHash: 'corrupt_hash',
+        observations: [],
+        orders: [],
+        fills: [],
+        trades: [],
+        activeLot: {
+          tradeId: 't1',
+          symbol: 'BTCUSDT',
+          direction: Direction.BULLISH,
+          initialQuantity: 10,
+          remainingQuantity: 10,
+          entryPrice: 100,
+          currentStopLoss: 90,
+          initialRiskPerUnit: 10,
+          entryTimestamp: 1700000000000,
+          entryOrderId: 'o1',
+          status: 'OPEN',
+          realizedPnl: 0,
+          realizedR: 0,
+          accumulatedFees: 0,
+          accumulatedSlippage: 0,
+          partialFills: [],
+        },
+        pendingOrders: [],
+        pendingEntrySignals: [],
+        recentCandles: [],
+        regimeHistory: [],
+        featureVectors: [],
+        drifts: [],
+        comparisons: [],
+        events: [],
+        health: {
+          status: 'HEALTHY',
+          degradationFactors: [],
+          updatedAt: Date.now(),
+        },
+        lastMarketTimestamp: null, // Corrupted / missing market timestamp
+      };
+
+      fs.writeFileSync(persistenceFilePath, JSON.stringify(corruptData), 'utf-8');
+
+      const orchestrator = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orchestrator.startCandidate(candidateId, { persistenceFilePath })).toThrow(
+        /SHADOW_EXECUTION_STATE_CORRUPT/,
+      );
+    });
+
+    it('Test 31: P1 #4 Continuous execution vs multi-step restart equivalence test', () => {
+      const candidateId = 'cand-equiv-test';
+
+      const candidate = createDummyCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const pathCont = path.join(testDir, `shadow-${candidateId}-cont.json`);
+      const pathRest = path.join(testDir, `shadow-${candidateId}-rest.json`);
+
+      const fixedTime = 1700000000000;
+      const candles = generateContinuousCandles(1700000000000, 40);
+
+      // Run Orchestrator 1 Continuously
+      const orchContinuous = new ShadowOrchestrator({ persistenceDir: testDir });
+      orchContinuous.startCandidate(candidateId, { persistenceFilePath: pathCont });
+      for (let i = 0; i < candles.length; i++) {
+        orchContinuous.processCandle(candidateId, candles[i], undefined, fixedTime + i * 60000);
+      }
+
+      // Run Orchestrator 2 with restarts every 10 candles
+      let orchRestart = new ShadowOrchestrator({ persistenceDir: testDir });
+      orchRestart.startCandidate(candidateId, { persistenceFilePath: pathRest });
+
+      for (let i = 0; i < candles.length; i++) {
+        orchRestart.processCandle(candidateId, candles[i], undefined, fixedTime + i * 60000);
+
+        // Restart every 10 candles
+        if ((i + 1) % 10 === 0 && i < candles.length - 1) {
+          orchRestart = new ShadowOrchestrator({ persistenceDir: testDir });
+          orchRestart.startCandidate(candidateId, { persistenceFilePath: pathRest });
+        }
+      }
+
+      const ledgerCont = orchContinuous.getCandidateLedger(candidateId)!;
+      const ledgerRest = orchRestart.getCandidateLedger(candidateId)!;
+
+      // Assert equivalence of observations, orders, fills, trades, and market hash
+      expect(ledgerRest.getObservations().length).toBe(ledgerCont.getObservations().length);
+      expect(ledgerRest.getOrders().length).toBe(ledgerCont.getOrders().length);
+      expect(ledgerRest.getFills().length).toBe(ledgerCont.getFills().length);
+      expect(ledgerRest.getTrades().length).toBe(ledgerCont.getTrades().length);
+      expect(ledgerRest.getShadowMarketDatasetHash()).toBe(ledgerCont.getShadowMarketDatasetHash());
+
+      // If positions exist, verify lot equivalence
+      const lotCont = ledgerCont.getActiveLot();
+      const lotRest = ledgerRest.getActiveLot();
+      if (lotCont && lotRest) {
+        expect(lotRest.remainingQuantity).toBe(lotCont.remainingQuantity);
+        expect(lotRest.currentStopLoss).toBe(lotCont.currentStopLoss);
+      } else {
+        expect(lotCont).toBeNull();
+        expect(lotRest).toBeNull();
+      }
+    });
   });
 });

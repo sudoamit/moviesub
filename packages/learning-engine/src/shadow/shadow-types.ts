@@ -1,8 +1,9 @@
-import { IBacktestTrade, ICandle } from '@quant/shared';
+import { IBacktestTrade, ICandle, ISignalSetup } from '@quant/shared';
 import { PositionLot } from '@quant/risk-engine';
 import { IFill, IOrder } from '@quant/backtesting';
 import { ShadowEvaluationMetrics } from '../types';
 import { RegimeObservation } from './regime-drift-detector';
+import { FeatureDriftBaseline } from './feature-drift-detector';
 
 export const SHADOW_SCHEMA_VERSION = '1.0';
 
@@ -320,6 +321,19 @@ export interface ShadowLedgerData {
   readonly activeLot?: PositionLot | null;
   readonly recentCandles?: readonly ICandle[];
   readonly pendingOrders?: readonly IOrder[];
+  readonly pendingEntrySignals?: readonly (readonly [string, ISignalSetup])[];
+  readonly baselineMetrics?: {
+    readonly expectancyR: number;
+    readonly winRate: number;
+    readonly profitFactor: number;
+    readonly maxDrawdownR?: number;
+  };
+  readonly featureBaseline?: FeatureDriftBaseline;
+  readonly referenceRegime?: {
+    readonly volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY';
+    readonly trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING';
+  };
+  readonly windowConfig?: ShadowWindowConfig;
   readonly regimeHistory?: readonly RegimeObservation[];
   readonly featureVectors?: readonly (readonly number[])[];
   readonly executionSequences?: {

@@ -288,6 +288,21 @@ export class ShadowOrchestrator {
       );
     }
 
+    // Initialize ShadowLedger FIRST so we can read persisted baseline/regime/signals if present
+    const persistencePath =
+      options?.persistenceFilePath ||
+      (this.options.persistenceDir ? path.join(this.options.persistenceDir, `shadow-${candidateId}.json`) : undefined);
+
+    const ledger = new ShadowLedger({
+      candidateId: validatedArtifact.candidateId,
+      candidateVersion: validatedArtifact.candidateVersion,
+      strategyVersion: validatedArtifact.strategyVersion,
+      featureSchemaHash: validatedArtifact.featureSchemaHash,
+      artifactHash: validatedArtifact.artifactHash,
+      symbol,
+      persistencePath,
+    });
+
     // Risk Configuration Validation (Strict Fail-Closed — No synthetic defaults)
     const riskCfg = validatedArtifact.riskConfig;
     if (typeof riskCfg.initialCapital !== 'number' || !Number.isFinite(riskCfg.initialCapital) || riskCfg.initialCapital <= 0) {
@@ -301,9 +316,11 @@ export class ShadowOrchestrator {
       throw new Error(`SHADOW_RISK_CONFIG_MISSING: Candidate '${candidateId}' partialExitPolicy is invalid: ${partialPolicyVal.reason}`);
     }
 
-    // Baseline metrics check (Strict Fail-Closed — No synthetic defaults)
+    // Baseline metrics check (Strict Fail-Closed — Check options -> persisted ledger -> candidate artifact evidence)
+    const persistedBaselines = ledger.getBaselineMetrics();
     const baselineExpectancy =
       options?.baselineExpectancyR ??
+      persistedBaselines?.expectancyR ??
       (validatedArtifact as any).evidence?.expectancyAfterHistorical ??
       (validatedArtifact as any).evidence?.expectancyBefore ??
       (validatedArtifact.strategyConfig as any)?.evidence?.expectancyAfterHistorical ??
@@ -317,6 +334,7 @@ export class ShadowOrchestrator {
 
     const baselineWinRate =
       options?.baselineWinRate ??
+      persistedBaselines?.winRate ??
       (validatedArtifact as any).evidence?.winRate ??
       (validatedArtifact.strategyConfig as any)?.evidence?.winRate;
 
@@ -328,6 +346,7 @@ export class ShadowOrchestrator {
 
     const baselineProfitFactor =
       options?.baselineProfitFactor ??
+      persistedBaselines?.profitFactor ??
       (validatedArtifact as any).evidence?.profitFactor ??
       (validatedArtifact.strategyConfig as any)?.evidence?.profitFactor;
 
@@ -337,8 +356,13 @@ export class ShadowOrchestrator {
       );
     }
 
-    // Reference regime validation from immutable candidate evidence with robust normalization
+    // Feature baseline resolution
+    const featureBaseline = options?.featureBaseline ?? ledger.getFeatureBaseline();
+
+    // Reference regime validation from options / persisted ledger / immutable candidate evidence with robust normalization
+    const persistedRefRegime = ledger.getReferenceRegime();
     const rawRefRegime =
+      persistedRefRegime ??
       (validatedArtifact as any).evidence?.referenceRegime ??
       (validatedArtifact as any).evidence?.primaryRegime ??
       (validatedArtifact.strategyConfig as any)?.referenceRegime ??
@@ -376,20 +400,19 @@ export class ShadowOrchestrator {
       trendRegime: normalizedTrend,
     };
 
-    // Initialize ShadowLedger
-    const persistencePath =
-      options?.persistenceFilePath ||
-      (this.options.persistenceDir ? path.join(this.options.persistenceDir, `shadow-${candidateId}.json`) : undefined);
-
-    const ledger = new ShadowLedger({
-      candidateId: validatedArtifact.candidateId,
-      candidateVersion: validatedArtifact.candidateVersion,
-      strategyVersion: validatedArtifact.strategyVersion,
-      featureSchemaHash: validatedArtifact.featureSchemaHash,
-      artifactHash: validatedArtifact.artifactHash,
-      symbol,
-      persistencePath,
+    // Store baseline metrics, feature baseline, reference regime, and windowConfig in ledger for self-contained restart
+    ledger.setBaselineMetrics({
+      expectancyR: baselineExpectancy,
+      winRate: baselineWinRate,
+      profitFactor: baselineProfitFactor,
     });
+    if (featureBaseline) {
+      ledger.setFeatureBaseline(featureBaseline);
+    }
+    ledger.setReferenceRegime(referenceRegime);
+    if (this.options.windowConfig) {
+      ledger.setWindowConfig(this.options.windowConfig);
+    }
 
     // Initialize Authoritative ExecutionSimulator
     const execSim = new ExecutionSimulator(
@@ -399,7 +422,7 @@ export class ShadowOrchestrator {
       `shadow_${candidateId}`,
     );
 
-    // Restore persisted state, fills, and pending orders into ExecutionSimulator
+    // Restore persisted state, fills, pending orders, and pending entry signals into ExecutionSimulator & context
     const recoveredCandles = [...ledger.getRecentCandles()];
     const frozenLot = ledger.getActiveLot();
     const recoveredActiveLot = frozenLot ? ShadowOrchestrator.thawPositionLot(frozenLot) : null;
@@ -408,6 +431,7 @@ export class ShadowOrchestrator {
     const recoveredPendingOrders = [...ledger.getPendingOrders()];
     const recoveredFills = [...ledger.getFills()];
     const recoveredSequences = ledger.getExecutionSequences();
+    const recoveredPendingSignals = ledger.getPendingEntrySignals();
     if (recoveredSequences) {
       execSim.setExecutionSequences(recoveredSequences);
     }
@@ -415,12 +439,18 @@ export class ShadowOrchestrator {
     execSim.restoreFills(recoveredFills);
 
     if (recoveredActiveLot && recoveredActiveLot.remainingQuantity > 0) {
+      const lastMktTs = ledger.getLastMarketTimestamp();
+      if (!lastMktTs || lastMktTs <= 0) {
+        throw new Error(
+          `SHADOW_EXECUTION_STATE_CORRUPT: Active position lot exists in persistence for candidate '${candidateId}' but lastMarketTimestamp is missing or invalid`,
+        );
+      }
       ShadowOrchestrator.submitRestingExitOrders(
         execSim,
         recoveredActiveLot,
         symbol,
         validatedArtifact.riskConfig.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY,
-        ledger.getLastMarketTimestamp() || Date.now(),
+        lastMktTs,
       );
     }
 
@@ -431,8 +461,8 @@ export class ShadowOrchestrator {
       ledger,
       execSim,
       candles: recoveredCandles,
-      pendingEntrySignals: new Map(),
-      featureBaseline: options?.featureBaseline,
+      pendingEntrySignals: recoveredPendingSignals,
+      featureBaseline,
       baselineMetrics: {
         expectancyR: baselineExpectancy,
         winRate: baselineWinRate,
@@ -869,7 +899,7 @@ export class ShadowOrchestrator {
     const prevHealth = ctx.ledger.getHealthState();
     // Active drifts include newly detected drifts from the current evaluation cycle
     // and any unexpired ledger drifts within the current rolling window horizon
-    const activeDriftLookbackMs = 3600000;
+    const activeDriftLookbackMs = this.options.healthConfig?.activeDriftLookbackMs ?? 3600000;
     const unexpiredLedgerDrifts = ctx.ledger
       .getDrifts()
       .filter((d) => d.severity === 'CRITICAL' && Math.abs(candleTime - d.marketTimestamp) <= activeDriftLookbackMs);
@@ -901,7 +931,7 @@ export class ShadowOrchestrator {
         timestamp: now,
         marketTimestamp: candleTime,
         eventType: 'SHADOW_TRADE_CLOSED',
-        evidenceHash: createHash('sha256').update(JSON.stringify(closedTrades)).digest('hex'),
+        evidenceHash: createHash('sha256').update(canonicalJsonStringify(closedTrades)).digest('hex'),
         metadata: { tradeCount: closedTrades.length, pnl: closedTrades[0].pnl },
       });
     }
@@ -930,9 +960,10 @@ export class ShadowOrchestrator {
       });
     }
 
-    // 12. Atomic persistence to disk including restart state and pending orders
+    // 12. Atomic persistence to disk including restart state, pending orders, and pending entry signals
     ctx.ledger.setActiveLot(ctx.activeLot);
     ctx.ledger.setPendingOrders(ctx.execSim.getAllOrders().filter((o) => o.status === 'PENDING'));
+    ctx.ledger.setPendingEntrySignals(ctx.pendingEntrySignals);
     ctx.ledger.setRecentCandles(ctx.candles.slice(-100));
     ctx.ledger.setRegimeHistory(ctx.regimeHistory.slice(-50));
     ctx.ledger.setFeatureVectors(ctx.featureVectors.slice(-50));
@@ -1143,11 +1174,13 @@ export class ShadowOrchestrator {
     const ctx = this.activeCandidates.get(candidateId);
     if (!ctx) return;
 
-    // Cancel all orders in ExecutionSimulator and clear lot
+    // Cancel all orders in ExecutionSimulator and clear lot & pending signals
     ctx.execSim.cancelAllOrders();
     ctx.activeLot = null;
+    ctx.pendingEntrySignals.clear();
     ctx.ledger.setActiveLot(null);
     ctx.ledger.setPendingOrders([]);
+    ctx.ledger.setPendingEntrySignals(new Map());
 
     ctx.ledger.setHealthState({
       ...ctx.ledger.getHealthState(),
@@ -1370,11 +1403,13 @@ export class ShadowOrchestrator {
   private executePaperRollback(ctx: ActiveCandidateContext, reason: string, now: number): void {
     if (!this.options.enableAutomaticPaperRollback) return;
 
-    // 1. Cancel active paper position and pending orders in ExecutionSimulator and ledger
+    // 1. Cancel active paper position, pending orders, and pending signals in ExecutionSimulator and ledger
     ctx.execSim.cancelAllOrders();
     ctx.activeLot = null;
+    ctx.pendingEntrySignals.clear();
     ctx.ledger.setActiveLot(null);
     ctx.ledger.setPendingOrders([]);
+    ctx.ledger.setPendingEntrySignals(new Map());
 
     // 2. Mark candidate REJECTED in ModelRegistry (strict fail-closed)
     try {

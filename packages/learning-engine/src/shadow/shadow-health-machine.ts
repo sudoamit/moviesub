@@ -5,6 +5,7 @@ export interface HealthMachineConfig {
   readonly minTradesForHealthy: number; // e.g. 10
   readonly requiredConsecutiveHealthyWindowsForRecovery: number; // e.g. 3
   readonly maxConsecutiveDegradedWindowsBeforeFailure: number; // e.g. 5
+  readonly activeDriftLookbackMs?: number; // e.g. 3600000 (1 hour default)
 }
 
 export const DEFAULT_HEALTH_MACHINE_CONFIG: HealthMachineConfig = {
@@ -12,6 +13,7 @@ export const DEFAULT_HEALTH_MACHINE_CONFIG: HealthMachineConfig = {
   minTradesForHealthy: 10,
   requiredConsecutiveHealthyWindowsForRecovery: 3,
   maxConsecutiveDegradedWindowsBeforeFailure: 5,
+  activeDriftLookbackMs: 3600000,
 };
 
 const ALLOWED_TRANSITIONS: Record<ShadowStatus, readonly ShadowStatus[]> = {
