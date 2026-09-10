@@ -95,3 +95,13 @@ export interface ILatencyConfig {
   submissionLatencyMs: number; // Time from trigger to exchange receipt (e.g. 15ms)
   processingLatencyMs: number;
 }
+
+export type CostStressMode = 'NORMAL' | 'MULTIPLIER' | 'ABSOLUTE';
+
+export interface ExecutionCostStressConfig {
+  mode: CostStressMode;
+  multiplier?: number; // e.g. 1.0 (NORMAL), 2.0 (DOUBLE), 3.0 (TRIPLE)
+  feeConfig?: IFeeConfig;
+  slippageConfig?: ISlippageConfig;
+  spreadConfig?: ISpreadConfig;
+}

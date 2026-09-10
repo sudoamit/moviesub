@@ -8,8 +8,26 @@ import {
   Timeframe,
 } from '@quant/shared';
 import { IPartialExitPolicy, PositionLot, IExecutionEvent } from '@quant/risk-engine';
-import { FillModel, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ILatencyConfig } from './execution/types';
-export { FillModel, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ILatencyConfig };
+import {
+  FillModel,
+  SameCandleAmbiguityMode,
+  IFeeConfig,
+  ISlippageConfig,
+  ISpreadConfig,
+  ILatencyConfig,
+  CostStressMode,
+  ExecutionCostStressConfig,
+} from './execution/types';
+export {
+  FillModel,
+  SameCandleAmbiguityMode,
+  IFeeConfig,
+  ISlippageConfig,
+  ISpreadConfig,
+  ILatencyConfig,
+  CostStressMode,
+  ExecutionCostStressConfig,
+};
 
 export interface IEquityPoint {
   timestamp: Date;
@@ -95,6 +113,7 @@ export interface IBacktestOptions {
   slippageConfig?: ISlippageConfig;
   spreadConfig?: ISpreadConfig;
   latencyConfig?: ILatencyConfig;
+  costStressConfig?: ExecutionCostStressConfig;
   feeRate?: number;
   slippageBps?: number;
   costPerTradeR?: number;

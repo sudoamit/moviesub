@@ -1,4 +1,4 @@
-import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig } from './types';
+import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ExecutionCostStressConfig } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
@@ -14,6 +14,7 @@ export class ExecutionSimulator {
   private slippageConfig?: ISlippageConfig;
   private feeConfig?: IFeeConfig;
   private spreadConfig?: ISpreadConfig;
+  private costStressConfig?: ExecutionCostStressConfig;
   private orderCounter = 0;
   private fillCounter = 0;
   private eventCounter = 0;
@@ -27,6 +28,7 @@ export class ExecutionSimulator {
     slippageConfig?: ISlippageConfig,
     feeConfig?: IFeeConfig,
     spreadConfig?: ISpreadConfig,
+    costStressConfig?: ExecutionCostStressConfig,
   ) {
     this.fillModel = fillModel;
     this.ambiguityMode = ambiguityMode;
@@ -35,6 +37,7 @@ export class ExecutionSimulator {
     this.slippageConfig = slippageConfig;
     this.feeConfig = feeConfig;
     this.spreadConfig = spreadConfig;
+    this.costStressConfig = costStressConfig;
   }
 
   submitOrder(params: {
@@ -163,6 +166,7 @@ export class ExecutionSimulator {
                   this.slippageConfig,
                   this.feeConfig,
                   this.spreadConfig,
+                  this.costStressConfig,
                 );
               } else {
                 res = FillModelEngine.evaluateFill(
@@ -175,6 +179,7 @@ export class ExecutionSimulator {
                   this.slippageConfig,
                   this.feeConfig,
                   this.spreadConfig,
+                  this.costStressConfig,
                 );
               }
             } else {
@@ -188,6 +193,7 @@ export class ExecutionSimulator {
                 this.slippageConfig,
                 this.feeConfig,
                 this.spreadConfig,
+                this.costStressConfig,
               );
             }
 

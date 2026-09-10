@@ -235,6 +235,7 @@ export class BacktestSimulator {
       slippageConfig,
       feeConfig,
       options.spreadConfig,
+      options.costStressConfig,
     );
 
     const trades: IBacktestTrade[] = [];
