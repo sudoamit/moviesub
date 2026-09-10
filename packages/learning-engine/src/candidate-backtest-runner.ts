@@ -107,10 +107,9 @@ export class CandidateBacktestRunner {
    */
   public static validateArtifactIntegrity(
     artifact: unknown,
-    options?: { allowTestHooks?: boolean },
   ): { isValid: boolean; reason?: string } {
     try {
-      CandidateArtifactValidator.validate(artifact, options);
+      CandidateArtifactValidator.validate(artifact);
       return { isValid: true };
     } catch (err: any) {
       return { isValid: false, reason: err.message || 'ARTIFACT_VALIDATION_FAILED' };

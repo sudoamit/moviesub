@@ -506,8 +506,8 @@ export class ModelRegistry {
     const artifact = this.artifacts.get(candidateId);
     if (!artifact) return undefined;
 
-    // Fail-closed verification upon load (allows test hooks if registered for test fixtures)
-    const valResult = CandidateBacktestRunner.validateArtifactIntegrity(artifact, { allowTestHooks: true });
+    // Fail-closed verification upon load
+    const valResult = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
     if (!valResult.isValid) {
       throw new Error(`ARTIFACT_INTEGRITY_VIOLATION on get: ${valResult.reason}`);
     }

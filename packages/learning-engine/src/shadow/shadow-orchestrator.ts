@@ -277,7 +277,7 @@ export class ShadowOrchestrator {
       throw new Error(`MISSING_EXECUTION_CONFIG: Candidate '${candidateId}' artifact does not contain executionConfig`);
     }
 
-    const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact, { allowTestHooks: true });
+    const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
     if (!val.isValid) {
       throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: Candidate artifact corrupted: ${val.reason}`);
     }
@@ -717,7 +717,7 @@ export class ShadowOrchestrator {
         riskPercentage: (riskCfg.maxRiskPerTrade <= 0.2 ? riskCfg.maxRiskPerTrade * 100 : riskCfg.maxRiskPerTrade),
         entryPrice,
         stopLoss: stopPrice,
-        lotSize: riskCfg.lotSize || 1,
+        lotSize: riskCfg.lotSize || (symbol.toUpperCase().includes('BTC') || symbol.toUpperCase().includes('ETH') ? 0.001 : 1),
         contractSize: riskCfg.contractSize || 1,
         maxRiskPercentage: (riskCfg.maxAccountRiskLimit ?? 0.05) * 100,
         maxLeverage: riskCfg.maxLeverage || 10,

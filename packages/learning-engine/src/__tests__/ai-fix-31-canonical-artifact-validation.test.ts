@@ -252,7 +252,7 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
     });
   });
 
-  describe('P1-3: Elimination of Synthetic Fallback Provenance', () => {
+  describe('P1-3: Elimination of Synthetic Fallback Provenance & Strict Integrity', () => {
     test('CandidateArtifactBuilder fails closed when dataset provenance hash is completely missing', () => {
       const candidateNoDataset = createValidCandidate({
         change: {
@@ -265,6 +265,97 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
       delete (candidateNoDataset as any).datasetHash;
 
       expect(() => CandidateArtifactBuilder.build(candidateNoDataset)).toThrow(/DATASET_HASH_MISSING/);
+    });
+
+    test('CandidateArtifactValidator strictly rejects placeholder feature hashes (no hash_* bypass)', () => {
+      const candidate = createValidCandidate();
+      const artifact = CandidateArtifactBuilder.build(candidate, { datasetHash: 'dataset_hash_unified_001' });
+
+      const tampered = {
+        ...artifact,
+        selectedFeatureHash: 'hash_placeholder_123',
+      };
+
+      expect(() => CandidateArtifactValidator.validate(tampered as any)).toThrow(/SELECTED_FEATURE_HASH_MISMATCH/);
+    });
+
+    test('CandidateArtifactValidator strictly requires artifactHash and rejects missing or mismatched artifactHash', () => {
+      const candidate = createValidCandidate();
+      const artifact = CandidateArtifactBuilder.build(candidate, { datasetHash: 'dataset_hash_unified_001' });
+
+      const missingHash = {
+        ...artifact,
+        artifactHash: undefined,
+      };
+      expect(() => CandidateArtifactValidator.validate(missingHash as any)).toThrow(/ARTIFACT_HASH_MISSING/);
+
+      const mismatchedHash = {
+        ...artifact,
+        artifactHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      };
+      expect(() => CandidateArtifactValidator.validate(mismatchedHash as any)).toThrow(/ARTIFACT_HASH_MISMATCH/);
+    });
+
+    test('CandidateArtifactValidator strictly enforces single canonical symbol authority', () => {
+      const candidate = createValidCandidate();
+      const artifact = CandidateArtifactBuilder.build(candidate, { datasetHash: 'dataset_hash_unified_001' });
+
+      const mismatchedExecSymbol = {
+        ...artifact,
+        executionConfig: {
+          ...artifact.executionConfig,
+          symbol: 'ETHUSDT',
+        },
+      };
+      expect(() => CandidateArtifactValidator.validate(mismatchedExecSymbol as any)).toThrow(/SYMBOL_MISMATCH/);
+
+      const mismatchedStratSymbol = {
+        ...artifact,
+        strategyConfig: {
+          ...artifact.strategyConfig,
+          symbol: 'ETHUSDT',
+        },
+      };
+      expect(() => CandidateArtifactValidator.validate(mismatchedStratSymbol as any)).toThrow(/SYMBOL_MISMATCH/);
+    });
+
+    test('CandidateArtifactValidator rejects candidates with model/scaler hashes when artifacts are absent', () => {
+      const candidate = createValidCandidate();
+      const artifact = CandidateArtifactBuilder.build(candidate, { datasetHash: 'dataset_hash_unified_001' });
+
+      const scalerHashWithoutArtifact = {
+        ...artifact,
+        scalerHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        scalerArtifact: undefined,
+      };
+      expect(() => CandidateArtifactValidator.validate(scalerHashWithoutArtifact as any)).toThrow(/SCALER_ARTIFACT_MISSING/);
+
+      const modelHashWithoutArtifact = {
+        ...artifact,
+        modelHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        modelArtifact: undefined,
+      };
+      expect(() => CandidateArtifactValidator.validate(modelHashWithoutArtifact as any)).toThrow(/MODEL_ARTIFACT_MISSING/);
+    });
+
+    test('Production CandidateArtifactValidator unconditionally rejects test hooks in root or strategyConfig', () => {
+      const candidate = createValidCandidate();
+      const artifact = CandidateArtifactBuilder.build(candidate, { datasetHash: 'dataset_hash_unified_001' });
+
+      const rootHookArtifact = {
+        ...artifact,
+        deterministicSignal: { direction: 'BUY', score: 90 },
+      };
+      expect(() => CandidateArtifactValidator.validate(rootHookArtifact as any)).toThrow(/TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT/);
+
+      const stratHookArtifact = {
+        ...artifact,
+        strategyConfig: {
+          ...artifact.strategyConfig,
+          deterministicSignal: { direction: 'BUY', score: 90 },
+        },
+      };
+      expect(() => CandidateArtifactValidator.validate(stratHookArtifact as any)).toThrow(/TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT/);
     });
   });
 

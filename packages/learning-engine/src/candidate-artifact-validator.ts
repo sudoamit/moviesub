@@ -14,11 +14,9 @@ export class CandidateArtifactValidator {
    * Central canonical validation boundary for CandidateArtifact.
    * Ensures that any artifact consumed across Backtest, Shadow, Registry, Promotion, and WFV
    * strictly conforms to the immutable, validated financial ledger contract.
+   * Zero test-hook tolerance in production validation.
    */
-  public static validate(
-    artifact: unknown,
-    options?: { allowTestHooks?: boolean },
-  ): ValidatedCandidateArtifact {
+  public static validate(artifact: unknown): ValidatedCandidateArtifact {
     if (!artifact || typeof artifact !== 'object') {
       throw new Error('INVALID_CANDIDATE_ARTIFACT: Artifact must be a non-null object');
     }
@@ -41,17 +39,9 @@ export class CandidateArtifactValidator {
       throw new Error(`STRATEGY_VERSION_MISSING: Candidate '${candidateId}' is missing strategyVersion`);
     }
 
-    // 2. Authoritative Symbol Validation
-    const symbol =
-      (typeof art.symbol === 'string' && art.symbol.trim() !== '' ? art.symbol : undefined) ||
-      (typeof (art.executionConfig as any)?.symbol === 'string' && (art.executionConfig as any).symbol.trim() !== ''
-        ? (art.executionConfig as any).symbol
-        : undefined) ||
-      (typeof (art.strategyConfig as any)?.symbol === 'string' && (art.strategyConfig as any).symbol.trim() !== ''
-        ? (art.strategyConfig as any).symbol
-        : undefined);
-
-    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+    // 2. Authoritative Symbol Validation (Canonical authority on artifact root)
+    const symbol = art.symbol;
+    if (typeof symbol !== 'string' || symbol.trim() === '') {
       throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidateId}' is missing authoritative symbol`);
     }
 
@@ -95,7 +85,13 @@ export class CandidateArtifactValidator {
       throw new Error(`CANDIDATE_EXECUTION_CONFIG_MISSING: Candidate '${candidateId}' is missing executionConfig`);
     }
 
-    if (execConfig.symbol && execConfig.symbol !== symbol) {
+    if (execConfig.candidateId !== candidateId) {
+      throw new Error(
+        `EXECUTION_CONFIG_MISMATCH: Execution config candidateId '${execConfig.candidateId}' does not match artifact '${candidateId}'`,
+      );
+    }
+
+    if (execConfig.symbol !== symbol) {
       throw new Error(
         `CANDIDATE_SYMBOL_MISMATCH: Execution config symbol '${execConfig.symbol}' does not match artifact symbol '${symbol}'`,
       );
@@ -105,12 +101,51 @@ export class CandidateArtifactValidator {
       throw new Error(`CONFIG_HASH_MISSING: Candidate '${candidateId}' executionConfig is missing configHash`);
     }
 
-    // 5. Canonical minMtfScore Validation (Zero Downstream Defaults Invariant)
+    // minMtfScore must be strictly defined, finite, and in range [0, 100]
     const execMinMtfScore = execConfig.minMtfScore;
     if (typeof execMinMtfScore !== 'number' || !Number.isFinite(execMinMtfScore) || execMinMtfScore < 0 || execMinMtfScore > 100) {
       throw new Error(
         `MISSING_MIN_MTF_SCORE: Candidate '${candidateId}' executionConfig must specify a finite minMtfScore in range [0, 100]`,
       );
+    }
+
+    // Sizing and Stop Loss Multipliers
+    if (
+      typeof execConfig.stopLossAtrMultiplier !== 'number' ||
+      !Number.isFinite(execConfig.stopLossAtrMultiplier) ||
+      (execConfig.stopLossAtrMultiplier as number) <= 0
+    ) {
+      throw new Error(
+        `INVALID_STOP_MULTIPLIER: Candidate '${candidateId}' stopLossAtrMultiplier must be a positive finite number`,
+      );
+    }
+
+    if (
+      typeof execConfig.sizingMultiplier !== 'number' ||
+      !Number.isFinite(execConfig.sizingMultiplier) ||
+      (execConfig.sizingMultiplier as number) <= 0
+    ) {
+      throw new Error(
+        `INVALID_SIZING_MULTIPLIER: Candidate '${candidateId}' sizingMultiplier must be a positive finite number`,
+      );
+    }
+
+    // Fill model and ambiguity mode
+    const fillModel = execConfig.fillModel;
+    if (fillModel !== 'OHLC_PATH' && fillModel !== 'NEXT_BAR_OPEN') {
+      throw new Error(`INVALID_FILL_MODEL: Candidate '${candidateId}' has invalid fillModel '${fillModel}'`);
+    }
+
+    const ambiguityMode = execConfig.ambiguityMode;
+    if (ambiguityMode !== 'CONSERVATIVE' && ambiguityMode !== 'AGGRESSIVE') {
+      throw new Error(
+        `INVALID_AMBIGUITY_MODE: Candidate '${candidateId}' has invalid ambiguityMode '${ambiguityMode}'`,
+      );
+    }
+
+    const latencyMs = execConfig.latencyMs;
+    if (typeof latencyMs !== 'number' || latencyMs < 0 || !Number.isFinite(latencyMs)) {
+      throw new Error(`INVALID_LATENCY: Candidate '${candidateId}' latencyMs must be non-negative finite number`);
     }
 
     // 5. Strategy Configuration Integrity
@@ -119,28 +154,26 @@ export class CandidateArtifactValidator {
       throw new Error(`MISSING_STRATEGY_CONFIG: Candidate '${candidateId}' is missing strategyConfig`);
     }
 
-    if (stratConfig.symbol && stratConfig.symbol !== symbol) {
+    if (stratConfig.symbol !== symbol) {
       throw new Error(
         `CANDIDATE_SYMBOL_MISMATCH: Strategy config symbol '${stratConfig.symbol}' does not match artifact symbol '${symbol}'`,
       );
     }
 
     // Test hooks are strictly prohibited in production CandidateArtifact
-    if (!options?.allowTestHooks) {
-      if ('deterministicSignal' in stratConfig || 'deterministicSignals' in stratConfig || 'strategy' in stratConfig) {
-        throw new Error(
-          `TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT: Candidate '${candidateId}' strategyConfig contains test hooks (deterministicSignal/strategy)`,
-        );
-      }
-
-      if ('deterministicSignal' in art || 'deterministicSignals' in art) {
-        throw new Error(
-          `TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT: Candidate '${candidateId}' root artifact contains test hooks`,
-        );
-      }
+    if ('deterministicSignal' in stratConfig || 'deterministicSignals' in stratConfig || 'strategy' in stratConfig) {
+      throw new Error(
+        `TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT: Candidate '${candidateId}' strategyConfig contains test hooks (deterministicSignal/strategy)`,
+      );
     }
 
-    // 7. Schema and Feature Selection Integrity
+    if ('deterministicSignal' in art || 'deterministicSignals' in art) {
+      throw new Error(
+        `TEST_HOOKS_PROHIBITED_IN_PRODUCTION_ARTIFACT: Candidate '${candidateId}' root artifact contains test hooks`,
+      );
+    }
+
+    // 6. Schema and Feature Selection Integrity
     const featureSchemaVersion = art.featureSchemaVersion;
     if (typeof featureSchemaVersion !== 'string' || featureSchemaVersion.trim() === '') {
       throw new Error(`FEATURE_SCHEMA_VERSION_MISSING: Candidate '${candidateId}' is missing featureSchemaVersion`);
@@ -156,25 +189,32 @@ export class CandidateArtifactValidator {
       throw new Error(`SELECTED_FEATURES_MISSING: Candidate '${candidateId}' must specify non-empty selectedFeatures`);
     }
 
+    // Canonical feature hash: SHA-256 over selectedFeatures without placeholder bypass
     const computedFeatureHash = createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
-    if (
-      typeof art.selectedFeatureHash === 'string' &&
-      !art.selectedFeatureHash.startsWith('hash_') &&
-      art.selectedFeatureHash !== computedFeatureHash
-    ) {
+    if (typeof art.selectedFeatureHash !== 'string' || art.selectedFeatureHash !== computedFeatureHash) {
       throw new Error(
         `SELECTED_FEATURE_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedFeatureHash}, got ${art.selectedFeatureHash}`,
       );
     }
 
-    // 8. Scaler & Model Integrity
+    // 7. Scaler & Model Integrity
     const scalerHash = art.scalerHash;
     if (typeof scalerHash !== 'string' || scalerHash.trim() === '') {
       throw new Error(`SCALER_HASH_MISSING: Candidate '${candidateId}' is missing scalerHash`);
     }
 
-    const scalerParams = (art.scalerArtifact as any)?.scalerParameters;
-    if (scalerParams) {
+    const modelHash = art.modelHash;
+    if (typeof modelHash !== 'string' || modelHash.trim() === '') {
+      throw new Error(`MODEL_HASH_MISSING: Candidate '${candidateId}' is missing modelHash`);
+    }
+
+    if (scalerHash !== 'none') {
+      const scalerParams = (art.scalerArtifact as any)?.scalerParameters;
+      if (!scalerParams) {
+        throw new Error(
+          `SCALER_ARTIFACT_MISSING: Candidate '${candidateId}' has scalerHash '${scalerHash}' but is missing scalerArtifact with scalerParameters`,
+        );
+      }
       try {
         const computedScalerHash = TemporalFeatureScaler.computeScalerHash(scalerParams);
         if (scalerHash !== computedScalerHash) {
@@ -185,15 +225,19 @@ export class CandidateArtifactValidator {
       } catch (err: any) {
         throw new Error(`SCALER_HASH_MISMATCH: ${err.message || 'corrupted scaler parameters'}`);
       }
+    } else if (art.scalerArtifact !== undefined && (art.scalerArtifact as any)?.scalerParameters) {
+      throw new Error(
+        `SCALER_HASH_MISMATCH: Candidate '${candidateId}' has scalerArtifact parameters but scalerHash is 'none'`,
+      );
     }
 
-    const modelHash = art.modelHash;
-    if (typeof modelHash !== 'string' || modelHash.trim() === '') {
-      throw new Error(`MODEL_HASH_MISSING: Candidate '${candidateId}' is missing modelHash`);
-    }
-
-    const model = art.modelArtifact as any;
-    if (model && Array.isArray(model.weights)) {
+    if (modelHash !== 'none') {
+      const model = art.modelArtifact as any;
+      if (!model || !Array.isArray(model.weights) || model.weights.length === 0) {
+        throw new Error(
+          `MODEL_ARTIFACT_MISSING: Candidate '${candidateId}' has modelHash '${modelHash}' but is missing modelArtifact with weights`,
+        );
+      }
       const computedModelHash = createHash('sha256')
         .update(`${model.modelVersion || 'v2.0'}|${model.weights.join(',')}|${model.bias ?? 0}`)
         .digest('hex');
@@ -202,9 +246,14 @@ export class CandidateArtifactValidator {
           `MODEL_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedModelHash}, got ${modelHash}`,
         );
       }
+    } else if (art.modelArtifact && Array.isArray((art.modelArtifact as any).weights) && (art.modelArtifact as any).weights.length > 0) {
+      throw new Error(
+        `MODEL_HASH_MISMATCH: Candidate '${candidateId}' has modelArtifact weights but modelHash is 'none'`,
+      );
     }
 
-    // 9. Cryptographic Linkage Verification
+    // Cryptographic Linkage Verification
+    const model = art.modelArtifact as any;
     if (model) {
       if (model.featureSchemaHash && art.featureSchemaHash && model.featureSchemaHash !== art.featureSchemaHash) {
         throw new Error(
@@ -218,12 +267,12 @@ export class CandidateArtifactValidator {
       }
       if (model.selectedFeatureHash && art.selectedFeatureHash && model.selectedFeatureHash !== art.selectedFeatureHash) {
         throw new Error(
-          `INCOMPATIBLE_MODEL_SELECTED_FEATURE_HASH: Model selected feature hash ${model.selectedFeatureHash} does not match artifact ${art.selectedFeatureHash}`,
+          `INCOMPATIBLE_MODEL_SELECTED_FEATURE_HASH: Model selected feature hash ${model.selectedFeatureHash} does not match artifact selected feature hash ${art.selectedFeatureHash}`,
         );
       }
     }
 
-    // 10. Dataset Provenance Hashes
+    // 8. Dataset Provenance Hashes
     const datasetHash = art.datasetHash || art.marketDatasetHash;
     if (typeof datasetHash !== 'string' || datasetHash.trim() === '') {
       throw new Error(`DATASET_HASH_MISSING: Candidate '${candidateId}' is missing datasetHash`);
@@ -244,20 +293,13 @@ export class CandidateArtifactValidator {
       throw new Error(`OOS_DATASET_HASH_MISSING: Candidate '${candidateId}' is missing oosDatasetHash`);
     }
 
-    // 11. Training Seed Validation
+    // 9. Training Seed Validation
     const trainingSeed = art.trainingSeed;
     if (typeof trainingSeed !== 'number' || !Number.isFinite(trainingSeed)) {
       throw new Error(`TRAINING_SEED_MISSING: Candidate '${candidateId}' is missing valid numeric trainingSeed`);
     }
 
-    // 12. Artifact Cryptographic Integrity (Artifact Hash)
-    const sanitizedStratConfig: any = { ...stratConfig };
-    if (options?.allowTestHooks) {
-      delete sanitizedStratConfig.deterministicSignal;
-      delete sanitizedStratConfig.deterministicSignals;
-      delete sanitizedStratConfig.strategy;
-    }
-
+    // 10. Artifact Cryptographic Integrity (Mandatory Artifact Hash)
     const canonicalPayload = {
       candidateId,
       candidateVersion,
@@ -280,11 +322,14 @@ export class CandidateArtifactValidator {
       trainingSeed,
       riskConfig,
       executionConfig: execConfig,
-      strategyConfig: sanitizedStratConfig,
+      strategyConfig: stratConfig,
     };
 
     const computedArtifactHash = createHash('sha256').update(JSON.stringify(canonicalPayload)).digest('hex');
-    if (art.artifactHash && art.artifactHash !== computedArtifactHash) {
+    if (typeof art.artifactHash !== 'string' || art.artifactHash.trim() === '') {
+      throw new Error(`ARTIFACT_HASH_MISSING: Candidate '${candidateId}' is missing artifactHash`);
+    }
+    if (art.artifactHash !== computedArtifactHash) {
       throw new Error(
         `ARTIFACT_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedArtifactHash}, got ${art.artifactHash}`,
       );

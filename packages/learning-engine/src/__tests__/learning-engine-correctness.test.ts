@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import {
   CandidateEvaluator,
   CandidateGenerator,
@@ -1045,9 +1046,9 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
         riskConfig: defaultRiskConfig,
         modelArtifact: {
           modelId: 'm1',
-          featureSchemaHash: 'hash_schema_1',
-          selectedFeatureHash: 'hash_feat_1',
-          scalerHash: 'hash_scaler_1',
+          featureSchemaHash: createHash('sha256').update('schema_2.0_smcScore,mtfAlignment,rvol').digest('hex'),
+          selectedFeatureHash: createHash('sha256').update('smcScore,mtfAlignment,rvol').digest('hex'),
+          scalerHash: 'none',
         },
       },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },

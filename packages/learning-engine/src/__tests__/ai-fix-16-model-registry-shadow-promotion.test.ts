@@ -207,8 +207,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
       expect(artifact.scalerHash).not.toBe('no_scaler');
       expect(artifact.modelHash).not.toBe('no_model');
       expect(artifact.selectedFeatures).not.toContain('all_features');
-      expect(artifact.scalerHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(artifact.modelHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(artifact.scalerHash).toBe('none');
+      expect(artifact.modelHash).toBe('none');
       expect(artifact.artifactHash).toMatch(/^[a-f0-9]{64}$/);
     });
 

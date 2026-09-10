@@ -241,72 +241,11 @@ export class CandidateArtifactBuilder {
       (candidate.change?.marketDatasetHash as string) ||
       resolvedDatasetHash;
 
-    const scalerParams =
-      (candidate.change?.scalerArtifact as any)?.scalerParameters ||
-      (candidate.change?.modelArtifact as any)?.scalerArtifact?.scalerParameters;
-    const scalerHash = scalerParams
-      ? TemporalFeatureScaler.computeScalerHash(scalerParams)
-      : ((candidate.change?.modelArtifact as any)?.scalerHash ||
-        (candidate.change?.scalerHash as string) ||
-        createHash('sha256').update('canonical_baseline_scaler_v2').digest('hex'));
-
-    const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
-    const featureSchemaHash =
-      (candidate.change?.modelArtifact as any)?.featureSchemaHash ||
-      (candidate.change?.featureSchemaHash as string) ||
-      createHash('sha256').update(`canonical_schema_${featureSchemaVersion}`).digest('hex');
-
-    const selectedFeatures = [...((candidate.change?.selectedFeatures as string[]) || [])];
-    if (selectedFeatures.length === 0 && (candidate.change?.modelArtifact as any)?.selectedFeatures) {
-      selectedFeatures.push(...((candidate.change?.modelArtifact as any)?.selectedFeatures as string[]));
-    }
-    if (selectedFeatures.length === 0) {
-      selectedFeatures.push('smcScore', 'mtfAlignment', 'rvol');
-    }
-    const selectedFeatureHash =
-      (candidate.change?.modelArtifact as any)?.selectedFeatureHash ||
-      (candidate.change?.selectedFeatureHash as string) ||
-      createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
-
-    const modelArtifact = candidate.change?.modelArtifact as any;
-    const modelHash =
-      modelArtifact?.weights && Array.isArray(modelArtifact.weights)
-        ? createHash('sha256')
-            .update(
-              `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
-            )
-            .digest('hex')
-        : (modelArtifact?.modelHash ||
-          (candidate.change?.modelHash as string) ||
-          createHash('sha256').update('canonical_baseline_model_v2').digest('hex'));
-
-    const modelId = modelArtifact?.modelId || `model-${candidate.id}`;
-    const modelVersion = modelArtifact?.modelVersion || candidate.baseStrategyVersion || 'ml-v2-0';
-    const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
-    const candidateVersion = candidate.candidateVersion || candidate.id;
-    const artifactVersion = 'v2.0';
-    const createdBy = provenance?.createdBy || 'LearningEngine';
-    const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
-
     const candidateRisk =
-      (candidate as any).riskConfig ||
-      (candidate.change as any)?.riskConfig ||
+      candidate.riskConfig ||
+      candidate.change?.riskConfig ||
       options?.riskConfig ||
-      provenance?.riskConfig ||
-      (candidate.type === 'BASELINE'
-        ? {
-            initialCapital: 100000,
-            maxRiskPerTrade: 0.01,
-            partialExitPolicy: {
-              tp1Ratio: 0.33,
-              tp2Ratio: 0.33,
-              tp3Ratio: 0.34,
-              moveStopToBreakevenOnTp1: true,
-              trailStopOnTp2: true,
-              trailStopOffsetR: 1.0,
-            },
-          }
-        : undefined);
+      options?.provenance?.riskConfig;
 
     if (!candidateRisk || typeof candidateRisk !== 'object' || Object.keys(candidateRisk).length === 0) {
       throw new Error(`CANDIDATE_RISK_CONFIG_MISSING: Candidate '${candidate.id}' is missing authoritative riskConfig`);
@@ -319,21 +258,84 @@ export class CandidateArtifactBuilder {
       partialExitPolicy: candidateRisk.partialExitPolicy,
     } as CandidateRiskConfig);
 
-    const strategyConfig: CandidateStrategyConfig = {
-      ...((candidate as any).strategyConfig || {}),
-      ...(candidate.change || {}),
+    const candidateChange = candidate.change as Record<string, any> | undefined;
+    const modelArtifact = candidateChange?.modelArtifact;
+    const scalerArtifact =
+      candidateChange?.scalerArtifact ||
+      candidateChange?.modelArtifact?.scalerArtifact ||
+      undefined;
+
+    const selectedFeatures: string[] = [...(candidateChange?.selectedFeatures || [])];
+    if (selectedFeatures.length === 0 && modelArtifact?.selectedFeatures) {
+      selectedFeatures.push(...modelArtifact.selectedFeatures);
+    }
+    if (selectedFeatures.length === 0) {
+      selectedFeatures.push('smcScore', 'mtfAlignment', 'rvol');
+    }
+    const selectedFeatureHash = createHash('sha256').update(selectedFeatures.join(',')).digest('hex');
+
+    const featureSchemaVersion = candidate.featureSchemaVersion || '2.0';
+    const featureSchemaHash =
+      modelArtifact?.featureSchemaHash ||
+      candidateChange?.featureSchemaHash ||
+      createHash('sha256').update(`schema_${featureSchemaVersion}_${selectedFeatures.join(',')}`).digest('hex');
+
+    const isMlCandidate =
+      candidate.type === 'MODEL' ||
+      modelArtifact !== undefined ||
+      scalerArtifact !== undefined;
+
+    let scalerHash = 'none';
+    let modelHash = 'none';
+    let modelId = 'none';
+    let modelVersion = 'none';
+
+    if (isMlCandidate) {
+      const scalerParams = scalerArtifact?.scalerParameters;
+      if (scalerParams) {
+        scalerHash = TemporalFeatureScaler.computeScalerHash(scalerParams);
+      } else if (candidateChange?.scalerHash) {
+        scalerHash = candidateChange.scalerHash;
+      }
+
+      if (modelArtifact?.weights && Array.isArray(modelArtifact.weights)) {
+        modelHash = createHash('sha256')
+          .update(
+            `${modelArtifact.modelVersion || 'v2.0'}|${modelArtifact.weights.join(',')}|${modelArtifact.bias ?? 0}`,
+          )
+          .digest('hex');
+      } else if (candidateChange?.modelHash) {
+        modelHash = candidateChange.modelHash;
+      }
+
+      modelId = modelArtifact?.modelId || `model-${candidate.id}`;
+      modelVersion = modelArtifact?.modelVersion || candidate.baseStrategyVersion || 'ml-v2-0';
+    }
+
+    const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
+    const candidateVersion = candidate.candidateVersion || candidate.id;
+    const artifactVersion = 'v2.0';
+    const createdBy = provenance?.createdBy || 'LearningEngine';
+    const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
+
+    const rawCandidate = candidate as Record<string, any>;
+    const stratConfigObj = {
+      ...(rawCandidate.strategyConfig || {}),
+      ...(candidateChange || {}),
       symbol: config.symbol,
       minMtfScore: config.minMtfScore,
     };
 
     // Remove any test hooks from production strategyConfig
-    delete (strategyConfig as any).deterministicSignal;
-    delete (strategyConfig as any).deterministicSignals;
-    delete (strategyConfig as any).strategy;
+    delete stratConfigObj.deterministicSignal;
+    delete stratConfigObj.deterministicSignals;
+    delete stratConfigObj.strategy;
 
-    if ((candidate as any).evidence) {
-      (strategyConfig as any).evidence = (candidate as any).evidence;
+    if (candidate.evidence) {
+      stratConfigObj.evidence = candidate.evidence;
     }
+
+    const strategyConfig: CandidateStrategyConfig = stratConfigObj;
 
     const canonicalPayload = {
       candidateId: candidate.id,
@@ -377,11 +379,8 @@ export class CandidateArtifactBuilder {
       selectedFeatures,
       selectedFeatureHash,
       scalerHash,
-      scalerArtifact:
-        (candidate.change?.scalerArtifact as any) ||
-        (candidate.change?.modelArtifact as any)?.scalerArtifact ||
-        undefined,
-      modelArtifact: modelArtifact || undefined,
+      scalerArtifact,
+      modelArtifact,
       modelHash,
       strategyConfig,
       trainingDatasetHash,
@@ -398,7 +397,7 @@ export class CandidateArtifactBuilder {
       configHash: config.configHash,
       artifactHash,
       symbol: config.symbol,
-      ...((candidate as any).evidence ? { evidence: (candidate as any).evidence } : {}),
+      ...(candidate.evidence ? { evidence: candidate.evidence } : {}),
     };
 
     const frozen = deepFreeze(rawArtifact);
