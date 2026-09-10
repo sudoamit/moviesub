@@ -9,6 +9,9 @@ import {
   CandidateHypothesis,
   RetrainingRunConfig,
   TrainingExample,
+  ExperienceDataset,
+  CandidateMarketDataset,
+  StrategyCandidate,
 } from '../types';
 import { PITExperienceDatasetBuilder } from '../pit-experience-dataset-builder';
 import { CandidateHypothesisGenerator } from '../candidate-hypothesis-generator';
@@ -2097,7 +2100,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     evalSpy.mockRestore();
   });
 
-  it('Test 80 (P2): Dev experience dataset conversion produces fully typed TradingExperience records', async () => {
+  it('Test 80 (P0 Zero-Fabrication): Dev experience dataset supplies genuine TrainingExample records without fake data synthesis', async () => {
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -2120,14 +2123,190 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(capturedDevExp).toBeDefined();
     expect(capturedDevExp.experiences.length).toBeGreaterThan(0);
     const firstExp = capturedDevExp.experiences[0];
-    expect(firstExp.id).toBeDefined();
-    expect(firstExp.instrument.symbol).toBe(baseConfig.symbol);
-    expect(firstExp.timeframe).toBe(baseConfig.timeframe);
-    expect(firstExp.outcome.pnlR).toBeDefined();
-    expect(firstExp.marketState.quant).toBeDefined();
-    expect(firstExp.marketState.quant.smcScore).toBeDefined();
+    
+    // Verifies original TrainingExample provenance is preserved without synthetic execution/risk manufacture
+    expect(firstExp.exampleId).toBe(examples[0].exampleId);
+    expect(firstExp.decisionTimestamp).toBe(examples[0].decisionTimestamp);
+    expect(firstExp.outcomeR).toBe(examples[0].outcomeR);
+    // Synthetic fabricated fields must NOT exist on raw TrainingExample
+    expect((firstExp as any).execution?.entryPrice).toBeUndefined();
+    expect((firstExp as any).risk?.stopLoss).toBeUndefined();
 
     wfSpy.mockRestore();
+  });
+
+  it('Test 81 (P0 Zero-Fabrication): Real end-to-end WFV lifecycle runs with genuine TrainingExample records and zero fake fields', async () => {
+    const candles = generateTestCandles(1700000000000, 120);
+    const examples = generateTestExamples(1700000000000, 60);
+
+    const devExpDataset: ExperienceDataset = {
+      experiences: examples,
+      datasetHash: 'canonical_test_dev_hash',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: examples[0].decisionTimestamp,
+      endTimestamp: examples[examples.length - 1].decisionTimestamp,
+    };
+
+    const devMarketDataset: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'canonical_test_mkt_hash',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: new Date(candles[0].timestamp).getTime(),
+      endTimestamp: new Date(candles[candles.length - 1].timestamp).getTime(),
+      isContinuous: true,
+    };
+
+    const candidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      baseConfig.riskConfig,
+      baseConfig.executionConfig,
+    );
+
+    const wfResult = WalkForwardValidator.validate(candidate, {
+      experienceDataset: devExpDataset,
+      marketDataset: devMarketDataset,
+      embargoMs: 0,
+      numFolds: 2,
+      warmupBars: 5,
+    });
+
+    expect(wfResult).toBeDefined();
+    expect(wfResult.folds.length).toBe(2);
+    for (const fold of wfResult.folds) {
+      expect(typeof fold.inSampleExpectancy).toBe('number');
+      expect(typeof fold.outOfSampleExpectancy).toBe('number');
+    }
+  });
+
+  it('Test 82 (P1 Measurement API): CandidateEvaluator.measureCandidateOnMarketData performs pure measurement without acceptance gates', () => {
+    const candles = generateTestCandles(1700000000000, 50);
+    const candidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      baseConfig.riskConfig,
+      baseConfig.executionConfig,
+    );
+
+    const measurement = CandidateEvaluator.measureCandidateOnMarketData(
+      candidate,
+      { candles },
+      {
+        minimumCandles: 5,
+        symbol: 'BTCUSDT',
+        costPerTradeR: 0.05,
+      },
+    );
+
+    expect(measurement).toBeDefined();
+    expect(typeof measurement.candidateExpectancy).toBe('number');
+    expect(typeof measurement.profitFactor).toBe('number');
+    expect(typeof measurement.totalSimulatedTrades).toBe('number');
+    expect(Array.isArray(measurement.simulatedRMultiples)).toBe(true);
+    expect(Array.isArray(measurement.simulatedTrades)).toBe(true);
+    // Measurement has no criteria gate 'passed' field
+    expect((measurement as any).passed).toBeUndefined();
+  });
+
+  it('Test 83 (P1 Strict Baseline Construction): CandidateEvaluator.createBaselineBenchmarkCandidate fails closed if required parameters are missing', () => {
+    // Missing minMtfScore
+    expect(() => {
+      CandidateEvaluator.createBaselineBenchmarkCandidate(
+        'v2.0',
+        'BTCUSDT',
+        baseConfig.riskConfig,
+        {
+          ...baseConfig.executionConfig,
+          minMtfScore: undefined as any,
+        },
+      );
+    }).toThrow(/MISSING_MIN_MTF_SCORE/);
+
+    // Missing stopLossAtrMultiplier
+    expect(() => {
+      CandidateEvaluator.createBaselineBenchmarkCandidate(
+        'v2.0',
+        'BTCUSDT',
+        baseConfig.riskConfig,
+        {
+          ...baseConfig.executionConfig,
+          stopLossAtrMultiplier: undefined as any,
+        },
+      );
+    }).toThrow(/MISSING_STOP_LOSS_ATR_MULTIPLIER/);
+
+    // Missing sizingMultiplier
+    expect(() => {
+      CandidateEvaluator.createBaselineBenchmarkCandidate(
+        'v2.0',
+        'BTCUSDT',
+        baseConfig.riskConfig,
+        {
+          ...baseConfig.executionConfig,
+          sizingMultiplier: undefined as any,
+        },
+      );
+    }).toThrow(/MISSING_SIZING_MULTIPLIER/);
+  });
+
+  it('Test 84 (P1 Champion Validation): Pipeline validates champion artifacts with CandidateArtifactValidator fail-closed without fallbacks', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    // Register a valid candidate and promote to champion in ModelRegistry
+    const championCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      baseConfig.riskConfig,
+      {
+        ...baseConfig.executionConfig,
+        minMtfScore: 0.77,
+      },
+    );
+
+    const championArtifact = CandidateArtifactBuilder.build(championCandidate, {
+      datasetHash: 'canonical_champion_mkt_hash',
+    });
+
+    ModelRegistry.reset();
+    ModelRegistry.registerCandidateArtifact(championArtifact);
+    ModelRegistry.setProductionState({
+      strategyId: 'smc-quant-baseline',
+      environment: 'paper',
+      activeCandidateId: championArtifact.candidateId,
+      activeModelVersion: championArtifact.modelVersion || 'm_v2.0',
+      activeStrategyVersion: championArtifact.strategyVersion || 'v2.0',
+      activeArtifactHash: championArtifact.artifactHash,
+      activatedAt: Date.now(),
+      activationId: 'act_champion_test',
+    });
+
+    let baselineUsedInEval: any = null;
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation((cand: any, opts: any) => {
+      baselineUsedInEval = opts.baselineCandidate;
+      return {
+        passed: true,
+        candidateExpectancy: 1.0,
+        profitFactor: 2.0,
+        maxDrawdownPercent: 0.05,
+        simulatedRMultiples: [1.0, 0.5],
+        totalSimulatedTrades: 2,
+        totalTrades: 2,
+        trades: [],
+      } as any;
+    });
+
+    await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+
+    expect(baselineUsedInEval).toBeDefined();
+    expect(baselineUsedInEval.id).toBe(championArtifact.candidateId);
+    expect(baselineUsedInEval.executionConfig.minMtfScore).toBe(0.77);
+
+    evalSpy.mockRestore();
+    ModelRegistry.reset();
   });
 });
 

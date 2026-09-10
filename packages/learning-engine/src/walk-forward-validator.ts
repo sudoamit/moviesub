@@ -183,9 +183,19 @@ export class WalkForwardValidator {
       };
     }
 
+    const getExperienceTimestamp = (exp: any): number => {
+      if (exp.decisionTimestamp !== undefined && typeof exp.decisionTimestamp === 'number') {
+        return exp.decisionTimestamp;
+      }
+      if (exp.timestamp) {
+        return exp.timestamp instanceof Date ? exp.timestamp.getTime() : new Date(exp.timestamp).getTime();
+      }
+      throw new Error('MISSING_EXPERIENCE_TIMESTAMP: Experience missing valid decisionTimestamp or timestamp');
+    };
+
     // Sort chronologically
     const sorted = [...experiences].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      (a, b) => getExperienceTimestamp(a) - getExperienceTimestamp(b),
     );
 
     const expectedIntervalMs =
@@ -260,7 +270,7 @@ export class WalkForwardValidator {
 
       // 2. Join supervised experiences into authoritative market windows
       const trainSlice = sorted.filter((e) => {
-        const t = new Date(e.timestamp).getTime();
+        const t = getExperienceTimestamp(e);
         return t >= trainStartTs && t <= trainEndTs;
       });
       if (trainSlice.length === 0) {
@@ -268,12 +278,12 @@ export class WalkForwardValidator {
       }
 
       const valRaw = sorted.filter((e) => {
-        const t = new Date(e.timestamp).getTime();
+        const t = getExperienceTimestamp(e);
         return t >= valStartTs && t <= valEndTs;
       });
 
       const testRaw = sorted.filter((e) => {
-        const t = new Date(e.timestamp).getTime();
+        const t = getExperienceTimestamp(e);
         return t >= testStartTs && t <= testEndTs;
       });
 
@@ -287,7 +297,7 @@ export class WalkForwardValidator {
         if (endTs > trainMaxLabelEnd) trainMaxLabelEnd = endTs;
       }
 
-      const valPurged = valRaw.filter((e) => new Date(e.timestamp).getTime() > trainMaxLabelEnd + embargoMs);
+      const valPurged = valRaw.filter((e) => getExperienceTimestamp(e) > trainMaxLabelEnd + embargoMs);
       if (valPurged.length === 0 && valRaw.length > 0) {
         throw new Error('INSUFFICIENT_PURGED_VALIDATION_DATA');
       }
@@ -303,7 +313,7 @@ export class WalkForwardValidator {
         if (endTs > valMaxLabelEnd) valMaxLabelEnd = endTs;
       }
 
-      const testPurged = testRaw.filter((e) => new Date(e.timestamp).getTime() > valMaxLabelEnd + embargoMs);
+      const testPurged = testRaw.filter((e) => getExperienceTimestamp(e) > valMaxLabelEnd + embargoMs);
       if (testPurged.length === 0 && testRaw.length > 0) {
         throw new Error('INSUFFICIENT_PURGED_OOS_DATA');
       }
@@ -349,8 +359,8 @@ export class WalkForwardValidator {
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         symbol: options.marketDataset.symbol || 'BTCUSDT',
         timeframe: options.marketDataset.timeframe || '15m',
-        startTimestamp: new Date(trainSlice[0].timestamp).getTime(),
-        endTimestamp: new Date(trainSlice[trainSlice.length - 1].timestamp).getTime(),
+        startTimestamp: getExperienceTimestamp(trainSlice[0]),
+        endTimestamp: getExperienceTimestamp(trainSlice[trainSlice.length - 1]),
       };
 
       const trainMarketDataset: CandidateMarketDataset = {
@@ -455,7 +465,7 @@ export class WalkForwardValidator {
       foldArtifacts.push(foldArtifact);
 
       // 7. Evaluate retrained candidate in-sample strictly on training fold market data (Fail Closed: No whole dataset fallback!)
-      const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+      const isEval = CandidateEvaluator.measureCandidateOnMarketData(
         foldCandidate,
         {
           dataset: trainMarketDataset,
@@ -466,17 +476,11 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, trainCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
-          criteria: {
-            minExpectancyDelta: -999.0,
-            minProfitFactor: 0.0,
-            minCandidateExpectancy: -999.0,
-            minTrades: 0,
-          },
         },
       );
 
       // 8. Evaluate frozen retrained candidate strictly on validation fold market data
-      const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+      const valEval = CandidateEvaluator.measureCandidateOnMarketData(
         foldCandidate,
         {
           dataset: valMarketDataset,
@@ -487,17 +491,11 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, valCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
-          criteria: {
-            minExpectancyDelta: -999.0,
-            minProfitFactor: 0.0,
-            minCandidateExpectancy: -999.0,
-            minTrades: 0,
-          },
         },
       );
 
       // 9. Evaluate frozen retrained candidate strictly out-of-sample on OOS fold market data
-      const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+      const oosEval = CandidateEvaluator.measureCandidateOnMarketData(
         foldCandidate,
         {
           dataset: oosMarketDataset,
@@ -508,12 +506,6 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, testCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
-          criteria: {
-            minExpectancyDelta: -999.0,
-            minProfitFactor: 0.0,
-            minCandidateExpectancy: -999.0,
-            minTrades: 0,
-          },
         },
       );
 

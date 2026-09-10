@@ -4,15 +4,7 @@ import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingEx
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { canonicalJsonStringify } from './canonical-serializer';
 
-export interface ICandidateEvaluationCriteria {
-  minExpectancyDelta?: number;
-  minProfitFactor?: number;
-  minCandidateExpectancy?: number;
-  minTrades?: number;
-  maxDrawdownPercent?: number;
-}
-
-export interface ICandidateEvaluationOptions {
+export interface ICandidateMeasurementOptions {
   baselineCandidate?: StrategyCandidate | CandidateArtifact;
   dataset?: CandidateMarketDataset;
   marketDataset?: CandidateMarketDataset;
@@ -25,12 +17,10 @@ export interface ICandidateEvaluationOptions {
   symbol?: string;
   timeframe?: string;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
-  criteria?: ICandidateEvaluationCriteria;
 }
 
-export interface ICandidateEvaluationResult {
+export interface CandidateMeasurementResult {
   candidateId: string;
-  passed: boolean;
   baselineExpectancy: number;
   candidateExpectancy: number;
   expectancyDelta: number;
@@ -39,8 +29,24 @@ export interface ICandidateEvaluationResult {
   totalSimulatedTrades: number;
   simulatedRMultiples: number[];
   simulatedTrades?: IBacktestTrade[];
-  rejectionReason?: string;
   baselineTrades?: number;
+}
+
+export interface ICandidateEvaluationCriteria {
+  minExpectancyDelta?: number;
+  minProfitFactor?: number;
+  minCandidateExpectancy?: number;
+  minTrades?: number;
+  maxDrawdownPercent?: number;
+}
+
+export interface ICandidateEvaluationOptions extends ICandidateMeasurementOptions {
+  criteria?: ICandidateEvaluationCriteria;
+}
+
+export interface ICandidateEvaluationResult extends CandidateMeasurementResult {
+  passed: boolean;
+  rejectionReason?: string;
 }
 
 export class CandidateEvaluator {
@@ -60,22 +66,10 @@ export class CandidateEvaluator {
     if (!riskConfigParam || typeof riskConfigParam !== 'object') {
       throw new Error('MISSING_RISK_CONFIG: createBaselineBenchmarkCandidate requires explicit riskConfig');
     }
-    const initialCapital = (riskConfigParam as any).initialCapital;
-    if (typeof initialCapital !== 'number' || !Number.isFinite(initialCapital) || initialCapital <= 0) {
-      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig initialCapital must be a positive finite number');
-    }
-    const maxRiskPerTrade = (riskConfigParam as any).maxRiskPerTrade;
-    if (typeof maxRiskPerTrade !== 'number' || !Number.isFinite(maxRiskPerTrade) || maxRiskPerTrade <= 0) {
-      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig maxRiskPerTrade must be a positive finite number');
-    }
-    const partialExitPolicy = (riskConfigParam as any).partialExitPolicy;
-    if (!partialExitPolicy || typeof partialExitPolicy !== 'object') {
-      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig requires valid partialExitPolicy');
-    }
-
     if (!executionConfigParam || typeof executionConfigParam !== 'object') {
       throw new Error('MISSING_EXECUTION_CONFIG: createBaselineBenchmarkCandidate requires explicit executionConfig');
     }
+
     const fillModel = (executionConfigParam as any).fillModel;
     if (!fillModel || typeof fillModel !== 'string' || fillModel.trim() === '') {
       throw new Error('MISSING_FILL_MODEL: createBaselineBenchmarkCandidate requires explicit fillModel');
@@ -89,9 +83,18 @@ export class CandidateEvaluator {
       throw new Error('INVALID_LATENCY_MS: createBaselineBenchmarkCandidate requires explicit non-negative latencyMs');
     }
 
-    const minMtfScore = typeof (executionConfigParam as any).minMtfScore === 'number' ? (executionConfigParam as any).minMtfScore : 0.5;
-    const stopLossAtrMultiplier = typeof (executionConfigParam as any).stopLossAtrMultiplier === 'number' ? (executionConfigParam as any).stopLossAtrMultiplier : 1.5;
-    const sizingMultiplier = typeof (executionConfigParam as any).sizingMultiplier === 'number' ? (executionConfigParam as any).sizingMultiplier : 1.0;
+    const minMtfScore = (executionConfigParam as any).minMtfScore;
+    if (typeof minMtfScore !== 'number' || !Number.isFinite(minMtfScore)) {
+      throw new Error('MISSING_MIN_MTF_SCORE: createBaselineBenchmarkCandidate requires explicit minMtfScore');
+    }
+    const stopLossAtrMultiplier = (executionConfigParam as any).stopLossAtrMultiplier;
+    if (typeof stopLossAtrMultiplier !== 'number' || !Number.isFinite(stopLossAtrMultiplier) || stopLossAtrMultiplier <= 0) {
+      throw new Error('MISSING_STOP_LOSS_ATR_MULTIPLIER: createBaselineBenchmarkCandidate requires explicit positive stopLossAtrMultiplier');
+    }
+    const sizingMultiplier = (executionConfigParam as any).sizingMultiplier;
+    if (typeof sizingMultiplier !== 'number' || !Number.isFinite(sizingMultiplier) || sizingMultiplier <= 0) {
+      throw new Error('MISSING_SIZING_MULTIPLIER: createBaselineBenchmarkCandidate requires explicit positive sizingMultiplier');
+    }
 
     const execPayload = {
       strategyVersion: baseStrategyVersion,
@@ -105,77 +108,76 @@ export class CandidateEvaluator {
     };
     const configHash = crypto.createHash('sha256').update(canonicalJsonStringify(execPayload)).digest('hex').substring(0, 16);
 
-    return {
-      id: `baseline-${baseStrategyVersion}`,
-      baseStrategyVersion,
-      candidateVersion: `baseline-${baseStrategyVersion}`,
-      type: 'BASELINE',
-      description: `Baseline Benchmark Strategy (${baseStrategyVersion})`,
+    const riskConfig = riskConfigParam as CandidateRiskConfig;
+    const id = `cand_baseline_${baseStrategyVersion}_${configHash}`;
+    const candidateVersion = `baseline_${baseStrategyVersion}`;
+    const executionConfig: CandidateExecutionConfig = {
+      candidateId: id,
+      candidateVersion,
+      strategyVersion: baseStrategyVersion,
       symbol,
-      riskConfig: riskConfigParam as any,
-      executionConfig: {
-        candidateId: `baseline-${baseStrategyVersion}`,
-        candidateVersion: `baseline-${baseStrategyVersion}`,
-        strategyVersion: baseStrategyVersion,
-        symbol,
-        fillModel: fillModel as any,
-        ambiguityMode: ambiguityMode as any,
-        latencyMs,
-        minMtfScore,
-        configHash,
-      },
+      fillModel: fillModel as any,
+      ambiguityMode: ambiguityMode as any,
+      latencyMs,
+      minMtfScore,
+      stopLossAtrMultiplier,
+      sizingMultiplier,
+      configHash,
+    };
+
+    return {
+      id,
+      baseStrategyVersion,
+      candidateVersion,
+      type: 'BASELINE',
+      description: `Baseline benchmark candidate for strategy ${baseStrategyVersion}`,
       change: {
-        action: 'BASELINE_BENCHMARK',
+        symbol,
         minMtfScore,
         stopLossAtrMultiplier,
         sizingMultiplier,
-        symbol,
-        riskConfig: riskConfigParam,
         fillModel,
         ambiguityMode,
         latencyMs,
       },
-      evidence: { sampleSize: 0, expectancyBefore: 0, expectancyAfterHistorical: 0 },
+      evidence: {
+        sampleSize: 0,
+        expectancyBefore: 0,
+        expectancyAfterHistorical: 0,
+      },
+      riskConfig,
+      executionConfig,
       status: 'PROMOTED',
       createdAt: new Date(),
     };
   }
 
   /**
-   * Evaluates candidate strategy artifact against baseline benchmark strictly on continuous market data
-   * (candles / market dataset) without requiring or consuming any TradingExperience[] set.
+   * Performs pure performance measurement of a candidate strategy against market candles
+   * without applying acceptance gates or criteria checks.
    */
-  public static evaluateCandidateOnMarketData(
+  public static measureCandidateOnMarketData(
     candidate: StrategyCandidate | CandidateArtifact,
     marketData: { dataset?: CandidateMarketDataset; candles?: ICandle[]; evaluationStartTimestamp?: number; evaluationEndTimestamp?: number } | ICandle[],
-    options?: ICandidateEvaluationOptions,
-  ): ICandidateEvaluationResult {
-    const candidateId = 'artifactId' in candidate ? candidate.candidateId : candidate.id;
-    const dataset = Array.isArray(marketData) ? undefined : marketData.dataset;
-    const candles = Array.isArray(marketData) ? marketData : (marketData.candles || dataset?.executionCandles || []);
-    const evaluationStartTimestamp = !Array.isArray(marketData) ? marketData.evaluationStartTimestamp : options?.evaluationStartTimestamp;
-    const evaluationEndTimestamp = !Array.isArray(marketData) ? marketData.evaluationEndTimestamp : options?.evaluationEndTimestamp;
+    options?: ICandidateMeasurementOptions,
+  ): CandidateMeasurementResult {
+    const candidateId = 'candidateId' in candidate ? candidate.candidateId : candidate.id;
+    let dataset: CandidateMarketDataset | undefined;
+    let candles: ICandle[] | undefined;
+    let evaluationStartTimestamp: number | undefined;
+    let evaluationEndTimestamp: number | undefined;
 
-    // Strict minimumCandles requirement (FAIL CLOSED)
-    const minimumCandles = options?.minimumCandles;
-    if (typeof minimumCandles !== 'number' || !Number.isFinite(minimumCandles) || minimumCandles <= 0) {
-      throw new Error('MISSING_MINIMUM_CANDLES: CandidateEvaluator requires explicit positive minimumCandles in evaluation options');
+    if (Array.isArray(marketData)) {
+      candles = marketData;
+    } else if (marketData && typeof marketData === 'object') {
+      dataset = marketData.dataset;
+      candles = marketData.candles;
+      evaluationStartTimestamp = marketData.evaluationStartTimestamp;
+      evaluationEndTimestamp = marketData.evaluationEndTimestamp;
     }
 
-    if ((!candles || candles.length < minimumCandles) && !dataset) {
-      return {
-        candidateId,
-        passed: false,
-        baselineExpectancy: 0,
-        candidateExpectancy: 0,
-        expectancyDelta: 0,
-        profitFactor: 0,
-        maxDrawdownPercent: 0,
-        totalSimulatedTrades: 0,
-        simulatedRMultiples: [],
-        simulatedTrades: [],
-        rejectionReason: `Insufficient candle data: received ${candles?.length || 0} candles, minimum required is ${minimumCandles}.`,
-      };
+    if ((!candles || candles.length === 0) && (!dataset || !dataset.executionCandles || dataset.executionCandles.length === 0)) {
+      throw new Error(`MISSING_MARKET_DATA: Candidate '${candidateId}' requires continuous market candles or dataset for execution evaluation`);
     }
 
     // Strict symbol requirement (FAIL CLOSED)
@@ -218,13 +220,6 @@ export class CandidateEvaluator {
     }
 
     const resolvedRisk = rawRisk;
-
-    // Strict evaluation criteria requirement (FAIL CLOSED)
-    const criteria = options?.criteria;
-    if (!criteria || typeof criteria !== 'object') {
-      throw new Error('MISSING_EVALUATION_CRITERIA: CandidateEvaluator requires explicit validation/acceptance criteria in options.criteria');
-    }
-
     const baselineCandidate = options?.baselineCandidate;
 
     let baselineExpectancy = 0;
@@ -265,26 +260,8 @@ export class CandidateEvaluator {
     const profitFactor = backtestRes.profitFactor;
     const maxDrawdownPercent = backtestRes.maxDrawdownR;
 
-    const minExpectancyDelta = criteria.minExpectancyDelta ?? 0.0;
-    const minProfitFactor = criteria.minProfitFactor ?? 1.0;
-    const minCandidateExpectancy = criteria.minCandidateExpectancy ?? 0.0;
-    const minTrades = criteria.minTrades ?? 1;
-
-    const passed =
-      expectancyDelta >= minExpectancyDelta &&
-      (profitFactor === Infinity || profitFactor >= minProfitFactor) &&
-      candidateExpectancy >= minCandidateExpectancy &&
-      backtestRes.totalTrades >= minTrades;
-
-    const rejectionReason = !passed
-      ? backtestRes.totalTrades < minTrades
-        ? `Candidate generated ${backtestRes.totalTrades} trades in backtest execution simulation (min required: ${minTrades}).`
-        : `Candidate did not meet criteria (Delta: ${expectancyDelta}R vs min ${minExpectancyDelta}R, Profit Factor: ${profitFactor} vs min ${minProfitFactor}, Expectancy: ${candidateExpectancy}R vs min ${minCandidateExpectancy}R, Trades: ${backtestRes.totalTrades} vs min ${minTrades}).`
-      : undefined;
-
     return {
       candidateId,
-      passed,
       baselineExpectancy,
       candidateExpectancy,
       expectancyDelta,
@@ -293,8 +270,48 @@ export class CandidateEvaluator {
       totalSimulatedTrades: backtestRes.totalTrades,
       simulatedRMultiples: backtestRes.rMultiples,
       simulatedTrades: backtestRes.trades,
-      rejectionReason,
       baselineTrades,
+    };
+  }
+
+  /**
+   * Evaluates candidate strategy artifact against baseline benchmark strictly on continuous market data
+   * (candles / market dataset) and applies explicit acceptance criteria (acceptance gate).
+   */
+  public static evaluateCandidateOnMarketData(
+    candidate: StrategyCandidate | CandidateArtifact,
+    marketData: { dataset?: CandidateMarketDataset; candles?: ICandle[]; evaluationStartTimestamp?: number; evaluationEndTimestamp?: number } | ICandle[],
+    options?: ICandidateEvaluationOptions,
+  ): ICandidateEvaluationResult {
+    // Strict evaluation criteria requirement (FAIL CLOSED)
+    const criteria = options?.criteria;
+    if (!criteria || typeof criteria !== 'object') {
+      throw new Error('MISSING_EVALUATION_CRITERIA: CandidateEvaluator requires explicit validation/acceptance criteria in options.criteria');
+    }
+
+    const measurement = this.measureCandidateOnMarketData(candidate, marketData, options);
+
+    const minExpectancyDelta = criteria.minExpectancyDelta ?? 0.0;
+    const minProfitFactor = criteria.minProfitFactor ?? 1.0;
+    const minCandidateExpectancy = criteria.minCandidateExpectancy ?? 0.0;
+    const minTrades = criteria.minTrades ?? 1;
+
+    const passed =
+      measurement.expectancyDelta >= minExpectancyDelta &&
+      (measurement.profitFactor === Infinity || measurement.profitFactor >= minProfitFactor) &&
+      measurement.candidateExpectancy >= minCandidateExpectancy &&
+      measurement.totalSimulatedTrades >= minTrades;
+
+    const rejectionReason = !passed
+      ? measurement.totalSimulatedTrades < minTrades
+        ? `Candidate generated ${measurement.totalSimulatedTrades} trades in backtest execution simulation (min required: ${minTrades}).`
+        : `Candidate did not meet criteria (Delta: ${measurement.expectancyDelta}R vs min ${minExpectancyDelta}R, Profit Factor: ${measurement.profitFactor} vs min ${minProfitFactor}, Expectancy: ${measurement.candidateExpectancy}R vs min ${minCandidateExpectancy}R, Trades: ${measurement.totalSimulatedTrades} vs min ${minTrades}).`
+      : undefined;
+
+    return {
+      ...measurement,
+      passed,
+      rejectionReason,
     };
   }
 
@@ -319,6 +336,11 @@ export class CandidateEvaluator {
 
     if (!opts.baselineCandidate) {
       throw new Error('MISSING_BASELINE_CANDIDATE: CandidateEvaluator requires an explicit baselineCandidate for comparative benchmark evaluation');
+    }
+
+    const minimumCandles = opts.minimumCandles;
+    if (typeof minimumCandles !== 'number' || !Number.isFinite(minimumCandles) || minimumCandles <= 0) {
+      throw new Error('MISSING_MINIMUM_CANDLES: CandidateEvaluator requires explicit positive minimumCandles in evaluation options');
     }
 
     if (!opts.criteria || typeof opts.criteria !== 'object') {

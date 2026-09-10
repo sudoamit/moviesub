@@ -1,12 +1,12 @@
 import { CANONICAL_FEATURE_NAMES_V2 } from '@quant/trading-engine';
-import { FeatureImportanceItem, TradingExperience } from './types';
+import { FeatureImportanceItem, TradingExperience, TrainingExample } from './types';
 
 export class FeatureAnalyzer {
   /**
    * Computes empirical feature correlation / importance against realized trade outcome R.
    */
   public static analyze(
-    experiences: TradingExperience[],
+    experiences: (TradingExperience | TrainingExample)[],
     historicalImportances?: Map<string, number>,
   ): FeatureImportanceItem[] {
     if (experiences.length < 10) {

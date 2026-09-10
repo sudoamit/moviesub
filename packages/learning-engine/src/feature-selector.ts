@@ -1,13 +1,13 @@
 import { CANONICAL_FEATURE_NAMES_V2 } from '@quant/trading-engine';
 import { FeatureAnalyzer } from './feature-analysis';
-import { FeatureSelectionResult, TradingExperience } from './types';
+import { FeatureSelectionResult, TradingExperience, TrainingExample } from './types';
 
 export class FeatureSelector {
   /**
    * Evaluates feature subsets and prunes low-importance, noisy dimensions that do not contribute to out-of-sample expectancy.
    */
   public static selectFeatures(
-    experiences: TradingExperience[],
+    experiences: (TradingExperience | TrainingExample)[],
     minImportanceThreshold = 0.02,
   ): FeatureSelectionResult {
     const importances = FeatureAnalyzer.analyze(experiences);

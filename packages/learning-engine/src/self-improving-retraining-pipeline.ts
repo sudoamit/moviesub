@@ -381,28 +381,29 @@ export class SelfImprovingRetrainingPipeline {
       const activeChampionArtifact = prodState?.activeCandidateId ? ModelRegistry.getCandidateArtifact(prodState.activeCandidateId) : undefined;
 
       if (activeChampionArtifact) {
+        const validatedChampion = CandidateArtifactValidator.validate(activeChampionArtifact);
         championCand = {
-          id: activeChampionArtifact.candidateId,
-          baseStrategyVersion: activeChampionArtifact.strategyVersion,
-          candidateVersion: activeChampionArtifact.candidateVersion,
+          id: validatedChampion.candidateId,
+          baseStrategyVersion: validatedChampion.strategyVersion,
+          candidateVersion: validatedChampion.candidateVersion,
           type: 'BASELINE',
-          description: `Active Production Champion (${activeChampionArtifact.candidateId})`,
+          description: `Active Production Champion (${validatedChampion.candidateId})`,
           change: {
-            symbol: config.symbol,
-            minMtfScore: activeChampionArtifact.executionConfig?.minMtfScore ?? config.executionConfig.minMtfScore,
-            stopLossAtrMultiplier: activeChampionArtifact.executionConfig?.stopLossAtrMultiplier ?? config.executionConfig.stopLossAtrMultiplier,
-            sizingMultiplier: activeChampionArtifact.executionConfig?.sizingMultiplier ?? config.executionConfig.sizingMultiplier,
-            fillModel: activeChampionArtifact.executionConfig?.fillModel ?? config.executionConfig.fillModel,
-            ambiguityMode: activeChampionArtifact.executionConfig?.ambiguityMode ?? config.executionConfig.ambiguityMode,
-            latencyMs: activeChampionArtifact.executionConfig?.latencyMs ?? config.executionConfig.latencyMs,
+            symbol: validatedChampion.executionConfig.symbol,
+            minMtfScore: validatedChampion.executionConfig.minMtfScore,
+            stopLossAtrMultiplier: validatedChampion.executionConfig.stopLossAtrMultiplier,
+            sizingMultiplier: validatedChampion.executionConfig.sizingMultiplier,
+            fillModel: validatedChampion.executionConfig.fillModel,
+            ambiguityMode: validatedChampion.executionConfig.ambiguityMode,
+            latencyMs: validatedChampion.executionConfig.latencyMs,
           },
           evidence: {
             sampleSize: trainSlice.length,
             expectancyBefore: 0,
             expectancyAfterHistorical: 0,
           },
-          riskConfig: (activeChampionArtifact.riskConfig as CandidateRiskConfig) || config.riskConfig,
-          executionConfig: (activeChampionArtifact.executionConfig as CandidateExecutionConfig) || config.executionConfig,
+          riskConfig: validatedChampion.riskConfig,
+          executionConfig: validatedChampion.executionConfig,
           status: 'PROMOTED',
           createdAt: new Date(),
         };
@@ -439,119 +440,36 @@ export class SelfImprovingRetrainingPipeline {
         // 6b. Walk-Forward Validation (WFV) with Genuine Fold Retraining
         currentStatus = 'WALK_FORWARD';
         const rawDevExamples = [...splits.training.examples, ...splits.validation.examples];
-        const devExpDatasetHash = PITExperienceDatasetBuilder.computeDatasetHash(rawDevExamples);
 
-        const devExperiences: TradingExperience[] = rawDevExamples.map((e: TrainingExample) => {
+        for (const e of rawDevExamples) {
           if (e.outcomeR === undefined || e.outcomeR === null || !Number.isFinite(e.outcomeR)) {
             throw new Error(`MISSING_OUTCOME_R_PROVENANCE: Training example '${e.exampleId}' lacks validated outcomeR for walk-forward validation`);
           }
           if (!e.exitType || typeof e.exitType !== 'string' || e.exitType.trim() === '') {
             throw new Error(`MISSING_EXIT_TYPE_PROVENANCE: Training example '${e.exampleId}' lacks validated exitType for walk-forward validation`);
           }
-
-          let quantFeatures: Record<string, number>;
           if (Array.isArray(e.features)) {
-            let names: readonly string[];
-            if (e.featureNames && Array.isArray(e.featureNames) && e.featureNames.length === e.features.length) {
-              names = e.featureNames;
-            } else if (e.featureSchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
-              const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
-              if (e.featureSchemaHash === computed) {
-                names = CANONICAL_FEATURE_NAMES_V2;
-              } else {
-                throw new Error(`FEATURE_SCHEMA_MISMATCH: Example '${e.exampleId}' schema hash ${e.featureSchemaHash} does not match canonical 2.0 schema hash ${computed}`);
-              }
-            } else {
-              throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Example '${e.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
-            }
-
-            quantFeatures = {};
-            for (let i = 0; i < names.length; i++) {
+            for (let i = 0; i < e.features.length; i++) {
               const val = e.features[i];
               if (val === undefined || val === null || typeof val !== 'number' || !Number.isFinite(val)) {
-                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${names[i]}'`);
+                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature index '${i}'`);
               }
-              quantFeatures[names[i]] = val;
             }
           } else if (e.features && typeof e.features === 'object') {
-            quantFeatures = {};
             for (const [k, v] of Object.entries(e.features as unknown as Record<string, unknown>)) {
               if (v === undefined || v === null || typeof v !== 'number' || !Number.isFinite(v)) {
                 throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${k}'`);
               }
-              quantFeatures[k] = v;
             }
           } else {
             throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' has invalid features structure`);
           }
+        }
 
-          const exp: TradingExperience = {
-            id: e.exampleId,
-            tradeId: e.exampleId,
-            timestamp: new Date(e.decisionTimestamp),
-            decisionTimestamp: e.decisionTimestamp,
-            featureTimestamp: e.featureTimestamp,
-            labelStartTimestamp: e.labelStartTimestamp,
-            labelEndTimestamp: e.labelEndTimestamp,
-            instrument: {
-              symbol,
-              assetType: 'CRYPTO',
-            },
-            timeframe: config.timeframe,
-            marketState: {
-              quant: quantFeatures,
-            },
-            decision: {
-              action: e.label === 1 ? 'BUY' : 'WAIT',
-              score: 0.5,
-            },
-            execution: {
-              entryPrice: 50000,
-              entryTime: new Date(e.decisionTimestamp),
-            },
-            risk: {
-              stopLoss: 49000,
-            },
-            prediction: {},
-            outcome: {
-              status: e.label === 1 ? 'WIN' : 'LOSS',
-              pnl: e.outcomeR * 1000,
-              pnlR: e.outcomeR,
-              maxFavorableExcursion: e.outcomeR > 0 ? e.outcomeR : 0,
-              maxAdverseExcursion: e.outcomeR < 0 ? e.outcomeR : 0,
-              holdingTimeSeconds: Math.max(0, (e.labelEndTimestamp - e.decisionTimestamp) / 1000),
-            },
-            marketContext: {
-              regime: e.regime || 'NORMAL',
-              volatilityRegime: e.volatilityBucket || 'NORMAL',
-              session: 'DEFAULT',
-              dayOfWeek: new Date(e.decisionTimestamp).getUTCDay(),
-            },
-            outcomeClassification: {
-              primaryClassification: e.label === 1 ? 'GOOD_TRADE' : 'BAD_TRADE',
-              detailedClassification: e.exitType || 'UNKNOWN',
-              executionQualityScore: 1.0,
-              signalQualityScore: 1.0,
-              holdingEfficiencyScore: 1.0,
-              adverseExcursionPenalty: 0.0,
-              favorableExcursionCapture: 1.0,
-              wasMistake: false,
-              tags: [e.exitType || 'UNKNOWN'],
-            } as any,
-            reasons: [],
-            failureReasons: [],
-            strategyVersion: e.strategyVersion || strategyVersion,
-            featureSchemaVersion: '2.0',
-            features: quantFeatures,
-            label: e.label,
-            labelBinary: e.label,
-            createdAt: new Date(e.decisionTimestamp),
-          };
-          return exp;
-        });
+        const devExpDatasetHash = PITExperienceDatasetBuilder.computeDatasetHash(rawDevExamples);
 
         const devExpDataset: ExperienceDataset = {
-          experiences: devExperiences,
+          experiences: rawDevExamples,
           datasetHash: devExpDatasetHash,
           featureSchemaVersion: '2.0',
           symbol,

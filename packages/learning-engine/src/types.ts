@@ -258,7 +258,7 @@ export interface StrategyCandidate {
 }
 
 export interface ExperienceDataset {
-  experiences: TradingExperience[];
+  experiences: (TradingExperience | TrainingExample)[];
   datasetId?: string;
   datasetHash: string;
   featureSchemaVersion: string;
@@ -507,6 +507,34 @@ export interface MonteCarloSimulationResult {
   maxDrawdown99Pct: number;
   medianExpectancyR: number;
   isRobust: boolean;
+}
+
+export interface CandidateMeasurementResult {
+  candidateId: string;
+  baselineExpectancy: number;
+  candidateExpectancy: number;
+  expectancyDelta: number;
+  profitFactor: number;
+  maxDrawdownPercent: number;
+  totalSimulatedTrades: number;
+  simulatedRMultiples: number[];
+  simulatedTrades?: IBacktestTrade[];
+  baselineTrades?: number;
+}
+
+export interface ICandidateMeasurementOptions {
+  baselineCandidate?: StrategyCandidate | CandidateArtifact;
+  dataset?: CandidateMarketDataset;
+  marketDataset?: CandidateMarketDataset;
+  candles?: ICandle[];
+  evaluationStartTimestamp?: number;
+  evaluationEndTimestamp?: number;
+  costPerTradeR?: number;
+  minimumCandles?: number;
+  warmupBars?: number;
+  symbol?: string;
+  timeframe?: string;
+  riskConfig?: CandidateRiskConfig | Record<string, unknown>;
 }
 
 export interface ShadowTradeRecord {

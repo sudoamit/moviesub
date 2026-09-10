@@ -10,7 +10,7 @@ export {
   CANONICAL_V2_DIMENSION,
   CanonicalTradeFeatureVectorV2,
 };
-import { NoTradePrediction, TradingExperience } from './types';
+import { NoTradePrediction, TradingExperience, TrainingExample } from './types';
 import { IDatasetSample } from './dataset-manager';
 import { TemporalFeatureScaler } from './feature-scaler';
 
@@ -88,7 +88,7 @@ export class ModelTrainer {
    * consuming the fitted TemporalFeatureScaler to ensure normalized, leakage-free feature scaling.
    */
   public static trainModel(
-    trainingDataset: (TradingExperience | IDatasetSample)[],
+    trainingDataset: (TradingExperience | IDatasetSample | TrainingExample)[],
     optionsOrEpochs?: IModelTrainingOptions | number,
     learningRateParam = 0.05,
     l2LambdaParam = 0.01,

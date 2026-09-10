@@ -1,6 +1,6 @@
 import * as crypto from 'crypto';
 import { IDatasetSample } from './dataset-manager';
-import { TradingExperience } from './types';
+import { TradingExperience, TrainingExample } from './types';
 
 export interface IScaleParameters {
   mean: number;
@@ -45,7 +45,7 @@ export class TemporalFeatureScaler {
    * Fits normalization parameters (mean, std, min, max) EXCLUSIVELY on the training fold.
    * Ensures zero future-data leakage into scaling parameters.
    */
-  public fit(trainingData: (IDatasetSample | TradingExperience)[]): void {
+  public fit(trainingData: (IDatasetSample | TradingExperience | TrainingExample)[]): void {
     this.featureStats.clear();
     if (!trainingData || trainingData.length === 0) return;
 
