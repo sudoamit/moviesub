@@ -466,6 +466,12 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, trainCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          criteria: {
+            minExpectancyDelta: -999.0,
+            minProfitFactor: 0.0,
+            minCandidateExpectancy: -999.0,
+            minTrades: 0,
+          },
         },
       );
 
@@ -481,6 +487,12 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, valCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          criteria: {
+            minExpectancyDelta: -999.0,
+            minProfitFactor: 0.0,
+            minCandidateExpectancy: -999.0,
+            minTrades: 0,
+          },
         },
       );
 
@@ -496,6 +508,12 @@ export class WalkForwardValidator {
         {
           minimumCandles: Math.max(1, Math.min(10, testCandles.length)),
           symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          criteria: {
+            minExpectancyDelta: -999.0,
+            minProfitFactor: 0.0,
+            minCandidateExpectancy: -999.0,
+            minTrades: 0,
+          },
         },
       );
 

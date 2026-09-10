@@ -1,6 +1,8 @@
+import * as crypto from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
-import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience, CandidateRiskConfig } from './types';
+import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience, CandidateRiskConfig, CandidateExecutionConfig } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
+import { canonicalJsonStringify } from './canonical-serializer';
 
 export interface ICandidateEvaluationCriteria {
   minExpectancyDelta?: number;
@@ -44,13 +46,13 @@ export interface ICandidateEvaluationResult {
 export class CandidateEvaluator {
   /**
    * Constructs a canonical frozen baseline benchmark strategy candidate.
-   * Requires explicit riskConfig and symbol.
+   * Requires explicit riskConfig, executionConfig, and symbol.
    */
   public static createBaselineBenchmarkCandidate(
     baseStrategyVersion: string,
     symbol: string,
     riskConfigParam: CandidateRiskConfig | Record<string, unknown>,
-    executionConfigParam?: any,
+    executionConfigParam: CandidateExecutionConfig | Record<string, unknown>,
   ): StrategyCandidate {
     if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
       throw new Error('MISSING_SYMBOL: createBaselineBenchmarkCandidate requires explicit non-empty symbol');
@@ -71,9 +73,37 @@ export class CandidateEvaluator {
       throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig requires valid partialExitPolicy');
     }
 
-    const fillModel = executionConfigParam?.fillModel || 'OHLC_PATH';
-    const ambiguityMode = executionConfigParam?.ambiguityMode || 'CONSERVATIVE';
-    const latencyMs = typeof executionConfigParam?.latencyMs === 'number' ? executionConfigParam.latencyMs : 50;
+    if (!executionConfigParam || typeof executionConfigParam !== 'object') {
+      throw new Error('MISSING_EXECUTION_CONFIG: createBaselineBenchmarkCandidate requires explicit executionConfig');
+    }
+    const fillModel = (executionConfigParam as any).fillModel;
+    if (!fillModel || typeof fillModel !== 'string' || fillModel.trim() === '') {
+      throw new Error('MISSING_FILL_MODEL: createBaselineBenchmarkCandidate requires explicit fillModel');
+    }
+    const ambiguityMode = (executionConfigParam as any).ambiguityMode;
+    if (!ambiguityMode || typeof ambiguityMode !== 'string' || ambiguityMode.trim() === '') {
+      throw new Error('MISSING_AMBIGUITY_MODE: createBaselineBenchmarkCandidate requires explicit ambiguityMode');
+    }
+    const latencyMs = (executionConfigParam as any).latencyMs;
+    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs) || latencyMs < 0) {
+      throw new Error('INVALID_LATENCY_MS: createBaselineBenchmarkCandidate requires explicit non-negative latencyMs');
+    }
+
+    const minMtfScore = typeof (executionConfigParam as any).minMtfScore === 'number' ? (executionConfigParam as any).minMtfScore : 0.5;
+    const stopLossAtrMultiplier = typeof (executionConfigParam as any).stopLossAtrMultiplier === 'number' ? (executionConfigParam as any).stopLossAtrMultiplier : 1.5;
+    const sizingMultiplier = typeof (executionConfigParam as any).sizingMultiplier === 'number' ? (executionConfigParam as any).sizingMultiplier : 1.0;
+
+    const execPayload = {
+      strategyVersion: baseStrategyVersion,
+      symbol,
+      fillModel,
+      ambiguityMode,
+      latencyMs,
+      minMtfScore,
+      stopLossAtrMultiplier,
+      sizingMultiplier,
+    };
+    const configHash = crypto.createHash('sha256').update(canonicalJsonStringify(execPayload)).digest('hex').substring(0, 16);
 
     return {
       id: `baseline-${baseStrategyVersion}`,
@@ -88,17 +118,17 @@ export class CandidateEvaluator {
         candidateVersion: `baseline-${baseStrategyVersion}`,
         strategyVersion: baseStrategyVersion,
         symbol,
-        fillModel,
-        ambiguityMode,
+        fillModel: fillModel as any,
+        ambiguityMode: ambiguityMode as any,
         latencyMs,
-        minMtfScore: 0,
-        configHash: 'baseline_exec_config',
+        minMtfScore,
+        configHash,
       },
       change: {
         action: 'BASELINE_BENCHMARK',
-        minMtfScore: 0,
-        stopLossAtrMultiplier: 1.0,
-        sizingMultiplier: 1.0,
+        minMtfScore,
+        stopLossAtrMultiplier,
+        sizingMultiplier,
         symbol,
         riskConfig: riskConfigParam,
         fillModel,
@@ -144,24 +174,23 @@ export class CandidateEvaluator {
         totalSimulatedTrades: 0,
         simulatedRMultiples: [],
         simulatedTrades: [],
-        rejectionReason: `Insufficient market data for candidate evaluation (requires >= ${minimumCandles} candles).`,
+        rejectionReason: `Insufficient candle data: received ${candles?.length || 0} candles, minimum required is ${minimumCandles}.`,
       };
     }
 
-    // Strict symbol requirement (FAIL CLOSED - zero BTC default)
+    // Strict symbol requirement (FAIL CLOSED)
     const resolvedSymbol =
       options?.symbol ||
       dataset?.symbol ||
       (candidate as any).symbol ||
       (candidate as any).change?.symbol ||
-      (candidate as any).provenance?.symbol ||
-      (candidate as any).strategyConfig?.symbol;
+      (candidate as any).executionConfig?.symbol;
 
     if (!resolvedSymbol || typeof resolvedSymbol !== 'string' || resolvedSymbol.trim() === '') {
-      throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative instrument symbol`);
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in evaluation`);
     }
 
-    // Strict riskConfig requirement (FAIL CLOSED - zero defaultRisk)
+    // Strict candidate riskConfig requirement (FAIL CLOSED)
     const rawRisk =
       options?.riskConfig ||
       (candidate as any).riskConfig ||
@@ -190,8 +219,13 @@ export class CandidateEvaluator {
 
     const resolvedRisk = rawRisk;
 
-    const baselineCandidate = options?.baselineCandidate;
+    // Strict evaluation criteria requirement (FAIL CLOSED)
     const criteria = options?.criteria;
+    if (!criteria || typeof criteria !== 'object') {
+      throw new Error('MISSING_EVALUATION_CRITERIA: CandidateEvaluator requires explicit validation/acceptance criteria in options.criteria');
+    }
+
+    const baselineCandidate = options?.baselineCandidate;
 
     let baselineExpectancy = 0;
     let baselineTrades = 0;
@@ -231,38 +265,22 @@ export class CandidateEvaluator {
     const profitFactor = backtestRes.profitFactor;
     const maxDrawdownPercent = backtestRes.maxDrawdownR;
 
-    let passed: boolean;
-    let rejectionReason: string | undefined;
+    const minExpectancyDelta = criteria.minExpectancyDelta ?? 0.0;
+    const minProfitFactor = criteria.minProfitFactor ?? 1.0;
+    const minCandidateExpectancy = criteria.minCandidateExpectancy ?? 0.0;
+    const minTrades = criteria.minTrades ?? 1;
 
-    if (criteria) {
-      const minExpectancyDelta = criteria.minExpectancyDelta ?? 0.0;
-      const minProfitFactor = criteria.minProfitFactor ?? 1.0;
-      const minCandidateExpectancy = criteria.minCandidateExpectancy ?? 0.0;
-      const minTrades = criteria.minTrades ?? 1;
+    const passed =
+      expectancyDelta >= minExpectancyDelta &&
+      (profitFactor === Infinity || profitFactor >= minProfitFactor) &&
+      candidateExpectancy >= minCandidateExpectancy &&
+      backtestRes.totalTrades >= minTrades;
 
-      passed =
-        expectancyDelta >= minExpectancyDelta &&
-        (profitFactor === Infinity || profitFactor >= minProfitFactor) &&
-        candidateExpectancy >= minCandidateExpectancy &&
-        backtestRes.totalTrades >= minTrades;
-
-      if (!passed) {
-        if (backtestRes.totalTrades < minTrades) {
-          rejectionReason = `Candidate generated ${backtestRes.totalTrades} trades in backtest execution simulation (min required: ${minTrades}).`;
-        } else {
-          rejectionReason = `Candidate did not meet criteria (Delta: ${expectancyDelta}R vs min ${minExpectancyDelta}R, Profit Factor: ${profitFactor} vs min ${minProfitFactor}, Expectancy: ${candidateExpectancy}R vs min ${minCandidateExpectancy}R, Trades: ${backtestRes.totalTrades} vs min ${minTrades}).`;
-        }
-      }
-    } else {
-      passed = backtestRes.totalTrades > 0 && candidateExpectancy > 0 && profitFactor >= 1.0;
-      if (!passed) {
-        if (backtestRes.totalTrades === 0) {
-          rejectionReason = 'Candidate generated zero trades in backtest execution simulation.';
-        } else {
-          rejectionReason = `Candidate did not meet default profitability thresholds (Expectancy: ${candidateExpectancy}R, Profit Factor: ${profitFactor}).`;
-        }
-      }
-    }
+    const rejectionReason = !passed
+      ? backtestRes.totalTrades < minTrades
+        ? `Candidate generated ${backtestRes.totalTrades} trades in backtest execution simulation (min required: ${minTrades}).`
+        : `Candidate did not meet criteria (Delta: ${expectancyDelta}R vs min ${minExpectancyDelta}R, Profit Factor: ${profitFactor} vs min ${minProfitFactor}, Expectancy: ${candidateExpectancy}R vs min ${minCandidateExpectancy}R, Trades: ${backtestRes.totalTrades} vs min ${minTrades}).`
+      : undefined;
 
     return {
       candidateId,
@@ -389,10 +407,18 @@ export class CandidateEvaluator {
         trailStopOffsetR: 1.0,
       },
     };
+    const fixtureExec = (candidate as any).executionConfig || {
+      fillModel: 'OHLC_PATH',
+      ambiguityMode: 'CONSERVATIVE',
+      latencyMs: 50,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
     const fixtureSymbol = options?.symbol || (candidate as any).symbol || 'BTCUSDT';
     const baselineCandidate =
       options?.baselineCandidate ||
-      this.createBaselineBenchmarkCandidate(baseStrategyVersion, fixtureSymbol, fixtureRisk);
+      this.createBaselineBenchmarkCandidate(baseStrategyVersion, fixtureSymbol, fixtureRisk, fixtureExec);
     const baselineRes = CandidateBacktestRunner.runDeterministicTestFixture(baselineCandidate, {
       candles: options?.candles || [],
       experiences,

@@ -107,6 +107,9 @@ export interface TradingExperience {
   modelVersion?: string;
   featureSchemaVersion: string;
   candlesDuringTrade?: any[];
+  features?: Record<string, number>;
+  label?: number;
+  labelBinary?: number;
   createdAt: Date;
 }
 
@@ -811,7 +814,7 @@ export interface CandidateValidationResult {
   readonly hypothesisId: string;
   readonly passed: boolean;
   readonly validationExpectancyR: number;
-  readonly validationWinRate: number;
+  readonly validationWinRate?: number;
   readonly validationProfitFactor: number;
   readonly validationMaxDrawdownR: number;
   readonly validationTradeCount: number;
@@ -825,7 +828,7 @@ export interface CandidateValidationResult {
 export interface CandidateOOSResult {
   readonly hypothesisId: string;
   readonly oosExpectancyR: number;
-  readonly oosWinRate: number;
+  readonly oosWinRate?: number;
   readonly oosProfitFactor: number;
   readonly oosMaxDrawdownPercent: number;
   readonly oosTradeCount: number;

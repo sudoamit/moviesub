@@ -7,6 +7,8 @@ import {
   CandidateOOSResult,
   CandidateTrainingResult,
   CandidateValidationResult,
+  CandidateRiskConfig,
+  CandidateExecutionConfig,
   ExperienceDataset,
   ModelArtifact,
   RetrainingRunConfig,
@@ -16,6 +18,7 @@ import {
   StrategyCandidate,
   TrainingDataset,
   TrainingExample,
+  TradingExperience,
   ValidatedCandidateArtifact,
 } from './types';
 import { PITExperienceDatasetBuilder, PITSplitsResult } from './pit-experience-dataset-builder';
@@ -183,8 +186,25 @@ export class SelfImprovingRetrainingPipeline {
     }
 
     // Strict validation of candidate validation acceptance criteria (FAIL CLOSED)
-    if (config.minValidationTrades === undefined || typeof config.minValidationTrades !== 'number' || !Number.isFinite(config.minValidationTrades)) {
+    if (
+      config.minValidationTrades === undefined ||
+      typeof config.minValidationTrades !== 'number' ||
+      !Number.isFinite(config.minValidationTrades)
+    ) {
       throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minValidationTrades must be an explicit finite number');
+    }
+    if (!Number.isInteger(config.minValidationTrades) || config.minValidationTrades < 1) {
+      throw new Error('INVALID_MIN_VALIDATION_TRADES: config.minValidationTrades must be an integer >= 1');
+    }
+    if (
+      config.minOOSTrades === undefined ||
+      typeof config.minOOSTrades !== 'number' ||
+      !Number.isFinite(config.minOOSTrades)
+    ) {
+      throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minOOSTrades must be an explicit finite number');
+    }
+    if (!Number.isInteger(config.minOOSTrades) || config.minOOSTrades < 1) {
+      throw new Error('INVALID_MIN_OOS_TRADES: config.minOOSTrades must be an integer >= 1');
     }
     if (config.minValidationExpectancyR === undefined || typeof config.minValidationExpectancyR !== 'number' || !Number.isFinite(config.minValidationExpectancyR)) {
       throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minValidationExpectancyR must be an explicit finite number');
@@ -355,32 +375,45 @@ export class SelfImprovingRetrainingPipeline {
       const devMktHash = DatasetManager.requireCanonicalMarketDatasetHash(devCandles, config.timeframe);
       const canonicalV2SchemaHash = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
 
-      // Baseline Champion Strategy Candidate for validation benchmarks
-      const championCand: StrategyCandidate = {
-        id: 'champion_baseline_benchmark',
-        baseStrategyVersion: strategyVersion,
-        candidateVersion: `${strategyVersion}-baseline`,
-        type: 'BASELINE',
-        description: 'Champion Baseline Benchmark Strategy Candidate',
-        change: {
-          symbol: config.symbol,
-          minMtfScore: config.executionConfig.minMtfScore,
-          stopLossAtrMultiplier: config.executionConfig.stopLossAtrMultiplier,
-          sizingMultiplier: config.executionConfig.sizingMultiplier,
-          fillModel: config.executionConfig.fillModel,
-          ambiguityMode: config.executionConfig.ambiguityMode,
-          latencyMs: config.executionConfig.latencyMs,
-        },
-        evidence: {
-          sampleSize: trainSlice.length,
-          expectancyBefore: 0,
-          expectancyAfterHistorical: 0,
-        },
-        riskConfig: config.riskConfig,
-        executionConfig: config.executionConfig,
-        status: 'PROMOTED',
-        createdAt: new Date(),
-      };
+      // Resolve Authoritative Baseline Candidate (Champion Artifact if present in ModelRegistry, else Initial Benchmark Candidate)
+      let championCand: StrategyCandidate;
+      const prodState = ModelRegistry.getProductionState(strategyVersion) || ModelRegistry.getProductionState();
+      const activeChampionArtifact = prodState?.activeCandidateId ? ModelRegistry.getCandidateArtifact(prodState.activeCandidateId) : undefined;
+
+      if (activeChampionArtifact) {
+        championCand = {
+          id: activeChampionArtifact.candidateId,
+          baseStrategyVersion: activeChampionArtifact.strategyVersion,
+          candidateVersion: activeChampionArtifact.candidateVersion,
+          type: 'BASELINE',
+          description: `Active Production Champion (${activeChampionArtifact.candidateId})`,
+          change: {
+            symbol: config.symbol,
+            minMtfScore: activeChampionArtifact.executionConfig?.minMtfScore ?? config.executionConfig.minMtfScore,
+            stopLossAtrMultiplier: activeChampionArtifact.executionConfig?.stopLossAtrMultiplier ?? config.executionConfig.stopLossAtrMultiplier,
+            sizingMultiplier: activeChampionArtifact.executionConfig?.sizingMultiplier ?? config.executionConfig.sizingMultiplier,
+            fillModel: activeChampionArtifact.executionConfig?.fillModel ?? config.executionConfig.fillModel,
+            ambiguityMode: activeChampionArtifact.executionConfig?.ambiguityMode ?? config.executionConfig.ambiguityMode,
+            latencyMs: activeChampionArtifact.executionConfig?.latencyMs ?? config.executionConfig.latencyMs,
+          },
+          evidence: {
+            sampleSize: trainSlice.length,
+            expectancyBefore: 0,
+            expectancyAfterHistorical: 0,
+          },
+          riskConfig: (activeChampionArtifact.riskConfig as CandidateRiskConfig) || config.riskConfig,
+          executionConfig: (activeChampionArtifact.executionConfig as CandidateExecutionConfig) || config.executionConfig,
+          status: 'PROMOTED',
+          createdAt: new Date(),
+        };
+      } else {
+        championCand = CandidateEvaluator.createBaselineBenchmarkCandidate(
+          strategyVersion,
+          config.symbol,
+          config.riskConfig,
+          config.executionConfig,
+        );
+      }
 
       for (const trainRes of trainingResults) {
         const hyp = trainRes.hypothesis;
@@ -406,7 +439,9 @@ export class SelfImprovingRetrainingPipeline {
         // 6b. Walk-Forward Validation (WFV) with Genuine Fold Retraining
         currentStatus = 'WALK_FORWARD';
         const rawDevExamples = [...splits.training.examples, ...splits.validation.examples];
-        const devExperiences = rawDevExamples.map((e: TrainingExample) => {
+        const devExpDatasetHash = PITExperienceDatasetBuilder.computeDatasetHash(rawDevExamples);
+
+        const devExperiences: TradingExperience[] = rawDevExamples.map((e: TrainingExample) => {
           if (e.outcomeR === undefined || e.outcomeR === null || !Number.isFinite(e.outcomeR)) {
             throw new Error(`MISSING_OUTCOME_R_PROVENANCE: Training example '${e.exampleId}' lacks validated outcomeR for walk-forward validation`);
           }
@@ -450,28 +485,74 @@ export class SelfImprovingRetrainingPipeline {
             throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' has invalid features structure`);
           }
 
-          return {
+          const exp: TradingExperience = {
             id: e.exampleId,
+            tradeId: e.exampleId,
             timestamp: new Date(e.decisionTimestamp),
             decisionTimestamp: e.decisionTimestamp,
+            featureTimestamp: e.featureTimestamp,
             labelStartTimestamp: e.labelStartTimestamp,
             labelEndTimestamp: e.labelEndTimestamp,
-            label: e.label,
-            labelBinary: e.label,
-            outcome: {
-              pnlR: e.outcomeR,
-              realizedR: e.outcomeR,
-              exitType: e.exitType,
+            instrument: {
+              symbol,
+              assetType: 'CRYPTO',
             },
+            timeframe: config.timeframe,
             marketState: {
               quant: quantFeatures,
             },
+            decision: {
+              action: e.label === 1 ? 'BUY' : 'WAIT',
+              score: 0.5,
+            },
+            execution: {
+              entryPrice: 50000,
+              entryTime: new Date(e.decisionTimestamp),
+            },
+            risk: {
+              stopLoss: 49000,
+            },
+            prediction: {},
+            outcome: {
+              status: e.label === 1 ? 'WIN' : 'LOSS',
+              pnl: e.outcomeR * 1000,
+              pnlR: e.outcomeR,
+              maxFavorableExcursion: e.outcomeR > 0 ? e.outcomeR : 0,
+              maxAdverseExcursion: e.outcomeR < 0 ? e.outcomeR : 0,
+              holdingTimeSeconds: Math.max(0, (e.labelEndTimestamp - e.decisionTimestamp) / 1000),
+            },
+            marketContext: {
+              regime: e.regime || 'NORMAL',
+              volatilityRegime: e.volatilityBucket || 'NORMAL',
+              session: 'DEFAULT',
+              dayOfWeek: new Date(e.decisionTimestamp).getUTCDay(),
+            },
+            outcomeClassification: {
+              primaryClassification: e.label === 1 ? 'GOOD_TRADE' : 'BAD_TRADE',
+              detailedClassification: e.exitType || 'UNKNOWN',
+              executionQualityScore: 1.0,
+              signalQualityScore: 1.0,
+              holdingEfficiencyScore: 1.0,
+              adverseExcursionPenalty: 0.0,
+              favorableExcursionCapture: 1.0,
+              wasMistake: false,
+              tags: [e.exitType || 'UNKNOWN'],
+            } as any,
+            reasons: [],
+            failureReasons: [],
+            strategyVersion: e.strategyVersion || strategyVersion,
+            featureSchemaVersion: '2.0',
+            features: quantFeatures,
+            label: e.label,
+            labelBinary: e.label,
+            createdAt: new Date(e.decisionTimestamp),
           };
+          return exp;
         });
 
         const devExpDataset: ExperienceDataset = {
-          experiences: devExperiences as any,
-          datasetHash: splits.training.datasetHash,
+          experiences: devExperiences,
+          datasetHash: devExpDatasetHash,
           featureSchemaVersion: '2.0',
           symbol,
           timeframe: config.timeframe,
@@ -497,14 +578,14 @@ export class SelfImprovingRetrainingPipeline {
           warmupBars: config.warmupBars,
         });
 
-        const minValTrades = config.minValidationTrades !== undefined ? config.minValidationTrades : 0;
-        const minValExp = config.minValidationExpectancyR !== undefined ? config.minValidationExpectancyR : -999.0;
-        const minValPF = config.minValidationProfitFactor !== undefined ? config.minValidationProfitFactor : 0.0;
+        const minValTrades = config.minValidationTrades;
+        const minValExp = config.minValidationExpectancyR;
+        const minValPF = config.minValidationProfitFactor;
 
         const valWinRate =
           valEval.simulatedRMultiples.length > 0
             ? valEval.simulatedRMultiples.filter((r) => r > 0).length / valEval.simulatedRMultiples.length
-            : 0;
+            : undefined;
 
         const valPassed =
           valEval.passed &&
@@ -536,18 +617,22 @@ export class SelfImprovingRetrainingPipeline {
         }
       }
 
-      // 7. Rejection Gate
+      // 7. Rejection Gate & Validation-Driven Candidate Ranking
       if (passedHypotheses.length === 0) {
         currentStatus = 'REJECTED';
       } else {
         currentStatus = 'OOS_EVALUATION';
       }
 
-      // 8. OOS Holdout Evaluation strictly for passing hypotheses
+      // Explicitly rank passing candidates based strictly on validation performance
+      // (Out-of-sample data is NEVER used for ranking or candidate selection)
+      const rankedPassedHypotheses = this.rankValidationCandidates(passedHypotheses);
+
+      // 8. OOS Holdout Evaluation strictly for passing hypotheses (Evidence-only contract)
       const oosResults: CandidateOOSResult[] = [];
       const createdArtifacts: ValidatedCandidateArtifact[] = [];
 
-      for (const passed of passedHypotheses) {
+      for (const passed of rankedPassedHypotheses) {
         const hyp = passed.hyp;
         const candidateObj = this.toStrategyCandidate(
           hyp,
@@ -571,7 +656,7 @@ export class SelfImprovingRetrainingPipeline {
             minExpectancyDelta: 0.0,
             minProfitFactor: config.minValidationProfitFactor,
             minCandidateExpectancy: config.minValidationExpectancyR,
-            minTrades: config.minValidationTrades ?? 0,
+            minTrades: config.minOOSTrades,
           },
         });
 
@@ -598,7 +683,7 @@ export class SelfImprovingRetrainingPipeline {
         const oosWinRate =
           oosEval.simulatedRMultiples.length > 0
             ? oosEval.simulatedRMultiples.filter((r) => r > 0).length / oosEval.simulatedRMultiples.length
-            : 0;
+            : undefined;
 
         const oosRes: CandidateOOSResult = {
           hypothesisId: hyp.hypothesisId,
@@ -660,7 +745,9 @@ export class SelfImprovingRetrainingPipeline {
         currentStatus = 'REGISTERED';
       }
 
-      const selectedCandidateId = createdArtifacts.length > 0 ? createdArtifacts[0].candidateId : undefined;
+      // Candidate selected strictly by best validation ranking (blind to OOS)
+      const selectedCandidateId =
+        rankedPassedHypotheses.length > 0 ? rankedPassedHypotheses[0].hyp.candidateId : undefined;
       const completedAt = Date.now();
       const finalStatus: RetrainingRunStatus = createdArtifacts.length > 0 ? 'COMPLETED' : 'REJECTED';
 
@@ -830,4 +917,58 @@ export class SelfImprovingRetrainingPipeline {
       createdAt: new Date(),
     } as StrategyCandidate;
   }
+
+  /**
+   * Deterministically ranks passed candidate hypotheses strictly on in-sample and walk-forward
+   * validation performance. Out-of-sample (OOS) data is strictly excluded from candidate selection and ranking.
+   */
+  public static rankValidationCandidates(
+    candidates: Array<{
+      hyp: CandidateHypothesis;
+      trainRes: CandidateTrainingResult;
+      valRes: CandidateValidationResult;
+    }>,
+  ): Array<{
+    hyp: CandidateHypothesis;
+    trainRes: CandidateTrainingResult;
+    valRes: CandidateValidationResult;
+  }> {
+    return [...candidates].sort((a, b) => {
+      // 1. Primary: Validation Expectancy (R) descending
+      if (b.valRes.validationExpectancyR !== a.valRes.validationExpectancyR) {
+        return b.valRes.validationExpectancyR - a.valRes.validationExpectancyR;
+      }
+      // 2. Secondary: Walk-forward Expectancy (R) descending
+      if (b.valRes.walkForwardExpectancyR !== a.valRes.walkForwardExpectancyR) {
+        return b.valRes.walkForwardExpectancyR - a.valRes.walkForwardExpectancyR;
+      }
+      // 3. Tertiary: Walk-forward fold pass rate descending
+      const aFoldRate =
+        a.valRes.walkForwardTotalFolds > 0
+          ? a.valRes.walkForwardFoldsPassed / a.valRes.walkForwardTotalFolds
+          : 0;
+      const bFoldRate =
+        b.valRes.walkForwardTotalFolds > 0
+          ? b.valRes.walkForwardFoldsPassed / b.valRes.walkForwardTotalFolds
+          : 0;
+      if (bFoldRate !== aFoldRate) {
+        return bFoldRate - aFoldRate;
+      }
+      // 4. Quaternary: Validation Profit Factor descending
+      if (b.valRes.validationProfitFactor !== a.valRes.validationProfitFactor) {
+        return b.valRes.validationProfitFactor - a.valRes.validationProfitFactor;
+      }
+      // 5. Quinary: Validation Max Drawdown ascending (lower is better)
+      if (a.valRes.validationMaxDrawdownR !== b.valRes.validationMaxDrawdownR) {
+        return a.valRes.validationMaxDrawdownR - b.valRes.validationMaxDrawdownR;
+      }
+      // 6. Senary: Validation trade count descending
+      if (b.valRes.validationTradeCount !== a.valRes.validationTradeCount) {
+        return b.valRes.validationTradeCount - a.valRes.validationTradeCount;
+      }
+      // Deterministic tie-breaker: hypothesisId ascending
+      return a.hyp.hypothesisId.localeCompare(b.hyp.hypothesisId);
+    });
+  }
 }
+

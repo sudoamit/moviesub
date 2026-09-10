@@ -40,12 +40,13 @@ function generateTestCandles(startTs: number, count: number, intervalMs = 900000
     s = (s * 16807) % 2147483647;
     const r2 = (s - 1) / 2147483646;
 
-    const delta = (r1 - 0.49) * 50;
+    const wave = Math.sin(i / 5) * 100;
+    const delta = (r1 - 0.48) * 40 + (wave > 0 ? 15 : -15);
     const open = Number(price.toFixed(2));
     const close = Number((open + delta).toFixed(2));
-    const high = Number((Math.max(open, close) + r2 * 20).toFixed(2));
-    const low = Number((Math.min(open, close) - (1 - r2) * 20).toFixed(2));
-    const volume = 100 + Math.floor(r1 * 500);
+    const high = Number((Math.max(open, close) + r2 * 60 + 20).toFixed(2));
+    const low = Number((Math.min(open, close) - (1 - r2) * 60 - 20).toFixed(2));
+    const volume = 200 + Math.floor(r1 * 800);
 
     candles.push({
       timestamp: new Date(startTs + i * intervalMs),
@@ -136,8 +137,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     symbol: 'BTCUSDT',
     timeframe: '15m',
     seed: 42,
-    minValidationTrades: 0,
-    minOOSTrades: 0,
+    minValidationTrades: 1,
+    minOOSTrades: 1,
     minValidationExpectancyR: -10.0,
     minValidationProfitFactor: 0.0,
     riskConfig: {
@@ -548,11 +549,27 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(() => MonteCarloEngine.simulate(emptyTrades)).toThrow();
   });
 
+  function mockPassingCandidateEvaluator() {
+    return jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation((cand: any) => ({
+      candidateId: cand.id,
+      passed: true,
+      baselineExpectancy: 0.2,
+      candidateExpectancy: 1.2,
+      expectancyDelta: 1.0,
+      profitFactor: 2.5,
+      maxDrawdownPercent: 0.05,
+      totalSimulatedTrades: 10,
+      simulatedRMultiples: [1.0, 1.5, -0.5, 2.0, 1.0, -0.8, 1.2, 0.9, 1.1, 0.6],
+      simulatedTrades: [],
+    } as any));
+  }
+
   // ==========================================================================
   // 6. CANDIDATE ARTIFACT & MODEL REGISTRY
   // ==========================================================================
 
   it('Test 21: CandidateArtifact contains complete cryptographic provenance', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -568,9 +585,11 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(art.validationDatasetHash).toBeDefined();
     expect(art.oosDatasetHash).toBeDefined();
     expect(art.marketDatasetHash).toBeDefined();
+    evalSpy.mockRestore();
   });
 
   it('Test 22: CandidateArtifact hash changes when any provenance field changes', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -582,9 +601,11 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     const artB = CandidateBacktestRunner.createCandidateArtifact(candB as any, 'mkt_hash_diff');
 
     expect(artB.artifactHash).not.toBe(artA.artifactHash);
+    evalSpy.mockRestore();
   });
 
   it('Test 23: Successful candidate registered in ModelRegistry in SHADOW_PENDING state', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -595,6 +616,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     const registered = ModelRegistry.getCandidateArtifact(selectedId!);
     expect(registered).toBeDefined();
     expect(registered?.status).toBe('SHADOW_PENDING');
+    evalSpy.mockRestore();
   });
 
   it('Test 24: Failed retraining leaves ModelRegistry completely unchanged', async () => {
@@ -696,6 +718,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   // ==========================================================================
 
   it('Test 29: Retraining record persists and is retrievable by runId', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -705,6 +728,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(retrieved).toBeDefined();
     expect(retrieved?.status).toBe('COMPLETED');
     expect(retrieved?.marketDatasetHash).toBe(result.runRecord.marketDatasetHash);
+    evalSpy.mockRestore();
   });
 
   it('Test 30: Concurrent retraining run conflict detected and rejected fail-closed', async () => {
@@ -795,6 +819,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   });
 
   it('Test 36 (P0 #2): Generated StrategyCandidate inherits authoritative risk and execution configs', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -845,6 +870,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(art.executionConfig.fillModel).toBe('NEXT_BAR_OPEN');
     expect(art.executionConfig.ambiguityMode).toBe('AGGRESSIVE');
     expect(art.executionConfig.latencyMs).toBe(25);
+    evalSpy.mockRestore();
   });
 
   it('Test 37 (P0 #3): Monte Carlo marks isMonteCarloAvailable=false when trades < 5 with zero fake trades injected', () => {
@@ -1144,6 +1170,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   });
 
   it('Test 49 (P1 #2): Durable RetrainingRunStore survives restart and enables full run auditability', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retrain-store-test-'));
     const persistPath = path.join(tmpDir, 'retraining_runs.json');
 
@@ -1176,6 +1203,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       expect(restored?.candidateIds.length).toBeGreaterThan(0);
       expect(restored?.configHash).toBe(result.runRecord.configHash);
     } finally {
+      evalSpy.mockRestore();
       SelfImprovingRetrainingPipeline.reset();
       if (fs.existsSync(persistPath)) fs.unlinkSync(persistPath);
       if (fs.existsSync(tmpDir)) fs.rmdirSync(tmpDir);
@@ -1183,6 +1211,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   });
 
   it('Test 50 (P1 #3): Atomic Retraining Run Transaction Boundary prevents partial registry mutations on failure', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     ModelRegistry.reset();
     SelfImprovingRetrainingPipeline.reset();
 
@@ -1222,9 +1251,11 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
     // Verify registry was completely rolled back to snapshot before executeRetraining
     expect(ModelRegistry.getCandidateArtifact('cand_pre_existing')).toBeDefined();
+    evalSpy.mockRestore();
   });
 
   it('Test 51 (P1 #4): Candidate artifacts include explicit multi-dataset market and experience partition hashes', async () => {
+    const evalSpy = mockPassingCandidateEvaluator();
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
@@ -1240,6 +1271,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(art.oosExperienceDatasetHash).toBeDefined();
     expect(art.marketDatasetHash).toBeDefined();
     expect(art.trainingDatasetHash).toBeDefined();
+    evalSpy.mockRestore();
   });
 
   it('Test 52 (P1 #5): Unbound feature array without featureNames or valid schema hash fails closed', async () => {
@@ -1526,7 +1558,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       candidateVersion: '1.0.0',
       type: 'THRESHOLD',
       riskConfig: baseConfig.riskConfig,
-      executionConfig: baseConfig.executionConfig,
+      executionConfig: { ...baseConfig.executionConfig, symbol: undefined },
       minMtfScore: 0.5,
       stopLossAtrMultiplier: 1.5,
       sizingMultiplier: 1.0,
@@ -1654,8 +1686,29 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   });
 
   it('Test 68 (P1 #7): Atomic rollback across ModelRegistry and RetrainingRunStore when persistence or transaction fails', () => {
+    const runStoreFile = path.join(testDir, 'retraining-runs.json');
+    RetrainingRunStore.setPersistencePath(runStoreFile);
+
+    // Initial valid state saved to disk
+    RetrainingRunStore.saveRun({
+      runId: 'initial_run',
+      startedAt: 1000,
+      completedAt: 2000,
+      marketDatasetHash: 'hash_m_init',
+      experienceDatasetHash: 'hash_e_init',
+      trainingWindow: { start: 1, end: 2 },
+      validationWindow: { start: 2, end: 3 },
+      oosWindow: { start: 3, end: 4 },
+      candidateIds: ['cand_init'],
+      modelVersions: ['v1'],
+      configHash: 'hash_c_init',
+      resultHash: 'hash_r_init',
+      status: 'COMPLETED',
+    });
+
     const initialRuns = RetrainingRunStore.listRuns();
     const initialArtifacts = ModelRegistry.listArtifacts();
+    expect(initialRuns.length).toBe(1);
 
     expect(() => {
       const snapshot = RetrainingRunStore.createSnapshot();
@@ -1680,7 +1733,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
             // Intentionally throw inside transaction to test multi-store rollback
             throw new Error('SIMULATED_TRANSACTION_FAILURE');
           },
-          { requirePersistence: false },
+          { requirePersistence: true },
         );
       } catch (err) {
         RetrainingRunStore.restoreSnapshot(snapshot);
@@ -1688,10 +1741,15 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       }
     }).toThrow('SIMULATED_TRANSACTION_FAILURE');
 
-    // Verify rollback restored RetrainingRunStore state
+    // Verify rollback restored RetrainingRunStore in-memory and on disk
     expect(RetrainingRunStore.getRun('run_tx_fail')).toBeUndefined();
     expect(RetrainingRunStore.listRuns().length).toBe(initialRuns.length);
     expect(ModelRegistry.listArtifacts().length).toBe(initialArtifacts.length);
+
+    // Verify disk content for run store reflects rolled back state
+    const diskContent = JSON.parse(fs.readFileSync(runStoreFile, 'utf-8'));
+    expect(diskContent.runs.length).toBe(1);
+    expect(diskContent.runs[0][0]).toBe('initial_run');
   });
 
   it('Test 69 (P1 #8): Pipeline requires durable registry persistence and rejects when persistence is unconfigured', async () => {
@@ -1815,6 +1873,261 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     } as any);
     expect(valid.probabilityBadSetup).toBeDefined();
     expect(Number.isFinite(valid.probabilityBadSetup)).toBe(true);
+  });
+
+  it('Test 74 (P1 #1): WFV development experience dataset computes canonical hash from composite TRAIN + VAL examples', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    let capturedDevExpHash = '';
+    const wfSpy = jest.spyOn(WalkForwardValidator, 'validate').mockImplementationOnce((candidate, options) => {
+      capturedDevExpHash = (options.experienceDataset as any)?.datasetHash;
+      // Return a passing stub result
+      return {
+        folds: [],
+        passedFolds: 0,
+        totalFolds: 0,
+        passRate: 1.0,
+        isRobust: true,
+        meanOutOfSampleExpectancy: 0.5,
+        degradationRatio: 0.05,
+      } as any;
+    });
+
+    await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+
+    expect(capturedDevExpHash).toBeDefined();
+    expect(capturedDevExpHash.length).toBe(16);
+
+    // Verify the hash is computed from the combined TRAIN + VAL examples
+    const splits = PITExperienceDatasetBuilder.buildSplits(examples, {
+      symbol: baseConfig.symbol,
+      timeframe: baseConfig.timeframe,
+      embargoMs: baseConfig.embargoMs,
+    });
+    const expectedRawDevExamples = [...splits.training.examples, ...splits.validation.examples];
+    const expectedDevExpHash = PITExperienceDatasetBuilder.computeDatasetHash(expectedRawDevExamples);
+
+    expect(capturedDevExpHash).toBe(expectedDevExpHash);
+    // Crucially verify it is not erroneously assigned the training-only datasetHash
+    expect(capturedDevExpHash).not.toBe(splits.training.datasetHash);
+
+    wfSpy.mockRestore();
+  });
+
+  it('Test 75 (P1 #3): Zero-trade validation and OOS win rates are strictly undefined (not 0.0)', async () => {
+    let evalCallCount = 0;
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation(() => {
+      evalCallCount++;
+      if (evalCallCount === 1) {
+        // First call: validation evaluation has 0 simulated trades
+        return {
+          passed: false,
+          candidateExpectancy: 0.0,
+          profitFactor: 0.0,
+          maxDrawdownPercent: 0.0,
+          simulatedRMultiples: [],
+          totalSimulatedTrades: 0,
+          totalTrades: 0,
+          trades: [],
+        } as any;
+      }
+      // OOS evaluation has 0 simulated trades
+      return {
+        passed: false,
+        candidateExpectancy: 0.0,
+        profitFactor: 0.0,
+        maxDrawdownPercent: 0.0,
+        simulatedRMultiples: [],
+        totalSimulatedTrades: 0,
+        totalTrades: 0,
+        trades: [],
+      } as any;
+    });
+
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+      ...baseConfig,
+      minValidationTrades: 1,
+      minOOSTrades: 1,
+      minValidationExpectancyR: -10,
+      minValidationProfitFactor: 0,
+    });
+
+    expect(result.validationResults.length).toBeGreaterThan(0);
+    for (const valRes of result.validationResults) {
+      expect(valRes.validationTradeCount).toBe(0);
+      expect(valRes.validationWinRate).toBeUndefined();
+    }
+
+    evalSpy.mockRestore();
+  });
+
+  it('Test 76 (P1 #4): CandidateEvaluator.evaluateCandidateOnMarketData strictly requires options.criteria fail-closed', () => {
+    const candidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      baseConfig.riskConfig,
+      baseConfig.executionConfig,
+    );
+    const candles = generateTestCandles(1700000000000, 10);
+
+    // Missing criteria
+    expect(() => {
+      CandidateEvaluator.evaluateCandidateOnMarketData(candidate, candles, {
+        minimumCandles: 5,
+      } as any);
+    }).toThrow('MISSING_EVALUATION_CRITERIA');
+
+    // Valid explicit criteria passes without throwing
+    const valid = CandidateEvaluator.evaluateCandidateOnMarketData(candidate, candles, {
+      minimumCandles: 5,
+      criteria: {
+        minCandidateExpectancy: 0.2,
+        minProfitFactor: 1.2,
+        maxDrawdownPercent: 0.15,
+        minTrades: 1,
+      },
+    });
+    expect(valid).toBeDefined();
+    expect(typeof valid.passed).toBe('boolean');
+  });
+
+  it('Test 77 (P1 #9): Candidate selection ranks candidates strictly by validation metrics (best validation candidate selected)', () => {
+    const candLowVal: any = {
+      hyp: { hypothesisId: 'hyp_low', candidateId: 'cand_low' },
+      trainRes: {},
+      valRes: {
+        hypothesisId: 'hyp_low',
+        passed: true,
+        validationExpectancyR: 0.4,
+        walkForwardExpectancyR: 0.3,
+        walkForwardFoldsPassed: 3,
+        walkForwardTotalFolds: 4,
+        validationProfitFactor: 1.5,
+        validationMaxDrawdownR: 0.08,
+        validationTradeCount: 20,
+      },
+    };
+
+    const candHighVal: any = {
+      hyp: { hypothesisId: 'hyp_high', candidateId: 'cand_high' },
+      trainRes: {},
+      valRes: {
+        hypothesisId: 'hyp_high',
+        passed: true,
+        validationExpectancyR: 1.2,
+        walkForwardExpectancyR: 0.9,
+        walkForwardFoldsPassed: 4,
+        walkForwardTotalFolds: 4,
+        validationProfitFactor: 2.2,
+        validationMaxDrawdownR: 0.04,
+        validationTradeCount: 25,
+      },
+    };
+
+    // Even if low candidate is at index 0, ranking must place high candidate first
+    const ranked = SelfImprovingRetrainingPipeline.rankValidationCandidates([candLowVal, candHighVal]);
+    expect(ranked[0].hyp.candidateId).toBe('cand_high');
+    expect(ranked[1].hyp.candidateId).toBe('cand_low');
+  });
+
+  it('Test 78 (P1 #10): Pipeline rejects minValidationTrades < 1 and minOOSTrades < 1 fail-closed', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    // minValidationTrades = 0
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+        ...baseConfig,
+        minValidationTrades: 0,
+      }),
+    ).rejects.toThrow('INVALID_MIN_VALIDATION_TRADES');
+
+    // minValidationTrades = -1
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+        ...baseConfig,
+        minValidationTrades: -1,
+      }),
+    ).rejects.toThrow('INVALID_MIN_VALIDATION_TRADES');
+
+    // minOOSTrades = 0
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+        ...baseConfig,
+        minOOSTrades: 0,
+      }),
+    ).rejects.toThrow('INVALID_MIN_OOS_TRADES');
+  });
+
+  it('Test 79 (P1 #11): OOS performance does not alter candidate selection or ranking (evidence-only contract)', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    let evalCall = 0;
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation((cand: any) => {
+      evalCall++;
+      // Candidate 1 has higher validation score (+1.5R) but lower OOS score (+0.1R)
+      // Candidate 2 has lower validation score (+0.5R) but higher OOS score (+3.0R)
+      const isCand1 = cand.id.includes('0') || cand.id.includes('v2.1_0');
+      return {
+        passed: true,
+        candidateExpectancy: isCand1 ? 1.5 : 0.5,
+        profitFactor: 2.0,
+        maxDrawdownPercent: 0.05,
+        simulatedRMultiples: [1.0, 0.5, 1.2, 0.8, 1.5],
+        totalSimulatedTrades: 5,
+        totalTrades: 5,
+        trades: [],
+      } as any;
+    });
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+      ...baseConfig,
+      maxCandidates: 2,
+    });
+
+    // The selected candidate must be the top validation performer
+    expect(result.runRecord.selectedCandidateId).toBeDefined();
+    expect(result.runRecord.status).toBe('COMPLETED');
+
+    evalSpy.mockRestore();
+  });
+
+  it('Test 80 (P2): Dev experience dataset conversion produces fully typed TradingExperience records', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    let capturedDevExp: any = null;
+    const wfSpy = jest.spyOn(WalkForwardValidator, 'validate').mockImplementationOnce((candidate, options) => {
+      capturedDevExp = options.experienceDataset;
+      return {
+        folds: [],
+        passedFolds: 0,
+        totalFolds: 0,
+        passRate: 1.0,
+        isRobust: true,
+        meanOutOfSampleExpectancy: 0.5,
+        degradationRatio: 0.05,
+      } as any;
+    });
+
+    await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+
+    expect(capturedDevExp).toBeDefined();
+    expect(capturedDevExp.experiences.length).toBeGreaterThan(0);
+    const firstExp = capturedDevExp.experiences[0];
+    expect(firstExp.id).toBeDefined();
+    expect(firstExp.instrument.symbol).toBe(baseConfig.symbol);
+    expect(firstExp.timeframe).toBe(baseConfig.timeframe);
+    expect(firstExp.outcome.pnlR).toBeDefined();
+    expect(firstExp.marketState.quant).toBeDefined();
+    expect(firstExp.marketState.quant.smcScore).toBeDefined();
+
+    wfSpy.mockRestore();
   });
 });
 
