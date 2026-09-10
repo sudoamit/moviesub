@@ -29,6 +29,7 @@ export interface CandidateArtifactBuildOptions {
   };
   symbol?: string;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+  executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
 }
 
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
@@ -139,15 +140,28 @@ export class CandidateArtifactBuilder {
       throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidate.id}' is missing authoritative symbol`);
     }
 
-    const fillModel = (change.fillModel as string) || (rawCandidate.fillModel as string) || 'OHLC_PATH';
+    const fillModel =
+      (candidate.executionConfig as Record<string, unknown>)?.fillModel as string ||
+      (options?.executionConfig as Record<string, unknown>)?.fillModel as string ||
+      (change.fillModel as string) ||
+      (rawCandidate.fillModel as string) ||
+      'OHLC_PATH';
     const ambiguityMode =
-      (change.ambiguityMode as string) || (rawCandidate.ambiguityMode as string) || 'CONSERVATIVE';
+      (candidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
+      (options?.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
+      (change.ambiguityMode as string) ||
+      (rawCandidate.ambiguityMode as string) ||
+      'CONSERVATIVE';
     const latencyMs =
-      typeof change.latencyMs === 'number'
-        ? change.latencyMs
-        : typeof rawCandidate.latencyMs === 'number'
-          ? (rawCandidate.latencyMs as number)
-          : 50;
+      typeof (candidate.executionConfig as Record<string, unknown>)?.latencyMs === 'number'
+        ? ((candidate.executionConfig as Record<string, unknown>).latencyMs as number)
+        : typeof (options?.executionConfig as Record<string, unknown>)?.latencyMs === 'number'
+          ? ((options?.executionConfig as Record<string, unknown>).latencyMs as number)
+          : typeof change.latencyMs === 'number'
+            ? change.latencyMs
+            : typeof rawCandidate.latencyMs === 'number'
+              ? (rawCandidate.latencyMs as number)
+              : 50;
 
     // Canonical SHA-256 hash over candidate parameters using canonical JSON serialization
     const hashPayload = canonicalJsonStringify({

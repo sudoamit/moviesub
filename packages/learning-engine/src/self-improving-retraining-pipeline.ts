@@ -99,11 +99,59 @@ export class SelfImprovingRetrainingPipeline {
     if (!config || typeof config !== 'object') {
       throw new Error('MISSING_RETRAINING_CONFIG: Retraining pipeline requires explicit RetrainingRunConfig');
     }
+    if (!config.symbol || typeof config.symbol !== 'string' || config.symbol.trim().length === 0) {
+      throw new Error('MISSING_SYMBOL: config.symbol must be a non-empty string');
+    }
+    if (!config.baseStrategyVersion || typeof config.baseStrategyVersion !== 'string' || config.baseStrategyVersion.trim().length === 0) {
+      throw new Error('MISSING_STRATEGY_VERSION: config.baseStrategyVersion must be a non-empty string');
+    }
     if (typeof config.maxCandidates !== 'number' || !Number.isFinite(config.maxCandidates) || config.maxCandidates <= 0) {
       throw new Error('INVALID_MAX_CANDIDATES: config.maxCandidates must be a positive integer');
     }
     if (typeof config.maxTrainingRuns !== 'number' || !Number.isFinite(config.maxTrainingRuns) || config.maxTrainingRuns <= 0) {
       throw new Error('INVALID_MAX_TRAINING_RUNS: config.maxTrainingRuns must be a positive integer');
+    }
+
+    // Strict validation of authoritative riskConfig
+    if (!config.riskConfig || typeof config.riskConfig !== 'object') {
+      throw new Error('MISSING_RISK_CONFIG: RetrainingRunConfig requires authoritative riskConfig');
+    }
+    const { initialCapital, maxRiskPerTrade, lotSize, contractSize, partialExitPolicy } = config.riskConfig;
+    if (typeof initialCapital !== 'number' || !Number.isFinite(initialCapital) || initialCapital <= 0) {
+      throw new Error('INVALID_RISK_CONFIG: riskConfig.initialCapital must be a positive finite number');
+    }
+    if (typeof maxRiskPerTrade !== 'number' || !Number.isFinite(maxRiskPerTrade) || maxRiskPerTrade <= 0 || maxRiskPerTrade > 1) {
+      throw new Error('INVALID_RISK_CONFIG: riskConfig.maxRiskPerTrade must be between 0 and 1');
+    }
+    if (typeof lotSize !== 'number' || !Number.isFinite(lotSize) || lotSize <= 0) {
+      throw new Error('INVALID_RISK_CONFIG: riskConfig.lotSize must be a positive finite number');
+    }
+    if (typeof contractSize !== 'number' || !Number.isFinite(contractSize) || contractSize <= 0) {
+      throw new Error('INVALID_RISK_CONFIG: riskConfig.contractSize must be a positive finite number');
+    }
+    if (!partialExitPolicy || typeof partialExitPolicy !== 'object') {
+      throw new Error('INVALID_RISK_CONFIG: riskConfig.partialExitPolicy must be an object');
+    }
+    const exitRatioSum = (partialExitPolicy.tp1Ratio || 0) + (partialExitPolicy.tp2Ratio || 0) + (partialExitPolicy.tp3Ratio || 0);
+    if (Math.abs(exitRatioSum - 1.0) > 1e-4) {
+      throw new Error(`INVALID_RISK_CONFIG: partialExitPolicy ratios must sum to 1.0, got ${exitRatioSum}`);
+    }
+
+    // Strict validation of authoritative executionConfig
+    if (!config.executionConfig || typeof config.executionConfig !== 'object') {
+      throw new Error('MISSING_EXECUTION_CONFIG: RetrainingRunConfig requires authoritative executionConfig');
+    }
+    if (!config.executionConfig.symbol || typeof config.executionConfig.symbol !== 'string') {
+      throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.symbol is required');
+    }
+    if (!config.executionConfig.fillModel || typeof config.executionConfig.fillModel !== 'string') {
+      throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.fillModel is required');
+    }
+    if (!config.executionConfig.ambiguityMode || typeof config.executionConfig.ambiguityMode !== 'string') {
+      throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.ambiguityMode is required');
+    }
+    if (typeof config.executionConfig.latencyMs !== 'number' || !Number.isFinite(config.executionConfig.latencyMs) || config.executionConfig.latencyMs < 0) {
+      throw new Error('INVALID_EXECUTION_CONFIG: executionConfig.latencyMs must be non-negative');
     }
 
     const configHash = crypto.createHash('sha256').update(canonicalJsonStringify(config)).digest('hex').substring(0, 16);
@@ -112,8 +160,8 @@ export class SelfImprovingRetrainingPipeline {
       config.timeframe || '15m',
     );
     const expHash = PITExperienceDatasetBuilder.computeDatasetHash(rawExamples);
-    const strategyVersion = config.baseStrategyVersion || 'v2.0';
-    const symbol = config.symbol || 'BTCUSDT';
+    const strategyVersion = config.baseStrategyVersion;
+    const symbol = config.symbol;
 
     const runId = this.computeRunId(strategyVersion, symbol, mktHash, expHash, configHash);
 
@@ -256,7 +304,7 @@ export class SelfImprovingRetrainingPipeline {
 
       for (const trainRes of trainingResults) {
         const hyp = trainRes.hypothesis;
-        const candidateObj = this.toStrategyCandidate(hyp, trainRes.modelArtifact);
+        const candidateObj = this.toStrategyCandidate(hyp, trainRes.modelArtifact, config, trainSlice.length, 0, 0);
 
         // 6a. Historical Simulation on Validation partition
         const valEval = CandidateEvaluator.evaluate(candidateObj, {
@@ -268,25 +316,30 @@ export class SelfImprovingRetrainingPipeline {
         // 6b. Walk-Forward Validation (WFV) with Genuine Fold Retraining
         currentStatus = 'WALK_FORWARD';
         const rawDevExamples = [...splits.training.examples, ...splits.validation.examples];
-        const devExperiences = rawDevExamples.map((e: any) => ({
-          id: e.exampleId,
-          timestamp: new Date(e.decisionTimestamp),
-          decisionTimestamp: e.decisionTimestamp,
-          labelStartTimestamp: e.labelStartTimestamp,
-          labelEndTimestamp: e.labelEndTimestamp,
-          outcome: {
-            pnlR: e.outcomeR ?? (e.label === 1 ? 1.5 : -1.0),
-            realizedR: e.outcomeR ?? (e.label === 1 ? 1.5 : -1.0),
-            exitType: e.label === 1 ? 'TP1' : 'SL',
-          },
-          marketState: {
-            quant: Array.isArray(e.features)
-              ? Object.fromEntries(
-                  (e.featureNames || CANONICAL_FEATURE_NAMES_V2).map((name: string, i: number) => [name, e.features[i] ?? 0.5]),
-                )
-              : (e.features || {}),
-          },
-        }));
+        const devExperiences = rawDevExamples.map((e: TrainingExample) => {
+          if (e.outcomeR === undefined || e.outcomeR === null || !Number.isFinite(e.outcomeR)) {
+            throw new Error(`MISSING_OUTCOME_R_PROVENANCE: Training example '${e.exampleId}' lacks validated outcomeR for walk-forward validation`);
+          }
+          return {
+            id: e.exampleId,
+            timestamp: new Date(e.decisionTimestamp),
+            decisionTimestamp: e.decisionTimestamp,
+            labelStartTimestamp: e.labelStartTimestamp,
+            labelEndTimestamp: e.labelEndTimestamp,
+            outcome: {
+              pnlR: e.outcomeR,
+              realizedR: e.outcomeR,
+              exitType: e.exitType || (e.outcomeR > 0 ? 'TP' : 'SL'),
+            },
+            marketState: {
+              quant: Array.isArray(e.features)
+                ? Object.fromEntries(
+                    (e.featureNames || CANONICAL_FEATURE_NAMES_V2).map((name: string, i: number) => [name, e.features[i] ?? 0.5]),
+                  )
+                : (e.features || {}),
+            },
+          };
+        });
 
         const devExpDataset: ExperienceDataset = {
           experiences: devExperiences as any,
@@ -368,7 +421,14 @@ export class SelfImprovingRetrainingPipeline {
 
       for (const passed of passedHypotheses) {
         const hyp = passed.hyp;
-        const candidateObj = this.toStrategyCandidate(hyp, passed.trainRes.modelArtifact);
+        const candidateObj = this.toStrategyCandidate(
+          hyp,
+          passed.trainRes.modelArtifact,
+          config,
+          trainSlice.length,
+          passed.valRes.validationExpectancyR,
+          passed.valRes.walkForwardExpectancyR,
+        );
 
         // Authoritative Backtest on OOS Holdout Candles
         const oosEval = CandidateEvaluator.evaluate(candidateObj, {
@@ -377,16 +437,21 @@ export class SelfImprovingRetrainingPipeline {
           warmupBars: 5,
         });
 
-        // Seeded Monte Carlo Simulation on real execution-derived trades
-        let mcRuinProb = 0;
-        const mcSamples =
-          oosEval.simulatedRMultiples && oosEval.simulatedRMultiples.length > 0
+        // Seeded Monte Carlo Simulation on real execution-derived trades only (ZERO synthetic fallback)
+        let mcRuinProb: number | undefined = undefined;
+        let isMonteCarloAvailable = false;
+        const realTrades =
+          oosEval.simulatedRMultiples && oosEval.simulatedRMultiples.length >= 5
             ? oosEval.simulatedRMultiples
-            : passed.valRes.simulatedRMultiples && passed.valRes.simulatedRMultiples.length > 0
+            : passed.valRes.simulatedRMultiples && passed.valRes.simulatedRMultiples.length >= 5
               ? passed.valRes.simulatedRMultiples
-              : [1.0, -1.0, 1.2, -0.8, 1.5];
-        const mc = MonteCarloEngine.simulate([...mcSamples], { seed: 42 });
-        mcRuinProb = mc.probabilityOfRuin;
+              : null;
+
+        if (realTrades && realTrades.length >= 5) {
+          const mc = MonteCarloEngine.simulate([...realTrades], { seed: config.seed ?? DEFAULT_LEARNING_SEED });
+          mcRuinProb = mc.probabilityOfRuin;
+          isMonteCarloAvailable = true;
+        }
 
         const costEval = RobustnessEngine.evaluateCosts(candidateObj, {
           candles: oosCandles,
@@ -407,6 +472,7 @@ export class SelfImprovingRetrainingPipeline {
           oosMarketDatasetHash: oosMarketHash,
           executionDerived: true,
           monteCarloRuinProbability: mcRuinProb,
+          isMonteCarloAvailable,
           transactionCostSurvived: costEval.survivedDoubleCosts,
         };
         oosResults.push(oosRes);
@@ -422,7 +488,7 @@ export class SelfImprovingRetrainingPipeline {
             outOfSampleExpectancy: oosEval.candidateExpectancy,
             profitFactor: oosEval.profitFactor,
             maxDrawdownPercent: oosEval.maxDrawdownPercent,
-            monteCarloRuinProb: mcRuinProb,
+            monteCarloRuinProb: mcRuinProb ?? 0,
             transactionCostSurvived: costEval.survivedDoubleCosts,
           },
         };
@@ -509,7 +575,14 @@ export class SelfImprovingRetrainingPipeline {
     }
   }
 
-  private static toStrategyCandidate(hyp: CandidateHypothesis, modelArtifact: ModelArtifact): StrategyCandidate {
+  private static toStrategyCandidate(
+    hyp: CandidateHypothesis,
+    modelArtifact: ModelArtifact,
+    config: RetrainingRunConfig,
+    sampleCount: number,
+    baselineExpectancy?: number,
+    historicalExpectancy?: number,
+  ): StrategyCandidate {
     const featSchemaVer = typeof modelArtifact.featureSchemaVersion === 'string' ? modelArtifact.featureSchemaVersion : '2.0';
     return {
       id: hyp.candidateId,
@@ -528,33 +601,19 @@ export class SelfImprovingRetrainingPipeline {
         minMtfScore: (hyp.entryFilters?.minMtfScore as number) ?? (hyp.parameterChanges?.minMtfScore as number) ?? 0,
       },
       evidence: {
-        sampleSize: 100,
-        expectancyBefore: 1.5,
-        expectancyAfterHistorical: 1.8,
+        sampleSize: sampleCount,
+        expectancyBefore: baselineExpectancy ?? 0,
+        expectancyAfterHistorical: historicalExpectancy ?? 0,
       },
       riskConfig: {
-        initialCapital: 100000,
-        maxRiskPerTrade: 0.01,
-        lotSize: 1,
-        contractSize: 1,
-        partialExitPolicy: {
-          tp1Ratio: 0.33,
-          tp2Ratio: 0.33,
-          tp3Ratio: 0.34,
-          moveStopToBreakevenOnTp1: true,
-          trailStopOnTp2: true,
-          trailStopOffsetR: 1.0,
-        },
+        ...config.riskConfig,
+        partialExitPolicy: { ...config.riskConfig.partialExitPolicy },
       },
       executionConfig: {
+        ...config.executionConfig,
         candidateId: hyp.candidateId,
         candidateVersion: hyp.candidateVersion,
         strategyVersion: hyp.baseStrategyVersion,
-        symbol: 'BTCUSDT',
-        fillModel: 'REALISTIC',
-        ambiguityMode: 'PESSIMISTIC',
-        latencyMs: 10,
-        configHash: 'exec_conf_hash',
       },
       status: 'GENERATED',
       createdAt: new Date(),

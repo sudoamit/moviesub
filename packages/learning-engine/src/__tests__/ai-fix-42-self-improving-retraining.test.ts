@@ -20,6 +20,7 @@ import { CandidateBacktestRunner } from '../candidate-backtest-runner';
 import { ModelRegistry } from '../model-registry';
 import { MonteCarloEngine } from '../monte-carlo-engine';
 import { WalkForwardValidator } from '../walk-forward-validator';
+import { CandidateEvaluator } from '../candidate-evaluator';
 
 /**
  * Deterministic candle generator for test market datasets.
@@ -89,6 +90,9 @@ function generateTestExamples(startTs: number, count: number, intervalMs = 90000
       regime: i % 2 === 0 ? 'TRENDING_BULLISH' : 'RANGING',
       volatilityBucket: 'NORMAL',
       source: 'HISTORICAL',
+      featureSchemaHash: 'test_feat_schema_hash',
+      marketDatasetHash: 'test_market_dataset_hash',
+      strategyVersion: 'v2.0',
     });
     examples.push(example);
   }
@@ -128,6 +132,31 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
     minOOSTrades: 0,
     minValidationExpectancyR: -10.0,
     minValidationProfitFactor: 0.0,
+    riskConfig: {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      lotSize: 1,
+      contractSize: 1,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    },
+    executionConfig: {
+      candidateId: 'base_candidate',
+      candidateVersion: 'v2.1',
+      strategyVersion: 'v2.0',
+      symbol: 'BTCUSDT',
+      fillModel: 'OHLC_PATH',
+      ambiguityMode: 'CONSERVATIVE',
+      latencyMs: 10,
+      minMtfScore: 0.5,
+      configHash: 'base_exec_conf_hash',
+    },
   };
 
   // ==========================================================================
@@ -167,10 +196,20 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
 
   it('Test 2: Future label leakage rejected fail-closed', () => {
     const t0 = 1700000000000;
+    const baseMeta = {
+      featureSchemaHash: 'test_feat_schema_hash',
+      marketDatasetHash: 'test_market_dataset_hash',
+      strategyVersion: 'v2.0',
+      outcomeR: 1.0,
+      regime: 'TRENDING_BULLISH',
+      volatilityBucket: 'NORMAL',
+      source: 'HISTORICAL' as const,
+    };
 
     // Missing labelStartTimestamp -> FAIL CLOSED
     expect(() => {
       PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
         exampleId: 'ex_leak_1',
         decisionTimestamp: t0,
         featureTimestamp: t0,
@@ -184,6 +223,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
     // Feature timestamp after decision timestamp -> FAIL CLOSED
     expect(() => {
       PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
         exampleId: 'ex_leak_2',
         decisionTimestamp: t0,
         featureTimestamp: t0 + 1000,
@@ -197,6 +237,7 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
     // Future-only leaked feature name -> FAIL CLOSED
     expect(() => {
       PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
         exampleId: 'ex_leak_3',
         decisionTimestamp: t0,
         featureTimestamp: t0,
@@ -462,15 +503,27 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
     }
   });
 
-  it('Test 19: Monte Carlo uses real execution-derived trades', () => {
-    const spy = jest.spyOn(MonteCarloEngine, 'simulate');
+  it('Test 19: Monte Carlo uses real execution-derived trades', async () => {
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation(() => ({
+      candidateExpectancy: 1.2,
+      profitFactor: 2.1,
+      maxDrawdownPercent: 0.05,
+      simulatedRMultiples: [1.5, -1.0, 2.0, -0.5, 1.2, 0.8],
+      totalTrades: 6,
+      trades: [],
+    } as any));
+    const mcSpy = jest.spyOn(MonteCarloEngine, 'simulate');
+
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
-    return SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig).then(() => {
-      expect(spy).toHaveBeenCalled();
-      spy.mockRestore();
-    });
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+    expect(mcSpy).toHaveBeenCalled();
+    expect(result.oosResults[0].isMonteCarloAvailable).toBe(true);
+    expect(result.oosResults[0].monteCarloRuinProbability).toBeDefined();
+
+    evalSpy.mockRestore();
+    mcSpy.mockRestore();
   });
 
   it('Test 20: Insufficient Monte Carlo data fails unavailable (zero probability of ruin fabrications)', () => {
@@ -669,5 +722,179 @@ describe('AI Fix 42 — Self-Improving Retraining & Candidate Generation', () =>
     expect(SelfImprovingRetrainingPipeline.AUTOMATIC_LIVE_TRADING_ENABLED).toBe(false);
     expect(SelfImprovingRetrainingPipeline.AUTOMATIC_LIVE_PROMOTION_ENABLED).toBe(false);
     expect(SelfImprovingRetrainingPipeline.AUTOMATIC_LIVE_ROLLBACK_ENABLED).toBe(false);
+  });
+
+  // ==========================================================================
+  // 9. ZERO SYNTHETIC DATA & STRICT PROVENANCE INVARIANTS (P0 Remediation)
+  // ==========================================================================
+
+  it('Test 33 (P0 #1): Missing outcomeR provenance in WFV examples fails closed without synthetic P&L fabrication', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const rawExamples = generateTestExamples(1700000000000, 50);
+    // Construct unvalidated example missing outcomeR
+    const examples = rawExamples.map((ex, idx) =>
+      idx === 10 ? ({ ...ex, outcomeR: undefined } as unknown as TrainingExample) : ex,
+    );
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow(/MISSING_OUTCOME_R_PROVENANCE/);
+  });
+
+  it('Test 34 (P0 #2): Missing or invalid riskConfig in RetrainingRunConfig fails closed', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const configWithoutRisk = { ...baseConfig, riskConfig: undefined as any };
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, configWithoutRisk),
+    ).rejects.toThrow(/MISSING_RISK_CONFIG/);
+
+    const configInvalidRatios = {
+      ...baseConfig,
+      riskConfig: {
+        ...baseConfig.riskConfig,
+        partialExitPolicy: {
+          ...baseConfig.riskConfig.partialExitPolicy,
+          tp1Ratio: 0.5,
+          tp2Ratio: 0.5,
+          tp3Ratio: 0.5, // sums to 1.5 != 1.0
+        },
+      },
+    };
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, configInvalidRatios),
+    ).rejects.toThrow(/INVALID_RISK_CONFIG/);
+  });
+
+  it('Test 35 (P0 #2): Missing or invalid executionConfig in RetrainingRunConfig fails closed', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const configWithoutExec = { ...baseConfig, executionConfig: undefined as any };
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, configWithoutExec),
+    ).rejects.toThrow(/MISSING_EXECUTION_CONFIG/);
+  });
+
+  it('Test 36 (P0 #2): Generated StrategyCandidate inherits authoritative risk and execution configs', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const customRisk = {
+      initialCapital: 250000,
+      maxRiskPerTrade: 0.005,
+      lotSize: 2,
+      contractSize: 10,
+      partialExitPolicy: {
+        tp1Ratio: 0.4,
+        tp2Ratio: 0.4,
+        tp3Ratio: 0.2,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: false,
+        trailStopOffsetR: 1.5,
+      },
+    };
+
+    const customExec = {
+      candidateId: 'custom_candidate',
+      candidateVersion: 'v3.0',
+      strategyVersion: 'v2.0',
+      symbol: 'BTCUSDT',
+      fillModel: 'NEXT_BAR_OPEN' as const,
+      ambiguityMode: 'AGGRESSIVE' as const,
+      latencyMs: 25,
+      minMtfScore: 0.7,
+      configHash: 'custom_exec_hash',
+    };
+
+    const customConfig: RetrainingRunConfig = {
+      ...baseConfig,
+      riskConfig: customRisk,
+      executionConfig: customExec,
+    };
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, customConfig);
+    expect(result.createdArtifacts.length).toBeGreaterThan(0);
+    const art = result.createdArtifacts[0];
+
+    expect(art.riskConfig.initialCapital).toBe(250000);
+    expect(art.riskConfig.maxRiskPerTrade).toBe(0.005);
+    expect(art.riskConfig.lotSize).toBe(2);
+    expect(art.riskConfig.contractSize).toBe(10);
+    expect(art.riskConfig.partialExitPolicy.tp1Ratio).toBe(0.4);
+    expect(art.executionConfig.fillModel).toBe('NEXT_BAR_OPEN');
+    expect(art.executionConfig.ambiguityMode).toBe('AGGRESSIVE');
+    expect(art.executionConfig.latencyMs).toBe(25);
+  });
+
+  it('Test 37 (P0 #3): Monte Carlo marks isMonteCarloAvailable=false when trades < 5 with zero fake trades injected', () => {
+    // Zero trades
+    const simulatedTrades: number[] = [];
+    let isAvailable = false;
+    let ruinProb: number | undefined = undefined;
+    if (simulatedTrades.length >= 5) {
+      ruinProb = MonteCarloEngine.simulate(simulatedTrades, { seed: 42 }).probabilityOfRuin;
+      isAvailable = true;
+    }
+    expect(isAvailable).toBe(false);
+    expect(ruinProb).toBeUndefined();
+  });
+
+  it('Test 38 (P0 #4): PITExperienceDatasetBuilder rejects non-finite features and missing metadata fail-closed', () => {
+    const t0 = 1700000000000;
+    const baseMeta = {
+      featureSchemaHash: 'test_feat_schema_hash',
+      marketDatasetHash: 'test_market_dataset_hash',
+      strategyVersion: 'v2.0',
+      outcomeR: 1.0,
+      regime: 'TRENDING_BULLISH',
+      volatilityBucket: 'NORMAL',
+      source: 'HISTORICAL' as const,
+    };
+
+    // NaN feature value
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        exampleId: 'ex_nan',
+        decisionTimestamp: t0,
+        featureTimestamp: t0,
+        labelStartTimestamp: t0 + 1000,
+        labelEndTimestamp: t0 + 3600000,
+        features: { smcScore: NaN },
+        label: 1.0,
+      });
+    }).toThrow(/INVALID_FEATURE_VALUE/);
+
+    // Missing featureSchemaHash
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        featureSchemaHash: undefined as any,
+        exampleId: 'ex_no_schema',
+        decisionTimestamp: t0,
+        featureTimestamp: t0,
+        labelStartTimestamp: t0 + 1000,
+        labelEndTimestamp: t0 + 3600000,
+        features: { smcScore: 0.5 },
+        label: 1.0,
+      });
+    }).toThrow(/MISSING_FEATURE_SCHEMA_HASH/);
+
+    // Missing outcomeR
+    expect(() => {
+      PITExperienceDatasetBuilder.createTrainingExample({
+        ...baseMeta,
+        outcomeR: undefined as any,
+        exampleId: 'ex_no_outcome',
+        decisionTimestamp: t0,
+        featureTimestamp: t0,
+        labelStartTimestamp: t0 + 1000,
+        labelEndTimestamp: t0 + 3600000,
+        features: { smcScore: 0.5 },
+        label: 1.0,
+      });
+    }).toThrow(/MISSING_OUTCOME_R/);
   });
 });

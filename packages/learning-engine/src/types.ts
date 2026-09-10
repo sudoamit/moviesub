@@ -1,5 +1,6 @@
 import { Direction, ICandle, IBacktestTrade, ISignalSetup, MarketRegimeType, Timeframe } from '@quant/shared';
-export { PointInTimeMarketSnapshot } from '@quant/trading-engine';
+import { PointInTimeMarketSnapshot } from '@quant/trading-engine';
+export { PointInTimeMarketSnapshot };
 
 export type SimulatedTrade = IBacktestTrade;
 
@@ -248,6 +249,7 @@ export interface StrategyCandidate {
   targetComponent?: string;
   symbol?: string;
   riskConfig?: any;
+  executionConfig?: CandidateExecutionConfig;
   createdAt: Date;
   promotedAt?: Date;
 }
@@ -720,9 +722,10 @@ export interface TrainingExample {
   readonly strategyVersion: string;
   readonly candidateVersion?: string;
   readonly label: number; // 1.0 (win/favorable) or 0.0 (loss)
-  readonly outcomeR?: number; // realized or counterfactual R-multiple
-  readonly regime?: string;
-  readonly volatilityBucket?: string;
+  readonly outcomeR: number; // realized or counterfactual R-multiple (mandatory finite number)
+  readonly exitType?: string; // e.g. TP1, TP2, TP3, SL, TRAILING_STOP
+  readonly regime: string;
+  readonly volatilityBucket: string;
   readonly source: 'HISTORICAL' | 'SHADOW';
 }
 
@@ -821,7 +824,8 @@ export interface CandidateOOSResult {
   readonly oosTradeCount: number;
   readonly oosMarketDatasetHash: string;
   readonly executionDerived: boolean;
-  readonly monteCarloRuinProbability: number;
+  readonly monteCarloRuinProbability?: number;
+  readonly isMonteCarloAvailable: boolean;
   readonly transactionCostSurvived: boolean;
 }
 
@@ -835,6 +839,9 @@ export interface RetrainingRunConfig {
   readonly baseStrategyVersion: string;
   readonly symbol: string;
   readonly timeframe: string;
+  readonly riskConfig: CandidateRiskConfig;
+  readonly executionConfig: CandidateExecutionConfig;
+  readonly baseCandidate?: StrategyCandidate | ValidatedCandidateArtifact;
   readonly seed?: number;
   readonly minValidationTrades?: number;
   readonly minOOSTrades?: number;

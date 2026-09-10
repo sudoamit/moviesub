@@ -75,6 +75,7 @@ export class PITExperienceDatasetBuilder {
     readonly candidateVersion?: string;
     readonly label: number;
     readonly outcomeR?: number;
+    readonly exitType?: string;
     readonly regime?: string;
     readonly volatilityBucket?: string;
     readonly source?: 'HISTORICAL' | 'SHADOW';
@@ -135,14 +136,23 @@ export class PITExperienceDatasetBuilder {
     let featureValues: number[] = [];
 
     if (Array.isArray(raw.features)) {
-      featureValues = (raw.features as number[]).map((v) => (Number.isFinite(v) ? v : 0));
+      for (let i = 0; i < raw.features.length; i++) {
+        const v = raw.features[i];
+        if (typeof v !== 'number' || !Number.isFinite(v)) {
+          throw new Error(`INVALID_FEATURE_VALUE: Feature value at index ${i} must be a finite number in example '${raw.exampleId}'`);
+        }
+      }
+      featureValues = [...raw.features];
       featureNames = (raw.featureNames ? [...raw.featureNames] : featureValues.map((_, i) => `f_${i}`)).sort();
     } else if (raw.features && typeof raw.features === 'object') {
       featureNames = Object.keys(raw.features).sort();
       this.validateFeatureNames(featureNames);
       featureValues = featureNames.map((k) => {
         const val = (raw.features as Record<string, number>)[k];
-        return typeof val === 'number' && Number.isFinite(val) ? val : 0;
+        if (typeof val !== 'number' || !Number.isFinite(val)) {
+          throw new Error(`INVALID_FEATURE_VALUE: Feature '${k}' must be a finite number in example '${raw.exampleId}'`);
+        }
+        return val;
       });
     } else {
       throw new Error(`MISSING_FEATURES: Example '${raw.exampleId}' is missing valid feature vector or record`);
@@ -150,11 +160,33 @@ export class PITExperienceDatasetBuilder {
 
     this.validateFeatureNames(featureNames);
 
-    const featSchemaHash =
-      raw.featureSchemaHash ||
-      crypto.createHash('sha256').update(featureNames.join('|')).digest('hex').substring(0, 16);
+    if (!raw.featureSchemaHash || typeof raw.featureSchemaHash !== 'string' || raw.featureSchemaHash.trim() === '') {
+      throw new Error(`MISSING_FEATURE_SCHEMA_HASH: Example '${raw.exampleId}' is missing authoritative featureSchemaHash`);
+    }
 
-    const mktHash = raw.marketDatasetHash || 'mkt_unspecified';
+    if (!raw.marketDatasetHash || typeof raw.marketDatasetHash !== 'string' || raw.marketDatasetHash.trim() === '') {
+      throw new Error(`MISSING_MARKET_DATASET_HASH: Example '${raw.exampleId}' is missing authoritative marketDatasetHash`);
+    }
+
+    if (!raw.strategyVersion || typeof raw.strategyVersion !== 'string' || raw.strategyVersion.trim() === '') {
+      throw new Error(`MISSING_STRATEGY_VERSION: Example '${raw.exampleId}' is missing authoritative strategyVersion`);
+    }
+
+    if (raw.outcomeR === undefined || typeof raw.outcomeR !== 'number' || !Number.isFinite(raw.outcomeR)) {
+      throw new Error(`MISSING_OUTCOME_R: Example '${raw.exampleId}' is missing authoritative outcomeR (finite number required)`);
+    }
+
+    if (!raw.regime || typeof raw.regime !== 'string' || raw.regime.trim() === '') {
+      throw new Error(`MISSING_REGIME: Example '${raw.exampleId}' is missing authoritative regime`);
+    }
+
+    if (!raw.volatilityBucket || typeof raw.volatilityBucket !== 'string' || raw.volatilityBucket.trim() === '') {
+      throw new Error(`MISSING_VOLATILITY_BUCKET: Example '${raw.exampleId}' is missing authoritative volatilityBucket`);
+    }
+
+    if (!raw.source || (raw.source !== 'HISTORICAL' && raw.source !== 'SHADOW')) {
+      throw new Error(`MISSING_DATASET_SOURCE: Example '${raw.exampleId}' must have source 'HISTORICAL' or 'SHADOW'`);
+    }
 
     return Object.freeze({
       exampleId: raw.exampleId,
@@ -164,15 +196,16 @@ export class PITExperienceDatasetBuilder {
       labelEndTimestamp: lEnd,
       features: Object.freeze(featureValues),
       featureNames: Object.freeze(featureNames),
-      featureSchemaHash: featSchemaHash,
-      marketDatasetHash: mktHash,
-      strategyVersion: raw.strategyVersion || 'v2.0',
+      featureSchemaHash: raw.featureSchemaHash,
+      marketDatasetHash: raw.marketDatasetHash,
+      strategyVersion: raw.strategyVersion,
       candidateVersion: raw.candidateVersion,
       label: raw.label >= 0.5 ? 1.0 : 0.0,
-      outcomeR: raw.outcomeR !== undefined && Number.isFinite(raw.outcomeR) ? raw.outcomeR : undefined,
-      regime: raw.regime || 'NORMAL',
-      volatilityBucket: raw.volatilityBucket || 'NORMAL',
-      source: raw.source || 'HISTORICAL',
+      outcomeR: raw.outcomeR,
+      exitType: raw.exitType,
+      regime: raw.regime,
+      volatilityBucket: raw.volatilityBucket,
+      source: raw.source,
     });
   }
 

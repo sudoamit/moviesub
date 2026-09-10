@@ -149,8 +149,8 @@ function createReliabilityCandidate(candidateId: string, minMtfScore = 50) {
       },
     },
     executionConfig: {
-      fillModel: 'REALISTIC',
-      ambiguityMode: 'PESSIMISTIC',
+      fillModel: 'OHLC_PATH',
+      ambiguityMode: 'CONSERVATIVE',
       latencyMs: 10,
       minMtfScore,
     },
