@@ -296,13 +296,28 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       return c;
     });
 
+    const defaultRiskConfig = {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    };
+
     const candidate: StrategyCandidate = {
       id: 'cand_test_e',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-e',
       type: 'THRESHOLD',
       description: 'Test E candidate',
-      change: { parameter: 'minMtfScore', value: 65 },
+      symbol: 'BTCUSDT',
+      riskConfig: defaultRiskConfig,
+      change: { parameter: 'minMtfScore', value: 65, symbol: 'BTCUSDT', riskConfig: defaultRiskConfig },
       evidence: { sampleSize: 20, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -374,7 +389,20 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
       candidateVersion: 'v2.0-h',
       type: 'THRESHOLD',
       description: 'Test H candidate',
-      change: { parameter: 'minMtfScore', value: 50 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: { parameter: 'minMtfScore', value: 50, symbol: 'BTCUSDT', riskConfig: { initialCapital: 100000, maxRiskPerTrade: 0.01, partialExitPolicy: { tp1Ratio: 0.33, tp2Ratio: 0.33, tp3Ratio: 0.34, moveStopToBreakevenOnTp1: true, trailStopOnTp2: true, trailStopOffsetR: 1.0 } } },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),

@@ -562,7 +562,17 @@ export class CandidateBacktestRunner {
           )
         : undefined);
 
-    // 1. Resolve or construct immutable CandidateArtifact
+    // 1. Collect and validate continuous market candles
+    const dataset = options?.marketDataset || options?.dataset;
+    const candles: ICandle[] = dataset?.executionCandles || options?.candles || [];
+
+    if (!candles || candles.length === 0) {
+      throw new Error(
+        'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candidate evaluation requires continuous market dataset',
+      );
+    }
+
+    // 2. Resolve or construct immutable CandidateArtifact
     const artifact: CandidateArtifact =
       candidateOrArtifact && 'artifactId' in candidateOrArtifact && 'configHash' in candidateOrArtifact
         ? (candidateOrArtifact as CandidateArtifact)
@@ -572,14 +582,14 @@ export class CandidateBacktestRunner {
             riskConfig: options?.riskConfig,
           });
 
-    // 1b. Preflight validation for CandidateArtifact execution configuration (Fail-Closed)
+    // 2b. Preflight validation for CandidateArtifact execution configuration (Fail-Closed)
     this.validateCandidateExecutionConfig(artifact, options);
 
     const config: CandidateExecutionConfig = artifact.executionConfig as any;
     const riskConfig = artifact.riskConfig;
     const candidateId = artifact.candidateId;
 
-    // 2. Cryptographic Linkage Verification between Model and Candidate Scaler/Schema/Features
+    // 3. Cryptographic Linkage Verification between Model and Candidate Scaler/Schema/Features
     if (artifact.modelArtifact) {
       const model = artifact.modelArtifact as any;
       if (model.featureSchemaHash && artifact.featureSchemaHash && model.featureSchemaHash !== artifact.featureSchemaHash) {
@@ -597,16 +607,6 @@ export class CandidateBacktestRunner {
           `INCOMPATIBLE_MODEL_SELECTED_FEATURE_HASH: Model selected feature hash ${model.selectedFeatureHash} does not match artifact ${artifact.selectedFeatureHash}`,
         );
       }
-    }
-
-    // 3. Collect and validate continuous market candles
-    const dataset = options?.marketDataset || options?.dataset;
-    const candles: ICandle[] = dataset?.executionCandles || options?.candles || [];
-
-    if (!candles || candles.length === 0) {
-      throw new Error(
-        'INSUFFICIENT_MARKET_DATA_FOR_CANDIDATE_EXECUTION: INSUFFICIENT_CONTINUOUS_MARKET_DATA: Candidate evaluation requires continuous market dataset',
-      );
     }
 
     const strategyConfig = {

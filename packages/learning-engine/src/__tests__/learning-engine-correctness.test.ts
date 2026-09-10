@@ -1017,15 +1017,32 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       volume: 1000,
     }));
 
+    const defaultRiskConfig = {
+      initialCapital: 100000,
+      maxRiskPerTrade: 0.01,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
+    };
+
     const cand: StrategyCandidate = {
       id: 'cand_inv_test',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-inv',
       type: 'THRESHOLD',
       description: 'Invariant test candidate',
+      symbol: 'BTCUSDT',
+      riskConfig: defaultRiskConfig,
       change: {
         parameter: 'minMtfScore',
         value: 70,
+        symbol: 'BTCUSDT',
+        riskConfig: defaultRiskConfig,
         modelArtifact: {
           modelId: 'm1',
           featureSchemaHash: 'hash_schema_1',
