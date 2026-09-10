@@ -529,7 +529,7 @@ export interface ICandidateMeasurementOptions {
   candles?: ICandle[];
   evaluationStartTimestamp?: number;
   evaluationEndTimestamp?: number;
-  costPerTradeR?: number;
+  costStressConfig?: import('@quant/backtesting').ExecutionCostStressConfig;
   feeConfig?: any;
   slippageConfig?: any;
   spreadConfig?: any;

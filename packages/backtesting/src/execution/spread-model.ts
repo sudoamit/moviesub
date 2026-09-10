@@ -23,10 +23,10 @@ export class SpreadModel {
         if (
           typeof costStressConfig.multiplier !== 'number' ||
           !Number.isFinite(costStressConfig.multiplier) ||
-          costStressConfig.multiplier < 0
+          costStressConfig.multiplier <= 0
         ) {
           throw new Error(
-            `INVALID_COST_STRESS_MULTIPLIER: Multiplier must be a non-negative finite number, got ${costStressConfig.multiplier}`,
+            `INVALID_COST_STRESS_MULTIPLIER: Multiplier must be a positive finite number, got ${costStressConfig.multiplier}`,
           );
         }
       }
@@ -55,10 +55,12 @@ export class SpreadModel {
     const sym = (symbol || '').toUpperCase();
     let spreadBps = effectiveConfig.baseSpreadBps;
 
-    if (sym === 'NIFTY' || sym === 'BANKNIFTY') {
-      spreadBps = 0.5; // Very tight liquid index spread (0.005%)
-    } else if (sym === 'BTCUSDT' || sym === 'XAUUSD') {
-      spreadBps = 1.0; // Tight crypto/gold spread
+    if (costStressConfig?.mode !== 'ABSOLUTE') {
+      if (sym === 'NIFTY' || sym === 'BANKNIFTY') {
+        spreadBps = 0.5; // Very tight liquid index spread (0.005%)
+      } else if (sym === 'BTCUSDT' || sym === 'XAUUSD') {
+        spreadBps = 1.0; // Tight crypto/gold spread
+      }
     }
 
     const effectiveSpreadBps = spreadBps * multiplier;

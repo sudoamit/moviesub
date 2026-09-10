@@ -116,7 +116,6 @@ export interface IBacktestOptions {
   costStressConfig?: ExecutionCostStressConfig;
   feeRate?: number;
   slippageBps?: number;
-  costPerTradeR?: number;
 
   // Replay & Candidate Evaluation Options
   experiences?: any[];

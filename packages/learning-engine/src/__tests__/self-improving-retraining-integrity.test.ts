@@ -2201,7 +2201,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       {
         minimumCandles: 5,
         symbol: 'BTCUSDT',
-        costPerTradeR: 0.05,
+        costStressConfig: { mode: 'NORMAL' },
       },
     );
 
@@ -2635,7 +2635,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
     // 1. Measure candidate with normal cost (0.05R)
     const normal = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
-      costPerTradeR: 0.05,
+      costStressConfig: { mode: 'NORMAL' },
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
@@ -2643,7 +2643,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
     // 2. Measure candidate with double cost (0.10R)
     const doubleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
-      costPerTradeR: 0.10,
+      costStressConfig: { mode: 'MULTIPLIER', multiplier: 2 },
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
@@ -2651,7 +2651,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
     // 3. Measure candidate with triple cost (0.15R)
     const tripleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
-      costPerTradeR: 0.15,
+      costStressConfig: { mode: 'MULTIPLIER', multiplier: 3 },
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
@@ -2804,6 +2804,31 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       );
       expect(result.validationResults[0].hypothesisId).toBe(sortedByValidation[0].hypothesisId);
     }
+  });
+
+  it('Test 98 (P1 OOS Independence): Production ranking is unchanged when only OOS metrics are inverted', () => {
+    const makeCandidate = (candidateId: string, oosExpectancyR: number) => ({
+      hyp: { candidateId, hypothesisId: `${candidateId}-hyp` },
+      trainRes: {},
+      valRes: {
+        validationExpectancyR: candidateId === 'A' ? 1.5 : 0.5,
+        walkForwardExpectancyR: candidateId === 'A' ? 1.2 : 0.4,
+        walkForwardFoldsPassed: 2,
+        walkForwardTotalFolds: 2,
+        validationProfitFactor: 2,
+        validationMaxDrawdownR: 0.1,
+        oosExpectancyR,
+      },
+    }) as any;
+
+    const rank = (aOos: number, bOos: number) =>
+      SelfImprovingRetrainingPipeline.rankValidationCandidates([
+        makeCandidate('A', aOos),
+        makeCandidate('B', bOos),
+      ])[0].hyp.candidateId;
+
+    expect(rank(0.1, 1.8)).toBe('A');
+    expect(rank(1.8, 0.1)).toBe('A');
   });
 });
 

@@ -35,10 +35,10 @@ export class SlippageModel {
         if (
           typeof costStressConfig.multiplier !== 'number' ||
           !Number.isFinite(costStressConfig.multiplier) ||
-          costStressConfig.multiplier < 0
+          costStressConfig.multiplier <= 0
         ) {
           throw new Error(
-            `INVALID_COST_STRESS_MULTIPLIER: Multiplier must be a non-negative finite number, got ${costStressConfig.multiplier}`,
+            `INVALID_COST_STRESS_MULTIPLIER: Multiplier must be a positive finite number, got ${costStressConfig.multiplier}`,
           );
         }
       }

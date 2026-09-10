@@ -44,21 +44,19 @@ export class RobustnessEngine {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidate.id}' is missing authoritative trading symbol in robustness evaluation`);
     }
 
-    // 1. Normal Cost: 0.05R
+    // Stress each execution-cost component; this is intentionally not a total-cost multiple.
     const normal = CandidateEvaluator.measureCandidateOnMarketData(candidate, marketData, {
-      costPerTradeR: 0.05,
+      costStressConfig: { mode: 'NORMAL' },
       minimumCandles: minCandles,
       symbol: sym,
     });
-    // 2. Double Cost: 0.10R
     const doubleCost = CandidateEvaluator.measureCandidateOnMarketData(candidate, marketData, {
-      costPerTradeR: 0.1,
+      costStressConfig: { mode: 'MULTIPLIER', multiplier: 2 },
       minimumCandles: minCandles,
       symbol: sym,
     });
-    // 3. Triple Cost (Stress): 0.15R
     const tripleCost = CandidateEvaluator.measureCandidateOnMarketData(candidate, marketData, {
-      costPerTradeR: 0.15,
+      costStressConfig: { mode: 'MULTIPLIER', multiplier: 3 },
       minimumCandles: minCandles,
       symbol: sym,
     });

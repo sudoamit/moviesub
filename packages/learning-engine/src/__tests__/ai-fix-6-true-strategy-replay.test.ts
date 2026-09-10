@@ -597,7 +597,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
     const evalResult = CandidateEvaluator.evaluate(
       cand,
-      { candles: continuousCandles, costPerTradeR: 0.05 },
+      { candles: continuousCandles, costStressConfig: { mode: 'NORMAL' } },
     );
 
     expect(evalResult).toBeDefined();

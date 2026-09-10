@@ -228,7 +228,7 @@ export class CandidateEvaluator {
         latencyConfig: options?.latencyConfig,
         feeRate: options?.feeRate,
         slippageBps: options?.slippageBps,
-        costPerTradeR: options?.costPerTradeR,
+        costStressConfig: options?.costStressConfig,
         riskConfig: (baselineCandidate as any).riskConfig || resolvedRisk,
       });
       baselineExpectancy = baselineRes.expectancyR;
@@ -251,7 +251,7 @@ export class CandidateEvaluator {
       latencyConfig: options?.latencyConfig,
       feeRate: options?.feeRate,
       slippageBps: options?.slippageBps,
-      costPerTradeR: options?.costPerTradeR,
+      costStressConfig: options?.costStressConfig,
       riskConfig: resolvedRisk,
     });
 
@@ -400,7 +400,7 @@ export class CandidateEvaluator {
   public static evaluateDeterministicTestFixture(
     candidate: StrategyCandidate | CandidateArtifact,
     experiences: TradingExperience[],
-    costPerTradeR = 0.05,
+    _fixtureCostR = 0.05,
     options?: {
       baselineCandidate?: StrategyCandidate | CandidateArtifact;
       candles: ICandle[];

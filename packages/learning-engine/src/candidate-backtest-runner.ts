@@ -1,5 +1,5 @@
 import { ICandle, IBacktestTrade } from '@quant/shared';
-import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
+import { BacktestSimulator, ExecutionCostStressConfig, IBacktestOptions } from '@quant/backtesting';
 import {
   CandidateArtifact,
   CandidateExecutionConfig,
@@ -48,7 +48,8 @@ export interface ICandidateBacktestOptions {
   latencyConfig?: any;
   feeRate?: number;
   slippageBps?: number;
-  costPerTradeR?: number;
+  costStressConfig?: ExecutionCostStressConfig;
+  executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
   executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
   provenance?: {
@@ -258,15 +259,14 @@ export class CandidateBacktestRunner {
       scoringWeights: artifact.strategyConfig.scoringWeights,
     };
 
-    // Enforce production backtester warm-up standards (minimumCandles = 50, warmupBars = 40)
-    // to preserve SMC swings, BOS, CHOCH, FVG, order blocks, indicators, and MTF context integrity.
+    // Production replay owns execution geometry; experiments must opt in explicitly.
     const minimumCandles =
-      options?.minimumCandles !== undefined
+      options?.executionContext === 'EXPERIMENTAL' && options.minimumCandles !== undefined
         ? options.minimumCandles
         : PRODUCTION_DEFAULT_MINIMUM_CANDLES;
 
     const warmupBars =
-      options?.warmupBars !== undefined
+      options?.executionContext === 'EXPERIMENTAL' && options.warmupBars !== undefined
         ? options.warmupBars
         : PRODUCTION_DEFAULT_WARMUP_BARS;
 
@@ -277,25 +277,6 @@ export class CandidateBacktestRunner {
 
     let feeConfig = options?.feeConfig;
     let slippageConfig = options?.slippageConfig;
-    const costPerTradeR = options?.costPerTradeR;
-
-    if (costPerTradeR !== undefined && costPerTradeR > 0) {
-      const stressedBps = costPerTradeR * (riskConfig.maxRiskPerTrade as number) * 10000;
-      if (!feeConfig) {
-        feeConfig = {
-          brokerageRateBps: stressedBps / 2,
-        };
-      }
-      if (!slippageConfig) {
-        slippageConfig = {
-          baseSlippageBps: Math.max(1.0, stressedBps / 4),
-          volatilityMultiplier: 1.5,
-          impactMultiplier: 0.8,
-          maxSlippageBps: Math.max(25.0, stressedBps),
-        };
-      }
-    }
-
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: sym,
@@ -310,7 +291,7 @@ export class CandidateBacktestRunner {
       latencyConfig: options?.latencyConfig,
       feeRate: options?.feeRate,
       slippageBps: options?.slippageBps,
-      costPerTradeR: options?.costPerTradeR,
+      costStressConfig: options?.costStressConfig,
       candidateArtifact: artifact,
       minScore: config.minMtfScore,
       stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
