@@ -23,6 +23,7 @@ export interface IModelTrainingOptions {
   scaler?: TemporalFeatureScaler;
   seed?: number;
   featureNames?: readonly string[] | string[];
+  trainedAt?: Date;
 }
 
 export interface ITrainedModelArtifact {
@@ -108,21 +109,33 @@ export class ModelTrainer {
       );
       const defaultBias = 0.1;
       const emptyModelHash = ModelTrainer.computeModelHash(defaultWeights, defaultBias, 'none');
-      const emptySchemaHash = ModelTrainer.computeFeatureSchemaHash(targetFeatures, '2.0');
+      const emptyFeatureSchemaHash = ModelTrainer.computeFeatureSchemaHash(targetFeatures, '2.0');
+      const emptySelectedFeatureHash = crypto
+        .createHash('sha256')
+        .update(targetFeatures.join(','))
+        .digest('hex');
+
       return {
-        modelId: `model-${emptyModelHash.substring(0, 12)}`,
-        modelVersion: 'ml-v2-empty',
+        modelId: 'empty-model',
+        modelVersion: 'v2.0-empty',
         modelHash: emptyModelHash,
         weights: defaultWeights,
         bias: defaultBias,
         featureSchemaVersion: '2.0',
-        featureSchemaHash: emptySchemaHash,
+        featureSchemaHash: emptyFeatureSchemaHash,
         selectedFeatures: [...targetFeatures],
-        selectedFeatureHash: crypto.createHash('sha256').update(targetFeatures.join(',')).digest('hex'),
+        selectedFeatureHash: emptySelectedFeatureHash,
         scalerHash: 'none',
+        trainingDatasetHash: 'none',
+        strategyVersion: 'v2.0',
         sampleCount: 0,
-        trainLoss: 0.693,
-        trainedAt: new Date(0),
+        trainLoss: 0,
+        trainedAt: isOptionsObj && optionsOrEpochs.trainedAt ? optionsOrEpochs.trainedAt : new Date(),
+        scalerArtifact: {
+          scalerVersion: '1.0.0',
+          scalerHash: 'none',
+          scalerParameters: {},
+        },
       };
     }
 
@@ -133,56 +146,68 @@ export class ModelTrainer {
 
     const scalerParameters: Record<string, { mean: number; std: number; min: number; max: number }> = {};
     for (const name of targetFeatures) {
-      const stats = scaler.getParams(name);
-      if (stats) {
-        scalerParameters[name] = { mean: stats.mean, std: stats.std, min: stats.min, max: stats.max };
+      const p = scaler.getParams(name);
+      if (!p) {
+        throw new Error(`MISSING_SCALER_PARAMETER: TemporalFeatureScaler lacks fitted parameters for feature '${name}'`);
       }
+      scalerParameters[name] = p;
     }
 
-    // Xavier / Glorot initialization for dimension
-    const dim = targetFeatures.length;
-    const scale = 1.0 / Math.sqrt(dim);
-    const weights = targetFeatures.map((_, i) => {
-      const r = Math.sin((i + 1) * 997) * 10000;
-      const frac = r - Math.floor(r);
-      return Number(((frac - 0.5) * 2 * scale).toFixed(5));
-    });
-    let bias = 0.0;
-
-    // Transform training samples using the fitted scaler (STRICT FAIL-CLOSED)
+    // Extract exact numeric feature vectors and binary labels strictly (FAIL CLOSED on missing/corrupt values)
     const samples: { features: number[]; label: number }[] = [];
     for (const exp of trainingDataset) {
+      const feats = (exp as any).features || (exp as any).marketState?.quant;
       const featVector: number[] = [];
-      const feats = 'features' in exp ? exp.features : (exp as any).marketState?.quant;
-      if (!feats || (typeof feats !== 'object' && !Array.isArray(feats))) {
-        throw new Error('MISSING_FEATURES: Training experience is missing features object');
-      }
 
-      for (const name of targetFeatures) {
-        let rawVal: unknown;
-        if (Array.isArray(feats)) {
-          if (!('featureNames' in exp) || !Array.isArray((exp as any).featureNames) || (exp as any).featureNames.length !== feats.length) {
-            throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Training experience array features lacks valid featureNames provenance`);
+      if (Array.isArray(feats)) {
+        let names: readonly string[];
+        if ('featureNames' in exp && Array.isArray((exp as any).featureNames) && (exp as any).featureNames.length === feats.length) {
+          names = (exp as any).featureNames;
+        } else if ((exp as any).featureSchemaHash && feats.length === CANONICAL_FEATURE_NAMES_V2.length) {
+          const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+          if ((exp as any).featureSchemaHash === computed) {
+            names = CANONICAL_FEATURE_NAMES_V2;
+          } else {
+            throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Training experience array features lacks valid schema hash binding`);
           }
-          const names = (exp as any).featureNames;
-          const idx = names.indexOf(name);
-          rawVal = idx >= 0 ? feats[idx] : undefined;
         } else {
-          rawVal = (feats as Record<string, unknown>)[name];
+          throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Training experience array features lacks valid featureNames provenance`);
         }
 
-        if (rawVal === undefined || rawVal === null || typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
-          throw new Error(`MISSING_FEATURE_VALUE: Training experience lacks valid finite value for feature '${name}'`);
+        for (const name of targetFeatures) {
+          const idx = names.indexOf(name);
+          const rawVal = idx >= 0 ? feats[idx] : undefined;
+          if (rawVal === undefined || rawVal === null || typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
+            throw new Error(
+              `MISSING_FEATURE_VALUE: Training experience lacks valid finite value for feature '${name}'`,
+            );
+          }
+          const scaledVal = scaler.transformValue(name, rawVal);
+          featVector.push(scaledVal);
         }
-        const scaledVal = scaler.transformValue(name, rawVal);
-        featVector.push(scaledVal);
+      } else if (feats && typeof feats === 'object') {
+        for (const name of targetFeatures) {
+          const rawVal = (feats as any)[name];
+          if (rawVal === undefined || rawVal === null || typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
+            throw new Error(
+              `MISSING_FEATURE_VALUE: Training experience lacks valid finite value for feature '${name}'`,
+            );
+          }
+          const scaledVal = scaler.transformValue(name, rawVal);
+          featVector.push(scaledVal);
+        }
+      } else {
+        throw new Error('MISSING_FEATURE_VALUE: Training experience is missing features object');
       }
 
       let label: number;
-      if ('label' in exp && (exp.label === 0 || exp.label === 1)) {
-        label = exp.label;
-      } else if ('labelBinary' in exp && (exp.labelBinary === 0 || exp.labelBinary === 1)) {
-        label = exp.labelBinary;
+      if (typeof (exp as any).label === 'number' && ((exp as any).label === 0 || (exp as any).label === 1)) {
+        label = (exp as any).label;
+      } else if (
+        typeof (exp as any).labelBinary === 'number' &&
+        ((exp as any).labelBinary === 0 || (exp as any).labelBinary === 1)
+      ) {
+        label = (exp as any).labelBinary;
       } else {
         throw new Error(`TRAINING_LABEL_MISSING: Training sample is missing explicit binary label (must be 0 or 1)`);
       }
@@ -190,8 +215,12 @@ export class ModelTrainer {
       samples.push({ features: featVector, label });
     }
 
-    let finalLoss = 0.693;
+    const dim = targetFeatures.length;
+    const weights = new Array(dim).fill(0).map((_, i) => Number((Math.sin(i + 1) * 0.1).toFixed(4)));
+    let bias = 0.1;
 
+    // Gradient descent
+    let finalLoss = 0;
     for (let epoch = 0; epoch < epochs; epoch++) {
       let totalLoss = 0;
       const gradW = new Array(dim).fill(0);
@@ -202,11 +231,9 @@ export class ModelTrainer {
         for (let j = 0; j < dim; j++) {
           z += weights[j] * s.features[j];
         }
-
-        const prob = 1.0 / (1.0 + Math.exp(-Math.max(-10, Math.min(10, z))));
+        const prob = 1.0 / (1.0 + Math.exp(-Math.max(-20, Math.min(20, z))));
         const err = prob - s.label;
 
-        // Binary cross-entropy loss
         const loss =
           -s.label * Math.log(Math.max(1e-7, prob)) -
           (1 - s.label) * Math.log(Math.max(1e-7, 1 - prob));
@@ -262,7 +289,7 @@ export class ModelTrainer {
       strategyVersion: 'v2.0',
       sampleCount: samples.length,
       trainLoss: Number(finalLoss.toFixed(4)),
-      trainedAt: new Date(0),
+      trainedAt: isOptionsObj && optionsOrEpochs.trainedAt ? optionsOrEpochs.trainedAt : new Date(),
       scalerArtifact: {
         scalerVersion: TemporalFeatureScaler.computeVersion(scalerParameters),
         scalerHash,
@@ -278,9 +305,24 @@ export class ModelTrainer {
     features: CanonicalTradeFeatureVectorV2,
     modelArtifact?: ITrainedModelArtifact,
   ): NoTradePrediction {
-    const smcScore = features.smcScore ?? 0.5;
-    const mtfAlignment = features.mtfAlignment ?? 0.5;
-    const volAtr = features.volatilityAtr ?? 0.5;
+    if (!features || typeof features !== 'object') {
+      throw new Error('MISSING_FEATURE_VALUE: predictNoTrade requires valid features object');
+    }
+
+    const smcScore = features.smcScore;
+    if (smcScore === undefined || smcScore === null || typeof smcScore !== 'number' || !Number.isFinite(smcScore)) {
+      throw new Error("MISSING_FEATURE_VALUE: predictNoTrade requires explicit finite 'smcScore'");
+    }
+
+    const mtfAlignment = features.mtfAlignment;
+    if (mtfAlignment === undefined || mtfAlignment === null || typeof mtfAlignment !== 'number' || !Number.isFinite(mtfAlignment)) {
+      throw new Error("MISSING_FEATURE_VALUE: predictNoTrade requires explicit finite 'mtfAlignment'");
+    }
+
+    const volAtr = features.volatilityAtr;
+    if (volAtr === undefined || volAtr === null || typeof volAtr !== 'number' || !Number.isFinite(volAtr)) {
+      throw new Error("MISSING_FEATURE_VALUE: predictNoTrade requires explicit finite 'volatilityAtr'");
+    }
 
     // High risk when MTF is conflicted or volatility is extreme
     let riskLogit = 0.0;

@@ -235,7 +235,7 @@ export interface StrategyCandidate {
     outOfSampleExpectancy: number;
     profitFactor: number;
     maxDrawdownPercent: number;
-    monteCarloRuinProb: number;
+    monteCarloRuinProb?: number;
     transactionCostSurvived: boolean;
   };
   shadowMetrics?: {
@@ -410,6 +410,7 @@ export interface CandidateArtifact {
   readonly validationDatasetHash: string;
   readonly oosDatasetHash: string;
   readonly marketDatasetHash: string;
+  readonly developmentMarketDatasetHash?: string;
   readonly datasetHash: string; // compatibility alias
   readonly trainingMarketDatasetHash?: string;
   readonly validationMarketDatasetHash?: string;

@@ -41,6 +41,23 @@ export class RetrainingRunStore {
   }
 
   /**
+   * Captures an immutable snapshot of in-memory runs for atomic multi-store transactions.
+   */
+  public static createSnapshot(): Map<string, RetrainingRunRecord> {
+    return new Map(this.runs);
+  }
+
+  /**
+   * Restores an in-memory snapshot, rolling back mutations.
+   */
+  public static restoreSnapshot(snapshot: Map<string, RetrainingRunRecord>): void {
+    this.runs = new Map(snapshot);
+    if (this.persistencePath) {
+      this.saveToFile(this.persistencePath);
+    }
+  }
+
+  /**
    * Resets in-memory run cache and clears persistence path.
    */
   public static reset(): void {

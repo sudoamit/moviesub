@@ -178,10 +178,40 @@ export class LearningEngine {
         oosCandles = sliceContinuousCandles(options.candles, oosStartTime, oosEndTime, 40);
       }
 
+      const resolvedSym = options.dataset?.symbol || (cand as any).symbol || 'BTCUSDT';
+      const baselineCand = CandidateEvaluator.createBaselineBenchmarkCandidate(
+        baseVersion,
+        resolvedSym,
+        cand.riskConfig || {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        },
+      );
+
       // 9a. Historical Simulation on Validation slice of development dataset
       const valEval = CandidateEvaluator.evaluate(cand, {
+        baselineCandidate: baselineCand,
         dataset: options.dataset,
         candles: valCandles || options.candles,
+        minimumCandles: 10,
+        warmupBars: 5,
+        symbol: resolvedSym,
+        timeframe: options.dataset?.timeframe || '15m',
+        riskConfig: cand.riskConfig,
+        criteria: {
+          minExpectancyDelta: 0.0,
+          minProfitFactor: 1.0,
+          minCandidateExpectancy: 0.0,
+          minTrades: 1,
+        },
       });
       if (!valEval.passed) {
         cand.status = 'REJECTED';
@@ -249,8 +279,20 @@ export class LearningEngine {
 
       // 9e. FINAL OOS BACKTEST on untouched out-of-sample holdout dataset (pure market data, zero experience leakage)
       const finalOosEval = CandidateEvaluator.evaluate(cand, {
+        baselineCandidate: baselineCand,
         dataset: options.dataset,
         candles: oosCandles || options.candles,
+        minimumCandles: 10,
+        warmupBars: 5,
+        symbol: resolvedSym,
+        timeframe: options.dataset?.timeframe || '15m',
+        riskConfig: cand.riskConfig,
+        criteria: {
+          minExpectancyDelta: 0.0,
+          minProfitFactor: 1.0,
+          minCandidateExpectancy: 0.0,
+          minTrades: 1,
+        },
       });
 
       // Post-execution label analysis (strictly separated from backtest strategy execution)

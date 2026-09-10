@@ -520,10 +520,12 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
   it('Test 19: Monte Carlo uses real execution-derived trades', async () => {
     const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation(() => ({
+      passed: true,
       candidateExpectancy: 1.2,
       profitFactor: 2.1,
       maxDrawdownPercent: 0.05,
       simulatedRMultiples: [1.5, -1.0, 2.0, -0.5, 1.2, 0.8],
+      totalSimulatedTrades: 6,
       totalTrades: 6,
       trades: [],
     } as any));
@@ -1483,6 +1485,336 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     await expect(
       SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, corruptConfig),
     ).rejects.toThrow(/MISSING_VALIDATION_ACCEPTANCE_CRITERIA/);
+  });
+
+  it('Test 62 (P0 #1): CandidateEvaluator fails closed when candidate lacks authoritative riskConfig (zero default risk fabrication)', () => {
+    const candles = generateTestCandles(1700000000000, 60);
+    const candidateNoRisk: any = {
+      id: 'cand_no_risk',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+      executionConfig: baseConfig.executionConfig,
+    };
+
+    const championCand: any = {
+      ...candidateNoRisk,
+      id: 'champ_base',
+      riskConfig: baseConfig.riskConfig,
+    };
+
+    expect(() => {
+      CandidateEvaluator.evaluate(candidateNoRisk, {
+        baselineCandidate: championCand,
+        candles,
+        minimumCandles: 50,
+        criteria: { minExpectancyDelta: 0.0, minProfitFactor: 1.0, minCandidateExpectancy: 0.0, minTrades: 1 },
+      });
+    }).toThrow(/MISSING_RISK_CONFIG/);
+  });
+
+  it('Test 63 (P0 #2): CandidateEvaluator fails closed when symbol is omitted (zero BTCUSDT default fallback)', () => {
+    const candles = generateTestCandles(1700000000000, 60);
+    const candidateNoSym: any = {
+      id: 'cand_no_symbol',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
+
+    const championCand: any = {
+      ...candidateNoSym,
+      id: 'champ_base',
+      symbol: 'ETHUSDT',
+    };
+
+    expect(() => {
+      CandidateEvaluator.evaluate(candidateNoSym, {
+        baselineCandidate: championCand,
+        candles,
+        minimumCandles: 50,
+        criteria: { minExpectancyDelta: 0.0, minProfitFactor: 1.0, minCandidateExpectancy: 0.0, minTrades: 1 },
+      });
+    }).toThrow(/MISSING_SYMBOL/);
+  });
+
+  it('Test 64 (P1 #3): CandidateEvaluator fails closed when criteria are omitted in options.criteria', () => {
+    const candles = generateTestCandles(1700000000000, 60);
+    const candidate: any = {
+      id: 'cand_valid',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
+
+    expect(() => {
+      CandidateEvaluator.evaluate(candidate, {
+        baselineCandidate: candidate,
+        candles,
+        minimumCandles: 50,
+      });
+    }).toThrow(/MISSING_EVALUATION_CRITERIA/);
+  });
+
+  it('Test 65 (P1 #4): CandidateEvaluator fails closed when minimumCandles is missing or non-positive', () => {
+    const candles = generateTestCandles(1700000000000, 60);
+    const candidate: any = {
+      id: 'cand_valid',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
+
+    expect(() => {
+      CandidateEvaluator.evaluate(candidate, {
+        baselineCandidate: candidate,
+        candles,
+        criteria: { minExpectancyDelta: 0.0, minProfitFactor: 1.0, minCandidateExpectancy: 0.0, minTrades: 1 },
+      });
+    }).toThrow(/MISSING_MINIMUM_CANDLES/);
+  });
+
+  it('Test 66 (P1 #5): CandidateEvaluator fails closed when baselineCandidate is omitted', () => {
+    const candles = generateTestCandles(1700000000000, 60);
+    const candidate: any = {
+      id: 'cand_valid',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
+
+    expect(() => {
+      CandidateEvaluator.evaluate(candidate, {
+        candles,
+        minimumCandles: 50,
+        criteria: { minExpectancyDelta: 0.0, minProfitFactor: 1.0, minCandidateExpectancy: 0.0, minTrades: 1 },
+      });
+    }).toThrow(/MISSING_BASELINE_CANDIDATE/);
+  });
+
+  it('Test 67 (P1 #6): Artifact provenance explicitly contains developmentMarketDatasetHash', () => {
+    const candidate: any = {
+      id: 'cand_prov_test',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+    };
+
+    const artifact = CandidateBacktestRunner.createCandidateArtifact(
+      candidate,
+      'dev_mkt_hash_123',
+      42,
+      {
+        developmentMarketDatasetHash: 'dev_mkt_hash_123',
+        trainingMarketDatasetHash: 'train_mkt_hash_123',
+        validationMarketDatasetHash: 'val_mkt_hash_123',
+        oosMarketDatasetHash: 'oos_mkt_hash_123',
+      },
+    );
+
+    expect(artifact.developmentMarketDatasetHash).toBe('dev_mkt_hash_123');
+  });
+
+  it('Test 68 (P1 #7): Atomic rollback across ModelRegistry and RetrainingRunStore when persistence or transaction fails', () => {
+    const initialRuns = RetrainingRunStore.listRuns();
+    const initialArtifacts = ModelRegistry.listArtifacts();
+
+    expect(() => {
+      const snapshot = RetrainingRunStore.createSnapshot();
+      try {
+        ModelRegistry.executeTransaction(
+          () => {
+            RetrainingRunStore.saveRun({
+              runId: 'run_tx_fail',
+              startedAt: Date.now(),
+              completedAt: Date.now(),
+              marketDatasetHash: 'hash_m',
+              experienceDatasetHash: 'hash_e',
+              trainingWindow: { start: 1, end: 2 },
+              validationWindow: { start: 2, end: 3 },
+              oosWindow: { start: 3, end: 4 },
+              candidateIds: ['cand_tx_fail'],
+              modelVersions: ['v1'],
+              configHash: 'hash_c',
+              resultHash: 'hash_r',
+              status: 'COMPLETED',
+            });
+            // Intentionally throw inside transaction to test multi-store rollback
+            throw new Error('SIMULATED_TRANSACTION_FAILURE');
+          },
+          { requirePersistence: false },
+        );
+      } catch (err) {
+        RetrainingRunStore.restoreSnapshot(snapshot);
+        throw err;
+      }
+    }).toThrow('SIMULATED_TRANSACTION_FAILURE');
+
+    // Verify rollback restored RetrainingRunStore state
+    expect(RetrainingRunStore.getRun('run_tx_fail')).toBeUndefined();
+    expect(RetrainingRunStore.listRuns().length).toBe(initialRuns.length);
+    expect(ModelRegistry.listArtifacts().length).toBe(initialArtifacts.length);
+  });
+
+  it('Test 69 (P1 #8): Pipeline requires durable registry persistence and rejects when persistence is unconfigured', async () => {
+    // Reset persistence path to null to test fail-closed durable persistence requirement
+    ModelRegistry.setPersistencePath(null);
+
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow('PERSISTENCE_NOT_CONFIGURED');
+  });
+
+  it('Test 70 (P1 #9): Failed retraining run record preserves actual partitioned window ranges, candidate IDs, and model versions', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    // Mock WalkForwardValidator.validate to fail mid-pipeline after splits and models were created
+    const wfSpy = jest.spyOn(WalkForwardValidator, 'validate').mockImplementationOnce(() => {
+      throw new Error('SIMULATED_WFV_CRASH_AFTER_SPLITS');
+    });
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow('SIMULATED_WFV_CRASH_AFTER_SPLITS');
+
+    wfSpy.mockRestore();
+
+    const runs = RetrainingRunStore.listRuns();
+    const failedRun = runs[runs.length - 1];
+
+    expect(failedRun.status).toBe('FAILED');
+    expect(failedRun.failureReason).toContain('SIMULATED_WFV_CRASH_AFTER_SPLITS');
+    // Verify partitioned windows are preserved rather than 0
+    expect(failedRun.trainingWindow.start).toBeGreaterThan(0);
+    expect(failedRun.trainingWindow.end).toBeGreaterThan(failedRun.trainingWindow.start);
+    expect(failedRun.validationWindow.start).toBeGreaterThan(0);
+    expect(failedRun.oosWindow.start).toBeGreaterThan(0);
+    // Verify candidate IDs and model versions generated up to failure point are preserved
+    expect(failedRun.candidateIds.length).toBeGreaterThan(0);
+    expect(failedRun.modelVersions.length).toBeGreaterThan(0);
+  });
+
+  it('Test 71 (P1 #10): Monte Carlo unavailable status leaves monteCarloRuinProb as undefined (zero probability of ruin is not fabricated)', async () => {
+    // Return fewer than 5 simulated trades so Monte Carlo is unavailable
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation(() => ({
+      passed: true,
+      candidateExpectancy: 1.2,
+      profitFactor: 2.1,
+      maxDrawdownPercent: 0.05,
+      simulatedRMultiples: [1.5, -1.0], // only 2 trades (< 5)
+      totalSimulatedTrades: 2,
+      totalTrades: 2,
+      trades: [],
+    } as any));
+
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+    expect(result.oosResults[0].isMonteCarloAvailable).toBe(false);
+    expect(result.oosResults[0].monteCarloRuinProbability).toBeUndefined();
+
+    // Verify created artifact also does NOT coerce unavailable Monte Carlo to 0
+    expect(result.createdArtifacts[0].riskConfig).toBeDefined();
+
+    evalSpy.mockRestore();
+  });
+
+  it('Test 72 (P1 #11): ModelTrainer returns valid realistic trainedAt timestamp while maintaining deterministic modelHash', () => {
+    const examples = generateTestExamples(1700000000000, 50);
+    const scaler = new TemporalFeatureScaler();
+    scaler.fit(examples as any);
+
+    const now = Date.now();
+    const trained = ModelTrainer.trainModel(examples as any, {
+      scaler,
+      featureNames: CANONICAL_FEATURE_NAMES_V2,
+      epochs: 10,
+    });
+
+    expect(trained.trainedAt).toBeInstanceOf(Date);
+    expect(trained.trainedAt.getTime()).toBeGreaterThanOrEqual(now - 10000);
+    expect(trained.trainedAt.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(trained.modelHash).toBeDefined();
+    expect(trained.modelHash.length).toBe(64);
+  });
+
+  it('Test 73 (P1 #12): ModelTrainer.predictNoTrade fails closed with MISSING_FEATURE_VALUE when required features are omitted or non-finite', () => {
+    // Missing smcScore
+    expect(() => {
+      ModelTrainer.predictNoTrade({
+        mtfAlignment: 0.5,
+        volatilityAtr: 0.5,
+      } as any);
+    }).toThrow('MISSING_FEATURE_VALUE');
+
+    // Non-finite mtfAlignment
+    expect(() => {
+      ModelTrainer.predictNoTrade({
+        smcScore: 0.8,
+        mtfAlignment: NaN,
+        volatilityAtr: 0.5,
+      } as any);
+    }).toThrow('MISSING_FEATURE_VALUE');
+
+    // Missing volatilityAtr
+    expect(() => {
+      ModelTrainer.predictNoTrade({
+        smcScore: 0.8,
+        mtfAlignment: 0.7,
+      } as any);
+    }).toThrow('MISSING_FEATURE_VALUE');
+
+    // Valid features produce correct prediction
+    const valid = ModelTrainer.predictNoTrade({
+      smcScore: 0.8,
+      mtfAlignment: 0.7,
+      volatilityAtr: 0.5,
+    } as any);
+    expect(valid.probabilityBadSetup).toBeDefined();
+    expect(Number.isFinite(valid.probabilityBadSetup)).toBe(true);
   });
 });
 

@@ -89,6 +89,7 @@ export class CandidateBacktestRunner {
       validationDatasetHash?: string;
       oosDatasetHash?: string;
       marketDatasetHash?: string;
+      developmentMarketDatasetHash?: string;
       trainingMarketDatasetHash?: string;
       validationMarketDatasetHash?: string;
       oosMarketDatasetHash?: string;

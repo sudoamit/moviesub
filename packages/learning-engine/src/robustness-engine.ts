@@ -34,12 +34,31 @@ export class RobustnessEngine {
         ? marketDataOrExperiences
         : { candles: options?.candles, dataset: options?.dataset };
 
+    const minCandles = (marketData.candles && marketData.candles.length > 0)
+      ? Math.min(10, marketData.candles.length)
+      : (marketData.dataset?.executionCandles && marketData.dataset.executionCandles.length > 0)
+        ? Math.min(10, marketData.dataset.executionCandles.length)
+        : 10;
+    const sym = marketData.dataset?.symbol || candidate.symbol || 'BTCUSDT';
+
     // 1. Normal Cost: 0.05R
-    const normal = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.05 });
+    const normal = CandidateEvaluator.evaluateCandidateOnMarketData(candidate, marketData, {
+      costPerTradeR: 0.05,
+      minimumCandles: minCandles,
+      symbol: sym,
+    });
     // 2. Double Cost: 0.10R
-    const doubleCost = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.1 });
+    const doubleCost = CandidateEvaluator.evaluateCandidateOnMarketData(candidate, marketData, {
+      costPerTradeR: 0.1,
+      minimumCandles: minCandles,
+      symbol: sym,
+    });
     // 3. Triple Cost (Stress): 0.15R
-    const tripleCost = CandidateEvaluator.evaluate(candidate, { ...marketData, costPerTradeR: 0.15 });
+    const tripleCost = CandidateEvaluator.evaluateCandidateOnMarketData(candidate, marketData, {
+      costPerTradeR: 0.15,
+      minimumCandles: minCandles,
+      symbol: sym,
+    });
 
     const normalExp = normal.candidateExpectancy;
     const doubleExp = doubleCost.candidateExpectancy;

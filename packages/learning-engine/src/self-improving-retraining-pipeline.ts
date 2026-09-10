@@ -213,6 +213,9 @@ export class SelfImprovingRetrainingPipeline {
     await Promise.resolve();
 
     let currentStatus: RetrainingRunStatus = 'DATASET_BUILDING';
+    let activeSplits: { training?: any; validation?: any; oos?: any } | undefined;
+    let activeHypotheses: CandidateHypothesis[] = [];
+    let activeModelVersions: string[] = [];
 
     try {
       // 2. Build Point-In-Time Dataset Splits (Train, Validation, OOS with Purge & Embargo)
@@ -223,6 +226,7 @@ export class SelfImprovingRetrainingPipeline {
         embargoMs: config.embargoMs,
         baseStrategyVersion: strategyVersion,
       });
+      activeSplits = splits;
 
       currentStatus = 'DATASET_VALIDATED';
 
@@ -248,6 +252,7 @@ export class SelfImprovingRetrainingPipeline {
         },
         featureSelection,
       });
+      activeHypotheses = hypotheses;
 
       // 5. Model Training per Hypothesis (Train-only fitting)
       const trainingResults: CandidateTrainingResult[] = [];
@@ -292,6 +297,7 @@ export class SelfImprovingRetrainingPipeline {
         };
 
         modelVersions.push(trainedModel.modelVersion);
+        activeModelVersions.push(trainedModel.modelVersion);
 
         trainingResults.push({
           hypothesis: hyp,
@@ -344,10 +350,37 @@ export class SelfImprovingRetrainingPipeline {
         })) as ICandle[];
 
       const trainMktHash = DatasetManager.requireCanonicalMarketDatasetHash(trainCandles, config.timeframe);
-      const devMktHash = DatasetManager.requireCanonicalMarketDatasetHash(devCandles, config.timeframe);
       const valMktHash = DatasetManager.requireCanonicalMarketDatasetHash(valCandles, config.timeframe);
       const oosMktHash = DatasetManager.requireCanonicalMarketDatasetHash(oosCandles, config.timeframe);
+      const devMktHash = DatasetManager.requireCanonicalMarketDatasetHash(devCandles, config.timeframe);
       const canonicalV2SchemaHash = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+
+      // Baseline Champion Strategy Candidate for validation benchmarks
+      const championCand: StrategyCandidate = {
+        id: 'champion_baseline_benchmark',
+        baseStrategyVersion: strategyVersion,
+        candidateVersion: `${strategyVersion}-baseline`,
+        type: 'BASELINE',
+        description: 'Champion Baseline Benchmark Strategy Candidate',
+        change: {
+          symbol: config.symbol,
+          minMtfScore: config.executionConfig.minMtfScore,
+          stopLossAtrMultiplier: config.executionConfig.stopLossAtrMultiplier,
+          sizingMultiplier: config.executionConfig.sizingMultiplier,
+          fillModel: config.executionConfig.fillModel,
+          ambiguityMode: config.executionConfig.ambiguityMode,
+          latencyMs: config.executionConfig.latencyMs,
+        },
+        evidence: {
+          sampleSize: trainSlice.length,
+          expectancyBefore: 0,
+          expectancyAfterHistorical: 0,
+        },
+        riskConfig: config.riskConfig,
+        executionConfig: config.executionConfig,
+        status: 'PROMOTED',
+        createdAt: new Date(),
+      };
 
       for (const trainRes of trainingResults) {
         const hyp = trainRes.hypothesis;
@@ -355,9 +388,19 @@ export class SelfImprovingRetrainingPipeline {
 
         // 6a. Historical Simulation on Validation partition
         const valEval = CandidateEvaluator.evaluate(candidateObj, {
+          baselineCandidate: championCand,
           candles: valCandles,
           minimumCandles: 10,
           warmupBars: 5,
+          symbol,
+          timeframe: config.timeframe,
+          riskConfig: candidateObj.riskConfig,
+          criteria: {
+            minExpectancyDelta: 0.0,
+            minProfitFactor: config.minValidationProfitFactor,
+            minCandidateExpectancy: config.minValidationExpectancyR,
+            minTrades: config.minValidationTrades,
+          },
         });
 
         // 6b. Walk-Forward Validation (WFV) with Genuine Fold Retraining
@@ -376,8 +419,13 @@ export class SelfImprovingRetrainingPipeline {
             let names: readonly string[];
             if (e.featureNames && Array.isArray(e.featureNames) && e.featureNames.length === e.features.length) {
               names = e.featureNames;
-            } else if (!e.featureNames && e.featureSchemaHash === canonicalV2SchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
-              names = CANONICAL_FEATURE_NAMES_V2;
+            } else if (e.featureSchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
+              const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+              if (e.featureSchemaHash === computed) {
+                names = CANONICAL_FEATURE_NAMES_V2;
+              } else {
+                throw new Error(`FEATURE_SCHEMA_MISMATCH: Example '${e.exampleId}' schema hash ${e.featureSchemaHash} does not match canonical 2.0 schema hash ${computed}`);
+              }
             } else {
               throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Example '${e.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
             }
@@ -459,19 +507,20 @@ export class SelfImprovingRetrainingPipeline {
             : 0;
 
         const valPassed =
+          valEval.passed &&
           valEval.simulatedRMultiples.length >= minValTrades &&
           valEval.candidateExpectancy >= minValExp &&
           valEval.profitFactor >= minValPF &&
           (wfEval.folds.length === 0 || wfEval.isRobust || wfEval.meanOutOfSampleExpectancy >= 0);
 
-        const valResult: CandidateValidationResult = {
+        const valRes: CandidateValidationResult = {
           hypothesisId: hyp.hypothesisId,
           passed: valPassed,
           validationExpectancyR: valEval.candidateExpectancy,
           validationWinRate: valWinRate,
           validationProfitFactor: valEval.profitFactor,
           validationMaxDrawdownR: valEval.maxDrawdownPercent,
-          validationTradeCount: valEval.simulatedRMultiples.length,
+          validationTradeCount: valEval.totalSimulatedTrades,
           walkForwardExpectancyR: wfEval.meanOutOfSampleExpectancy,
           walkForwardFoldsPassed: wfEval.folds.filter((f) => f.passed).length,
           walkForwardTotalFolds: wfEval.folds.length,
@@ -480,23 +529,21 @@ export class SelfImprovingRetrainingPipeline {
             : undefined,
           simulatedRMultiples: valEval.simulatedRMultiples,
         };
+        validationResults.push(valRes);
 
-        validationResults.push(valResult);
         if (valPassed) {
-          passedHypotheses.push({ hyp, trainRes, valRes: valResult });
+          passedHypotheses.push({ hyp, trainRes, valRes });
         }
       }
 
-      // 7. Rank Passed Candidates by Validation Metrics (NEVER on OOS metrics)
-      passedHypotheses.sort((a, b) => {
-        if (b.valRes.walkForwardExpectancyR !== a.valRes.walkForwardExpectancyR) {
-          return b.valRes.walkForwardExpectancyR - a.valRes.walkForwardExpectancyR;
-        }
-        return b.valRes.validationProfitFactor - a.valRes.validationProfitFactor;
-      });
+      // 7. Rejection Gate
+      if (passedHypotheses.length === 0) {
+        currentStatus = 'REJECTED';
+      } else {
+        currentStatus = 'OOS_EVALUATION';
+      }
 
-      // 8. OOS Evaluation for surviving candidates (Read-Only Unbiased Execution)
-      currentStatus = 'OOS_EVALUATION';
+      // 8. OOS Holdout Evaluation strictly for passing hypotheses
       const oosResults: CandidateOOSResult[] = [];
       const createdArtifacts: ValidatedCandidateArtifact[] = [];
 
@@ -513,9 +560,19 @@ export class SelfImprovingRetrainingPipeline {
 
         // Authoritative Backtest on OOS Holdout Candles
         const oosEval = CandidateEvaluator.evaluate(candidateObj, {
+          baselineCandidate: championCand,
           candles: oosCandles,
           minimumCandles: 10,
           warmupBars: 5,
+          symbol,
+          timeframe: config.timeframe,
+          riskConfig: candidateObj.riskConfig,
+          criteria: {
+            minExpectancyDelta: 0.0,
+            minProfitFactor: config.minValidationProfitFactor,
+            minCandidateExpectancy: config.minValidationExpectancyR,
+            minTrades: config.minValidationTrades ?? 0,
+          },
         });
 
         // Seeded Monte Carlo Simulation on real execution-derived trades only (ZERO synthetic fallback)
@@ -549,11 +606,11 @@ export class SelfImprovingRetrainingPipeline {
           oosWinRate,
           oosProfitFactor: oosEval.profitFactor,
           oosMaxDrawdownPercent: oosEval.maxDrawdownPercent,
-          oosTradeCount: oosEval.simulatedRMultiples.length,
+          oosTradeCount: oosEval.totalSimulatedTrades,
           oosMarketDatasetHash: oosMktHash,
           executionDerived: true,
-          monteCarloRuinProbability: mcRuinProb,
           isMonteCarloAvailable,
+          monteCarloRuinProbability: mcRuinProb,
           transactionCostSurvived: costEval.survivedDoubleCosts,
         };
         oosResults.push(oosRes);
@@ -569,7 +626,7 @@ export class SelfImprovingRetrainingPipeline {
             outOfSampleExpectancy: oosEval.candidateExpectancy,
             profitFactor: oosEval.profitFactor,
             maxDrawdownPercent: oosEval.maxDrawdownPercent,
-            monteCarloRuinProb: mcRuinProb ?? 0,
+            monteCarloRuinProb: mcRuinProb,
             transactionCostSurvived: costEval.survivedDoubleCosts,
           },
         };
@@ -583,6 +640,7 @@ export class SelfImprovingRetrainingPipeline {
             validationDatasetHash: splits.validation.datasetHash,
             oosDatasetHash: splits.oos.datasetHash,
             marketDatasetHash: devMktHash,
+            developmentMarketDatasetHash: devMktHash,
             trainingMarketDatasetHash: trainMktHash,
             validationMarketDatasetHash: valMktHash,
             oosMarketDatasetHash: oosMktHash,
@@ -597,18 +655,9 @@ export class SelfImprovingRetrainingPipeline {
         createdArtifacts.push(validatedArtifact);
       }
 
-      // 10. Atomic ModelRegistry Transaction Registration
+      // 10. Atomic ModelRegistry & RetrainingRunStore Unified Transaction
       if (createdArtifacts.length > 0) {
         currentStatus = 'REGISTERED';
-        const requirePersistence = Boolean(ModelRegistry.getPersistencePath());
-        ModelRegistry.executeTransaction(
-          () => {
-            for (const artifact of createdArtifacts) {
-              ModelRegistry.registerCandidateArtifact(artifact);
-            }
-          },
-          { requirePersistence },
-        );
       }
 
       const selectedCandidateId = createdArtifacts.length > 0 ? createdArtifacts[0].candidateId : undefined;
@@ -640,7 +689,24 @@ export class SelfImprovingRetrainingPipeline {
         status: finalStatus,
       });
 
-      RetrainingRunStore.saveRun(runRecord);
+      const runStoreSnapshot = RetrainingRunStore.createSnapshot();
+
+      try {
+        ModelRegistry.executeTransaction(
+          () => {
+            if (createdArtifacts.length > 0) {
+              for (const artifact of createdArtifacts) {
+                ModelRegistry.registerCandidateArtifact(artifact);
+              }
+            }
+            RetrainingRunStore.saveRun(runRecord);
+          },
+          { requirePersistence: true },
+        );
+      } catch (txErr) {
+        RetrainingRunStore.restoreSnapshot(runStoreSnapshot);
+        throw txErr;
+      }
 
       return {
         runRecord,
@@ -657,11 +723,17 @@ export class SelfImprovingRetrainingPipeline {
         completedAt: Date.now(),
         marketDatasetHash: mktHash,
         experienceDatasetHash: expHash,
-        trainingWindow: { start: 0, end: 0 },
-        validationWindow: { start: 0, end: 0 },
-        oosWindow: { start: 0, end: 0 },
-        candidateIds: Object.freeze([]),
-        modelVersions: Object.freeze([]),
+        trainingWindow: activeSplits?.training
+          ? { start: activeSplits.training.startTimestamp, end: activeSplits.training.endTimestamp }
+          : { start: 0, end: 0 },
+        validationWindow: activeSplits?.validation
+          ? { start: activeSplits.validation.startTimestamp, end: activeSplits.validation.endTimestamp }
+          : { start: 0, end: 0 },
+        oosWindow: activeSplits?.oos
+          ? { start: activeSplits.oos.startTimestamp, end: activeSplits.oos.endTimestamp }
+          : { start: 0, end: 0 },
+        candidateIds: Object.freeze(activeHypotheses.map((h) => h.candidateId)),
+        modelVersions: Object.freeze([...activeModelVersions]),
         configHash,
         status: 'FAILED',
         failureReason: err instanceof Error ? err.message : String(err),
@@ -675,13 +747,15 @@ export class SelfImprovingRetrainingPipeline {
 
   private static toStrategyCandidate(
     hyp: CandidateHypothesis,
-    modelArtifact: ModelArtifact,
+    modelArtifact: ModelArtifact | undefined,
     config: RetrainingRunConfig,
     sampleCount: number,
     baselineExpectancy?: number,
     historicalExpectancy?: number,
   ): StrategyCandidate {
-    const featSchemaVer = typeof modelArtifact.featureSchemaVersion === 'string' ? modelArtifact.featureSchemaVersion : '2.0';
+    const featSchemaVer = (modelArtifact && typeof modelArtifact.featureSchemaVersion === 'string')
+      ? modelArtifact.featureSchemaVersion
+      : '2.0';
 
     const minMtf =
       (hyp.entryFilters?.minMtfScore as number) ??
@@ -719,10 +793,12 @@ export class SelfImprovingRetrainingPipeline {
       featureSchemaVersion: featSchemaVer,
       change: {
         ...hyp.parameterChanges,
-        modelArtifact,
-        scalerArtifact: modelArtifact.scalerArtifact,
-        selectedFeatures: modelArtifact.selectedFeatures,
-        featureSchemaHash: modelArtifact.featureSchemaHash,
+        ...(modelArtifact ? {
+          modelArtifact,
+          scalerArtifact: modelArtifact.scalerArtifact,
+          selectedFeatures: modelArtifact.selectedFeatures,
+          featureSchemaHash: modelArtifact.featureSchemaHash,
+        } : {}),
         featureSchemaVersion: featSchemaVer,
         minMtfScore: minMtf,
         stopLossAtrMultiplier: stopLossMultiplier,

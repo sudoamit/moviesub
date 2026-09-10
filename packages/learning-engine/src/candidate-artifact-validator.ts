@@ -326,6 +326,7 @@ export class CandidateArtifactValidator {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash: art.marketDatasetHash,
+      ...(art.developmentMarketDatasetHash ? { developmentMarketDatasetHash: art.developmentMarketDatasetHash } : {}),
       ...(art.trainingMarketDatasetHash ? { trainingMarketDatasetHash: art.trainingMarketDatasetHash } : {}),
       ...(art.validationMarketDatasetHash ? { validationMarketDatasetHash: art.validationMarketDatasetHash } : {}),
       ...(art.oosMarketDatasetHash ? { oosMarketDatasetHash: art.oosMarketDatasetHash } : {}),

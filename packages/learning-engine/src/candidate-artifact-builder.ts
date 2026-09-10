@@ -42,6 +42,7 @@ export interface CandidateArtifactBuildOptions {
     validationDatasetHash?: string;
     oosDatasetHash?: string;
     marketDatasetHash?: string;
+    developmentMarketDatasetHash?: string;
     trainingMarketDatasetHash?: string;
     validationMarketDatasetHash?: string;
     oosMarketDatasetHash?: string;
@@ -337,11 +338,15 @@ export class CandidateArtifactBuilder {
       (candidateChange?.oosDatasetHash as string) ||
       resolvedDatasetHash;
 
-    const marketDatasetHash =
+    const developmentMarketDatasetHash =
+      provenance?.developmentMarketDatasetHash ||
       (datasetHash && datasetHash !== 'canonical_default_hash' ? datasetHash : undefined) ||
       provenance?.marketDatasetHash ||
+      (candidateChange?.developmentMarketDatasetHash as string) ||
       (candidateChange?.marketDatasetHash as string) ||
       resolvedDatasetHash;
+
+    const marketDatasetHash = developmentMarketDatasetHash;
 
     const trainingMarketDatasetHash =
       provenance?.trainingMarketDatasetHash ||
@@ -521,12 +526,13 @@ export class CandidateArtifactBuilder {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash,
-      trainingMarketDatasetHash,
-      validationMarketDatasetHash,
-      oosMarketDatasetHash,
-      trainingExperienceDatasetHash,
-      validationExperienceDatasetHash,
-      oosExperienceDatasetHash,
+      ...(developmentMarketDatasetHash ? { developmentMarketDatasetHash } : {}),
+      ...(trainingMarketDatasetHash ? { trainingMarketDatasetHash } : {}),
+      ...(validationMarketDatasetHash ? { validationMarketDatasetHash } : {}),
+      ...(oosMarketDatasetHash ? { oosMarketDatasetHash } : {}),
+      ...(trainingExperienceDatasetHash ? { trainingExperienceDatasetHash } : {}),
+      ...(validationExperienceDatasetHash ? { validationExperienceDatasetHash } : {}),
+      ...(oosExperienceDatasetHash ? { oosExperienceDatasetHash } : {}),
       datasetHash: resolvedDatasetHash,
       configHash: config.configHash,
       trainingSeed,
@@ -560,6 +566,7 @@ export class CandidateArtifactBuilder {
       validationDatasetHash,
       oosDatasetHash,
       marketDatasetHash,
+      developmentMarketDatasetHash,
       trainingMarketDatasetHash,
       validationMarketDatasetHash,
       oosMarketDatasetHash,

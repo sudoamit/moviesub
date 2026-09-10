@@ -540,6 +540,13 @@ export class ModelRegistry {
   }
 
   /**
+   * Lists all stored candidate artifacts.
+   */
+  public static listArtifacts(): CandidateArtifact[] {
+    return Array.from(this.artifacts.values());
+  }
+
+  /**
    * Internal candidate status update without standalone persistence.
    */
   private static updateCandidateStatusInternal(

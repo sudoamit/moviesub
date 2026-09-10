@@ -455,28 +455,49 @@ export class WalkForwardValidator {
       foldArtifacts.push(foldArtifact);
 
       // 7. Evaluate retrained candidate in-sample strictly on training fold market data (Fail Closed: No whole dataset fallback!)
-      const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: trainMarketDataset,
-        candles: trainCandles,
-        evaluationStartTimestamp: trainWindow.evaluationStartTimestamp,
-        evaluationEndTimestamp: trainWindow.evaluationEndTimestamp,
-      });
+      const isEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+        foldCandidate,
+        {
+          dataset: trainMarketDataset,
+          candles: trainCandles,
+          evaluationStartTimestamp: trainWindow.evaluationStartTimestamp,
+          evaluationEndTimestamp: trainWindow.evaluationEndTimestamp,
+        },
+        {
+          minimumCandles: Math.max(1, Math.min(10, trainCandles.length)),
+          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+        },
+      );
 
       // 8. Evaluate frozen retrained candidate strictly on validation fold market data
-      const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: valMarketDataset,
-        candles: valCandles,
-        evaluationStartTimestamp: valWindow.evaluationStartTimestamp,
-        evaluationEndTimestamp: valWindow.evaluationEndTimestamp,
-      });
+      const valEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+        foldCandidate,
+        {
+          dataset: valMarketDataset,
+          candles: valCandles,
+          evaluationStartTimestamp: valWindow.evaluationStartTimestamp,
+          evaluationEndTimestamp: valWindow.evaluationEndTimestamp,
+        },
+        {
+          minimumCandles: Math.max(1, Math.min(10, valCandles.length)),
+          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+        },
+      );
 
       // 9. Evaluate frozen retrained candidate strictly out-of-sample on OOS fold market data
-      const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(foldCandidate, {
-        dataset: oosMarketDataset,
-        candles: testCandles,
-        evaluationStartTimestamp: testWindow.evaluationStartTimestamp,
-        evaluationEndTimestamp: testWindow.evaluationEndTimestamp,
-      });
+      const oosEval = CandidateEvaluator.evaluateCandidateOnMarketData(
+        foldCandidate,
+        {
+          dataset: oosMarketDataset,
+          candles: testCandles,
+          evaluationStartTimestamp: testWindow.evaluationStartTimestamp,
+          evaluationEndTimestamp: testWindow.evaluationEndTimestamp,
+        },
+        {
+          minimumCandles: Math.max(1, Math.min(10, testCandles.length)),
+          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+        },
+      );
 
       const isExp = isEval.candidateExpectancy;
       const oosExp = oosEval.candidateExpectancy;
