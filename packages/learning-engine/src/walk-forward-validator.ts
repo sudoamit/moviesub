@@ -198,9 +198,16 @@ export class WalkForwardValidator {
       (a, b) => getExperienceTimestamp(a) - getExperienceTimestamp(b),
     );
 
+    const resolvedTimeframe =
+      options.marketDataset?.timeframe ||
+      options.experienceDataset?.timeframe;
+    if (!resolvedTimeframe || typeof resolvedTimeframe !== 'string' || resolvedTimeframe.trim() === '') {
+      throw new Error('MISSING_TIMEFRAME: WalkForwardValidator requires explicit timeframe in marketDataset or experienceDataset');
+    }
+
     const expectedIntervalMs =
       options.marketDataset.expectedIntervalMs ||
-      MarketDatasetValidator.resolveTimeframeIntervalMs(options.marketDataset.timeframe || '15m');
+      MarketDatasetValidator.resolveTimeframeIntervalMs(resolvedTimeframe);
 
     const totalIntervals = candles.length;
     const foldIntervalSize = Math.floor(totalIntervals / (numFolds + 2)); // Divide into train, val, oos chunks
@@ -269,9 +276,9 @@ export class WalkForwardValidator {
       const testCandles = testWindow.allCandles;
 
       // P1 #11: Validate sliced continuous market candles before setting isContinuous
-      MarketDatasetValidator.validateCandles(trainCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
-      MarketDatasetValidator.validateCandles(valCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
-      MarketDatasetValidator.validateCandles(testCandles, options.marketDataset.timeframe || '15m', { expectedIntervalMs });
+      MarketDatasetValidator.validateCandles(trainCandles, resolvedTimeframe, { expectedIntervalMs });
+      MarketDatasetValidator.validateCandles(valCandles, resolvedTimeframe, { expectedIntervalMs });
+      MarketDatasetValidator.validateCandles(testCandles, resolvedTimeframe, { expectedIntervalMs });
 
       const trainRange: [Date, Date] = [new Date(trainStartTs), new Date(trainEndTs)];
       const validateRange: [Date, Date] = [new Date(valStartTs), new Date(valEndTs)];
@@ -357,9 +364,9 @@ export class WalkForwardValidator {
       const oosExpDatasetHash = testSlice.length > 0 ? DatasetManager.computeCanonicalDatasetHash(testSlice) : 'canonical_empty_exp_hash';
 
       // Market dataset hash represents complete market execution input (warmup + evaluation)
-      const trainMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(trainCandles, options.marketDataset.timeframe || '15m');
-      const valMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(valCandles, options.marketDataset.timeframe || '15m');
-      const oosMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(testCandles, options.marketDataset.timeframe || '15m');
+      const trainMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(trainCandles, resolvedTimeframe);
+      const valMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(valCandles, resolvedTimeframe);
+      const oosMarketDatasetHash = DatasetManager.computeCanonicalMarketDatasetHash(testCandles, resolvedTimeframe);
 
       // Sliced datasets
       const trainExpDataset: ExperienceDataset = {
@@ -367,7 +374,7 @@ export class WalkForwardValidator {
         datasetHash: trainExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
         symbol: resolvedSymbol,
-        timeframe: options.marketDataset.timeframe || '15m',
+        timeframe: resolvedTimeframe,
         startTimestamp: getExperienceTimestamp(trainSlice[0]),
         endTimestamp: getExperienceTimestamp(trainSlice[trainSlice.length - 1]),
       };
@@ -375,7 +382,7 @@ export class WalkForwardValidator {
       const trainMarketDataset: CandidateMarketDataset = {
         executionCandles: trainCandles,
         datasetHash: trainMarketDatasetHash,
-        timeframe: options.marketDataset.timeframe || '15m',
+        timeframe: resolvedTimeframe,
         symbol: resolvedSymbol,
         startTimestamp: new Date(trainCandles[0].timestamp).getTime(),
         endTimestamp: new Date(trainCandles[trainCandles.length - 1].timestamp).getTime(),
@@ -386,7 +393,7 @@ export class WalkForwardValidator {
       const valMarketDataset: CandidateMarketDataset = {
         executionCandles: valCandles,
         datasetHash: valMarketDatasetHash,
-        timeframe: options.marketDataset.timeframe || '15m',
+        timeframe: resolvedTimeframe,
         symbol: resolvedSymbol,
         startTimestamp: new Date(valCandles[0].timestamp).getTime(),
         endTimestamp: new Date(valCandles[valCandles.length - 1].timestamp).getTime(),
@@ -397,7 +404,7 @@ export class WalkForwardValidator {
       const oosMarketDataset: CandidateMarketDataset = {
         executionCandles: testCandles,
         datasetHash: oosMarketDatasetHash,
-        timeframe: options.marketDataset.timeframe || '15m',
+        timeframe: resolvedTimeframe,
         symbol: resolvedSymbol,
         startTimestamp: new Date(testCandles[0].timestamp).getTime(),
         endTimestamp: new Date(testCandles[testCandles.length - 1].timestamp).getTime(),
@@ -526,7 +533,7 @@ export class WalkForwardValidator {
       const oosSimWins = oosEval.simulatedRMultiples.filter((r) => r > 0).length;
       const winRate = totalOosSimTrades > 0
         ? Number(((oosSimWins / totalOosSimTrades) * 100).toFixed(1))
-        : 50;
+        : undefined;
 
       const passed = oosExp > 0 && totalOosSimTrades > 0;
 

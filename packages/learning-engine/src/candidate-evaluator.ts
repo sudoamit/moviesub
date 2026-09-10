@@ -222,6 +222,7 @@ export class CandidateEvaluator {
         warmupBars: options?.warmupBars,
         symbol: resolvedSymbol,
         timeframe: options?.timeframe,
+        costPerTradeR: options?.costPerTradeR,
         riskConfig: (baselineCandidate as any).riskConfig || resolvedRisk,
       });
       baselineExpectancy = baselineRes.expectancyR;
@@ -238,6 +239,7 @@ export class CandidateEvaluator {
       warmupBars: options?.warmupBars,
       symbol: resolvedSymbol,
       timeframe: options?.timeframe,
+      costPerTradeR: options?.costPerTradeR,
       riskConfig: resolvedRisk,
     });
 
@@ -275,12 +277,25 @@ export class CandidateEvaluator {
       throw new Error('MISSING_EVALUATION_CRITERIA: CandidateEvaluator requires explicit validation/acceptance criteria in options.criteria');
     }
 
+    if (criteria.minExpectancyDelta === undefined || typeof criteria.minExpectancyDelta !== 'number' || !Number.isFinite(criteria.minExpectancyDelta)) {
+      throw new Error('MISSING_EVALUATION_CRITERIA_FIELD: criteria.minExpectancyDelta must be an explicit finite number');
+    }
+    if (criteria.minProfitFactor === undefined || typeof criteria.minProfitFactor !== 'number' || !Number.isFinite(criteria.minProfitFactor)) {
+      throw new Error('MISSING_EVALUATION_CRITERIA_FIELD: criteria.minProfitFactor must be an explicit finite number');
+    }
+    if (criteria.minCandidateExpectancy === undefined || typeof criteria.minCandidateExpectancy !== 'number' || !Number.isFinite(criteria.minCandidateExpectancy)) {
+      throw new Error('MISSING_EVALUATION_CRITERIA_FIELD: criteria.minCandidateExpectancy must be an explicit finite number');
+    }
+    if (criteria.minTrades === undefined || typeof criteria.minTrades !== 'number' || !Number.isFinite(criteria.minTrades)) {
+      throw new Error('MISSING_EVALUATION_CRITERIA_FIELD: criteria.minTrades must be an explicit finite number');
+    }
+
     const measurement = this.measureCandidateOnMarketData(candidate, marketData, options);
 
-    const minExpectancyDelta = criteria.minExpectancyDelta ?? 0.0;
-    const minProfitFactor = criteria.minProfitFactor ?? 1.0;
-    const minCandidateExpectancy = criteria.minCandidateExpectancy ?? 0.0;
-    const minTrades = criteria.minTrades ?? 1;
+    const minExpectancyDelta = criteria.minExpectancyDelta;
+    const minProfitFactor = criteria.minProfitFactor;
+    const minCandidateExpectancy = criteria.minCandidateExpectancy;
+    const minTrades = criteria.minTrades;
 
     const passed =
       measurement.expectancyDelta >= minExpectancyDelta &&

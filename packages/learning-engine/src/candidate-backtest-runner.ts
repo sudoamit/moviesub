@@ -42,6 +42,7 @@ export interface ICandidateBacktestOptions {
   symbol?: string;
   timeframe?: string;
   initialCapital?: number;
+  costPerTradeR?: number;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
   executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
   provenance?: {
@@ -289,14 +290,31 @@ export class CandidateBacktestRunner {
       return true;
     });
 
-    const rMultiples = trades.map((t) => t.pnlRMultiple || 0);
-    const winningTrades = trades.filter((t) => t.pnl > 0);
-    const losingTrades = trades.filter((t) => t.pnl < 0);
+    const costPerTradeR = options?.costPerTradeR !== undefined ? options.costPerTradeR : 0;
+    const initialCap = options?.initialCapital ?? riskConfig.initialCapital;
+    const riskFraction = (riskConfig.maxRiskPerTrade as number | undefined) ?? 0.02;
+    const riskAmount = initialCap * riskFraction;
+
+    const tradesWithCosts = trades.map((t) => {
+      const grossR = t.pnlRMultiple || 0;
+      const netR = Number((grossR - costPerTradeR).toFixed(4));
+      const costDollar = costPerTradeR * (t.riskAmount || riskAmount);
+      const netPnL = (t.pnl || 0) - costDollar;
+      return {
+        ...t,
+        pnl: netPnL,
+        pnlRMultiple: netR,
+      };
+    });
+
+    const rMultiples = tradesWithCosts.map((t) => t.pnlRMultiple);
+    const winningTrades = tradesWithCosts.filter((t) => t.pnl > 0);
+    const losingTrades = tradesWithCosts.filter((t) => t.pnl < 0);
     const grossProfit = winningTrades.reduce((sum, t) => sum + t.pnl, 0);
     const grossLoss = losingTrades.reduce((sum, t) => sum + Math.abs(t.pnl), 0);
-    const totalPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
-    const winRate = trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0;
-    const expectancyR = trades.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / trades.length : 0;
+    const totalPnL = tradesWithCosts.reduce((sum, t) => sum + t.pnl, 0);
+    const winRate = tradesWithCosts.length > 0 ? (winningTrades.length / tradesWithCosts.length) * 100 : 0;
+    const expectancyR = tradesWithCosts.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / tradesWithCosts.length : 0;
     const profitFactor =
       grossLoss === 0
         ? grossProfit > 0
@@ -308,8 +326,8 @@ export class CandidateBacktestRunner {
     let peakR = 0;
     let currentR = 0;
     let maxDrawdownR = 0;
-    for (const t of trades) {
-      currentR += t.pnlRMultiple || 0;
+    for (const t of tradesWithCosts) {
+      currentR += t.pnlRMultiple;
       if (currentR > peakR) {
         peakR = currentR;
       }
@@ -321,8 +339,8 @@ export class CandidateBacktestRunner {
 
     return {
       candidateId,
-      totalTrades: trades.length,
-      trades,
+      totalTrades: tradesWithCosts.length,
+      trades: tradesWithCosts,
       rMultiples,
       netPnL: totalPnL,
       grossProfit,

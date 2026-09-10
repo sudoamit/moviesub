@@ -455,7 +455,7 @@ export interface WalkForwardFold {
   testRange: [Date, Date];
   inSampleExpectancy: number;
   outOfSampleExpectancy: number;
-  winRate: number;
+  winRate?: number;
   passed: boolean;
   simulatedTrades?: IBacktestTrade[];
 }

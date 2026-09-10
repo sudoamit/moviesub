@@ -539,7 +539,8 @@ export class SelfImprovingRetrainingPipeline {
           valEval.simulatedRMultiples.length >= minValTrades &&
           valEval.candidateExpectancy >= minValExp &&
           valEval.profitFactor >= minValPF &&
-          (wfEval.folds.length === 0 || wfEval.isRobust || wfEval.meanOutOfSampleExpectancy >= 0);
+          wfEval.folds.length > 0 &&
+          (wfEval.isRobust || wfEval.meanOutOfSampleExpectancy >= 0);
 
         const valRes: CandidateValidationResult = {
           hypothesisId: hyp.hypothesisId,
@@ -553,7 +554,7 @@ export class SelfImprovingRetrainingPipeline {
           walkForwardFoldsPassed: wfEval.folds.filter((f) => f.passed).length,
           walkForwardTotalFolds: wfEval.folds.length,
           rejectionReason: !valPassed
-            ? valEval.rejectionReason || (!wfEval.isRobust ? 'Walk-forward validation failed' : 'Validation criteria failed')
+            ? valEval.rejectionReason || (wfEval.folds.length === 0 ? 'Walk-forward validation produced zero folds' : !wfEval.isRobust ? 'Walk-forward validation failed' : 'Validation criteria failed')
             : undefined,
           simulatedRMultiples: valEval.simulatedRMultiples,
         };

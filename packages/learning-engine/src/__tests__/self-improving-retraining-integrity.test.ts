@@ -1991,6 +1991,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     const valid = CandidateEvaluator.evaluateCandidateOnMarketData(candidate, candles, {
       minimumCandles: 5,
       criteria: {
+        minExpectancyDelta: 0.0,
         minCandidateExpectancy: 0.2,
         minProfitFactor: 1.2,
         maxDrawdownPercent: 0.15,
@@ -2525,35 +2526,76 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(ModelRegistry.listArtifacts().length).toBe(0);
   });
 
-  it('Test 91 (P1 #7 OOS Evidence-Only Selection): Superior validation candidate is selected regardless of OOS metrics', async () => {
+  it('Test 91 (P1 #5 Asymmetric OOS Evidence-Only Invariance): Candidate selection strictly prefers superior validation candidate regardless of OOS metrics', async () => {
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
-    let evalCount = 0;
-    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation((cand: any) => {
-      evalCount++;
-      const isCand1 = cand.id.includes('0') || cand.id.includes('v2.1_0');
+    const wfSpy = jest.spyOn(WalkForwardValidator, 'validate').mockReturnValue({
+      folds: [
+        {
+          foldIndex: 1,
+          trainRange: [new Date(1), new Date(2)],
+          validateRange: [new Date(2), new Date(3)],
+          testRange: [new Date(3), new Date(4)],
+          inSampleExpectancy: 1.0,
+          outOfSampleExpectancy: 0.8,
+          passed: true,
+        },
+      ],
+      meanInSampleExpectancy: 1.0,
+      meanOutOfSampleExpectancy: 0.8,
+      oosDegradationPct: 0.1,
+      isRobust: true,
+    });
+
+    // Run 1: Candidate 0 has high validation (+2.5R) but terrible OOS (-1.0R)
+    //        Candidate 1 has mediocre validation (+0.8R) but spectacular OOS (+4.0R)
+    const evaluatedCandidates: string[] = [];
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockImplementation((cand: any, opts: any) => {
+      if (!evaluatedCandidates.includes(cand.id)) {
+        evaluatedCandidates.push(cand.id);
+      }
+      const isCand0 = evaluatedCandidates.indexOf(cand.id) === 0;
+      // If candle count corresponds to OOS window (opts.candles === oosCandles or length < 30)
+      const isOOS = (opts?.candles && opts.candles.length <= 25);
+      
+      if (isOOS) {
+        return {
+          passed: true,
+          candidateExpectancy: isCand0 ? -1.0 : 4.0, // Cand0 terrible OOS, Cand1 great OOS
+          profitFactor: isCand0 ? 0.5 : 3.5,
+          maxDrawdownPercent: 0.10,
+          simulatedRMultiples: isCand0 ? [-1.0, -1.0] : [2.0, 2.0],
+          totalSimulatedTrades: 5,
+          totalTrades: 5,
+          trades: [],
+        } as any;
+      }
+
       return {
         passed: true,
-        candidateExpectancy: isCand1 ? 2.5 : 0.8, // Candidate 1 has much higher validation expectancy
-        profitFactor: 2.2,
-        maxDrawdownPercent: 0.05,
-        simulatedRMultiples: [1.0, 1.5],
+        candidateExpectancy: isCand0 ? 2.5 : 0.8, // Cand0 superior validation
+        profitFactor: isCand0 ? 2.8 : 1.4,
+        maxDrawdownPercent: 0.04,
+        simulatedRMultiples: isCand0 ? [1.2, 1.3] : [0.4, 0.4],
         totalSimulatedTrades: 5,
         totalTrades: 5,
         trades: [],
       } as any;
     });
 
-    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+    const result1 = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
       ...baseConfig,
       maxCandidates: 2,
     });
 
-    expect(result.runRecord.status).toBe('COMPLETED');
-    expect(result.runRecord.selectedCandidateId).toBeDefined();
+    expect(result1.runRecord.status).toBe('COMPLETED');
+    expect(result1.runRecord.selectedCandidateId).toBeDefined();
+    // Candidate 0 must be selected because of superior validation score despite terrible OOS
+    expect(result1.runRecord.selectedCandidateId).toBe(evaluatedCandidates[0]);
 
     evalSpy.mockRestore();
+    wfSpy.mockRestore();
   });
 
   it('Test 92 (P1 #8 Cryptographic Hash Provenance): Mutating input features or candles changes dataset hashes deterministically', () => {
@@ -2582,6 +2624,149 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     const mktHashA = DatasetManager.requireCanonicalMarketDatasetHash(candlesA, '15m');
     const mktHashB = DatasetManager.requireCanonicalMarketDatasetHash(candlesB, '15m');
     expect(mktHashA).not.toBe(mktHashB);
+  });
+
+  it('Test 93 (P1 #1 Real Transaction-Cost Robustness Execution): Backtester applies costPerTradeR deduction directly to simulated execution metrics', () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const cand = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0', 'BTCUSDT', baseConfig.riskConfig, baseConfig.executionConfig);
+
+    // 1. Measure candidate with normal cost (0.05R)
+    const normal = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
+      costPerTradeR: 0.05,
+      minimumCandles: 10,
+      warmupBars: 5,
+      symbol: 'BTCUSDT',
+    });
+
+    // 2. Measure candidate with double cost (0.10R)
+    const doubleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
+      costPerTradeR: 0.10,
+      minimumCandles: 10,
+      warmupBars: 5,
+      symbol: 'BTCUSDT',
+    });
+
+    // 3. Measure candidate with triple cost (0.15R)
+    const tripleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
+      costPerTradeR: 0.15,
+      minimumCandles: 10,
+      warmupBars: 5,
+      symbol: 'BTCUSDT',
+    });
+
+    // When trades exist, higher costPerTradeR MUST strictly reduce expectancy
+    if (normal.totalSimulatedTrades > 0) {
+      expect(normal.candidateExpectancy).toBeGreaterThan(doubleCost.candidateExpectancy);
+      expect(doubleCost.candidateExpectancy).toBeGreaterThan(tripleCost.candidateExpectancy);
+    }
+
+    // Robustness evaluation returns real differentiated survival metrics
+    const robReport = RobustnessEngine.evaluateCosts(cand, { candles });
+    expect(robReport).toBeDefined();
+    expect(typeof robReport.isRobust).toBe('boolean');
+    expect(typeof robReport.breakEvenCostR).toBe('number');
+  });
+
+  it('Test 94 (P1 #2 Zero-Trade WFV Fold Win Rate Undefined): Zero-trade WFV folds produce winRate=undefined instead of fabricated 50%', () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 40);
+
+    const devExp: ExperienceDataset = {
+      experiences: examples,
+      datasetHash: 'canonical_fold_test_hash',
+      featureSchemaVersion: '2.0',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      startTimestamp: examples[0].decisionTimestamp,
+      endTimestamp: examples[examples.length - 1].decisionTimestamp,
+    };
+
+    const devMkt: CandidateMarketDataset = {
+      executionCandles: candles,
+      datasetHash: 'canonical_mkt_fold_hash',
+      timeframe: '15m',
+      symbol: 'BTCUSDT',
+      startTimestamp: new Date(candles[0].timestamp).getTime(),
+      endTimestamp: new Date(candles[candles.length - 1].timestamp).getTime(),
+      isContinuous: true,
+    };
+
+    const cand = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0', 'BTCUSDT', baseConfig.riskConfig, {
+      ...baseConfig.executionConfig,
+      minMtfScore: 100, // Maximum score so zero trades will trigger in OOS fold
+    });
+
+    const result = WalkForwardValidator.validate(cand, {
+      experienceDataset: devExp,
+      marketDataset: devMkt,
+      numFolds: 2,
+      warmupBars: 5,
+    });
+
+    expect(result.folds.length).toBeGreaterThan(0);
+    for (const fold of result.folds) {
+      if (fold.simulatedTrades && fold.simulatedTrades.length === 0) {
+        expect(fold.winRate).toBeUndefined();
+      }
+    }
+  });
+
+  it('Test 95 (P1 #3 Zero WFV Folds Fail Validation Gate): Retraining pipeline rejects candidates when WFV yields 0 folds fail-closed', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    // Mock WFV to return zero folds
+    const wfSpy = jest.spyOn(WalkForwardValidator, 'validate').mockReturnValue({
+      folds: [],
+      meanInSampleExpectancy: 0,
+      meanOutOfSampleExpectancy: 0,
+      oosDegradationPct: 0,
+      isRobust: false,
+    });
+
+    const evalSpy = jest.spyOn(CandidateEvaluator, 'evaluate').mockReturnValue({
+      passed: true,
+      candidateExpectancy: 1.5,
+      profitFactor: 2.0,
+      maxDrawdownPercent: 0.05,
+      simulatedRMultiples: [1.0, 1.0, 1.0, 1.0, 1.0],
+      totalSimulatedTrades: 5,
+      totalTrades: 5,
+      trades: [],
+    } as any);
+
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
+
+    // Zero folds MUST cause candidate rejection
+    expect(result.runRecord.status).toBe('REJECTED');
+    expect(result.createdArtifacts.length).toBe(0);
+
+    wfSpy.mockRestore();
+    evalSpy.mockRestore();
+  });
+
+  it('Test 96 (P1 #4 Genuinely Unmocked End-to-End Retraining Execution): Retraining pipeline runs cleanly through real BacktestSimulator with 0 mocks', async () => {
+    const candles = generateTestCandles(1700000000000, 120);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    // Run 100% UNMOCKED: no jest.spyOn anywhere
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+      ...baseConfig,
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      numFolds: 2,
+      warmupBars: 5,
+      maxCandidates: 1,
+    });
+
+    expect(result).toBeDefined();
+    expect(result.runRecord).toBeDefined();
+    // Status can be COMPLETED or REJECTED based on real candle signals, but must not crash
+    expect(['COMPLETED', 'REJECTED']).toContain(result.runRecord.status);
+    expect(result.runRecord.runId).toBeDefined();
+    expect(result.runRecord.marketDatasetHash).toBeDefined();
+    expect(result.runRecord.experienceDatasetHash).toBeDefined();
+    expect(result.runRecord.configHash).toBeDefined();
   });
 });
 
