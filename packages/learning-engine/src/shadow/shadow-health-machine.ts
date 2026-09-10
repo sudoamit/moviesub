@@ -14,7 +14,29 @@ export const DEFAULT_HEALTH_MACHINE_CONFIG: HealthMachineConfig = {
   maxConsecutiveDegradedWindowsBeforeFailure: 5,
 };
 
+const ALLOWED_TRANSITIONS: Record<ShadowStatus, readonly ShadowStatus[]> = {
+  INSUFFICIENT_EVIDENCE: ['INSUFFICIENT_EVIDENCE', 'ACTIVE', 'HEALTHY', 'DEGRADED', 'CRITICAL', 'FAILED', 'STOPPED', 'REJECTED'],
+  PENDING: ['PENDING', 'INSUFFICIENT_EVIDENCE', 'ACTIVE', 'STOPPED', 'REJECTED'],
+  ACTIVE: ['ACTIVE', 'INSUFFICIENT_EVIDENCE', 'HEALTHY', 'DEGRADED', 'CRITICAL', 'FAILED', 'STOPPED', 'REJECTED'],
+  HEALTHY: ['HEALTHY', 'DEGRADED', 'CRITICAL', 'FAILED', 'STOPPED', 'REJECTED'],
+  DEGRADED: ['DEGRADED', 'HEALTHY', 'CRITICAL', 'FAILED', 'STOPPED', 'REJECTED'],
+  CRITICAL: ['CRITICAL', 'FAILED', 'STOPPED', 'REJECTED'],
+  FAILED: ['FAILED'],
+  REJECTED: ['REJECTED'],
+  STOPPED: ['STOPPED'],
+};
+
 export class ShadowHealthMachine {
+  /**
+   * Validates if a state transition is permitted in the explicit state transition matrix.
+   */
+  public static validateTransition(from: ShadowStatus, to: ShadowStatus): void {
+    const allowed = ALLOWED_TRANSITIONS[from];
+    if (!allowed || !allowed.includes(to)) {
+      throw new Error(`INVALID_HEALTH_TRANSITION: Cannot transition shadow health state from '${from}' to '${to}'`);
+    }
+  }
+
   /**
    * Evaluates the next deterministic health state based on observations, trades, active drift events, and history.
    */
@@ -48,6 +70,7 @@ export class ShadowHealthMachine {
     // 1. Critical drift triggers immediate failure
     if (hasCriticalDrift) {
       const critDrift = activeDrifts.find((d) => d.severity === 'CRITICAL');
+      this.validateTransition(currentState.status, 'FAILED');
       return {
         candidateId: currentState.candidateId,
         status: 'FAILED',
@@ -63,14 +86,16 @@ export class ShadowHealthMachine {
       };
     }
 
-    // 2. Insufficient sample size -> remain ACTIVE
+    // 2. Insufficient sample size -> remain INSUFFICIENT_EVIDENCE / ACTIVE
     if (
       observationCount < config.minObservationsForHealthy ||
       tradeCount < config.minTradesForHealthy
     ) {
+      const nextStatus: ShadowStatus = currentState.status === 'INSUFFICIENT_EVIDENCE' || currentState.status === 'PENDING' ? 'INSUFFICIENT_EVIDENCE' : 'ACTIVE';
+      this.validateTransition(currentState.status, nextStatus);
       return {
         candidateId: currentState.candidateId,
-        status: 'ACTIVE',
+        status: nextStatus,
         observationCount,
         tradeCount,
         consecutiveHealthyWindows: 0,
@@ -87,6 +112,7 @@ export class ShadowHealthMachine {
     if (hasWarningDrift) {
       const nextDegradedCount = currentState.consecutiveDegradedWindows + 1;
       if (nextDegradedCount >= config.maxConsecutiveDegradedWindowsBeforeFailure) {
+        this.validateTransition(currentState.status, 'FAILED');
         return {
           candidateId: currentState.candidateId,
           status: 'FAILED',
@@ -103,6 +129,7 @@ export class ShadowHealthMachine {
       }
 
       const warnDrift = activeDrifts.find((d) => d.severity === 'WARNING');
+      this.validateTransition(currentState.status, 'DEGRADED');
       return {
         candidateId: currentState.candidateId,
         status: 'DEGRADED',
@@ -122,6 +149,7 @@ export class ShadowHealthMachine {
     if (currentState.status === 'DEGRADED') {
       const nextHealthyCount = currentState.consecutiveHealthyWindows + 1;
       if (nextHealthyCount >= config.requiredConsecutiveHealthyWindowsForRecovery) {
+        this.validateTransition(currentState.status, 'HEALTHY');
         return {
           candidateId: currentState.candidateId,
           status: 'HEALTHY',
@@ -137,6 +165,7 @@ export class ShadowHealthMachine {
         };
       } else {
         // Still recovering: remain DEGRADED until threshold met
+        this.validateTransition(currentState.status, 'DEGRADED');
         return {
           candidateId: currentState.candidateId,
           status: 'DEGRADED',
@@ -154,6 +183,7 @@ export class ShadowHealthMachine {
     }
 
     // Normal Healthy State
+    this.validateTransition(currentState.status, 'HEALTHY');
     return {
       candidateId: currentState.candidateId,
       status: 'HEALTHY',
@@ -175,7 +205,7 @@ export class ShadowHealthMachine {
   public static createInitialState(candidateId: string, now = Date.now()): ShadowHealthState {
     return {
       candidateId,
-      status: 'ACTIVE',
+      status: 'INSUFFICIENT_EVIDENCE',
       observationCount: 0,
       tradeCount: 0,
       consecutiveHealthyWindows: 0,

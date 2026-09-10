@@ -18,13 +18,14 @@ import {
 } from './shadow-types';
 import { ShadowHealthMachine } from './shadow-health-machine';
 import { RegimeObservation } from './regime-drift-detector';
+import { canonicalJsonStringify } from '../canonical-serializer';
 
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
   Object.freeze(obj);
   for (const key of Object.getOwnPropertyNames(obj)) {
-    const val = (obj as any)[key];
+    const val = (obj as Record<string, unknown>)[key];
     if (val !== null && (typeof val === 'object' || typeof val === 'function') && !Object.isFrozen(val)) {
-      deepFreeze(val);
+      deepFreeze(val as object);
     }
   }
   return obj;
@@ -204,11 +205,14 @@ export class ShadowLedger {
   }
 
   /**
-   * Emits an authoritative audit record.
+   * Emits an authoritative audit record. Rejects duplicate event IDs.
    */
   public recordAuditEvent(record: ShadowAuditRecord): void {
     if (record.candidateId !== this.candidateId) {
       throw new Error(`Audit event candidateId mismatch: ${record.candidateId} vs ${this.candidateId}`);
+    }
+    if (this.events.some((e) => e.eventId === record.eventId)) {
+      throw new Error(`DUPLICATE_EVENT_ID: Audit event with ID '${record.eventId}' already exists`);
     }
     this.events.push(deepFreeze({ ...record }));
   }
@@ -355,6 +359,23 @@ export class ShadowLedger {
       .digest('hex');
   }
 
+  public getStateHash(): string {
+    const payload = {
+      candidateId: this.candidateId,
+      artifactHash: this.artifactHash,
+      symbol: this.symbol,
+      lastMarketTimestamp: this.lastMarketTimestamp,
+      observationCount: this.observations.length,
+      orderCount: this.orders.length,
+      fillCount: this.fills.length,
+      tradeCount: this.trades.length,
+      health: this.health,
+      activeLot: this.activeLot,
+      executionSequences: this.executionSequences,
+    };
+    return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
+  }
+
   public calculateMedianR(): number {
     const rVals = this.trades
       .map((t) => t.pnlRMultiple ?? (t as any).realizedR)
@@ -467,7 +488,7 @@ export class ShadowLedger {
     }
 
     const tempPath = `${targetPath}.tmp.${Date.now()}.${randomUUID()}`;
-    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(tempPath, canonicalJsonStringify(data), 'utf-8');
     fs.renameSync(tempPath, targetPath);
   }
 

@@ -1,5 +1,5 @@
 import { IBacktestTrade, ICandle } from '@quant/shared';
-import { IExecutionEvent, PositionLot } from '@quant/risk-engine';
+import { PositionLot } from '@quant/risk-engine';
 import { IFill, IOrder } from '@quant/backtesting';
 import { ShadowEvaluationMetrics } from '../types';
 import { RegimeObservation } from './regime-drift-detector';
@@ -7,10 +7,12 @@ import { RegimeObservation } from './regime-drift-detector';
 export const SHADOW_SCHEMA_VERSION = '1.0';
 
 export type ShadowStatus =
+  | 'INSUFFICIENT_EVIDENCE'
   | 'PENDING'
   | 'ACTIVE'
   | 'HEALTHY'
   | 'DEGRADED'
+  | 'CRITICAL'
   | 'FAILED'
   | 'REJECTED'
   | 'STOPPED';
@@ -23,6 +25,101 @@ export type DriftType =
   | 'CANDIDATE_VS_PRODUCTION';
 
 export type DriftSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
+
+export interface ShadowMarketData {
+  readonly symbol: string;
+  readonly timeframe: string;
+  readonly candles: readonly ICandle[];
+  readonly receivedAt: Date;
+  readonly source: string;
+}
+
+/**
+ * Validates shadow market data in strict fail-closed mode.
+ */
+export function validateShadowMarketData(
+  data: ShadowMarketData,
+  expectedSymbol?: string,
+): void {
+  if (!data || typeof data !== 'object') {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data object is null or undefined');
+  }
+
+  if (!data.symbol || typeof data.symbol !== 'string' || data.symbol.trim() === '') {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data is missing authoritative symbol');
+  }
+
+  if (expectedSymbol && data.symbol.trim().toUpperCase() !== expectedSymbol.trim().toUpperCase()) {
+    throw new Error(
+      `SYMBOL_MISMATCH: Market data symbol '${data.symbol}' does not match expected '${expectedSymbol}'`,
+    );
+  }
+
+  if (!data.timeframe || typeof data.timeframe !== 'string' || data.timeframe.trim() === '') {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data is missing timeframe');
+  }
+
+  if (!data.source || typeof data.source !== 'string' || data.source.trim() === '') {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data is missing authoritative source');
+  }
+
+  if (!(data.receivedAt instanceof Date) || isNaN(data.receivedAt.getTime())) {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data is missing valid receivedAt date');
+  }
+
+  if (!Array.isArray(data.candles) || data.candles.length === 0) {
+    throw new Error('INVALID_SHADOW_MARKET_DATA: Market data candles array is empty or not an array');
+  }
+
+  let prevTime = 0;
+  for (let i = 0; i < data.candles.length; i++) {
+    const candle = data.candles[i];
+    if (!candle || typeof candle !== 'object') {
+      throw new Error(`INVALID_CANDLE: Candle at index ${i} is null or invalid`);
+    }
+
+    const { open, high, low, close, volume, timestamp } = candle;
+    if (
+      typeof open !== 'number' ||
+      typeof high !== 'number' ||
+      typeof low !== 'number' ||
+      typeof close !== 'number' ||
+      !Number.isFinite(open) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close) ||
+      Number.isNaN(open) ||
+      Number.isNaN(high) ||
+      Number.isNaN(low) ||
+      Number.isNaN(close)
+    ) {
+      throw new Error(`INVALID_CANDLE_OHLC: Non-finite or NaN numeric price detected at index ${i}`);
+    }
+
+    if (high < low || close < low || close > high || open < low || open > high) {
+      throw new Error(`INVALID_CANDLE_BOUNDS: Candle at index ${i} has High (${high}) < Low (${low}) or Open/Close outside bounds`);
+    }
+
+    if (typeof volume !== 'number' || !Number.isFinite(volume) || volume < 0) {
+      throw new Error(`INVALID_CANDLE_VOLUME: Candle at index ${i} has negative or non-finite volume`);
+    }
+
+    const candleTime = timestamp instanceof Date ? timestamp.getTime() : new Date(timestamp).getTime();
+    if (Number.isNaN(candleTime) || candleTime <= 0) {
+      throw new Error(`INVALID_CANDLE_TIMESTAMP: Candle at index ${i} has invalid timestamp`);
+    }
+
+    if (i > 0) {
+      if (candleTime === prevTime) {
+        throw new Error(`DUPLICATE_CANDLE_TIMESTAMP: Duplicate candle timestamp ${candleTime} at index ${i}`);
+      }
+      if (candleTime < prevTime) {
+        throw new Error(`TIMESTAMP_REGRESSION: Out-of-order candle timestamp ${candleTime} < previous ${prevTime} at index ${i}`);
+      }
+    }
+    prevTime = candleTime;
+  }
+}
 
 export interface ShadowSignalSnapshot {
   readonly direction: 'LONG' | 'SHORT' | 'FLAT';
@@ -184,6 +281,24 @@ export interface ShadowAuditRecord {
   readonly metadata?: Record<string, unknown>;
 }
 
+export interface ShadowEvaluationEvidence {
+  readonly candidateId: string;
+  readonly artifactHash: string;
+  readonly observationCount: number;
+  readonly completedTradeCount: number;
+  readonly evaluationStart: Date;
+  readonly evaluationEnd: Date;
+  readonly performanceMetrics: ShadowEvaluationMetrics;
+  readonly featureDriftEvents: readonly DriftEvent[];
+  readonly regimeDriftEvents: readonly DriftEvent[];
+  readonly executionDriftEvents: readonly DriftEvent[];
+  readonly healthState: ShadowHealthState;
+  readonly marketDatasetHash: string;
+  readonly shadowDatasetHash: string;
+  readonly stateHash: string;
+  readonly evidenceHash: string;
+}
+
 export interface ShadowLedgerData {
   readonly version: string;
   readonly candidateId: string;
@@ -214,4 +329,3 @@ export interface ShadowLedgerData {
   };
   readonly savedAt: number;
 }
-

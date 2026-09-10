@@ -26,9 +26,9 @@ export class RegimeDriftDetector {
    * Evaluates causal market regime from recent closed candles without future lookahead.
    */
   public static classifyCausalRegime(candles: readonly ICandle[]): RegimeObservation {
-    if (candles.length < 15) {
+    if (candles.length === 0) {
       return {
-        timestamp: candles.length > 0 ? (candles[candles.length - 1].timestamp instanceof Date ? candles[candles.length - 1].timestamp.getTime() : new Date(candles[candles.length - 1].timestamp).getTime()) : 0,
+        timestamp: 0,
         volatilityRegime: 'NORMAL_VOLATILITY',
         trendRegime: 'RANGING',
         atrRatio: 1.0,
@@ -37,6 +37,15 @@ export class RegimeDriftDetector {
 
     const lastCandle = candles[candles.length - 1];
     const ts = lastCandle.timestamp instanceof Date ? lastCandle.timestamp.getTime() : new Date(lastCandle.timestamp).getTime();
+
+    if (candles.length < 15) {
+      return {
+        timestamp: ts,
+        volatilityRegime: 'NORMAL_VOLATILITY',
+        trendRegime: 'RANGING',
+        atrRatio: 1.0,
+      };
+    }
 
     // Calculate causal ATR-14
     let trSum = 0;
@@ -90,6 +99,7 @@ export class RegimeDriftDetector {
 
   /**
    * Evaluates regime drift by comparing current window regime observations against reference baseline regime.
+   * Strictly fails closed if reference regime is missing.
    */
   public static evaluateRegimeDrift(
     candidateId: string,
@@ -102,6 +112,10 @@ export class RegimeDriftDetector {
     timestamp = Date.now(),
   ): DriftEvent[] {
     const events: DriftEvent[] = [];
+
+    if (!referenceRegime || !referenceRegime.volatilityRegime) {
+      throw new Error(`REFERENCE_REGIME_MISSING: Candidate '${candidateId}' is missing authoritative reference regime`);
+    }
 
     if (observedRegimes.length < thresholds.minObservations) {
       return events;

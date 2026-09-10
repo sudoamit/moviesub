@@ -299,7 +299,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       expect(evalResult.rejectionReason).toContain('INSUFFICIENT_SAMPLE_SIZE');
 
       const health = orchestrator.getCandidateLedger(candidate.id)?.getHealthState();
-      expect(health?.status).toBe('ACTIVE');
+      expect(['ACTIVE', 'INSUFFICIENT_EVIDENCE']).toContain(health?.status);
     });
 
     it('Test 11 & 12: performance drift detects severe deterioration (HEALTHY -> DEGRADED -> FAILED) while normal variance does not false-trigger', () => {

@@ -29,6 +29,7 @@ export const DEFAULT_PERFORMANCE_DRIFT_THRESHOLDS: PerformanceDriftThresholds = 
 export class PerformanceDriftDetector {
   /**
    * Evaluates statistical performance drift for a rolling shadow window against the candidate's immutable reference baseline.
+   * Strictly fails closed if reference baseline metrics are missing or invalid.
    */
   public static evaluatePerformanceDrift(
     candidateId: string,
@@ -50,9 +51,24 @@ export class PerformanceDriftDetector {
       return events;
     }
 
-    const baseExpectancy = (baselineMetrics as any).averageR ?? (baselineMetrics as any).expectancyR ?? 0.2;
-    const baseWinRate = baselineMetrics.winRate ?? 50.0;
-    const baseProfitFactor = baselineMetrics.profitFactor ?? 1.3;
+    if (!baselineMetrics || typeof baselineMetrics !== 'object') {
+      throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing authoritative reference baseline metrics`);
+    }
+
+    const baseExpectancy = (baselineMetrics as any).averageR ?? (baselineMetrics as any).expectancyR;
+    if (typeof baseExpectancy !== 'number' || !Number.isFinite(baseExpectancy)) {
+      throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing valid numeric baseline expectancy`);
+    }
+
+    const baseWinRate = baselineMetrics.winRate;
+    if (typeof baseWinRate !== 'number' || !Number.isFinite(baseWinRate)) {
+      throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing valid numeric baseline win rate`);
+    }
+
+    const baseProfitFactor = baselineMetrics.profitFactor;
+    if (typeof baseProfitFactor !== 'number' || !Number.isFinite(baseProfitFactor)) {
+      throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing valid numeric baseline profit factor`);
+    }
 
     // 1. Expectancy R Drift
     if (baseExpectancy > 0) {
