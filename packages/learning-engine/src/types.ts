@@ -310,6 +310,61 @@ export interface SimulatedBacktestOutcome {
   readonly trades: IBacktestTrade[];
 }
 
+export interface CandidateRiskConfig {
+  readonly initialCapital: number;
+  readonly maxRiskPerTrade: number;
+  readonly partialExitPolicy: {
+    readonly tp1Ratio: number;
+    readonly tp2Ratio: number;
+    readonly tp3Ratio: number;
+    readonly moveStopToBreakevenOnTp1: boolean;
+    readonly trailStopOnTp2: boolean;
+    readonly trailStopOffsetR: number;
+  };
+  readonly [key: string]: unknown;
+}
+
+export interface CandidateExecutionConfig {
+  readonly candidateId: string;
+  readonly candidateVersion: string;
+  readonly strategyVersion: string;
+  readonly configHash: string;
+  readonly symbol: string;
+  readonly fillModel: string;
+  readonly ambiguityMode: string;
+  readonly latencyMs: number;
+  readonly minMtfScore: number;
+  readonly stopLossAtrMultiplier?: number;
+  readonly enablePartialTp1Trailing?: boolean;
+  readonly highVolatilitySizingMultiplier?: number;
+  readonly sizingMultiplier?: number;
+  readonly filterRegime?: string;
+  readonly regimeMode?: 'INCLUDE' | 'EXCLUDE';
+  readonly minProbability?: number;
+  readonly conditionRules?: string[];
+  readonly fittedValue?: number;
+  readonly [key: string]: unknown;
+}
+
+export interface CandidateStrategyConfig {
+  readonly symbol: string;
+  readonly minMtfScore: number;
+  readonly stopLossAtrMultiplier?: number;
+  readonly sizingMultiplier?: number;
+  readonly highVolatilitySizingMultiplier?: number;
+  readonly minProbability?: number;
+  readonly filterRegime?: string;
+  readonly regimeMode?: 'INCLUDE' | 'EXCLUDE';
+  readonly scoringWeights?: Record<string, number>;
+  readonly evidence?: {
+    readonly sampleSize: number;
+    readonly expectancyBefore: number;
+    readonly expectancyAfterHistorical: number;
+    readonly [key: string]: unknown;
+  };
+  readonly [key: string]: unknown;
+}
+
 export interface CandidateArtifact {
   readonly artifactId: string;
   readonly candidateId: string;
@@ -326,7 +381,7 @@ export interface CandidateArtifact {
   readonly scalerArtifact?: Record<string, unknown>;
   readonly modelArtifact?: Record<string, unknown>;
   readonly modelHash: string;
-  readonly strategyConfig: Record<string, unknown>;
+  readonly strategyConfig: CandidateStrategyConfig | Record<string, unknown>;
   readonly trainingDatasetHash: string;
   readonly validationDatasetHash: string;
   readonly oosDatasetHash: string;
@@ -335,13 +390,28 @@ export interface CandidateArtifact {
   readonly trainingSeed: number;
   readonly candidateSeed?: number;
   readonly parentCandidateId?: string;
-  readonly riskConfig: Record<string, unknown>;
-  readonly executionConfig: Record<string, unknown>;
+  readonly riskConfig: CandidateRiskConfig | Record<string, unknown>;
+  readonly executionConfig: CandidateExecutionConfig | Record<string, unknown>;
   readonly status: CandidateStatus;
   readonly createdBy: string;
   readonly createdAt: Date;
   readonly configHash: string;
   readonly artifactHash: string;
+  readonly symbol?: string;
+  readonly evidence?: {
+    readonly sampleSize: number;
+    readonly expectancyBefore: number;
+    readonly expectancyAfterHistorical: number;
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface ValidatedCandidateArtifact extends CandidateArtifact {
+  readonly _brand: 'ValidatedCandidateArtifact';
+  readonly symbol: string;
+  readonly riskConfig: CandidateRiskConfig;
+  readonly executionConfig: CandidateExecutionConfig;
+  readonly strategyConfig: CandidateStrategyConfig;
 }
 
 export interface WalkForwardFold {

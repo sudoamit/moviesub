@@ -612,7 +612,20 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       candidateVersion: 'v2.0-freeze',
       type: 'THRESHOLD',
       description: 'Frozen candidate',
-      change: { minMtfScore: 65 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: { minMtfScore: 65, symbol: 'BTCUSDT' },
       evidence: { sampleSize: 100, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -888,7 +901,20 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       candidateVersion: 'v2.0-immut',
       type: 'THRESHOLD',
       description: 'Immutable test',
-      change: { minMtfScore: 70 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: { minMtfScore: 70, symbol: 'BTCUSDT' },
       evidence: { sampleSize: 10, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -910,7 +936,20 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       candidateVersion: 'v2.0-hash',
       type: 'THRESHOLD',
       description: 'Hash test',
-      change: { minMtfScore: 60, stopLossAtrMultiplier: 1.0 },
+      symbol: 'BTCUSDT',
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
+      change: { minMtfScore: 60, stopLossAtrMultiplier: 1.0, symbol: 'BTCUSDT', datasetHash: 'hash_test_d1' },
       evidence: { sampleSize: 10, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -918,11 +957,11 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
     const modCand: StrategyCandidate = {
       ...baseCand,
-      change: { minMtfScore: 65, stopLossAtrMultiplier: 1.0 },
+      change: { minMtfScore: 65, stopLossAtrMultiplier: 1.0, symbol: 'BTCUSDT', datasetHash: 'hash_test_d1' },
     };
 
-    const art1 = CandidateBacktestRunner.createCandidateArtifact(baseCand);
-    const art2 = CandidateBacktestRunner.createCandidateArtifact(modCand);
+    const art1 = CandidateBacktestRunner.createCandidateArtifact(baseCand, 'hash_test_d1');
+    const art2 = CandidateBacktestRunner.createCandidateArtifact(modCand, 'hash_test_d1');
 
     expect(art1.configHash).not.toBe(art2.configHash);
   });
@@ -1064,6 +1103,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       change: {
         modelArtifact: testModelArtifact,
         minProbability: 0.4,
+        minMtfScore: 0,
         symbol: 'BTCUSDT',
         riskConfig: {
           initialCapital: 100000,

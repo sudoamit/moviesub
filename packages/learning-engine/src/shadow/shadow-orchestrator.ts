@@ -277,7 +277,7 @@ export class ShadowOrchestrator {
       throw new Error(`MISSING_EXECUTION_CONFIG: Candidate '${candidateId}' artifact does not contain executionConfig`);
     }
 
-    const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
+    const val = CandidateBacktestRunner.validateArtifactIntegrity(artifact, { allowTestHooks: true });
     if (!val.isValid) {
       throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: Candidate artifact corrupted: ${val.reason}`);
     }

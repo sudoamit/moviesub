@@ -1009,7 +1009,8 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-hash-base',
       type: 'THRESHOLD',
       description: 'Hash test candidate',
-      change: { parameter: 'minMtfScore', value: 65, stopLossAtrMultiplier: 1.0, sizingMultiplier: 1.0 },
+      symbol: 'BTCUSDT',
+      change: { parameter: 'minMtfScore', value: 65, stopLossAtrMultiplier: 1.0, sizingMultiplier: 1.0, symbol: 'BTCUSDT' },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
       status: 'GENERATED',
       createdAt: new Date(),
@@ -1250,7 +1251,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     const { exp, candles, candidate } = createDeterministicTradeFixture();
 
     // Create frozen CandidateArtifact
-    const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate);
+    const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'dataset_hash_ad');
     expect(Object.isFrozen(artifact)).toBe(true);
     expect(artifact.configHash).toBeDefined();
 

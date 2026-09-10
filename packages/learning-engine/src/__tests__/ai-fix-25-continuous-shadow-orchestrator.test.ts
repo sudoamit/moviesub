@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Direction, ICandle, SignalState } from '@quant/shared';
+import { Direction, ICandle, SignalGrade, SignalState } from '@quant/shared';
+import { SignalGenerator } from '@quant/trading-engine';
 import {
   CandidateArtifact,
   PromotionPolicy,
@@ -8,6 +9,7 @@ import {
 } from '../types';
 import { ModelRegistry } from '../model-registry';
 import { CandidateBacktestRunner } from '../candidate-backtest-runner';
+import { DeterministicTestStrategyAdapter } from '../deterministic-test-adapter';
 import { PromotionGate } from '../promotion-gate';
 import {
   CandidateProductionComparator,
@@ -256,7 +258,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
           state: SignalState.ACTIVE,
         },
       };
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_001');
+      const artifact = DeterministicTestStrategyAdapter.createTestArtifact(candidate, 'hash_mkt_shadow_001');
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const orchestrator = new ShadowOrchestrator({ persistenceDir: testDir });
@@ -683,7 +685,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
           state: SignalState.ACTIVE,
         },
       };
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_001');
+      const artifact = DeterministicTestStrategyAdapter.createTestArtifact(candidate, 'hash_mkt_shadow_001');
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const orchestrator = new ShadowOrchestrator();
@@ -756,7 +758,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
           state: SignalState.ACTIVE,
         },
       };
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_timing');
+      const artifact = DeterministicTestStrategyAdapter.createTestArtifact(candidate, 'hash_mkt_shadow_timing');
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const orchestrator = new ShadowOrchestrator();
@@ -840,8 +842,8 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       (candidate1 as any).strategyConfig = { deterministicSignal: signalDef };
       (candidate2 as any).strategyConfig = { deterministicSignal: signalDef };
 
-      const art1 = CandidateBacktestRunner.createCandidateArtifact(candidate1, 'hash_mkt_equiv');
-      const art2 = CandidateBacktestRunner.createCandidateArtifact(candidate2, 'hash_mkt_equiv');
+      const art1 = DeterministicTestStrategyAdapter.createTestArtifact(candidate1, 'hash_mkt_equiv');
+      const art2 = DeterministicTestStrategyAdapter.createTestArtifact(candidate2, 'hash_mkt_equiv');
       ModelRegistry.registerCandidateArtifact(art1);
       ModelRegistry.registerCandidateArtifact(art2);
 
@@ -925,7 +927,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
           trailStopOffsetR: 1.0,
         },
       };
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_scaleout');
+      const artifact = DeterministicTestStrategyAdapter.createTestArtifact(candidate, 'hash_mkt_scaleout');
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const orchestrator = new ShadowOrchestrator();
@@ -1008,13 +1010,10 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
     it('P1-4: missing symbol fails closed', () => {
       const candidate = createDummyCandidate('cand-no-symbol');
       delete (candidate.change as any).symbol;
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_no_sym');
-      ModelRegistry.registerCandidateArtifact(artifact);
-
-      const orchestrator = new ShadowOrchestrator();
+      delete (candidate as any).symbol;
       expect(() => {
-        orchestrator.startCandidate(candidate.id);
-      }).toThrow('MISSING_SYMBOL');
+        CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_no_sym');
+      }).toThrow(/CANDIDATE_SYMBOL_MISSING|MISSING_SYMBOL/);
     });
 
     it('P1-5: missing execution config fails closed', () => {
@@ -1132,21 +1131,24 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
     it('P0-7: evaluateCandidate computes real financial metrics strictly from trade and fill ledgers (zero synthetic placeholders)', () => {
       const baseTs = 1700000000000;
       const candidate = createDummyCandidate('cand-eval-metrics-p0');
-      (candidate as any).strategyConfig = {
-        deterministicSignal: {
-          timestamp: new Date(baseTs + 15 * 900000),
-          direction: Direction.BULLISH,
-          score: 90,
-          stopLoss: 95,
-          takeProfits: { tp1: 180, tp2: 190, tp3: 200 },
-          state: SignalState.ACTIVE,
-        },
-      };
       const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_eval');
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const orchestrator = new ShadowOrchestrator();
       orchestrator.startCandidate(candidate.id);
+
+      jest.spyOn(SignalGenerator, 'generateSignal').mockReturnValue({
+        id: 'sig-eval',
+        timestamp: new Date(baseTs + 15 * 900000),
+        symbol: 'BTCUSDT',
+        direction: Direction.BULLISH,
+        score: 90,
+        grade: SignalGrade.A,
+        entryPrice: 130,
+        stopLoss: 95,
+        takeProfits: { tp1: 180, tp2: 190, tp3: 200 },
+        state: SignalState.ACTIVE,
+      } as any);
 
       const candles: ICandle[] = [];
       for (let i = 0; i < 20; i++) {

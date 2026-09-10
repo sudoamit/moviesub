@@ -228,14 +228,14 @@ describe('AI Fix 30 — Risk Configuration Preflight, Authoritative Sequence Val
         createdAt: new Date(),
       } as any;
 
-      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_no_score_001');
-      ModelRegistry.registerCandidateArtifact(artifact);
-
-      const orchestrator = new ShadowOrchestrator({ persistenceDir: testDir });
-      orchestrator.startCandidate(candidate.id);
-
-      const candles = generateCandles(25);
       expect(() => {
+        const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_no_score_001');
+        ModelRegistry.registerCandidateArtifact(artifact);
+
+        const orchestrator = new ShadowOrchestrator({ persistenceDir: testDir });
+        orchestrator.startCandidate(candidate.id);
+
+        const candles = generateCandles(25);
         for (const c of candles) {
           orchestrator.processCandle(candidate.id, c);
         }

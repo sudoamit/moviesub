@@ -58,6 +58,7 @@ export class CandidateEvaluator {
       riskConfig,
       change: {
         action: 'BASELINE_BENCHMARK',
+        minMtfScore: 0,
         stopLossAtrMultiplier: 1.0,
         sizingMultiplier: 1.0,
         symbol,

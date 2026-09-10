@@ -34,6 +34,7 @@ export class CandidateGenerator {
         description: filterDesc,
         change: {
           action: 'ADD_FILTER_RULE',
+          minMtfScore: 0,
           conditionRules: pat.conditions,
           rejectWhenMatched: true,
         },
@@ -61,18 +62,18 @@ export class CandidateGenerator {
         } else if (driver.failureMode === 'VOLATILITY_MISREAD') {
           type = 'VOLATILITY';
           desc = `Apply 50% position sizing penalty or freeze entries during HIGH_VOLATILITY shocks.`;
-          change = { parameter: 'highVolatilitySizingMultiplier', value: 0.5 };
+          change = { parameter: 'highVolatilitySizingMultiplier', value: 0.5, minMtfScore: 0 };
         } else if (driver.failureMode === 'STOP_TOO_TIGHT') {
           type = 'EXIT';
           desc = `Widen minimum structural stop buffer by 1.25x ATR to avoid premature whipsaws.`;
-          change = { parameter: 'stopLossAtrMultiplier', value: 1.25 };
+          change = { parameter: 'stopLossAtrMultiplier', value: 1.25, minMtfScore: 0 };
         } else if (driver.failureMode === 'TARGET_TOO_FAR') {
           type = 'EXIT';
           desc = `Implement partial take-profit at 1.5R with immediate breakeven trailing.`;
-          change = { parameter: 'enablePartialTp1Trailing', value: true };
+          change = { parameter: 'enablePartialTp1Trailing', value: true, minMtfScore: 0 };
         } else {
           desc = `Add candidate mitigation for failure mode ${driver.failureMode}.`;
-          change = { parameter: 'generalMitigation', mode: driver.failureMode };
+          change = { parameter: 'generalMitigation', mode: driver.failureMode, minMtfScore: 0 };
         }
 
         candidates.push({
@@ -104,6 +105,7 @@ export class CandidateGenerator {
         description: `Boost conviction & position size when high-confluence condition holds: [${pat.conditions.join(' AND ')}]`,
         change: {
           action: 'BOOST_CONFIRMATION',
+          minMtfScore: 0,
           conditionRules: pat.conditions,
           convictionMultiplier: 1.2,
         },
@@ -130,6 +132,7 @@ export class CandidateGenerator {
           parameter: 'minProbability',
           minProbability: 0.55,
           value: 0.55,
+          minMtfScore: 0,
           modelArtifact: inputs.modelArtifact,
         },
         evidence: {
@@ -153,6 +156,7 @@ export class CandidateGenerator {
         description: `Prune low-importance features: [${inputs.featureSelection.prunedFeatures.join(', ')}]`,
         change: {
           parameter: 'featurePruning',
+          minMtfScore: 0,
           selectedFeatures: inputs.featureSelection.retainedFeatures,
           prunedFeatures: inputs.featureSelection.prunedFeatures,
         },

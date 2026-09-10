@@ -396,7 +396,9 @@ export class WalkForwardValidator {
         );
       }
 
-      const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate).configHash;
+      const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate, {
+        symbol: options.marketDataset?.symbol || trainMarketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+      }).configHash;
       const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
       const trainingSeed = options.seed ?? DEFAULT_LEARNING_SEED;
 
