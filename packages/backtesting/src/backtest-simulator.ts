@@ -204,13 +204,38 @@ export class BacktestSimulator {
     });
 
     const executionCandles = router.getExecutionCandles();
-    const execSim = new ExecutionSimulator(fillModel, ambiguityMode);
-
     let currentCash = initialCapital;
     let currentEquity = initialCapital;
 
     const runId =
       options.runId || `bt_${symbol}_${timeframe}_${options.strategyMode || 'SMC'}`;
+
+    const latencyConfig = options.latencyConfig || { submissionLatencyMs: 15, processingLatencyMs: 5 };
+    let slippageConfig = options.slippageConfig;
+    if (!slippageConfig && (options.slippageBps !== undefined || options.slippagePercent !== undefined)) {
+      const baseSlippageBps = options.slippageBps ?? ((options.slippagePercent || 0) * 100);
+      slippageConfig = {
+        baseSlippageBps,
+        volatilityMultiplier: 1.5,
+        impactMultiplier: 0.8,
+        maxSlippageBps: Math.max(25.0, baseSlippageBps * 2),
+      };
+    }
+    let feeConfig = options.feeConfig;
+    if (!feeConfig && options.feeRate !== undefined) {
+      feeConfig = {
+        brokerageRateBps: options.feeRate * 10000,
+      };
+    }
+    const execSim = new ExecutionSimulator(
+      fillModel,
+      ambiguityMode,
+      latencyConfig,
+      runId,
+      slippageConfig,
+      feeConfig,
+      options.spreadConfig,
+    );
 
     const trades: IBacktestTrade[] = [];
     const positionLots: PositionLot[] = [];

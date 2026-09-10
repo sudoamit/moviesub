@@ -1,4 +1,4 @@
-import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode } from './types';
+import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
@@ -11,6 +11,9 @@ export class ExecutionSimulator {
   private fillModel: FillModel;
   private ambiguityMode: SameCandleAmbiguityMode;
   private latencyConfig: ILatencyConfig;
+  private slippageConfig?: ISlippageConfig;
+  private feeConfig?: IFeeConfig;
+  private spreadConfig?: ISpreadConfig;
   private orderCounter = 0;
   private fillCounter = 0;
   private eventCounter = 0;
@@ -21,11 +24,17 @@ export class ExecutionSimulator {
     ambiguityMode: SameCandleAmbiguityMode = SameCandleAmbiguityMode.CONSERVATIVE,
     latencyConfig: ILatencyConfig = { submissionLatencyMs: 15, processingLatencyMs: 5 },
     runId = 'bt1',
+    slippageConfig?: ISlippageConfig,
+    feeConfig?: IFeeConfig,
+    spreadConfig?: ISpreadConfig,
   ) {
     this.fillModel = fillModel;
     this.ambiguityMode = ambiguityMode;
     this.latencyConfig = latencyConfig;
     this.runId = runId;
+    this.slippageConfig = slippageConfig;
+    this.feeConfig = feeConfig;
+    this.spreadConfig = spreadConfig;
   }
 
   submitOrder(params: {
@@ -149,6 +158,11 @@ export class ExecutionSimulator {
                   bar,
                   undefined,
                   FillModel.OHLC_PATH,
+                  undefined,
+                  undefined,
+                  this.slippageConfig,
+                  this.feeConfig,
+                  this.spreadConfig,
                 );
               } else {
                 res = FillModelEngine.evaluateFill(
@@ -156,6 +170,11 @@ export class ExecutionSimulator {
                   bar,
                   nextCandle,
                   this.fillModel,
+                  undefined,
+                  undefined,
+                  this.slippageConfig,
+                  this.feeConfig,
+                  this.spreadConfig,
                 );
               }
             } else {
@@ -166,6 +185,9 @@ export class ExecutionSimulator {
                 candleTime,
                 order.symbol,
                 this.fillModel,
+                this.slippageConfig,
+                this.feeConfig,
+                this.spreadConfig,
               );
             }
 

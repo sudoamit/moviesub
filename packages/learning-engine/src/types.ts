@@ -530,6 +530,12 @@ export interface ICandidateMeasurementOptions {
   evaluationStartTimestamp?: number;
   evaluationEndTimestamp?: number;
   costPerTradeR?: number;
+  feeConfig?: any;
+  slippageConfig?: any;
+  spreadConfig?: any;
+  latencyConfig?: any;
+  feeRate?: number;
+  slippageBps?: number;
   minimumCandles?: number;
   warmupBars?: number;
   symbol?: string;
@@ -882,6 +888,7 @@ export interface RetrainingRunConfig {
   readonly baseCandidate?: StrategyCandidate | ValidatedCandidateArtifact;
   readonly seed?: number;
   readonly numFolds?: number;
+  readonly minimumCandles?: number;
   readonly warmupBars?: number;
   readonly minValidationTrades?: number;
   readonly minOOSTrades?: number;

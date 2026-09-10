@@ -31,7 +31,7 @@ import { WalkForwardValidator, sliceContinuousCandles, DEFAULT_LEARNING_SEED } f
 import { MarketDatasetValidator } from './market-dataset-validator';
 import { RobustnessEngine } from './robustness-engine';
 import { MonteCarloEngine } from './monte-carlo-engine';
-import { CandidateBacktestRunner } from './candidate-backtest-runner';
+import { CandidateBacktestRunner, PRODUCTION_DEFAULT_MINIMUM_CANDLES, PRODUCTION_DEFAULT_WARMUP_BARS } from './candidate-backtest-runner';
 import { CandidateArtifactValidator } from './candidate-artifact-validator';
 import { ModelRegistry } from './model-registry';
 import { DatasetManager } from './dataset-manager';
@@ -439,8 +439,8 @@ export class SelfImprovingRetrainingPipeline {
         const valEval = CandidateEvaluator.evaluate(candidateObj, {
           baselineCandidate: championCand,
           candles: valCandles,
-          minimumCandles: 10,
-          warmupBars: 5,
+          minimumCandles: config.minimumCandles ?? PRODUCTION_DEFAULT_MINIMUM_CANDLES,
+          warmupBars: config.warmupBars ?? PRODUCTION_DEFAULT_WARMUP_BARS,
           symbol,
           timeframe: config.timeframe,
           riskConfig: candidateObj.riskConfig,
@@ -595,8 +595,8 @@ export class SelfImprovingRetrainingPipeline {
         const oosEval = CandidateEvaluator.evaluate(candidateObj, {
           baselineCandidate: championCand,
           candles: oosCandles,
-          minimumCandles: 10,
-          warmupBars: 5,
+          minimumCandles: config.minimumCandles ?? PRODUCTION_DEFAULT_MINIMUM_CANDLES,
+          warmupBars: config.warmupBars ?? PRODUCTION_DEFAULT_WARMUP_BARS,
           symbol,
           timeframe: config.timeframe,
           riskConfig: candidateObj.riskConfig,

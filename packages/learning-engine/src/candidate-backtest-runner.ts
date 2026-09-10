@@ -42,6 +42,12 @@ export interface ICandidateBacktestOptions {
   symbol?: string;
   timeframe?: string;
   initialCapital?: number;
+  feeConfig?: any;
+  slippageConfig?: any;
+  spreadConfig?: any;
+  latencyConfig?: any;
+  feeRate?: number;
+  slippageBps?: number;
   costPerTradeR?: number;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
   executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
@@ -227,6 +233,26 @@ export class CandidateBacktestRunner {
     const riskConfig = artifact.riskConfig;
     const candidateId = artifact.candidateId;
 
+    if (!riskConfig || typeof riskConfig !== 'object') {
+      throw new Error(`MISSING_RISK_CONFIG: Candidate '${candidateId}' is missing authoritative risk configuration`);
+    }
+    if (
+      riskConfig.maxRiskPerTrade === undefined ||
+      typeof riskConfig.maxRiskPerTrade !== 'number' ||
+      !Number.isFinite(riskConfig.maxRiskPerTrade) ||
+      riskConfig.maxRiskPerTrade <= 0
+    ) {
+      throw new Error(`MISSING_MAX_RISK_PER_TRADE: Candidate '${candidateId}' must specify valid positive maxRiskPerTrade`);
+    }
+    if (
+      riskConfig.initialCapital === undefined ||
+      typeof riskConfig.initialCapital !== 'number' ||
+      !Number.isFinite(riskConfig.initialCapital) ||
+      riskConfig.initialCapital <= 0
+    ) {
+      throw new Error(`MISSING_INITIAL_CAPITAL: Candidate '${candidateId}' must specify valid positive initialCapital`);
+    }
+
     const strategyConfig = {
       ...artifact.strategyConfig,
       scoringWeights: artifact.strategyConfig.scoringWeights,
@@ -249,6 +275,27 @@ export class CandidateBacktestRunner {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in backtest execution`);
     }
 
+    let feeConfig = options?.feeConfig;
+    let slippageConfig = options?.slippageConfig;
+    const costPerTradeR = options?.costPerTradeR;
+
+    if (costPerTradeR !== undefined && costPerTradeR > 0) {
+      const stressedBps = costPerTradeR * (riskConfig.maxRiskPerTrade as number) * 10000;
+      if (!feeConfig) {
+        feeConfig = {
+          brokerageRateBps: stressedBps / 2,
+        };
+      }
+      if (!slippageConfig) {
+        slippageConfig = {
+          baseSlippageBps: Math.max(1.0, stressedBps / 4),
+          volatilityMultiplier: 1.5,
+          impactMultiplier: 0.8,
+          maxSlippageBps: Math.max(25.0, stressedBps),
+        };
+      }
+    }
+
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: sym,
@@ -257,6 +304,13 @@ export class CandidateBacktestRunner {
       initialCapital: options?.initialCapital ?? riskConfig.initialCapital,
       minimumCandles,
       warmupBars,
+      feeConfig,
+      slippageConfig,
+      spreadConfig: options?.spreadConfig,
+      latencyConfig: options?.latencyConfig,
+      feeRate: options?.feeRate,
+      slippageBps: options?.slippageBps,
+      costPerTradeR: options?.costPerTradeR,
       candidateArtifact: artifact,
       minScore: config.minMtfScore,
       stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,
@@ -290,31 +344,14 @@ export class CandidateBacktestRunner {
       return true;
     });
 
-    const costPerTradeR = options?.costPerTradeR !== undefined ? options.costPerTradeR : 0;
-    const initialCap = options?.initialCapital ?? riskConfig.initialCapital;
-    const riskFraction = (riskConfig.maxRiskPerTrade as number | undefined) ?? 0.02;
-    const riskAmount = initialCap * riskFraction;
-
-    const tradesWithCosts = trades.map((t) => {
-      const grossR = t.pnlRMultiple || 0;
-      const netR = Number((grossR - costPerTradeR).toFixed(4));
-      const costDollar = costPerTradeR * (t.riskAmount || riskAmount);
-      const netPnL = (t.pnl || 0) - costDollar;
-      return {
-        ...t,
-        pnl: netPnL,
-        pnlRMultiple: netR,
-      };
-    });
-
-    const rMultiples = tradesWithCosts.map((t) => t.pnlRMultiple);
-    const winningTrades = tradesWithCosts.filter((t) => t.pnl > 0);
-    const losingTrades = tradesWithCosts.filter((t) => t.pnl < 0);
+    const rMultiples = trades.map((t) => t.pnlRMultiple);
+    const winningTrades = trades.filter((t) => t.pnl > 0);
+    const losingTrades = trades.filter((t) => t.pnl < 0);
     const grossProfit = winningTrades.reduce((sum, t) => sum + t.pnl, 0);
     const grossLoss = losingTrades.reduce((sum, t) => sum + Math.abs(t.pnl), 0);
-    const totalPnL = tradesWithCosts.reduce((sum, t) => sum + t.pnl, 0);
-    const winRate = tradesWithCosts.length > 0 ? (winningTrades.length / tradesWithCosts.length) * 100 : 0;
-    const expectancyR = tradesWithCosts.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / tradesWithCosts.length : 0;
+    const totalPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
+    const winRate = trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0;
+    const expectancyR = trades.length > 0 ? rMultiples.reduce((sum, r) => sum + r, 0) / trades.length : 0;
     const profitFactor =
       grossLoss === 0
         ? grossProfit > 0
@@ -326,7 +363,7 @@ export class CandidateBacktestRunner {
     let peakR = 0;
     let currentR = 0;
     let maxDrawdownR = 0;
-    for (const t of tradesWithCosts) {
+    for (const t of trades) {
       currentR += t.pnlRMultiple;
       if (currentR > peakR) {
         peakR = currentR;
@@ -339,8 +376,8 @@ export class CandidateBacktestRunner {
 
     return {
       candidateId,
-      totalTrades: tradesWithCosts.length,
-      trades: tradesWithCosts,
+      totalTrades: trades.length,
+      trades,
       rMultiples,
       netPnL: totalPnL,
       grossProfit,

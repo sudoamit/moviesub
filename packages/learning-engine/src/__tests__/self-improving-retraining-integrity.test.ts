@@ -442,8 +442,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
   it('Test 12: Candidate evaluation consumes BacktestSimulator', () => {
     const spy = jest.spyOn(BacktestSimulator, 'runSimulation');
-    const candles = generateTestCandles(1700000000000, 100);
-    const examples = generateTestExamples(1700000000000, 50);
+    const candles = generateTestCandles(1700000000000, 250);
+    const examples = generateTestExamples(1700000000000, 150);
 
     return SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig).then((res) => {
       expect(spy).toHaveBeenCalled();
@@ -453,8 +453,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
   it('Test 13: Candidate evaluation consumes ExecutionSimulator', () => {
     const spy = jest.spyOn(ExecutionSimulator.prototype, 'processSingleExecutionBar');
-    const candles = generateTestCandles(1700000000000, 100);
-    const examples = generateTestExamples(1700000000000, 50);
+    const candles = generateTestCandles(1700000000000, 250);
+    const examples = generateTestExamples(1700000000000, 150);
 
     return SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig).then((res) => {
       expect(spy).toHaveBeenCalled();
@@ -464,8 +464,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
 
   it('Test 14: Candidate evaluation consumes TradeLifecycleManager', () => {
     const spy = jest.spyOn(TradeLifecycleManager, 'validatePartialExitPolicy');
-    const candles = generateTestCandles(1700000000000, 100);
-    const examples = generateTestExamples(1700000000000, 50);
+    const candles = generateTestCandles(1700000000000, 250);
+    const examples = generateTestExamples(1700000000000, 150);
 
     return SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig).then((res) => {
       expect(spy).toHaveBeenCalled();
@@ -474,8 +474,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   });
 
   it('Test 15: No manual candidate P&L calculation (execution-derived only)', async () => {
-    const candles = generateTestCandles(1700000000000, 100);
-    const examples = generateTestExamples(1700000000000, 50);
+    const candles = generateTestCandles(1700000000000, 250);
+    const examples = generateTestExamples(1700000000000, 150);
 
     const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
     for (const oos of result.oosResults) {
@@ -2626,39 +2626,49 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     expect(mktHashA).not.toBe(mktHashB);
   });
 
-  it('Test 93 (P1 #1 Real Transaction-Cost Robustness Execution): Backtester applies costPerTradeR deduction directly to simulated execution metrics', () => {
-    const candles = generateTestCandles(1700000000000, 100);
-    const cand = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0', 'BTCUSDT', baseConfig.riskConfig, baseConfig.executionConfig);
+  it('Test 93 (P1 #1 Real Transaction-Cost Robustness Execution): Backtester applies cost stress directly to execution fills, fees, and realized P&L', () => {
+    const candles = generateTestCandles(1700000000000, 150);
+    const cand = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0', 'BTCUSDT', baseConfig.riskConfig, {
+      ...baseConfig.executionConfig,
+      minMtfScore: 30, // Lower threshold to guarantee signals and executed trades
+    });
 
     // 1. Measure candidate with normal cost (0.05R)
     const normal = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
       costPerTradeR: 0.05,
-      minimumCandles: 10,
-      warmupBars: 5,
+      minimumCandles: 50,
+      warmupBars: 40,
       symbol: 'BTCUSDT',
     });
 
     // 2. Measure candidate with double cost (0.10R)
     const doubleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
       costPerTradeR: 0.10,
-      minimumCandles: 10,
-      warmupBars: 5,
+      minimumCandles: 50,
+      warmupBars: 40,
       symbol: 'BTCUSDT',
     });
 
     // 3. Measure candidate with triple cost (0.15R)
     const tripleCost = CandidateEvaluator.measureCandidateOnMarketData(cand, { candles }, {
       costPerTradeR: 0.15,
-      minimumCandles: 10,
-      warmupBars: 5,
+      minimumCandles: 50,
+      warmupBars: 40,
       symbol: 'BTCUSDT',
     });
 
-    // When trades exist, higher costPerTradeR MUST strictly reduce expectancy
-    if (normal.totalSimulatedTrades > 0) {
-      expect(normal.candidateExpectancy).toBeGreaterThan(doubleCost.candidateExpectancy);
-      expect(doubleCost.candidateExpectancy).toBeGreaterThan(tripleCost.candidateExpectancy);
-    }
+    // Assert guaranteed trade execution unconditionally (no skipping)
+    expect(normal.totalSimulatedTrades).toBeGreaterThan(0);
+    expect(doubleCost.totalSimulatedTrades).toBeGreaterThan(0);
+    expect(tripleCost.totalSimulatedTrades).toBeGreaterThan(0);
+
+    // Assert monotonic expectancy reduction strictly through execution costs
+    expect(normal.candidateExpectancy).toBeGreaterThan(doubleCost.candidateExpectancy);
+    expect(doubleCost.candidateExpectancy).toBeGreaterThan(tripleCost.candidateExpectancy);
+
+    // Verify execution-level fee provenance on simulated trade records
+    expect((normal.simulatedTrades?.[0]?.entryFees || 0)).toBeLessThan((doubleCost.simulatedTrades?.[0]?.entryFees || 0));
+    expect((doubleCost.simulatedTrades?.[0]?.entryFees || 0)).toBeLessThan((tripleCost.simulatedTrades?.[0]?.entryFees || 0));
 
     // Robustness evaluation returns real differentiated survival metrics
     const robReport = RobustnessEngine.evaluateCosts(cand, { candles });
@@ -2745,28 +2755,55 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     evalSpy.mockRestore();
   });
 
-  it('Test 96 (P1 #4 Genuinely Unmocked End-to-End Retraining Execution): Retraining pipeline runs cleanly through real BacktestSimulator with 0 mocks', async () => {
-    const candles = generateTestCandles(1700000000000, 120);
-    const examples = generateTestExamples(1700000000000, 50);
+  it('Test 96 (P1 #4 Genuinely Unmocked End-to-End Retraining Execution): Retraining pipeline runs cleanly through real BacktestSimulator with production warmup context', async () => {
+    const candles = generateTestCandles(1700000000000, 200);
+    const examples = generateTestExamples(1700000000000, 60);
 
-    // Run 100% UNMOCKED: no jest.spyOn anywhere
+    // Run 100% UNMOCKED: no jest.spyOn anywhere, using production warmup standards
     const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
       ...baseConfig,
       symbol: 'BTCUSDT',
       timeframe: '15m',
       numFolds: 2,
-      warmupBars: 5,
+      minimumCandles: 50,
+      warmupBars: 40,
       maxCandidates: 1,
     });
 
     expect(result).toBeDefined();
     expect(result.runRecord).toBeDefined();
-    // Status can be COMPLETED or REJECTED based on real candle signals, but must not crash
     expect(['COMPLETED', 'REJECTED']).toContain(result.runRecord.status);
     expect(result.runRecord.runId).toBeDefined();
     expect(result.runRecord.marketDatasetHash).toBeDefined();
     expect(result.runRecord.experienceDatasetHash).toBeDefined();
     expect(result.runRecord.configHash).toBeDefined();
+  });
+
+  it('Test 97 (P1 #5 Unmocked Candidate Selection Invariance): Genuinely unmocked candidate ranking prefers highest validation score independent of OOS performance', async () => {
+    const candles = generateTestCandles(1700000000000, 200);
+    const examples = generateTestExamples(1700000000000, 60);
+
+    // Run unmocked retraining across multiple candidate hypotheses
+    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, {
+      ...baseConfig,
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      numFolds: 2,
+      minimumCandles: 50,
+      warmupBars: 40,
+      maxCandidates: 3,
+    });
+
+    expect(result).toBeDefined();
+    expect(result.runRecord).toBeDefined();
+
+    if (result.validationResults.length > 1) {
+      // Best validation candidate must be the top ranked
+      const sortedByValidation = [...result.validationResults].sort(
+        (a, b) => b.validationExpectancyR - a.validationExpectancyR,
+      );
+      expect(result.validationResults[0].hypothesisId).toBe(sortedByValidation[0].hypothesisId);
+    }
   });
 });
 
