@@ -1751,7 +1751,12 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     expect(evalResult.passed).toBe(true);
 
     // Verify custom baseline benchmark candidate can also be explicitly passed
-    const customBaseline: StrategyCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate('v2.0');
+    const customBaseline: StrategyCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      { initialCapital: 100000, maxRiskPerTrade: 0.02, partialExitPolicy: { moveStopToBreakevenOnTp1: true, trailStopOnTp2: true, trailStopOffsetR: 1.0 } },
+      { fillModel: 'OHLC_PATH', ambiguityMode: 'CONSERVATIVE', latencyMs: 50, minMtfScore: 0.5, stopLossAtrMultiplier: 1.0, sizingMultiplier: 1.0 },
+    );
     const customEvalResult = CandidateEvaluator.evaluateDeterministicTestFixture(filterCand, experiences, 0.05, {
       baselineCandidate: customBaseline,
       candles: experiences.flatMap((e) => e.candlesDuringTrade || []),

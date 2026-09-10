@@ -3,6 +3,7 @@ import { ITrainedModelArtifact } from './model-trainer';
 
 export interface ICandidateGeneratorInputs {
   baseStrategyVersion: string;
+  symbol?: string;
   errorReport: IErrorReport;
   patterns: DiscoveredPattern[];
   modelArtifact?: ITrainedModelArtifact;
@@ -27,6 +28,7 @@ export class CandidateGenerator {
   public static generateCandidates(inputs: ICandidateGeneratorInputs): StrategyCandidate[] {
     const candidates: StrategyCandidate[] = [];
     const baseVersion = inputs.baseStrategyVersion || 'v2.0';
+    const symbol = inputs.symbol || (inputs.errorReport as any)?.symbol || (inputs.patterns[0] as any)?.symbol || 'BTCUSDT';
 
     const execConfig = inputs.executionConfig ?? {
       fillModel: 'OHLC_PATH',
@@ -68,7 +70,7 @@ export class CandidateGenerator {
         candidateVersion,
         type: 'FILTER',
         description: filterDesc,
-        symbol: 'BTCUSDT',
+        symbol,
         riskConfig: defaultRiskConfig,
         change: {
           action: 'ADD_FILTER_RULE',
@@ -125,7 +127,7 @@ export class CandidateGenerator {
           candidateVersion: `${baseVersion}-cand-err-${this.candidateSeq}`,
           type,
           description: desc,
-          symbol: 'BTCUSDT',
+          symbol,
           riskConfig: defaultRiskConfig,
           change: {
             minMtfScore: execConfig.minMtfScore,
@@ -156,7 +158,7 @@ export class CandidateGenerator {
         candidateVersion: `${baseVersion}-cand-pos-${this.candidateSeq}`,
         type: 'THRESHOLD',
         description: `Boost conviction & position size when high-confluence condition holds: [${pat.conditions.join(' AND ')}]`,
-        symbol: 'BTCUSDT',
+        symbol,
         riskConfig: defaultRiskConfig,
         change: {
           action: 'BOOST_CONFIRMATION',
@@ -188,7 +190,7 @@ export class CandidateGenerator {
         type: 'MODEL',
         targetComponent: 'MODEL',
         description: `Apply trained canonical ML model filter (Version: ${inputs.modelArtifact.modelVersion}, Min Prob: 0.55)`,
-        symbol: 'BTCUSDT',
+        symbol,
         riskConfig: defaultRiskConfig,
         change: {
           parameter: 'minProbability',
@@ -223,7 +225,7 @@ export class CandidateGenerator {
         type: 'FEATURE',
         targetComponent: 'FEATURE_SELECTION',
         description: `Prune low-importance features: [${inputs.featureSelection.prunedFeatures.join(', ')}]`,
-        symbol: 'BTCUSDT',
+        symbol,
         riskConfig: defaultRiskConfig,
         change: {
           parameter: 'featurePruning',

@@ -53,8 +53,10 @@ export class CounterfactualAnalyzer {
       throw new Error('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
     }
 
-    // Replay experience through authoritative BacktestSimulator for each counterfactual scenario
-    const symbol = exp.instrument?.symbol || 'BTCUSDT';
+    const symbol = exp.instrument?.symbol;
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Experience '${exp.id}' is missing authoritative trading symbol in counterfactual analysis`);
+    }
     const timeframe = exp.timeframe || '15m';
 
     // 1. TP1 Fixed Scenario

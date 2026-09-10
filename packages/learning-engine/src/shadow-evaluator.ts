@@ -95,12 +95,17 @@ export class ShadowEvaluator {
     const evaluationCandles = slicedWindow.evaluationCandles;
     const observationsCount = evaluationCandles.length;
 
+    const symbol = marketDataset.symbol || candidate.symbol || (candidate.executionConfig as any)?.symbol;
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidate.id}' is missing authoritative trading symbol in shadow evaluation`);
+    }
+
     // Sliced candidate dataset for backtesting
     const shadowDataset: CandidateMarketDataset = {
       executionCandles: shadowCandles,
       datasetHash: marketDataset.datasetHash,
       timeframe: marketDataset.timeframe || '15m',
-      symbol: marketDataset.symbol || 'BTCUSDT',
+      symbol,
       startTimestamp: slicedWindow.warmupStartTimestamp,
       endTimestamp: slicedWindow.evaluationEndTimestamp,
       isContinuous: true,

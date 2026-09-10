@@ -1,36 +1,8 @@
 import * as crypto from 'crypto';
 import { ICandle, IBacktestTrade } from '@quant/shared';
-import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience, CandidateRiskConfig, CandidateExecutionConfig } from './types';
+import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience, CandidateRiskConfig, CandidateExecutionConfig, ICandidateMeasurementOptions, CandidateMeasurementResult } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { canonicalJsonStringify } from './canonical-serializer';
-
-export interface ICandidateMeasurementOptions {
-  baselineCandidate?: StrategyCandidate | CandidateArtifact;
-  dataset?: CandidateMarketDataset;
-  marketDataset?: CandidateMarketDataset;
-  candles?: ICandle[];
-  evaluationStartTimestamp?: number;
-  evaluationEndTimestamp?: number;
-  costPerTradeR?: number;
-  minimumCandles?: number;
-  warmupBars?: number;
-  symbol?: string;
-  timeframe?: string;
-  riskConfig?: CandidateRiskConfig | Record<string, unknown>;
-}
-
-export interface CandidateMeasurementResult {
-  candidateId: string;
-  baselineExpectancy: number;
-  candidateExpectancy: number;
-  expectancyDelta: number;
-  profitFactor: number;
-  maxDrawdownPercent: number;
-  totalSimulatedTrades: number;
-  simulatedRMultiples: number[];
-  simulatedTrades?: IBacktestTrade[];
-  baselineTrades?: number;
-}
 
 export interface ICandidateEvaluationCriteria {
   minExpectancyDelta?: number;
@@ -66,6 +38,19 @@ export class CandidateEvaluator {
     if (!riskConfigParam || typeof riskConfigParam !== 'object') {
       throw new Error('MISSING_RISK_CONFIG: createBaselineBenchmarkCandidate requires explicit riskConfig');
     }
+    const initialCapital = (riskConfigParam as any).initialCapital;
+    if (typeof initialCapital !== 'number' || !Number.isFinite(initialCapital) || initialCapital <= 0) {
+      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig initialCapital must be a positive finite number');
+    }
+    const maxRiskPerTrade = (riskConfigParam as any).maxRiskPerTrade;
+    if (typeof maxRiskPerTrade !== 'number' || !Number.isFinite(maxRiskPerTrade) || maxRiskPerTrade <= 0) {
+      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig maxRiskPerTrade must be a positive finite number');
+    }
+    const partialExitPolicy = (riskConfigParam as any).partialExitPolicy;
+    if (!partialExitPolicy || typeof partialExitPolicy !== 'object') {
+      throw new Error('INVALID_CANDIDATE_RISK_CONFIG: createBaselineBenchmarkCandidate riskConfig requires valid partialExitPolicy');
+    }
+
     if (!executionConfigParam || typeof executionConfigParam !== 'object') {
       throw new Error('MISSING_EXECUTION_CONFIG: createBaselineBenchmarkCandidate requires explicit executionConfig');
     }
@@ -129,6 +114,7 @@ export class CandidateEvaluator {
       id,
       baseStrategyVersion,
       candidateVersion,
+      symbol,
       type: 'BASELINE',
       description: `Baseline benchmark candidate for strategy ${baseStrategyVersion}`,
       change: {
@@ -437,7 +423,11 @@ export class CandidateEvaluator {
       stopLossAtrMultiplier: 1.5,
       sizingMultiplier: 1.0,
     };
-    const fixtureSymbol = options?.symbol || (candidate as any).symbol || 'BTCUSDT';
+    const fixtureSymbol = options?.symbol || (candidate as any).symbol || (candidate as any).executionConfig?.symbol;
+    if (!fixtureSymbol || typeof fixtureSymbol !== 'string' || fixtureSymbol.trim() === '') {
+      const candId = (candidate as any).id || (candidate as any).candidateId || 'unknown';
+      throw new Error(`MISSING_SYMBOL: Candidate '${candId}' is missing authoritative trading symbol`);
+    }
     const baselineCandidate =
       options?.baselineCandidate ||
       this.createBaselineBenchmarkCandidate(baseStrategyVersion, fixtureSymbol, fixtureRisk, fixtureExec);

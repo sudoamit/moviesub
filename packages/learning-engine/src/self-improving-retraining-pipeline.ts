@@ -236,6 +236,21 @@ export class SelfImprovingRetrainingPipeline {
     let activeSplits: { training?: any; validation?: any; oos?: any } | undefined;
     let activeHypotheses: CandidateHypothesis[] = [];
     let activeModelVersions: string[] = [];
+    // Validate feature schema bindings across all examples fail-closed
+    for (const ex of rawExamples) {
+      if (Array.isArray(ex.features)) {
+        if (!ex.featureNames || !Array.isArray(ex.featureNames) || ex.featureNames.length !== ex.features.length) {
+          if (ex.featureSchemaHash && ex.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
+            const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+            if (ex.featureSchemaHash !== computed) {
+              throw new Error(`FEATURE_SCHEMA_MISMATCH: Example '${ex.exampleId}' schema hash ${ex.featureSchemaHash} does not match canonical 2.0 schema hash ${computed}`);
+            }
+          } else {
+            throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Example '${ex.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
+          }
+        }
+      }
+    }
 
     try {
       // 2. Build Point-In-Time Dataset Splits (Train, Validation, OOS with Purge & Embargo)
@@ -449,10 +464,24 @@ export class SelfImprovingRetrainingPipeline {
             throw new Error(`MISSING_EXIT_TYPE_PROVENANCE: Training example '${e.exampleId}' lacks validated exitType for walk-forward validation`);
           }
           if (Array.isArray(e.features)) {
-            for (let i = 0; i < e.features.length; i++) {
+            let names: readonly string[];
+            if (e.featureNames && Array.isArray(e.featureNames) && e.featureNames.length === e.features.length) {
+              names = e.featureNames;
+            } else if (e.featureSchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
+              const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+              if (e.featureSchemaHash === computed) {
+                names = CANONICAL_FEATURE_NAMES_V2;
+              } else {
+                throw new Error(`FEATURE_SCHEMA_MISMATCH: Example '${e.exampleId}' schema hash ${e.featureSchemaHash} does not match canonical 2.0 schema hash ${computed}`);
+              }
+            } else {
+              throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Example '${e.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
+            }
+
+            for (let i = 0; i < names.length; i++) {
               const val = e.features[i];
               if (val === undefined || val === null || typeof val !== 'number' || !Number.isFinite(val)) {
-                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature index '${i}'`);
+                throw new Error(`MISSING_FEATURE_VALUE: Example '${e.exampleId}' lacks valid finite value for feature '${names[i]}'`);
               }
             }
           } else if (e.features && typeof e.features === 'object') {

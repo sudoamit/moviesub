@@ -68,7 +68,10 @@ export class LearningEngine {
 
     if (experiences.length >= 10) {
       const datasetBuilder = new TemporalDatasetBuilder();
-      const symbol = experiences[0]?.instrument?.symbol || 'BTCUSDT';
+      const symbol = experiences[0]?.instrument?.symbol || options.dataset?.symbol || (options as any).marketDataset?.symbol;
+      if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+        throw new Error('MISSING_SYMBOL: LearningEngine requires explicit instrument symbol in experiences or dataset');
+      }
 
       const datasetSamples = experiences.map((exp) => {
         if (exp.labelStartTimestamp === undefined || exp.labelStartTimestamp === null) {
@@ -178,7 +181,10 @@ export class LearningEngine {
         oosCandles = sliceContinuousCandles(options.candles, oosStartTime, oosEndTime, 40);
       }
 
-      const resolvedSym = options.dataset?.symbol || (cand as any).symbol || 'BTCUSDT';
+      const resolvedSym = options.dataset?.symbol || (cand as any).symbol || (cand as any).executionConfig?.symbol || experiences[0]?.instrument?.symbol;
+      if (!resolvedSym || typeof resolvedSym !== 'string' || resolvedSym.trim() === '') {
+        throw new Error(`MISSING_SYMBOL: Candidate '${cand.id}' is missing authoritative trading symbol in evaluation`);
+      }
       const baselineCand = CandidateEvaluator.createBaselineBenchmarkCandidate(
         baseVersion,
         resolvedSym,
@@ -193,6 +199,14 @@ export class LearningEngine {
             trailStopOnTp2: true,
             trailStopOffsetR: 1.0,
           },
+        },
+        cand.executionConfig || (cand.change as any)?.executionConfig || {
+          fillModel: 'OHLC_PATH',
+          ambiguityMode: 'CONSERVATIVE',
+          latencyMs: 50,
+          minMtfScore: 0.5,
+          stopLossAtrMultiplier: 1.5,
+          sizingMultiplier: 1.0,
         },
       );
 
@@ -225,7 +239,7 @@ export class LearningEngine {
       const devExpStart = devExperiences.length > 0 ? new Date(devExperiences[0].timestamp).getTime() : 0;
       const devExpEnd = devExperiences.length > 0 ? new Date(devExperiences[devExperiences.length - 1].timestamp).getTime() : 0;
       const devTimeframe = options.dataset?.timeframe || '15m';
-      const devSymbol = options.dataset?.symbol || 'BTCUSDT';
+      const devSymbol = resolvedSym;
       const devIntervalMs = MarketDatasetValidator.resolveTimeframeIntervalMs(devTimeframe);
 
       const devExpDataset: ExperienceDataset = {

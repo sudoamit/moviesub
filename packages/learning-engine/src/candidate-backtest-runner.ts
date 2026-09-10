@@ -243,9 +243,14 @@ export class CandidateBacktestRunner {
         ? options.warmupBars
         : PRODUCTION_DEFAULT_WARMUP_BARS;
 
+    const sym = options?.symbol || artifact.symbol || config.symbol || (artifact as any).executionConfig?.symbol;
+    if (!sym || typeof sym !== 'string' || sym.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in backtest execution`);
+    }
+
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
-      symbol: options?.symbol || artifact.symbol || 'BTCUSDT',
+      symbol: sym,
       timeframe: dataset?.timeframe || options?.timeframe || '15m',
       candles,
       initialCapital: options?.initialCapital ?? riskConfig.initialCapital,

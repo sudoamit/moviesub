@@ -208,6 +208,15 @@ export class WalkForwardValidator {
       throw new Error('INSUFFICIENT_MARKET_DATA_FOR_FOLDS: Candle count is insufficient for fold partitioning');
     }
 
+    const resolvedSymbol =
+      options.marketDataset?.symbol ||
+      candidate.symbol ||
+      (candidate.executionConfig as any)?.symbol ||
+      (candidate.change as any)?.symbol;
+    if (!resolvedSymbol || typeof resolvedSymbol !== 'string' || resolvedSymbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidate.id}' is missing authoritative trading symbol in walk-forward validation`);
+    }
+
     const folds: WalkForwardFold[] = [];
     const foldArtifacts: FoldArtifact[] = [];
 
@@ -357,7 +366,7 @@ export class WalkForwardValidator {
         experiences: trainSlice,
         datasetHash: trainExpDatasetHash,
         featureSchemaVersion: modelArtifact.featureSchemaVersion || '2.0',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        symbol: resolvedSymbol,
         timeframe: options.marketDataset.timeframe || '15m',
         startTimestamp: getExperienceTimestamp(trainSlice[0]),
         endTimestamp: getExperienceTimestamp(trainSlice[trainSlice.length - 1]),
@@ -367,7 +376,7 @@ export class WalkForwardValidator {
         executionCandles: trainCandles,
         datasetHash: trainMarketDatasetHash,
         timeframe: options.marketDataset.timeframe || '15m',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        symbol: resolvedSymbol,
         startTimestamp: new Date(trainCandles[0].timestamp).getTime(),
         endTimestamp: new Date(trainCandles[trainCandles.length - 1].timestamp).getTime(),
         isContinuous: true,
@@ -378,7 +387,7 @@ export class WalkForwardValidator {
         executionCandles: valCandles,
         datasetHash: valMarketDatasetHash,
         timeframe: options.marketDataset.timeframe || '15m',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        symbol: resolvedSymbol,
         startTimestamp: new Date(valCandles[0].timestamp).getTime(),
         endTimestamp: new Date(valCandles[valCandles.length - 1].timestamp).getTime(),
         isContinuous: true,
@@ -389,7 +398,7 @@ export class WalkForwardValidator {
         executionCandles: testCandles,
         datasetHash: oosMarketDatasetHash,
         timeframe: options.marketDataset.timeframe || '15m',
-        symbol: options.marketDataset.symbol || 'BTCUSDT',
+        symbol: resolvedSymbol,
         startTimestamp: new Date(testCandles[0].timestamp).getTime(),
         endTimestamp: new Date(testCandles[testCandles.length - 1].timestamp).getTime(),
         isContinuous: true,
@@ -415,7 +424,7 @@ export class WalkForwardValidator {
       }
 
       const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate, {
-        symbol: options.marketDataset?.symbol || trainMarketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+        symbol: resolvedSymbol,
       }).configHash;
       const scalerVersion = TemporalFeatureScaler.computeVersion(scalerParams);
       const trainingSeed = options.seed ?? DEFAULT_LEARNING_SEED;
@@ -475,7 +484,7 @@ export class WalkForwardValidator {
         },
         {
           minimumCandles: Math.max(1, Math.min(10, trainCandles.length)),
-          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          symbol: resolvedSymbol,
         },
       );
 
@@ -490,7 +499,7 @@ export class WalkForwardValidator {
         },
         {
           minimumCandles: Math.max(1, Math.min(10, valCandles.length)),
-          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          symbol: resolvedSymbol,
         },
       );
 
@@ -505,7 +514,7 @@ export class WalkForwardValidator {
         },
         {
           minimumCandles: Math.max(1, Math.min(10, testCandles.length)),
-          symbol: options.marketDataset.symbol || foldCandidate.symbol || 'BTCUSDT',
+          symbol: resolvedSymbol,
         },
       );
 
@@ -550,51 +559,45 @@ export class WalkForwardValidator {
       meanOutOfSampleExpectancy: meanOOS,
       oosDegradationPct: Math.max(0, degradation),
       isRobust,
-      foldArtifacts: Object.freeze(foldArtifacts),
+      foldArtifacts,
     };
   }
 
   /**
-   * Empirically fits candidate strategy parameters through grid search and execution evaluation strictly on training fold market data.
-   * Pure Market Data API: Accepts strictly market data (ICandle[] | CandidateMarketDataset) with no TradingExperience[] union.
+   * Refits candidate parameters strictly on in-sample fold continuous market data.
+   * Ensures zero future fold information or out-of-sample data leaks into candidate parameters.
    */
-  public static retrainCandidateOnFold(
-    trainMarketData: ICandle[] | CandidateMarketDataset | undefined,
+  public static fitThresholdParametersOnMarketDataset(
     baseCandidate: StrategyCandidate,
+    marketDataset: CandidateMarketDataset,
     foldIndex: number,
-    modelArtifact?: ITrainedModelArtifact,
-    selectedFeatures?: string[],
-    options?: {
-      candles?: ICandle[];
-      dataset?: CandidateMarketDataset;
-    },
   ): StrategyCandidate {
-    const marketCandles: ICandle[] | undefined = Array.isArray(trainMarketData)
-      ? (trainMarketData as ICandle[])
-      : options?.candles;
-    const marketDataset: CandidateMarketDataset | undefined =
-      trainMarketData && !Array.isArray(trainMarketData)
-        ? (trainMarketData as CandidateMarketDataset)
-        : options?.dataset;
+    const marketCandles = marketDataset.executionCandles;
+    const paramName = baseCandidate.change?.parameter || 'minMtfScore';
 
-    const paramName =
-      (baseCandidate.change as any)?.parameter ||
-      (baseCandidate.type === 'THRESHOLD'
-        ? 'minMtfScore'
-        : baseCandidate.type === 'RISK'
-          ? 'stopLossAtrMultiplier'
-          : (baseCandidate.type as any) === 'PROBABILITY'
-            ? 'minProbability'
-            : 'minMtfScore');
+    const fitSymbol =
+      marketDataset.symbol ||
+      baseCandidate.symbol ||
+      (baseCandidate.executionConfig as any)?.symbol ||
+      (baseCandidate.change as any)?.symbol;
+    if (!fitSymbol || typeof fitSymbol !== 'string' || fitSymbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${baseCandidate.id}' is missing authoritative trading symbol in threshold fitting`);
+    }
 
-    // 1. Build search grid based on parameter type
-    let grid: number[] = [];
+    const fitRisk =
+      baseCandidate.riskConfig ||
+      (baseCandidate.change as any)?.riskConfig;
+    if (!fitRisk || typeof fitRisk !== 'object') {
+      throw new Error(`MISSING_RISK_CONFIG: Candidate '${baseCandidate.id}' is missing authoritative riskConfig in threshold fitting`);
+    }
 
+    // 1. Determine parameter search space
+    let grid: number[];
     if (paramName === 'minMtfScore') {
-      grid = [50, 55, 60, 65, 70, 75, 80];
+      grid = [40, 45, 50, 55, 60, 65, 70, 75, 80];
     } else if (paramName === 'stopLossAtrMultiplier') {
-      grid = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-    } else if (paramName === 'sizingMultiplier' || paramName === 'highVolatilitySizingMultiplier') {
+      grid = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5];
+    } else if (paramName === 'sizingMultiplier') {
       grid = [0.25, 0.5, 0.75, 1.0, 1.25];
     } else if (paramName === 'minProbability') {
       grid = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
@@ -615,30 +618,14 @@ export class WalkForwardValidator {
     for (const val of grid) {
       const trialCandidate: StrategyCandidate = {
         ...baseCandidate,
-        symbol: baseCandidate.symbol || marketDataset?.symbol || 'BTCUSDT',
-        riskConfig:
-          baseCandidate.riskConfig ||
-          (baseCandidate.change as any)?.riskConfig || {
-            initialCapital: 100000,
-            maxRiskPerTrade: 0.01,
-            partialExitPolicy: {
-              tp1Ratio: 0.33,
-              tp2Ratio: 0.33,
-              tp3Ratio: 0.34,
-              moveStopToBreakevenOnTp1: true,
-              trailStopOnTp2: true,
-              trailStopOffsetR: 1.0,
-            },
-          },
+        symbol: fitSymbol,
+        riskConfig: fitRisk,
         candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-trial-${val}`,
         change: {
           ...baseCandidate.change,
           parameter: paramName,
           value: val,
           fittedValue: val,
-          modelArtifact: (modelArtifact || baseCandidate.change?.modelArtifact) as any,
-          scalerArtifact: (modelArtifact?.scalerArtifact || baseCandidate.change?.scalerArtifact) as any,
-          selectedFeatures: (modelArtifact?.selectedFeatures || selectedFeatures || baseCandidate.change?.selectedFeatures) as any,
         },
       };
 
@@ -646,6 +633,7 @@ export class WalkForwardValidator {
         const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, {
           dataset: marketDataset,
           candles: marketCandles,
+          symbol: fitSymbol,
         });
         if (evalRes.totalTrades > 0) {
           // Objective: Maximize trade expectancy penalized for low trade count
@@ -664,21 +652,114 @@ export class WalkForwardValidator {
 
     return {
       ...baseCandidate,
-      symbol: baseCandidate.symbol || marketDataset?.symbol || 'BTCUSDT',
-      riskConfig:
-        baseCandidate.riskConfig ||
-        (baseCandidate.change as any)?.riskConfig || {
-          initialCapital: 100000,
-          maxRiskPerTrade: 0.01,
-          partialExitPolicy: {
-            tp1Ratio: 0.33,
-            tp2Ratio: 0.33,
-            tp3Ratio: 0.34,
-            moveStopToBreakevenOnTp1: true,
-            trailStopOnTp2: true,
-            trailStopOffsetR: 1.0,
-          },
+      symbol: fitSymbol,
+      riskConfig: fitRisk,
+      candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-fold${foldIndex}`,
+      change: {
+        ...baseCandidate.change,
+        fittedOnFold: foldIndex,
+        fittedSampleCount: marketCandles?.length ?? 0,
+        fittedValue: bestValue,
+        fittedObjective: Number.isFinite(bestObjective) ? Number(bestObjective.toFixed(4)) : 0,
+      },
+    };
+  }
+
+  /**
+   * Refits candidate strategy and associated ML artifacts strictly on in-sample fold continuous market data.
+   */
+  public static retrainCandidateOnFold(
+    marketDataset: CandidateMarketDataset | ICandle[],
+    baseCandidate: StrategyCandidate,
+    foldIndex: number,
+    modelArtifact?: ITrainedModelArtifact,
+    selectedFeatures?: readonly string[],
+  ): StrategyCandidate {
+    const marketCandles = Array.isArray(marketDataset) ? marketDataset : marketDataset.executionCandles;
+    const paramName = baseCandidate.change?.parameter || 'minMtfScore';
+
+    const retrainSymbol =
+      (!Array.isArray(marketDataset) ? marketDataset.symbol : undefined) ||
+      baseCandidate.symbol ||
+      (baseCandidate.executionConfig as any)?.symbol ||
+      (baseCandidate.change as any)?.symbol;
+    if (!retrainSymbol || typeof retrainSymbol !== 'string' || retrainSymbol.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${baseCandidate.id}' is missing authoritative trading symbol in fold retraining`);
+    }
+
+    const retrainRisk =
+      baseCandidate.riskConfig ||
+      (baseCandidate.change as any)?.riskConfig;
+    if (!retrainRisk || typeof retrainRisk !== 'object') {
+      throw new Error(`MISSING_RISK_CONFIG: Candidate '${baseCandidate.id}' is missing authoritative riskConfig in fold retraining`);
+    }
+
+    // 1. Determine parameter search space
+    let grid: number[];
+    if (paramName === 'minMtfScore') {
+      grid = [40, 45, 50, 55, 60, 65, 70, 75, 80];
+    } else if (paramName === 'stopLossAtrMultiplier') {
+      grid = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5];
+    } else if (paramName === 'sizingMultiplier') {
+      grid = [0.25, 0.5, 0.75, 1.0, 1.25];
+    } else if (paramName === 'minProbability') {
+      grid = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
+    } else if (typeof (baseCandidate.change as any)?.value === 'number') {
+      const v = (baseCandidate.change as any).value;
+      grid = [Number((v * 0.75).toFixed(2)), Number((v * 0.9).toFixed(2)), v, Number((v * 1.1).toFixed(2)), Number((v * 1.25).toFixed(2))];
+    } else {
+      grid = [55, 60, 65, 70, 75];
+    }
+
+    // 2. Search parameter grid and evaluate each value strictly on continuous training market data
+    let bestValue =
+      typeof (baseCandidate.change as any)?.value === 'number'
+        ? (baseCandidate.change as any).value
+        : grid[Math.floor(grid.length / 2)];
+    let bestObjective = -Infinity;
+
+    for (const val of grid) {
+      const trialCandidate: StrategyCandidate = {
+        ...baseCandidate,
+        symbol: retrainSymbol,
+        riskConfig: retrainRisk,
+        candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-trial-${val}`,
+        change: {
+          ...baseCandidate.change,
+          parameter: paramName,
+          value: val,
+          fittedValue: val,
+          modelArtifact: (modelArtifact || baseCandidate.change?.modelArtifact) as any,
+          scalerArtifact: (modelArtifact?.scalerArtifact || baseCandidate.change?.scalerArtifact) as any,
+          selectedFeatures: (modelArtifact?.selectedFeatures || selectedFeatures || baseCandidate.change?.selectedFeatures) as any,
         },
+      };
+
+      try {
+        const evalRes = CandidateBacktestRunner.runCandidateBacktest(trialCandidate, {
+          dataset: Array.isArray(marketDataset) ? undefined : marketDataset,
+          candles: marketCandles,
+          symbol: retrainSymbol,
+        });
+        if (evalRes.totalTrades > 0) {
+          // Objective: Maximize trade expectancy penalized for low trade count
+          const sampleCount = marketCandles?.length ?? 100;
+          const samplePenalty = Math.min(1.0, evalRes.totalTrades / Math.max(1, Math.floor(sampleCount / 3)));
+          const objective = evalRes.expectancyR * samplePenalty + (evalRes.profitFactor >= 1.25 ? 0.2 : 0.0);
+          if (objective > bestObjective) {
+            bestObjective = objective;
+            bestValue = val;
+          }
+        }
+      } catch {
+        // Continue search if trial evaluation fails
+      }
+    }
+
+    return {
+      ...baseCandidate,
+      symbol: retrainSymbol,
+      riskConfig: retrainRisk,
       candidateVersion: `${baseCandidate.candidateVersion || baseCandidate.id}-fold${foldIndex}`,
       change: {
         ...baseCandidate.change,

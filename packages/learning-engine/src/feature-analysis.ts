@@ -1,5 +1,6 @@
 import { CANONICAL_FEATURE_NAMES_V2 } from '@quant/trading-engine';
 import { FeatureImportanceItem, TradingExperience, TrainingExample } from './types';
+import { ModelTrainer } from './model-trainer';
 
 export class FeatureAnalyzer {
   /**
@@ -27,13 +28,44 @@ export class FeatureAnalyzer {
 
     for (const featName of CANONICAL_FEATURE_NAMES_V2) {
       const featValues: number[] = [];
+      let hasMissing = false;
       for (const e of experiences as any[]) {
-        const featVal =
-          e.features?.[featName] ??
-          e.marketState?.quant?.[featName] ??
-          (e.marketState as any)?.[featName] ??
-          0.5;
-        featValues.push(typeof featVal === 'number' ? featVal : 0.5);
+        let featVal: number | undefined;
+        if (Array.isArray(e.features)) {
+          let names: readonly string[] | undefined = e.featureNames;
+          if (!names || names.length !== e.features.length) {
+            if (e.featureSchemaHash && e.features.length === CANONICAL_FEATURE_NAMES_V2.length) {
+              const computed = ModelTrainer.computeFeatureSchemaHash(CANONICAL_FEATURE_NAMES_V2, '2.0');
+              if (e.featureSchemaHash === computed) {
+                names = CANONICAL_FEATURE_NAMES_V2;
+              } else {
+                throw new Error(`FEATURE_SCHEMA_MISMATCH: Experience '${e.id || e.exampleId}' schema hash ${e.featureSchemaHash} does not match canonical 2.0 schema hash ${computed}`);
+              }
+            } else {
+              throw new Error(`MISSING_FEATURE_NAMES_PROVENANCE: Experience '${e.id || e.exampleId}' has array features without matching featureNames or valid canonical schema hash binding`);
+            }
+          }
+          const idx = names.indexOf(featName);
+          if (idx >= 0 && idx < e.features.length) {
+            featVal = e.features[idx];
+          }
+        } else if (e.features && typeof e.features === 'object') {
+          featVal = e.features[featName];
+        } else if (e.marketState?.quant && typeof e.marketState.quant === 'object') {
+          featVal = e.marketState.quant[featName];
+        }
+
+        if (featVal === undefined || featVal === null || typeof featVal !== 'number' || !Number.isFinite(featVal)) {
+          if (e.features !== undefined || e.featureSchemaHash !== undefined || e.exampleId !== undefined) {
+            throw new Error(`MISSING_FEATURE_VALUE: Experience '${e.id || e.exampleId}' lacks valid finite value for feature '${featName}'`);
+          }
+          hasMissing = true;
+          break;
+        }
+        featValues.push(featVal);
+      }
+      if (hasMissing || featValues.length < n) {
+        continue;
       }
 
       const meanF = featValues.reduce((a, b) => a + b, 0) / n;

@@ -38,8 +38,11 @@ export class RobustnessEngine {
       ? Math.min(10, marketData.candles.length)
       : (marketData.dataset?.executionCandles && marketData.dataset.executionCandles.length > 0)
         ? Math.min(10, marketData.dataset.executionCandles.length)
-        : 10;
-    const sym = marketData.dataset?.symbol || candidate.symbol || 'BTCUSDT';
+        : undefined;
+    const sym = marketData.dataset?.symbol || candidate.symbol || (candidate.executionConfig as any)?.symbol || (candidate.change as any)?.symbol;
+    if (!sym || typeof sym !== 'string' || sym.trim() === '') {
+      throw new Error(`MISSING_SYMBOL: Candidate '${candidate.id}' is missing authoritative trading symbol in robustness evaluation`);
+    }
 
     // 1. Normal Cost: 0.05R
     const normal = CandidateEvaluator.measureCandidateOnMarketData(candidate, marketData, {
