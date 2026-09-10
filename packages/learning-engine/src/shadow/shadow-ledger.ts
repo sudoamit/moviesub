@@ -13,6 +13,7 @@ import {
   ShadowHealthState,
   ShadowLedgerData,
   ShadowObservation,
+  ShadowStateSnapshot,
   ShadowWindowConfig,
   ShadowWindowMetrics,
 } from './shadow-types';
@@ -422,6 +423,33 @@ export class ShadowLedger {
       cumulativeMarketHash: this.cumulativeMarketHash,
     };
     return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
+  }
+
+  public getCanonicalStateSnapshot(): ShadowStateSnapshot {
+    return deepFreeze({
+      schemaVersion: SHADOW_SCHEMA_VERSION,
+      candidateId: this.candidateId,
+      candidateVersion: this.candidateVersion,
+      strategyVersion: this.strategyVersion,
+      symbol: this.symbol,
+      lastMarketTimestamp: this.lastMarketTimestamp,
+      observations: this.observations.map((o) => ({ ...o })),
+      orders: this.orders.map((o) => ({ ...o })),
+      fills: this.fills.map((f) => ({ ...f })),
+      trades: this.trades.map((t) => ({ ...t })),
+      events: this.events.map((e) => ({ ...e })),
+      pendingEntrySignals: Array.from(this.pendingEntrySignals.entries()).map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]),
+      pendingOrders: this.pendingOrders.map((o) => ({ ...o })),
+      activeLot: this.activeLot ? { ...this.activeLot } : null,
+      executionSequences: this.executionSequences ? { ...this.executionSequences } : null,
+      baselineMetrics: this.baselineMetrics ? { ...this.baselineMetrics } : undefined,
+      featureBaseline: this.featureBaseline ? JSON.parse(JSON.stringify(this.featureBaseline)) : undefined,
+      referenceRegime: this.referenceRegime ? { ...this.referenceRegime } : undefined,
+      windowConfig: this.windowConfig ? { ...this.windowConfig } : undefined,
+      health: { ...this.health },
+      cumulativeMarketHash: this.cumulativeMarketHash,
+      stateHash: this.getStateHash(),
+    }) as ShadowStateSnapshot;
   }
 
   public calculateMedianR(): number {

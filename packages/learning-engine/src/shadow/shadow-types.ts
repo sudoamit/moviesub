@@ -346,3 +346,40 @@ export interface ShadowLedgerData {
   readonly cumulativeMarketHash?: string;
   readonly savedAt: number;
 }
+
+export interface ShadowStateSnapshot {
+  readonly schemaVersion: string;
+  readonly candidateId: string;
+  readonly candidateVersion: string;
+  readonly strategyVersion: string;
+  readonly symbol: string;
+  readonly lastMarketTimestamp: number;
+  readonly observations: readonly ShadowObservation[];
+  readonly orders: readonly IOrder[];
+  readonly fills: readonly IFill[];
+  readonly trades: readonly IBacktestTrade[];
+  readonly events: readonly ShadowAuditRecord[];
+  readonly pendingEntrySignals: readonly (readonly [string, ISignalSetup])[];
+  readonly pendingOrders: readonly IOrder[];
+  readonly activeLot: PositionLot | null;
+  readonly executionSequences: {
+    readonly nextOrderSequence: number;
+    readonly nextFillSequence: number;
+    readonly nextEventSequence: number;
+  } | null;
+  readonly baselineMetrics: {
+    readonly expectancyR: number;
+    readonly winRate: number;
+    readonly profitFactor: number;
+    readonly maxDrawdownR?: number;
+  } | undefined;
+  readonly featureBaseline: FeatureDriftBaseline | undefined;
+  readonly referenceRegime: {
+    readonly volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY';
+    readonly trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING';
+  } | undefined;
+  readonly windowConfig: ShadowWindowConfig | undefined;
+  readonly health: ShadowHealthState;
+  readonly cumulativeMarketHash: string;
+  readonly stateHash: string;
+}

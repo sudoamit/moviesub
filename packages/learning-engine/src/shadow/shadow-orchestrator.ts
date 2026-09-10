@@ -31,12 +31,11 @@ import {
   DriftEvent,
   ShadowAuditRecord,
   ShadowEvaluationEvidence,
-  ShadowHealthState,
-  ShadowLedgerData,
   ShadowMarketData,
   ShadowObservation,
   ShadowProcessingResult,
   ShadowSignalSnapshot,
+  ShadowStateSnapshot,
   ShadowWindowConfig,
   validateShadowMarketData,
 } from './shadow-types';
@@ -79,6 +78,7 @@ export interface ShadowOrchestratorOptions {
   readonly healthConfig?: HealthMachineConfig;
   readonly persistenceDir?: string;
   readonly enableAutomaticPaperRollback?: boolean;
+  readonly maxAllowedGapMs?: number;
 }
 
 interface ActiveCandidateContext {
@@ -1211,6 +1211,14 @@ export class ShadowOrchestrator {
     return this.activeCandidates.get(candidateId)?.ledger;
   }
 
+  public getCandidateStateSnapshot(candidateId: string): ShadowStateSnapshot {
+    const ctx = this.activeCandidates.get(candidateId);
+    if (!ctx) {
+      throw new Error(`CANDIDATE_NOT_ACTIVE: Candidate '${candidateId}' is not active in orchestrator`);
+    }
+    return ctx.ledger.getCanonicalStateSnapshot();
+  }
+
   /**
    * Returns a fully mutable deep copy of a PositionLot, unfreezing all nested arrays and objects.
    */
@@ -1318,6 +1326,14 @@ export class ShadowOrchestrator {
         throw new Error(
           `TIMESTAMP_REGRESSION: Out-of-order candle timestamp ${candleTime} < previous timestamp ${prevTime}`,
         );
+      }
+      if (this.options.maxAllowedGapMs) {
+        const delta = candleTime - prevTime;
+        if (delta > this.options.maxAllowedGapMs) {
+          throw new Error(
+            `MARKET_DATA_GAP: Candle timestamp gap ${delta}ms exceeds maximum allowed threshold ${this.options.maxAllowedGapMs}ms`,
+          );
+        }
       }
     }
   }
