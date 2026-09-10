@@ -298,7 +298,7 @@ export class ShadowLedger {
     }, 0);
     const averageHoldingTimeMs = Math.round(totalHoldingMs / tradeCount);
 
-    const longTrades = recentTrades.filter((t) => t.direction === 'BULLISH' || (t as any).side === 'LONG').length;
+    const longTrades = recentTrades.filter((t) => t.direction === 'BULLISH').length;
     const longRatio = Number((longTrades / tradeCount).toFixed(2));
     const shortRatio = Number((1 - longRatio).toFixed(2));
 
@@ -454,7 +454,7 @@ export class ShadowLedger {
 
   public calculateMedianR(): number {
     const rVals = this.trades
-      .map((t) => t.pnlRMultiple ?? (t as any).realizedR)
+      .map((t) => t.pnlRMultiple)
       .filter((r) => typeof r === 'number' && !isNaN(r));
     if (rVals.length === 0) return 0;
     const sorted = [...rVals].sort((a, b) => a - b);
@@ -681,7 +681,13 @@ export class ShadowLedger {
         );
       }
 
-      if (!Array.isArray(data.observations) || !Array.isArray(data.trades) || !Array.isArray(data.events)) {
+      if (
+        !Array.isArray(data.observations) ||
+        !Array.isArray(data.orders) ||
+        !Array.isArray(data.fills) ||
+        !Array.isArray(data.trades) ||
+        !Array.isArray(data.events)
+      ) {
         throw new Error('Corrupted array structures in shadow ledger file');
       }
 
@@ -692,6 +698,102 @@ export class ShadowLedger {
           throw new Error('Chronological order violation in persisted shadow observations');
         }
         prevTs = obs.marketTimestamp;
+      }
+
+      // Deep semantic validation of orders
+      const orderIds = new Set<string>();
+      for (const order of data.orders) {
+        if (!order || typeof order !== 'object' || typeof order.id !== 'string' || order.id.trim() === '') {
+          throw new Error('Corrupted order in shadow ledger file (missing or invalid id)');
+        }
+        if (orderIds.has(order.id)) {
+          throw new Error(`Duplicate order ID '${order.id}' in persisted shadow ledger`);
+        }
+        orderIds.add(order.id);
+        if (typeof order.quantity !== 'number' || !Number.isFinite(order.quantity) || order.quantity <= 0) {
+          throw new Error(`Corrupted order quantity '${order.quantity}' for order '${order.id}'`);
+        }
+        if (!['BUY', 'SELL'].includes(order.side)) {
+          throw new Error(`Corrupted order side '${order.side}' for order '${order.id}'`);
+        }
+      }
+
+      // Deep semantic validation of fills
+      const fillIds = new Set<string>();
+      for (const fill of data.fills) {
+        if (!fill || typeof fill !== 'object' || typeof fill.id !== 'string' || fill.id.trim() === '') {
+          throw new Error('Corrupted fill in shadow ledger file (missing or invalid id)');
+        }
+        if (fillIds.has(fill.id)) {
+          throw new Error(`Duplicate fill ID '${fill.id}' in persisted shadow ledger`);
+        }
+        fillIds.add(fill.id);
+        if (typeof fill.price !== 'number' || !Number.isFinite(fill.price) || fill.price <= 0) {
+          throw new Error(`Corrupted fill price '${fill.price}' for fill '${fill.id}'`);
+        }
+        if (typeof fill.quantity !== 'number' || !Number.isFinite(fill.quantity) || fill.quantity <= 0) {
+          throw new Error(`Corrupted fill quantity '${fill.quantity}' for fill '${fill.id}'`);
+        }
+        if (typeof fill.fee === 'number' && (!Number.isFinite(fill.fee) || fill.fee < 0)) {
+          throw new Error(`Corrupted fill fee for fill '${fill.id}'`);
+        }
+        if (typeof fill.slippage === 'number' && (!Number.isFinite(fill.slippage) || fill.slippage < 0)) {
+          throw new Error(`Corrupted fill slippage for fill '${fill.id}'`);
+        }
+      }
+
+      // Deep semantic validation of trades
+      for (const trade of data.trades) {
+        if (!trade || typeof trade !== 'object' || typeof trade.id !== 'string' || trade.id.trim() === '') {
+          throw new Error('Corrupted trade in shadow ledger file (missing or invalid id)');
+        }
+        if (typeof trade.entryPrice !== 'number' || !Number.isFinite(trade.entryPrice) || trade.entryPrice <= 0) {
+          throw new Error(`Corrupted trade entry price for trade '${trade.id}'`);
+        }
+        if (typeof trade.exitPrice !== 'number' || !Number.isFinite(trade.exitPrice) || trade.exitPrice <= 0) {
+          throw new Error(`Corrupted trade exit price for trade '${trade.id}'`);
+        }
+        if (typeof trade.pnl !== 'number' || !Number.isFinite(trade.pnl)) {
+          throw new Error(`Corrupted trade PnL for trade '${trade.id}'`);
+        }
+        if (typeof trade.pnlRMultiple !== 'number' || !Number.isFinite(trade.pnlRMultiple)) {
+          throw new Error(`Corrupted trade pnlRMultiple for trade '${trade.id}'`);
+        }
+      }
+
+      // Deep semantic validation of activeLot if present
+      if (data.activeLot) {
+        const lot = data.activeLot;
+        if (typeof lot !== 'object' || typeof lot.id !== 'string' || lot.id.trim() === '') {
+          throw new Error('Corrupted activeLot in shadow ledger file');
+        }
+        if (typeof lot.entryPrice !== 'number' || !Number.isFinite(lot.entryPrice) || lot.entryPrice <= 0) {
+          throw new Error('Corrupted activeLot entryPrice');
+        }
+        if (typeof lot.initialQuantity !== 'number' || !Number.isFinite(lot.initialQuantity) || lot.initialQuantity <= 0) {
+          throw new Error('Corrupted activeLot initialQuantity');
+        }
+        if (
+          typeof lot.remainingQuantity !== 'number' ||
+          !Number.isFinite(lot.remainingQuantity) ||
+          lot.remainingQuantity < 0 ||
+          lot.remainingQuantity > lot.initialQuantity
+        ) {
+          throw new Error('Corrupted activeLot remainingQuantity (negative or exceeds initialQuantity)');
+        }
+        if (typeof lot.currentStopLoss !== 'number' || !Number.isFinite(lot.currentStopLoss) || lot.currentStopLoss <= 0) {
+          throw new Error('Corrupted activeLot currentStopLoss');
+        }
+      }
+
+      // Deep semantic validation of health
+      if (
+        !data.health ||
+        typeof data.health !== 'object' ||
+        typeof data.health.status !== 'string' ||
+        !['INSUFFICIENT_EVIDENCE', 'PENDING', 'ACTIVE', 'HEALTHY', 'DEGRADED', 'CRITICAL', 'FAILED', 'REJECTED', 'STOPPED'].includes(data.health.status)
+      ) {
+        throw new Error('Corrupted health state in shadow ledger file');
       }
 
       // Semantic validation of pendingEntrySignals if present

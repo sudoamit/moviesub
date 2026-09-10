@@ -55,7 +55,12 @@ export class PerformanceDriftDetector {
       throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing authoritative reference baseline metrics`);
     }
 
-    const baseExpectancy = (baselineMetrics as any).averageR ?? (baselineMetrics as any).expectancyR;
+    const baseExpectancy =
+      'expectancyR' in baselineMetrics && typeof baselineMetrics.expectancyR === 'number'
+        ? baselineMetrics.expectancyR
+        : 'averageR' in baselineMetrics && typeof baselineMetrics.averageR === 'number'
+        ? baselineMetrics.averageR
+        : undefined;
     if (typeof baseExpectancy !== 'number' || !Number.isFinite(baseExpectancy)) {
       throw new Error(`SHADOW_BASELINE_MISSING: Candidate '${candidateId}' is missing valid numeric baseline expectancy`);
     }

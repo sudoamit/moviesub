@@ -102,6 +102,7 @@ interface ActiveCandidateContext {
     volatilityRegime: 'LOW_VOLATILITY' | 'NORMAL_VOLATILITY' | 'HIGH_VOLATILITY';
     trendRegime?: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING';
   };
+  readonly windowConfig: ShadowWindowConfig;
   tradeCounter: number;
 }
 
@@ -255,7 +256,7 @@ export class ShadowOrchestrator {
       }
       validatedArtifact = CandidateArtifactValidator.validate(rawArtifact);
     } else {
-      if (!candidate || !(candidate as any).executionConfig) {
+      if (!candidate || typeof candidate !== 'object' || !('executionConfig' in candidate) || !candidate.executionConfig) {
         throw new Error(`MISSING_EXECUTION_CONFIG: Candidate artifact is missing authoritative executionConfig`);
       }
       validatedArtifact = CandidateArtifactValidator.validate(candidate);
@@ -318,11 +319,12 @@ export class ShadowOrchestrator {
 
     // Baseline metrics check (Strict Fail-Closed — Check options -> persisted ledger -> candidate artifact evidence)
     const persistedBaselines = ledger.getBaselineMetrics();
+    const evidence = validatedArtifact.evidence as Record<string, unknown> | undefined;
     const baselineExpectancy =
       options?.baselineExpectancyR ??
       persistedBaselines?.expectancyR ??
-      (validatedArtifact as any).evidence?.expectancyAfterHistorical ??
-      (validatedArtifact as any).evidence?.expectancyBefore;
+      (typeof evidence?.expectancyAfterHistorical === 'number' ? evidence.expectancyAfterHistorical : undefined) ??
+      (typeof evidence?.expectancyBefore === 'number' ? evidence.expectancyBefore : undefined);
 
     if (baselineExpectancy === undefined || typeof baselineExpectancy !== 'number' || !Number.isFinite(baselineExpectancy)) {
       throw new Error(
@@ -333,7 +335,7 @@ export class ShadowOrchestrator {
     const baselineWinRate =
       options?.baselineWinRate ??
       persistedBaselines?.winRate ??
-      (validatedArtifact as any).evidence?.winRate;
+      (typeof evidence?.winRate === 'number' ? evidence.winRate : undefined);
 
     if (baselineWinRate === undefined || typeof baselineWinRate !== 'number' || !Number.isFinite(baselineWinRate)) {
       throw new Error(
@@ -344,7 +346,7 @@ export class ShadowOrchestrator {
     const baselineProfitFactor =
       options?.baselineProfitFactor ??
       persistedBaselines?.profitFactor ??
-      (validatedArtifact as any).evidence?.profitFactor;
+      (typeof evidence?.profitFactor === 'number' ? evidence.profitFactor : undefined);
 
     if (baselineProfitFactor === undefined || typeof baselineProfitFactor !== 'number' || !Number.isFinite(baselineProfitFactor)) {
       throw new Error(
@@ -359,8 +361,8 @@ export class ShadowOrchestrator {
     const persistedRefRegime = ledger.getReferenceRegime();
     const rawRefRegime =
       persistedRefRegime ??
-      (validatedArtifact as any).evidence?.referenceRegime ??
-      (validatedArtifact as any).evidence?.primaryRegime;
+      (evidence?.referenceRegime as Record<string, unknown> | undefined) ??
+      (evidence?.primaryRegime as Record<string, unknown> | undefined);
 
     if (!rawRefRegime || !rawRefRegime.volatilityRegime) {
       throw new Error(
@@ -369,24 +371,30 @@ export class ShadowOrchestrator {
     }
 
     const volStr = String(rawRefRegime.volatilityRegime).toUpperCase();
-    const normalizedVol =
-      volStr === 'NORMAL' || volStr === 'NORMAL_VOLATILITY'
-        ? 'NORMAL_VOLATILITY'
-        : volStr === 'LOW' || volStr === 'LOW_VOLATILITY'
-        ? 'LOW_VOLATILITY'
-        : volStr === 'HIGH' || volStr === 'HIGH_VOLATILITY'
-        ? 'HIGH_VOLATILITY'
-        : (volStr as any);
+    let normalizedVol: 'NORMAL_VOLATILITY' | 'LOW_VOLATILITY' | 'HIGH_VOLATILITY';
+    if (volStr === 'NORMAL' || volStr === 'NORMAL_VOLATILITY') {
+      normalizedVol = 'NORMAL_VOLATILITY';
+    } else if (volStr === 'LOW' || volStr === 'LOW_VOLATILITY') {
+      normalizedVol = 'LOW_VOLATILITY';
+    } else if (volStr === 'HIGH' || volStr === 'HIGH_VOLATILITY') {
+      normalizedVol = 'HIGH_VOLATILITY';
+    } else {
+      throw new Error(`INVALID_REFERENCE_REGIME: Unsupported volatility regime '${volStr}'`);
+    }
 
     const trendStr = rawRefRegime.trendRegime ? String(rawRefRegime.trendRegime).toUpperCase() : undefined;
-    const normalizedTrend =
-      trendStr === 'BULLISH' || trendStr === 'TRENDING_BULLISH'
-        ? 'TRENDING_BULLISH'
-        : trendStr === 'BEARISH' || trendStr === 'TRENDING_BEARISH'
-        ? 'TRENDING_BEARISH'
-        : trendStr === 'RANGING'
-        ? 'RANGING'
-        : (trendStr as any);
+    let normalizedTrend: 'TRENDING_BULLISH' | 'TRENDING_BEARISH' | 'RANGING' | undefined;
+    if (trendStr) {
+      if (trendStr === 'BULLISH' || trendStr === 'TRENDING_BULLISH') {
+        normalizedTrend = 'TRENDING_BULLISH';
+      } else if (trendStr === 'BEARISH' || trendStr === 'TRENDING_BEARISH') {
+        normalizedTrend = 'TRENDING_BEARISH';
+      } else if (trendStr === 'RANGING') {
+        normalizedTrend = 'RANGING';
+      } else {
+        throw new Error(`INVALID_REFERENCE_REGIME: Unsupported trend regime '${trendStr}'`);
+      }
+    }
 
     const referenceRegime = {
       volatilityRegime: normalizedVol,
@@ -403,9 +411,34 @@ export class ShadowOrchestrator {
       ledger.setFeatureBaseline(featureBaseline);
     }
     ledger.setReferenceRegime(referenceRegime);
+
+    // Strict windowConfig resolution (Options -> Persisted Ledger -> Candidate Artifact -> Canonical Default)
+    let resolvedWindowConfig: ShadowWindowConfig;
     if (this.options.windowConfig) {
-      ledger.setWindowConfig(this.options.windowConfig);
+      resolvedWindowConfig = this.options.windowConfig;
+    } else if (ledger.getWindowConfig()) {
+      resolvedWindowConfig = ledger.getWindowConfig()!;
+    } else if (evidence && typeof evidence.windowConfig === 'object' && evidence.windowConfig !== null) {
+      resolvedWindowConfig = evidence.windowConfig as ShadowWindowConfig;
+    } else {
+      resolvedWindowConfig = DEFAULT_SHADOW_WINDOW_CONFIG;
     }
+
+    if (
+      !resolvedWindowConfig ||
+      typeof resolvedWindowConfig.shortWindowSize !== 'number' ||
+      !Number.isFinite(resolvedWindowConfig.shortWindowSize) ||
+      resolvedWindowConfig.shortWindowSize <= 0 ||
+      typeof resolvedWindowConfig.mediumWindowSize !== 'number' ||
+      !Number.isFinite(resolvedWindowConfig.mediumWindowSize) ||
+      resolvedWindowConfig.mediumWindowSize <= 0 ||
+      typeof resolvedWindowConfig.longWindowSize !== 'number' ||
+      !Number.isFinite(resolvedWindowConfig.longWindowSize) ||
+      resolvedWindowConfig.longWindowSize <= 0
+    ) {
+      throw new Error(`INVALID_SHADOW_WINDOW_CONFIG: Candidate '${candidateId}' has invalid window configuration`);
+    }
+    ledger.setWindowConfig(resolvedWindowConfig);
 
     // Initialize Authoritative ExecutionSimulator
     const execSim = new ExecutionSimulator(
@@ -462,6 +495,7 @@ export class ShadowOrchestrator {
         profitFactor: baselineProfitFactor,
       },
       referenceRegime,
+      windowConfig: resolvedWindowConfig,
       regimeHistory: recoveredRegimeHistory,
       featureVectors: recoveredFeatureVectors,
       activeLot: recoveredActiveLot,
@@ -544,7 +578,7 @@ export class ShadowOrchestrator {
     const newFills = execBarRes.fills;
 
     // Process Fills and manage Trade Lifecycles authoritatively via TradeLifecycleManager
-    const partialPolicy = (ctx.artifact.riskConfig as any)?.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
+    const partialPolicy = ctx.artifact.riskConfig.partialExitPolicy || DEFAULT_PARTIAL_EXIT_POLICY;
 
     for (const fill of newFills) {
       const order = ctx.execSim.getOrder(fill.orderId);
@@ -607,7 +641,7 @@ export class ShadowOrchestrator {
             const slOrder = ctx.execSim.getTradeOrders(ctx.activeLot.tradeId).find((o) => o.orderType === 'STOP');
             if (slOrder) {
               slOrder.stopPrice = ctx.activeLot.entryPrice;
-              (slOrder as any).exitTarget = 'TRAILING_STOP';
+              slOrder.exitTarget = 'TRAILING_STOP';
             }
           }
 
@@ -625,7 +659,8 @@ export class ShadowOrchestrator {
     // 3. Append Candle & Extract Causal Features / Regime
     ctx.candles.push(candle);
     ctx.ledger.recordCandle(candle);
-    const regimeObs = RegimeDriftDetector.classifyCausalRegime(ctx.candles);
+    const windowedCandles = ctx.candles.length > 100 ? ctx.candles.slice(-100) : ctx.candles;
+    const regimeObs = RegimeDriftDetector.classifyCausalRegime(windowedCandles);
     ctx.regimeHistory.push(regimeObs);
 
     let featureVectorHash = createHash('sha256').update(`feat_schema_${ctx.artifact.featureSchemaHash}`).digest('hex');
@@ -635,7 +670,7 @@ export class ShadowOrchestrator {
     if (ctx.candles.length >= requiredWarmup) {
       const snapshot = SnapshotBuilder.buildSnapshot({
         symbol,
-        executionCandles: ctx.candles,
+        executionCandles: windowedCandles,
       });
       const extracted = CanonicalMLEngineV2.extractFeatures(snapshot);
       const mlFeatures = CanonicalMLEngineV2.toArray(extracted);
@@ -690,14 +725,14 @@ export class ShadowOrchestrator {
       const entryPrice = candle.close;
       const stopPrice = candidateSignal.stopLoss;
 
-      const riskCfg = ctx.artifact.riskConfig as any;
+      const riskCfg = ctx.artifact.riskConfig;
       const sizing = PositionSizer.calculatePosition({
         accountBalance: riskCfg.initialCapital,
         riskPercentage: (riskCfg.maxRiskPerTrade <= 0.2 ? riskCfg.maxRiskPerTrade * 100 : riskCfg.maxRiskPerTrade),
         entryPrice,
         stopLoss: stopPrice,
-        lotSize: riskCfg.lotSize,
-        contractSize: riskCfg.contractSize,
+        lotSize: riskCfg.lotSize ?? 1,
+        contractSize: riskCfg.contractSize ?? 1,
         maxRiskPercentage: riskCfg.maxAccountRiskLimit !== undefined ? riskCfg.maxAccountRiskLimit * 100 : undefined,
         maxLeverage: riskCfg.maxLeverage,
         regime: ctx.regimeHistory.length > 0 ? ctx.regimeHistory[ctx.regimeHistory.length - 1].volatilityRegime : undefined,
@@ -767,19 +802,19 @@ export class ShadowOrchestrator {
     // A. Multi-Horizon Performance Drift (SHORT, MEDIUM, LONG)
     const rollingShort = ctx.ledger.computeRollingMetrics(
       'SHORT',
-      this.options.windowConfig?.shortWindowSize || 20,
+      ctx.windowConfig.shortWindowSize,
       ctx.baselineMetrics.expectancyR,
       ctx.baselineMetrics.winRate,
     );
     const rollingMedium = ctx.ledger.computeRollingMetrics(
       'MEDIUM',
-      this.options.windowConfig?.mediumWindowSize || 50,
+      ctx.windowConfig.mediumWindowSize,
       ctx.baselineMetrics.expectancyR,
       ctx.baselineMetrics.winRate,
     );
     const rollingLong = ctx.ledger.computeRollingMetrics(
       'LONG',
-      this.options.windowConfig?.longWindowSize || 100,
+      ctx.windowConfig.longWindowSize,
       ctx.baselineMetrics.expectancyR,
       ctx.baselineMetrics.winRate,
     );
@@ -895,7 +930,7 @@ export class ShadowOrchestrator {
     const activeDriftLookbackMs = this.options.healthConfig?.activeDriftLookbackMs ?? 3600000;
     const unexpiredLedgerDrifts = ctx.ledger
       .getDrifts()
-      .filter((d) => d.severity === 'CRITICAL' && Math.abs(candleTime - d.marketTimestamp) <= activeDriftLookbackMs);
+      .filter((d) => Math.abs(candleTime - d.marketTimestamp) <= activeDriftLookbackMs);
     const activeDrifts = [...unexpiredLedgerDrifts, ...detectedDrifts];
 
     const nextHealth = ShadowHealthMachine.evaluateNextState(
@@ -1211,6 +1246,10 @@ export class ShadowOrchestrator {
     return this.activeCandidates.get(candidateId)?.ledger;
   }
 
+  public getCandidateActiveLot(candidateId: string): PositionLot | null {
+    return this.activeCandidates.get(candidateId)?.activeLot || null;
+  }
+
   public getCandidateStateSnapshot(candidateId: string): ShadowStateSnapshot {
     const ctx = this.activeCandidates.get(candidateId);
     if (!ctx) {
@@ -1226,7 +1265,7 @@ export class ShadowOrchestrator {
     return {
       ...lot,
       partialFills: lot.partialFills ? lot.partialFills.map((f) => ({ ...f })) : [],
-      events: (lot as any).events ? [...(lot as any).events] : [],
+      events: lot.events ? [...lot.events] : [],
       entrySnapshot: lot.entrySnapshot ? { ...lot.entrySnapshot } : undefined,
     } as PositionLot;
   }
@@ -1284,7 +1323,7 @@ export class ShadowOrchestrator {
       throw new Error('INVALID_CANDLE: Candle object is undefined or null');
     }
 
-    const candleSym = (candle as any).symbol;
+    const candleSym = 'symbol' in candle && typeof candle.symbol === 'string' ? candle.symbol : undefined;
     if (candleSym && expectedSymbol && candleSym !== expectedSymbol) {
       throw new Error(`SYMBOL_MISMATCH: Candle symbol '${candleSym}' does not match expected '${expectedSymbol}'`);
     }
@@ -1343,10 +1382,11 @@ export class ShadowOrchestrator {
     candle: ICandle,
     symbol: string,
   ): { snapshot: ShadowSignalSnapshot; signalSetup?: ISignalSetup } {
-    const hasDet = !!(
-      (ctx.artifact.strategyConfig as any)?.deterministicSignal ||
-      (ctx.artifact.strategyConfig as any)?.deterministicSignals
-    );
+    const stratCfg = (ctx.artifact.strategyConfig || {}) as Record<string, unknown>;
+    const execCfg = (ctx.artifact.executionConfig || {}) as Record<string, unknown>;
+    const modelArt = (ctx.artifact.modelArtifact || {}) as Record<string, unknown>;
+
+    const hasDet = !!(stratCfg.deterministicSignal || stratCfg.deterministicSignals);
     if (!hasDet && ctx.candles.length < 15) {
       return {
         snapshot: { direction: 'FLAT' },
@@ -1355,10 +1395,10 @@ export class ShadowOrchestrator {
 
     // Extract candidate strategy configuration
     const strategyConfig = {
-      ...(ctx.artifact.strategyConfig || {}),
-      ...(ctx.artifact.executionConfig || {}),
-      deterministicSignal: (ctx.artifact.strategyConfig as any)?.deterministicSignal,
-      deterministicSignals: (ctx.artifact.strategyConfig as any)?.deterministicSignals,
+      ...stratCfg,
+      ...execCfg,
+      deterministicSignal: stratCfg.deterministicSignal,
+      deterministicSignals: stratCfg.deterministicSignals,
       minMtfScore: ctx.artifact.executionConfig?.minMtfScore,
       stopLossAtrMultiplier: ctx.artifact.executionConfig?.stopLossAtrMultiplier,
       sizingMultiplier: ctx.artifact.executionConfig?.sizingMultiplier,
@@ -1368,14 +1408,14 @@ export class ShadowOrchestrator {
       regimeMode: ctx.artifact.executionConfig?.regimeMode,
       modelArtifact: ctx.artifact.modelArtifact,
       scalerArtifact: ctx.artifact.scalerArtifact,
-      modelWeights: (ctx.artifact as any).modelWeights || (ctx.artifact.modelArtifact as any)?.weights,
+      modelWeights: (ctx.artifact as unknown as Record<string, unknown>).modelWeights || modelArt.weights,
     };
 
     const signalSetup = SignalGenerator.generateSignal({
       symbol,
-      executionCandles: ctx.candles,
+      executionCandles: ctx.candles.length > 200 ? ctx.candles.slice(-200) : ctx.candles,
       strategyConfig,
-      scoringWeights: (ctx.artifact.strategyConfig as any)?.scoringWeights,
+      scoringWeights: stratCfg.scoringWeights as Record<string, number> | undefined,
       minimumCandles: hasDet ? 1 : 15,
     });
 
@@ -1383,9 +1423,9 @@ export class ShadowOrchestrator {
     const isShort = signalSetup.direction === Direction.BEARISH;
     const rawRequiredScore =
       ctx.artifact.executionConfig?.minMtfScore ??
-      (ctx.artifact.strategyConfig as any)?.minMtfScore ??
-      (ctx.artifact.executionConfig as any)?.minScore ??
-      (ctx.artifact.strategyConfig as any)?.minScore;
+      (typeof stratCfg.minMtfScore === 'number' ? stratCfg.minMtfScore : undefined) ??
+      (typeof execCfg.minScore === 'number' ? execCfg.minScore : undefined) ??
+      (typeof stratCfg.minScore === 'number' ? stratCfg.minScore : undefined);
 
     if (!hasDet && (typeof rawRequiredScore !== 'number' || !Number.isFinite(rawRequiredScore))) {
       throw new Error(
