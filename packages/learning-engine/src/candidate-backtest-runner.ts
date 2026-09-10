@@ -43,6 +43,7 @@ export interface ICandidateBacktestOptions {
   timeframe?: string;
   initialCapital?: number;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+  executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
   provenance?: {
     trainingDatasetHash?: string;
     validationDatasetHash?: string;
@@ -63,6 +64,7 @@ export interface IDeterministicTestFixtureOptions {
   minimumCandles?: number;
   warmupBars?: number;
   symbol?: string;
+  executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
   timeframe?: string;
   initialCapital?: number;
 }
@@ -215,6 +217,7 @@ export class CandidateBacktestRunner {
             datasetHash: resolvedHash,
             symbol: options?.symbol || options?.marketDataset?.symbol || options?.dataset?.symbol,
             riskConfig: options?.riskConfig,
+            executionConfig: options?.executionConfig,
             provenance: options?.provenance,
           });
 

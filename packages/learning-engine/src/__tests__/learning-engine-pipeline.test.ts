@@ -79,6 +79,8 @@ describe('LearningEngine Pipeline', () => {
             volume: 120,
           },
         ],
+        label: isWin ? 1 : 0,
+        labelBinary: isWin ? 1 : 0,
       } as any;
     });
   };

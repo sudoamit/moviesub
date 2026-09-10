@@ -153,14 +153,20 @@ function createReliabilityCandidate(candidateId: string, minMtfScore = 50) {
       ambiguityMode: 'CONSERVATIVE',
       latencyMs: 10,
       minMtfScore,
+      stopLossAtrMultiplier: 1.0,
+      sizingMultiplier: 1.0,
     },
     strategyConfig: {
       timeframe: '15m',
       minMtfScore,
+      stopLossAtrMultiplier: 1.0,
+      sizingMultiplier: 1.0,
     },
     change: {
       description: 'Reliability candidate test change',
       minMtfScore,
+      stopLossAtrMultiplier: 1.0,
+      sizingMultiplier: 1.0,
     },
   } as any;
 }

@@ -114,7 +114,10 @@ export class LearningEngine {
     // 6. Train Canonical ML Model strictly on Train slice consuming fitted TemporalFeatureScaler
     const scaler = new TemporalFeatureScaler();
     scaler.fit(trainSlice);
-    const modelArtifact = ModelTrainer.trainModel(trainSlice, { scaler });
+    const modelArtifact = ModelTrainer.trainModel(trainSlice, {
+      scaler,
+      featureNames: featureSelection.retainedFeatures,
+    });
 
     // 7. Domain Metrics on Train slice
     RegimePerformanceAnalyzer.analyze(trainSlice);

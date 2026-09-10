@@ -1,3 +1,4 @@
+import { CANONICAL_FEATURE_NAMES_V2 } from '@quant/trading-engine';
 import { FeatureAnalyzer } from './feature-analysis';
 import { FeatureSelectionResult, TradingExperience } from './types';
 
@@ -21,7 +22,26 @@ export class FeatureSelector {
     const retainedFeatures: string[] = [];
     const prunedFeatures: string[] = [];
 
+    // Determine available features in experiences
+    const availableFeatures = new Set<string>();
+    for (const e of experiences as any[]) {
+      const q = e.features ?? e.marketState?.quant;
+      if (Array.isArray(q)) {
+        for (const name of CANONICAL_FEATURE_NAMES_V2) availableFeatures.add(name);
+        break;
+      } else if (q && typeof q === 'object') {
+        for (const k of Object.keys(q)) {
+          if (typeof q[k] === 'number' && Number.isFinite(q[k])) {
+            availableFeatures.add(k);
+          }
+        }
+      }
+    }
+
     for (const item of importances) {
+      if (availableFeatures.size > 0 && !availableFeatures.has(item.featureName)) {
+        continue;
+      }
       if (item.importanceScore >= minImportanceThreshold) {
         retainedFeatures.push(item.featureName);
       } else {
@@ -29,14 +49,20 @@ export class FeatureSelector {
       }
     }
 
-    // Always preserve core SMC features even if current sample is small
+    // Preserve core SMC features if present in dataset
     const coreMustRetain = ['smcScore', 'mtfAlignment', 'obStrength', 'liquiditySweep'];
     for (const core of coreMustRetain) {
-      if (!retainedFeatures.includes(core)) {
-        retainedFeatures.push(core);
-        const pIdx = prunedFeatures.indexOf(core);
-        if (pIdx >= 0) prunedFeatures.splice(pIdx, 1);
+      if (availableFeatures.size === 0 || availableFeatures.has(core)) {
+        if (!retainedFeatures.includes(core)) {
+          retainedFeatures.push(core);
+          const pIdx = prunedFeatures.indexOf(core);
+          if (pIdx >= 0) prunedFeatures.splice(pIdx, 1);
+        }
       }
+    }
+
+    if (retainedFeatures.length === 0 && availableFeatures.size > 0) {
+      retainedFeatures.push(...Array.from(availableFeatures));
     }
 
     // Evaluate feature subset performance experimentally on retained dimensions

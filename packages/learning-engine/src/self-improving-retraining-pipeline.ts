@@ -182,6 +182,17 @@ export class SelfImprovingRetrainingPipeline {
       throw new Error('MISSING_TIMEFRAME: config.timeframe must be a non-empty string');
     }
 
+    // Strict validation of candidate validation acceptance criteria (FAIL CLOSED)
+    if (config.minValidationTrades === undefined || typeof config.minValidationTrades !== 'number' || !Number.isFinite(config.minValidationTrades)) {
+      throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minValidationTrades must be an explicit finite number');
+    }
+    if (config.minValidationExpectancyR === undefined || typeof config.minValidationExpectancyR !== 'number' || !Number.isFinite(config.minValidationExpectancyR)) {
+      throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minValidationExpectancyR must be an explicit finite number');
+    }
+    if (config.minValidationProfitFactor === undefined || typeof config.minValidationProfitFactor !== 'number' || !Number.isFinite(config.minValidationProfitFactor)) {
+      throw new Error('MISSING_VALIDATION_ACCEPTANCE_CRITERIA: config.minValidationProfitFactor must be an explicit finite number');
+    }
+
     const configHash = crypto.createHash('sha256').update(canonicalJsonStringify(config)).digest('hex').substring(0, 16);
     const mktHash = DatasetManager.requireCanonicalMarketDatasetHash(
       candles as ICandle[],
@@ -245,6 +256,7 @@ export class SelfImprovingRetrainingPipeline {
       for (const hyp of hypotheses) {
         const trainedModel = ModelTrainer.trainModel(trainSlice as any, {
           scaler: trainScaler,
+          featureNames: hyp.selectedFeatures ?? selectedFeatures,
           epochs: (hyp.modelHyperparameters?.epochs as number) ?? 50,
           learningRate: (hyp.modelHyperparameters?.learningRate as number) ?? 0.05,
           l2Lambda: (hyp.modelHyperparameters?.l2Lambda as number) ?? 0.01,
@@ -396,6 +408,8 @@ export class SelfImprovingRetrainingPipeline {
             decisionTimestamp: e.decisionTimestamp,
             labelStartTimestamp: e.labelStartTimestamp,
             labelEndTimestamp: e.labelEndTimestamp,
+            label: e.label,
+            labelBinary: e.label,
             outcome: {
               pnlR: e.outcomeR,
               realizedR: e.outcomeR,
@@ -586,13 +600,14 @@ export class SelfImprovingRetrainingPipeline {
       // 10. Atomic ModelRegistry Transaction Registration
       if (createdArtifacts.length > 0) {
         currentStatus = 'REGISTERED';
+        const requirePersistence = Boolean(ModelRegistry.getPersistencePath());
         ModelRegistry.executeTransaction(
           () => {
             for (const artifact of createdArtifacts) {
               ModelRegistry.registerCandidateArtifact(artifact);
             }
           },
-          { requirePersistence: false },
+          { requirePersistence },
         );
       }
 
@@ -667,6 +682,34 @@ export class SelfImprovingRetrainingPipeline {
     historicalExpectancy?: number,
   ): StrategyCandidate {
     const featSchemaVer = typeof modelArtifact.featureSchemaVersion === 'string' ? modelArtifact.featureSchemaVersion : '2.0';
+
+    const minMtf =
+      (hyp.entryFilters?.minMtfScore as number) ??
+      (hyp.parameterChanges?.minMtfScore as number) ??
+      (hyp.parameterChanges?.minScore as number) ??
+      config.executionConfig.minMtfScore;
+
+    if (minMtf === undefined || !Number.isFinite(minMtf)) {
+      throw new Error(`MISSING_MIN_MTF_SCORE: Candidate hypothesis '${hyp.candidateId}' lacks explicit minMtfScore`);
+    }
+
+    const stopLossMultiplier =
+      (hyp.parameterChanges?.stopLossAtrMultiplier as number) ??
+      (hyp.exitOverrides?.stopLossAtrMultiplier as number) ??
+      config.executionConfig.stopLossAtrMultiplier;
+
+    if (stopLossMultiplier === undefined || !Number.isFinite(stopLossMultiplier) || stopLossMultiplier <= 0) {
+      throw new Error(`MISSING_STOP_LOSS_ATR_MULTIPLIER: Candidate hypothesis '${hyp.candidateId}' lacks explicit stopLossAtrMultiplier`);
+    }
+
+    const sizingMult =
+      (hyp.parameterChanges?.sizingMultiplier as number) ??
+      config.executionConfig.sizingMultiplier;
+
+    if (sizingMult === undefined || !Number.isFinite(sizingMult) || sizingMult <= 0) {
+      throw new Error(`MISSING_SIZING_MULTIPLIER: Candidate hypothesis '${hyp.candidateId}' lacks explicit sizingMultiplier`);
+    }
+
     return {
       id: hyp.candidateId,
       baseStrategyVersion: hyp.baseStrategyVersion,
@@ -681,7 +724,13 @@ export class SelfImprovingRetrainingPipeline {
         selectedFeatures: modelArtifact.selectedFeatures,
         featureSchemaHash: modelArtifact.featureSchemaHash,
         featureSchemaVersion: featSchemaVer,
-        minMtfScore: (hyp.entryFilters?.minMtfScore as number) ?? (hyp.parameterChanges?.minMtfScore as number) ?? 0,
+        minMtfScore: minMtf,
+        stopLossAtrMultiplier: stopLossMultiplier,
+        sizingMultiplier: sizingMult,
+        fillModel: config.executionConfig.fillModel,
+        ambiguityMode: config.executionConfig.ambiguityMode,
+        latencyMs: config.executionConfig.latencyMs,
+        symbol: config.symbol,
       },
       evidence: {
         sampleSize: sampleCount,
@@ -697,6 +746,9 @@ export class SelfImprovingRetrainingPipeline {
         candidateId: hyp.candidateId,
         candidateVersion: hyp.candidateVersion,
         strategyVersion: hyp.baseStrategyVersion,
+        minMtfScore: minMtf,
+        stopLossAtrMultiplier: stopLossMultiplier,
+        sizingMultiplier: sizingMult,
       },
       status: 'GENERATED',
       createdAt: new Date(),

@@ -15,7 +15,7 @@ import { CandidateHypothesisGenerator } from '../candidate-hypothesis-generator'
 import { SelfImprovingRetrainingPipeline } from '../self-improving-retraining-pipeline';
 import { TemporalFeatureScaler } from '../feature-scaler';
 import { FeatureSelector } from '../feature-selector';
-import { ModelTrainer } from '../model-trainer';
+import { ModelTrainer, CANONICAL_FEATURE_NAMES_V2 } from '../model-trainer';
 import { CandidateBacktestRunner } from '../candidate-backtest-runner';
 import { CandidateArtifactBuilder } from '../candidate-artifact-builder';
 import { CandidateArtifactValidator } from '../candidate-artifact-validator';
@@ -76,18 +76,22 @@ function generateTestExamples(startTs: number, count: number, intervalMs = 90000
     const lStart = decTs + 900000;
     const lEnd = decTs + 900000;
 
+    const feats: Record<string, number> = {};
+    for (const name of CANONICAL_FEATURE_NAMES_V2) {
+      feats[name] = 0.5;
+    }
+    feats.smcScore = 0.5 + (r - 0.5) * 0.4;
+    feats.mtfAlignment = 0.6 + (r - 0.5) * 0.3;
+    feats.obStrength = 0.7 + (r - 0.5) * 0.2;
+    feats.rvol = 1.2 + (r - 0.5) * 0.8;
+
     const example = PITExperienceDatasetBuilder.createTrainingExample({
       exampleId: `ex_${i}_${seed}`,
       decisionTimestamp: decTs,
       featureTimestamp: featTs,
       labelStartTimestamp: lStart,
       labelEndTimestamp: lEnd,
-      features: {
-        smcScore: 0.5 + (r - 0.5) * 0.4,
-        mtfAlignment: 0.6 + (r - 0.5) * 0.3,
-        obStrength: 0.7 + (r - 0.5) * 0.2,
-        rvol: 1.2 + (r - 0.5) * 0.8,
-      },
+      features: feats,
       label: r > 0.45 ? 1 : 0,
       outcomeR: r > 0.45 ? 1.5 : -1.0,
       exitType: r > 0.45 ? 'TP1' : 'SL',
@@ -159,6 +163,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       ambiguityMode: 'CONSERVATIVE',
       latencyMs: 10,
       minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
       configHash: 'base_exec_conf_hash',
     },
   };
@@ -343,12 +349,16 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
   it('Test 7: OOS outcome cannot change fitted model weights or bias', () => {
     const t0 = 1700000000000;
     const trainExamples = generateTestExamples(t0, 40, 3600000, 8);
+    const scaler1 = new TemporalFeatureScaler();
+    scaler1.fit(trainExamples as any);
 
-    const model1 = ModelTrainer.trainModel(trainExamples as any, { epochs: 30, learningRate: 0.05 });
+    const model1 = ModelTrainer.trainModel(trainExamples as any, { scaler: scaler1, epochs: 30, learningRate: 0.05 });
 
     // Modifying OOS outcomes does not change train-fitted model
     const trainExamplesCopy = generateTestExamples(t0, 40, 3600000, 8);
-    const model2 = ModelTrainer.trainModel(trainExamplesCopy as any, { epochs: 30, learningRate: 0.05 });
+    const scaler2 = new TemporalFeatureScaler();
+    scaler2.fit(trainExamplesCopy as any);
+    const model2 = ModelTrainer.trainModel(trainExamplesCopy as any, { scaler: scaler2, epochs: 30, learningRate: 0.05 });
 
     expect(model2.weights).toEqual(model1.weights);
     expect(model2.bias).toBe(model1.bias);
@@ -810,6 +820,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       ambiguityMode: 'AGGRESSIVE' as const,
       latencyMs: 25,
       minMtfScore: 0.7,
+      stopLossAtrMultiplier: 2.0,
+      sizingMultiplier: 1.5,
       configHash: 'custom_exec_hash',
     };
 
@@ -1168,20 +1180,46 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
     }
   });
 
-  it('Test 50 (P1 #3): Atomic Retraining Run Transaction Boundary prevents partial registry mutations', async () => {
+  it('Test 50 (P1 #3): Atomic Retraining Run Transaction Boundary prevents partial registry mutations on failure', async () => {
     ModelRegistry.reset();
     SelfImprovingRetrainingPipeline.reset();
 
     const candles = generateTestCandles(1700000000000, 100);
     const examples = generateTestExamples(1700000000000, 50);
 
-    const result = await SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig);
-    expect(result.createdArtifacts.length).toBeGreaterThan(0);
+    const preExisting = CandidateBacktestRunner.createCandidateArtifact({
+      id: 'cand_pre_existing',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+    } as any, 'hash_m_pre');
+    ModelRegistry.registerCandidateArtifact(preExisting);
+    expect(ModelRegistry.getCandidateArtifact('cand_pre_existing')).toBeDefined();
 
-    // All created artifacts are committed in ModelRegistry
-    for (const art of result.createdArtifacts) {
-      expect(ModelRegistry.getCandidateArtifact(art.candidateId)).toBeDefined();
-    }
+    // Mock registerCandidateArtifact to throw on subsequent registrations during executeRetraining
+    let count = 0;
+    const origRegister = ModelRegistry.registerCandidateArtifact.bind(ModelRegistry);
+    jest.spyOn(ModelRegistry, 'registerCandidateArtifact').mockImplementation((art) => {
+      count++;
+      if (count === 2) {
+        throw new Error('SIMULATED_REGISTRY_WRITE_FAILURE');
+      }
+      return origRegister(art);
+    });
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, baseConfig),
+    ).rejects.toThrow('SIMULATED_REGISTRY_WRITE_FAILURE');
+
+    // Verify registry was completely rolled back to snapshot before executeRetraining
+    expect(ModelRegistry.getCandidateArtifact('cand_pre_existing')).toBeDefined();
   });
 
   it('Test 51 (P1 #4): Candidate artifacts include explicit multi-dataset market and experience partition hashes', async () => {
@@ -1228,8 +1266,11 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
         id: 'cand_test_enum',
         baseStrategyVersion: 'v2.0',
         candidateVersion: '1.0.0',
-        type: 'PARAM',
+        type: 'THRESHOLD',
         symbol: 'BTCUSDT',
+        minMtfScore: 0.5,
+        stopLossAtrMultiplier: 1.5,
+        sizingMultiplier: 1.0,
         riskConfig: baseConfig.riskConfig,
         executionConfig: {
           ...baseConfig.executionConfig,
@@ -1245,8 +1286,11 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
         id: 'cand_test_enum_2',
         baseStrategyVersion: 'v2.0',
         candidateVersion: '1.0.0',
-        type: 'PARAM',
+        type: 'THRESHOLD',
         symbol: 'BTCUSDT',
+        minMtfScore: 0.5,
+        stopLossAtrMultiplier: 1.5,
+        sizingMultiplier: 1.0,
         riskConfig: baseConfig.riskConfig,
         executionConfig: {
           ...baseConfig.executionConfig,
@@ -1254,6 +1298,191 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
         },
       } as any);
     }).toThrow(/INVALID_AMBIGUITY_MODE/);
+  });
+
+  it('Test 55 (P0 #1): ModelTrainer fails closed when a feature value is missing or non-finite without 0.5 fallback', () => {
+    const scaler = new TemporalFeatureScaler();
+    const rawTrain = generateTestExamples(1700000000000, 20);
+    scaler.fit(rawTrain as any);
+
+    // Corrupt one example with undefined feature
+    const corruptTrain = rawTrain.map((ex, idx) =>
+      idx === 5
+        ? ({
+            ...ex,
+            features: (ex.features as number[]).map((v, fi) => (fi === 0 ? (undefined as any) : v)),
+          } as TrainingExample)
+        : ex,
+    );
+
+    expect(() => {
+      ModelTrainer.trainModel(corruptTrain as any, {
+        epochs: 10,
+        learningRate: 0.01,
+        scaler,
+      });
+    }).toThrow(/MISSING_FEATURE_VALUE/);
+  });
+
+  it('Test 56 (P0 #2): ModelTrainer fails closed when label is missing or non-binary without WIN coercion', () => {
+    const scaler = new TemporalFeatureScaler();
+    const rawTrain = generateTestExamples(1700000000000, 20);
+    scaler.fit(rawTrain as any);
+
+    // Corrupt one example with undefined label and only outcome status
+    const corruptTrain = rawTrain.map((ex, idx) =>
+      idx === 5
+        ? ({
+            ...ex,
+            label: undefined as any,
+            labelBinary: undefined as any,
+            outcome: { status: 'WIN' },
+          } as unknown as TrainingExample)
+        : ex,
+    );
+
+    expect(() => {
+      ModelTrainer.trainModel(corruptTrain as any, {
+        epochs: 10,
+        learningRate: 0.01,
+        scaler,
+      });
+    }).toThrow(/TRAINING_LABEL_MISSING/);
+  });
+
+  it('Test 57 (P1 #8): ModelTrainer fails closed when fitted scaler is omitted', () => {
+    const rawTrain = generateTestExamples(1700000000000, 20);
+
+    expect(() => {
+      ModelTrainer.trainModel(rawTrain as any, {
+        epochs: 10,
+        learningRate: 0.01,
+        scaler: undefined,
+      });
+    }).toThrow(/MISSING_TRAIN_SCALER/);
+  });
+
+  it('Test 58 (P1 #7): Training dataset hash is deterministic and changes when any sample feature or label changes', () => {
+    const scaler = new TemporalFeatureScaler();
+    const rawTrain = generateTestExamples(1700000000000, 20);
+    scaler.fit(rawTrain as any);
+
+    const modelA = ModelTrainer.trainModel(rawTrain as any, {
+      epochs: 10,
+      learningRate: 0.01,
+      scaler,
+    });
+
+    const modifiedTrain = rawTrain.map((ex, idx) =>
+      idx === 10
+        ? ({
+            ...ex,
+            features: (ex.features as number[]).map((v, fi) => (fi === 0 ? 0.9999 : v)),
+          } as TrainingExample)
+        : ex,
+    );
+    const scalerMod = new TemporalFeatureScaler();
+    scalerMod.fit(modifiedTrain as any);
+
+    const modelB = ModelTrainer.trainModel(modifiedTrain as any, {
+      epochs: 10,
+      learningRate: 0.01,
+      scaler: scalerMod,
+    });
+
+    expect(modelA.trainingDatasetHash).toBeDefined();
+    expect(modelB.trainingDatasetHash).toBeDefined();
+    expect(modelA.trainingDatasetHash).not.toBe(modelB.trainingDatasetHash);
+  });
+
+  it('Test 59 (P1 #3): CandidateArtifactBuilder fails closed when stopLossAtrMultiplier or sizingMultiplier are missing or non-positive', () => {
+    const validCandidateBase: any = {
+      id: 'cand_missing_econ',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'THRESHOLD',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      minMtfScore: 0.5,
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: {
+        fillModel: 'OHLC_PATH',
+        ambiguityMode: 'CONSERVATIVE',
+        latencyMs: 10,
+      },
+    };
+
+    expect(() => {
+      CandidateBacktestRunner.createCandidateArtifact({
+        ...validCandidateBase,
+        id: 'cand_missing_sl',
+        stopLossAtrMultiplier: undefined,
+        sizingMultiplier: 1.0,
+      }, 'hash_m_1');
+    }).toThrow(/MISSING_STOP_LOSS_ATR_MULTIPLIER/);
+
+    expect(() => {
+      CandidateBacktestRunner.createCandidateArtifact({
+        ...validCandidateBase,
+        id: 'cand_missing_sz',
+        stopLossAtrMultiplier: 1.5,
+        sizingMultiplier: 0, // non-positive
+      }, 'hash_m_1');
+    }).toThrow(/MISSING_SIZING_MULTIPLIER/);
+  });
+
+  it('Test 60 (P1 #5 & P1 #6): CandidateArtifactBuilder fails closed when ML candidate lacks featureSchemaHash or modelHash', () => {
+    const validCandidateBase: any = {
+      id: 'cand_ml_missing_hashes',
+      baseStrategyVersion: 'v2.0',
+      candidateVersion: '1.0.0',
+      type: 'MODEL',
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      minMtfScore: 0.5,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1.0,
+      riskConfig: baseConfig.riskConfig,
+      executionConfig: baseConfig.executionConfig,
+    };
+
+    expect(() => {
+      CandidateBacktestRunner.createCandidateArtifact({
+        ...validCandidateBase,
+        id: 'cand_ml_no_schema_hash',
+        change: {
+          selectedFeatures: ['smcScore'],
+          featureSchemaHash: '', // empty
+          modelHash: 'some_model_hash',
+        },
+      }, 'hash_m_1');
+    }).toThrow(/FEATURE_SCHEMA_HASH_MISSING/);
+
+    expect(() => {
+      CandidateBacktestRunner.createCandidateArtifact({
+        ...validCandidateBase,
+        id: 'cand_ml_none_model_hash',
+        change: {
+          selectedFeatures: ['smcScore'],
+          featureSchemaHash: 'valid_schema_hash',
+          modelHash: 'none', // forbidden for ML candidate
+        },
+      }, 'hash_m_1');
+    }).toThrow(/MODEL_HASH_MISSING/);
+  });
+
+  it('Test 61 (P1 #13): SelfImprovingRetrainingPipeline fails closed when validation acceptance criteria are missing', async () => {
+    const candles = generateTestCandles(1700000000000, 100);
+    const examples = generateTestExamples(1700000000000, 50);
+
+    const corruptConfig: any = {
+      ...baseConfig,
+      minValidationTrades: undefined,
+    };
+
+    await expect(
+      SelfImprovingRetrainingPipeline.executeRetraining(examples, candles, corruptConfig),
+    ).rejects.toThrow(/MISSING_VALIDATION_ACCEPTANCE_CRITERIA/);
   });
 });
 

@@ -320,7 +320,10 @@ export class WalkForwardValidator {
           scalerParams[feat] = { mean: stats.mean, std: stats.std, min: stats.min, max: stats.max };
         }
       }
-      const modelArtifact = ModelTrainer.trainModel(trainSlice, { scaler });
+      const modelArtifact = ModelTrainer.trainModel(trainSlice, {
+        scaler,
+        featureNames: foldSelection.retainedFeatures,
+      });
       if (!modelArtifact || !modelArtifact.modelVersion) {
         throw new Error('INVALID_MODEL_ARTIFACT: Model artifact must contain a valid modelVersion');
       }

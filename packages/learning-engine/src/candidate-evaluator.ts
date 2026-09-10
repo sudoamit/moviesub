@@ -41,10 +41,14 @@ export class CandidateEvaluator {
     riskConfigParam?: any,
     executionConfigParam?: any,
   ): StrategyCandidate {
-    const riskConfig = riskConfigParam || {
-      initialCapital: 100000,
-      maxRiskPerTrade: 0.01,
-      partialExitPolicy: {
+    const riskConfig = {
+      initialCapital: (riskConfigParam && typeof riskConfigParam.initialCapital === 'number' && Number.isFinite(riskConfigParam.initialCapital) && riskConfigParam.initialCapital > 0)
+        ? riskConfigParam.initialCapital
+        : 100000,
+      maxRiskPerTrade: (riskConfigParam && typeof riskConfigParam.maxRiskPerTrade === 'number' && Number.isFinite(riskConfigParam.maxRiskPerTrade) && riskConfigParam.maxRiskPerTrade > 0)
+        ? riskConfigParam.maxRiskPerTrade
+        : 0.01,
+      partialExitPolicy: riskConfigParam?.partialExitPolicy || {
         tp1Ratio: 0.33,
         tp2Ratio: 0.33,
         tp3Ratio: 0.34,
@@ -153,10 +157,14 @@ export class CandidateEvaluator {
       (candidate as any).symbol ||
       (candidate as any).change?.symbol ||
       'BTCUSDT';
-    const resolvedRisk =
-      (candidate as any).riskConfig ||
-      (candidate as any).change?.riskConfig ||
-      defaultRisk;
+    const candRisk = (candidate as any).riskConfig || (candidate as any).change?.riskConfig || {};
+    const resolvedRisk = {
+      ...defaultRisk,
+      ...candRisk,
+      initialCapital: (typeof candRisk.initialCapital === 'number' && Number.isFinite(candRisk.initialCapital) && candRisk.initialCapital > 0)
+        ? candRisk.initialCapital
+        : defaultRisk.initialCapital,
+    };
 
     // 1. Evaluate baseline strategy benchmark on authoritative BacktestSimulator using continuous market candles
     const baselineCandidate =
