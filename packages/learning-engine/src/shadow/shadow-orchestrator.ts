@@ -322,9 +322,7 @@ export class ShadowOrchestrator {
       options?.baselineExpectancyR ??
       persistedBaselines?.expectancyR ??
       (validatedArtifact as any).evidence?.expectancyAfterHistorical ??
-      (validatedArtifact as any).evidence?.expectancyBefore ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.expectancyAfterHistorical ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.expectancyBefore;
+      (validatedArtifact as any).evidence?.expectancyBefore;
 
     if (baselineExpectancy === undefined || typeof baselineExpectancy !== 'number' || !Number.isFinite(baselineExpectancy)) {
       throw new Error(
@@ -335,8 +333,7 @@ export class ShadowOrchestrator {
     const baselineWinRate =
       options?.baselineWinRate ??
       persistedBaselines?.winRate ??
-      (validatedArtifact as any).evidence?.winRate ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.winRate;
+      (validatedArtifact as any).evidence?.winRate;
 
     if (baselineWinRate === undefined || typeof baselineWinRate !== 'number' || !Number.isFinite(baselineWinRate)) {
       throw new Error(
@@ -347,8 +344,7 @@ export class ShadowOrchestrator {
     const baselineProfitFactor =
       options?.baselineProfitFactor ??
       persistedBaselines?.profitFactor ??
-      (validatedArtifact as any).evidence?.profitFactor ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.profitFactor;
+      (validatedArtifact as any).evidence?.profitFactor;
 
     if (baselineProfitFactor === undefined || typeof baselineProfitFactor !== 'number' || !Number.isFinite(baselineProfitFactor)) {
       throw new Error(
@@ -364,10 +360,7 @@ export class ShadowOrchestrator {
     const rawRefRegime =
       persistedRefRegime ??
       (validatedArtifact as any).evidence?.referenceRegime ??
-      (validatedArtifact as any).evidence?.primaryRegime ??
-      (validatedArtifact.strategyConfig as any)?.referenceRegime ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.referenceRegime ??
-      (validatedArtifact.strategyConfig as any)?.evidence?.primaryRegime;
+      (validatedArtifact as any).evidence?.primaryRegime;
 
     if (!rawRefRegime || !rawRefRegime.volatilityRegime) {
       throw new Error(
@@ -1139,6 +1132,10 @@ export class ShadowOrchestrator {
     const startTimestamp = observations.length > 0 ? observations[0].marketTimestamp : 0;
     const endTimestamp = observations.length > 0 ? observations[observations.length - 1].marketTimestamp : 0;
     const shadowDatasetHash = ctx.ledger.getShadowDatasetHash();
+    const windowConfig = ctx.ledger.getWindowConfig() || this.options.windowConfig;
+    const windowConfigHash = windowConfig
+      ? createHash('sha256').update(canonicalJsonStringify(windowConfig)).digest('hex')
+      : undefined;
 
     const rawEvidence = {
       candidateId: ctx.artifact.candidateId,
@@ -1154,6 +1151,8 @@ export class ShadowOrchestrator {
       healthState: health,
       marketDatasetHash: shadowDatasetHash,
       shadowDatasetHash,
+      windowConfigHash,
+      windowConfig,
       stateHash: ctx.ledger.getStateHash(),
     };
 

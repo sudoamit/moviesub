@@ -5,7 +5,7 @@ import { ShadowEvaluationMetrics } from '../types';
 import { RegimeObservation } from './regime-drift-detector';
 import { FeatureDriftBaseline } from './feature-drift-detector';
 
-export const SHADOW_SCHEMA_VERSION = '1.0';
+export const SHADOW_SCHEMA_VERSION = '1.1';
 
 export type ShadowStatus =
   | 'INSUFFICIENT_EVIDENCE'
@@ -296,6 +296,8 @@ export interface ShadowEvaluationEvidence {
   readonly healthState: ShadowHealthState;
   readonly marketDatasetHash: string;
   readonly shadowDatasetHash: string;
+  readonly windowConfigHash?: string;
+  readonly windowConfig?: ShadowWindowConfig;
   readonly stateHash: string;
   readonly evidenceHash: string;
 }

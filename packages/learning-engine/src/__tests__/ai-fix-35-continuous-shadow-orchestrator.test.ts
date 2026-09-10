@@ -1081,23 +1081,124 @@ describe('AI Fix 35 — Continuous Shadow Orchestrator + Drift Detection', () =>
       const ledgerCont = orchContinuous.getCandidateLedger(candidateId)!;
       const ledgerRest = orchRestart.getCandidateLedger(candidateId)!;
 
-      // Assert equivalence of observations, orders, fills, trades, and market hash
-      expect(ledgerRest.getObservations().length).toBe(ledgerCont.getObservations().length);
-      expect(ledgerRest.getOrders().length).toBe(ledgerCont.getOrders().length);
-      expect(ledgerRest.getFills().length).toBe(ledgerCont.getFills().length);
-      expect(ledgerRest.getTrades().length).toBe(ledgerCont.getTrades().length);
+      // Full State Equivalence: Compare canonical State Hash & Market Dataset Hash
+      expect(ledgerRest.getStateHash()).toBe(ledgerCont.getStateHash());
       expect(ledgerRest.getShadowMarketDatasetHash()).toBe(ledgerCont.getShadowMarketDatasetHash());
+      expect(ledgerRest.getShadowFeatureObservationHash()).toBe(ledgerCont.getShadowFeatureObservationHash());
+      expect(ledgerRest.getShadowExecutionEvidenceHash()).toBe(ledgerCont.getShadowExecutionEvidenceHash());
 
-      // If positions exist, verify lot equivalence
-      const lotCont = ledgerCont.getActiveLot();
-      const lotRest = ledgerRest.getActiveLot();
-      if (lotCont && lotRest) {
-        expect(lotRest.remainingQuantity).toBe(lotCont.remainingQuantity);
-        expect(lotRest.currentStopLoss).toBe(lotCont.currentStopLoss);
-      } else {
-        expect(lotCont).toBeNull();
-        expect(lotRest).toBeNull();
-      }
+      // Canonical Evaluation Evidence Equivalence
+      const evidenceCont = orchContinuous.generateEvaluationEvidence(candidateId, fixedTime + 40 * 60000);
+      const evidenceRest = orchRestart.generateEvaluationEvidence(candidateId, fixedTime + 40 * 60000);
+      expect(evidenceRest.evidenceHash).toBe(evidenceCont.evidenceHash);
+      expect(evidenceRest.stateHash).toBe(evidenceCont.stateHash);
+      expect(evidenceRest.marketDatasetHash).toBe(evidenceCont.marketDatasetHash);
+      expect(evidenceRest.observationCount).toBe(evidenceCont.observationCount);
+      expect(evidenceRest.completedTradeCount).toBe(evidenceCont.completedTradeCount);
+      expect(evidenceRest.performanceMetrics).toEqual(evidenceCont.performanceMetrics);
+
+      // Detailed Array Equivalence: Observations, Orders, Fills, Trades, Sequences, Lots
+      expect(ledgerRest.getObservations()).toEqual(ledgerCont.getObservations());
+      expect(ledgerRest.getOrders()).toEqual(ledgerCont.getOrders());
+      expect(ledgerRest.getFills()).toEqual(ledgerCont.getFills());
+      expect(ledgerRest.getTrades()).toEqual(ledgerCont.getTrades());
+      expect(ledgerRest.getExecutionSequences()).toEqual(ledgerCont.getExecutionSequences());
+      expect(ledgerRest.getActiveLot()).toEqual(ledgerCont.getActiveLot());
+    });
+
+    it('Test 32: P1 Strict semantic validation rejects malformed persisted optional fields fail-closed', () => {
+      const candidateId = 'cand-malformed-fields';
+      const candidate = createDummyCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const makeBaseData = () => ({
+        version: '1.1',
+        candidateId,
+        candidateVersion: '1.0.0',
+        strategyVersion: '1.0.0',
+        featureSchemaHash: artifact.featureSchemaHash,
+        artifactHash: artifact.artifactHash,
+        symbol: 'BTCUSDT',
+        cumulativeMarketHash: 'valid_hash',
+        lastMarketTimestamp: 1700000000000,
+        observations: [],
+        orders: [],
+        fills: [],
+        trades: [],
+        events: [],
+        health: {
+          status: 'HEALTHY',
+          degradationFactors: [],
+          updatedAt: Date.now(),
+        },
+      });
+
+      // 1. Malformed pendingEntrySignals (string instead of array)
+      const p1 = path.join(testDir, 'corrupt-signals.json');
+      fs.writeFileSync(p1, JSON.stringify({ ...makeBaseData(), pendingEntrySignals: 'corrupted' }), 'utf-8');
+      const orch1 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch1.startCandidate(candidateId, { persistenceFilePath: p1 })).toThrow(/SHADOW_LEDGER_CORRUPT/);
+
+      // 2. Malformed baselineMetrics (empty object missing required finite numbers)
+      const p2 = path.join(testDir, 'corrupt-baseline.json');
+      fs.writeFileSync(p2, JSON.stringify({ ...makeBaseData(), baselineMetrics: {} }), 'utf-8');
+      const orch2 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch2.startCandidate(candidateId, { persistenceFilePath: p2 })).toThrow(/SHADOW_LEDGER_CORRUPT/);
+
+      // 3. Malformed referenceRegime (invalid volatility regime string)
+      const p3 = path.join(testDir, 'corrupt-regime.json');
+      fs.writeFileSync(p3, JSON.stringify({ ...makeBaseData(), referenceRegime: { volatilityRegime: 'SUPER_HIGH' } }), 'utf-8');
+      const orch3 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch3.startCandidate(candidateId, { persistenceFilePath: p3 })).toThrow(/SHADOW_LEDGER_CORRUPT/);
+
+      // 4. Malformed windowConfig (negative window size)
+      const p4 = path.join(testDir, 'corrupt-window.json');
+      fs.writeFileSync(p4, JSON.stringify({ ...makeBaseData(), windowConfig: { shortWindowSize: -10, mediumWindowSize: 50, longWindowSize: 100 } }), 'utf-8');
+      const orch4 = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch4.startCandidate(candidateId, { persistenceFilePath: p4 })).toThrow(/SHADOW_LEDGER_CORRUPT/);
+    });
+
+    it('Test 33: P1 Schema version migration supports v1.0 and saves canonical v1.1', () => {
+      const candidateId = 'cand-schema-migration';
+      const candidate = createDummyCandidate(candidateId);
+      const artifact = CandidateBacktestRunner.createCandidateArtifact(candidate, 'hash_mkt_shadow_035');
+      ModelRegistry.registerCandidateArtifact(artifact);
+
+      const filePath = path.join(testDir, `shadow-${candidateId}.json`);
+
+      // Write valid v1.0 schema ledger file
+      const v1Data = {
+        version: '1.0',
+        candidateId,
+        candidateVersion: '1.0.0',
+        strategyVersion: '1.0.0',
+        featureSchemaHash: artifact.featureSchemaHash,
+        artifactHash: artifact.artifactHash,
+        symbol: 'BTCUSDT',
+        cumulativeMarketHash: 'valid_v1_hash',
+        lastMarketTimestamp: 1700000000000,
+        observations: [],
+        orders: [],
+        fills: [],
+        trades: [],
+        events: [],
+        health: {
+          status: 'HEALTHY',
+          degradationFactors: [],
+          updatedAt: Date.now(),
+        },
+      };
+
+      fs.writeFileSync(filePath, JSON.stringify(v1Data), 'utf-8');
+
+      // Hydrating v1.0 must succeed
+      const orch = new ShadowOrchestrator({ persistenceDir: testDir });
+      expect(() => orch.startCandidate(candidateId, { persistenceFilePath: filePath })).not.toThrow();
+
+      // Check saved file on disk: it must now have canonical v1.1 version
+      const savedContent = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      expect(savedContent.version).toBe('1.1');
     });
   });
 });

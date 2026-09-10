@@ -417,6 +417,7 @@ export class ShadowLedger {
       activeLot: this.activeLot,
       pendingOrdersCount: this.pendingOrders.length,
       pendingSignalsCount: this.pendingEntrySignals.size,
+      windowConfig: this.windowConfig,
       executionSequences: this.executionSequences,
       cumulativeMarketHash: this.cumulativeMarketHash,
     };
@@ -447,12 +448,12 @@ export class ShadowLedger {
     this.symbol = symbol.trim().toUpperCase();
   }
 
-  public getActiveLot(): Readonly<PositionLot> | null {
-    return this.activeLot ? deepFreeze({ ...this.activeLot }) : null;
+  public getActiveLot(): PositionLot | null {
+    return this.activeLot ? (deepFreeze({ ...this.activeLot }) as PositionLot) : null;
   }
 
   public setActiveLot(lot: PositionLot | null): void {
-    this.activeLot = lot ? deepFreeze({ ...lot }) : null;
+    this.activeLot = lot ? (deepFreeze({ ...lot }) as PositionLot) : null;
   }
 
   public getRecentCandles(): readonly ICandle[] {
@@ -474,7 +475,7 @@ export class ShadowLedger {
   public getPendingEntrySignals(): Map<string, ISignalSetup> {
     const copy = new Map<string, ISignalSetup>();
     for (const [k, v] of this.pendingEntrySignals.entries()) {
-      copy.set(k, { ...v });
+      copy.set(k, deepFreeze(JSON.parse(JSON.stringify(v))) as ISignalSetup);
     }
     return copy;
   }
@@ -483,7 +484,7 @@ export class ShadowLedger {
     this.pendingEntrySignals = new Map();
     const entries = signals instanceof Map ? signals.entries() : signals;
     for (const [k, v] of entries) {
-      this.pendingEntrySignals.set(k, deepFreeze({ ...v }));
+      this.pendingEntrySignals.set(k, deepFreeze(JSON.parse(JSON.stringify(v))) as ISignalSetup);
     }
   }
 
@@ -632,10 +633,11 @@ export class ShadowLedger {
         }
       }
 
-      // Version check
-      if (data.version !== SHADOW_SCHEMA_VERSION) {
+      // Version check with migration support for 1.0 -> 1.1
+      const supportedVersions = ['1.0', '1.1'];
+      if (!supportedVersions.includes(data.version)) {
         throw new Error(
-          `UNSUPPORTED_SHADOW_SCHEMA_VERSION: Schema version '${data.version}' is not supported (expected '${SHADOW_SCHEMA_VERSION}')`,
+          `UNSUPPORTED_SHADOW_SCHEMA_VERSION: Schema version '${data.version}' is not supported (expected one of [${supportedVersions.join(', ')}])`,
         );
       }
 
@@ -664,6 +666,87 @@ export class ShadowLedger {
         prevTs = obs.marketTimestamp;
       }
 
+      // Semantic validation of pendingEntrySignals if present
+      if (data.pendingEntrySignals !== undefined) {
+        if (!Array.isArray(data.pendingEntrySignals)) {
+          throw new Error('Corrupted pendingEntrySignals in shadow ledger file (expected array of entries)');
+        }
+        for (const entry of data.pendingEntrySignals) {
+          if (!Array.isArray(entry) || entry.length !== 2) {
+            throw new Error('Corrupted pendingEntrySignals entry format (expected [key, signal] tuple)');
+          }
+          const [key, signal] = entry;
+          if (typeof key !== 'string' || key.trim() === '') {
+            throw new Error('Corrupted pendingEntrySignals key (expected non-empty string)');
+          }
+          if (!signal || typeof signal !== 'object' || typeof signal.id !== 'string' || typeof signal.symbol !== 'string') {
+            throw new Error(`Corrupted pendingEntrySignals value for key '${key}'`);
+          }
+        }
+      }
+
+      // Semantic validation of baselineMetrics if present
+      if (data.baselineMetrics !== undefined) {
+        if (
+          !data.baselineMetrics ||
+          typeof data.baselineMetrics !== 'object' ||
+          typeof data.baselineMetrics.expectancyR !== 'number' ||
+          !Number.isFinite(data.baselineMetrics.expectancyR) ||
+          typeof data.baselineMetrics.winRate !== 'number' ||
+          !Number.isFinite(data.baselineMetrics.winRate) ||
+          typeof data.baselineMetrics.profitFactor !== 'number' ||
+          !Number.isFinite(data.baselineMetrics.profitFactor)
+        ) {
+          throw new Error('Corrupted baselineMetrics in shadow ledger file');
+        }
+      }
+
+      // Semantic validation of featureBaseline if present
+      if (data.featureBaseline !== undefined) {
+        if (
+          !data.featureBaseline ||
+          typeof data.featureBaseline !== 'object' ||
+          typeof data.featureBaseline.featureSchemaHash !== 'string' ||
+          !Array.isArray(data.featureBaseline.featureNames) ||
+          typeof data.featureBaseline.distributions !== 'object' ||
+          typeof data.featureBaseline.sampleCount !== 'number' ||
+          !Number.isFinite(data.featureBaseline.sampleCount) ||
+          data.featureBaseline.sampleCount <= 0
+        ) {
+          throw new Error('Corrupted featureBaseline in shadow ledger file');
+        }
+      }
+
+      // Semantic validation of referenceRegime if present
+      if (data.referenceRegime !== undefined) {
+        if (
+          !data.referenceRegime ||
+          typeof data.referenceRegime !== 'object' ||
+          !['LOW_VOLATILITY', 'NORMAL_VOLATILITY', 'HIGH_VOLATILITY'].includes(data.referenceRegime.volatilityRegime)
+        ) {
+          throw new Error('Corrupted referenceRegime in shadow ledger file');
+        }
+      }
+
+      // Semantic validation of windowConfig if present
+      if (data.windowConfig !== undefined) {
+        if (
+          !data.windowConfig ||
+          typeof data.windowConfig !== 'object' ||
+          typeof data.windowConfig.shortWindowSize !== 'number' ||
+          !Number.isFinite(data.windowConfig.shortWindowSize) ||
+          data.windowConfig.shortWindowSize <= 0 ||
+          typeof data.windowConfig.mediumWindowSize !== 'number' ||
+          !Number.isFinite(data.windowConfig.mediumWindowSize) ||
+          data.windowConfig.mediumWindowSize <= 0 ||
+          typeof data.windowConfig.longWindowSize !== 'number' ||
+          !Number.isFinite(data.windowConfig.longWindowSize) ||
+          data.windowConfig.longWindowSize <= 0
+        ) {
+          throw new Error('Corrupted windowConfig in shadow ledger file');
+        }
+      }
+
       // Atomic commit to in-memory state
       this.observations = data.observations.map((o) => deepFreeze({ ...o }) as ShadowObservation);
       this.orders = (data.orders || []).map((o) => deepFreeze({ ...o }) as IOrder);
@@ -680,7 +763,7 @@ export class ShadowLedger {
       this.recentCandles = (data.recentCandles || []).map((c) => deepFreeze({ ...c }) as ICandle);
       this.pendingOrders = (data.pendingOrders || []).map((o) => deepFreeze({ ...o }) as IOrder);
       this.pendingEntrySignals = new Map(
-        (data.pendingEntrySignals || []).map(([k, v]) => [k, deepFreeze({ ...v }) as ISignalSetup]),
+        (data.pendingEntrySignals || []).map(([k, v]) => [k, deepFreeze(JSON.parse(JSON.stringify(v))) as ISignalSetup]),
       );
       this.baselineMetrics = data.baselineMetrics ? deepFreeze({ ...data.baselineMetrics }) : undefined;
       this.featureBaseline = data.featureBaseline ? deepFreeze({ ...data.featureBaseline }) : undefined;
