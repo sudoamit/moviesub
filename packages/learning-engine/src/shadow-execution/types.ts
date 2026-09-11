@@ -1,7 +1,7 @@
 /**
  * Phase 11 — Shadow Trading & Live Decision Simulation Domain Types
- * Immutable MarketSnapshot, DecisionContext, ShadowOrder, ShadowPosition,
- * DecisionPair, and ShadowOutcome models.
+ * Immutable MarketSnapshot, PortfolioSnapshot, DecisionContext, ShadowOrder,
+ * ShadowPosition, DecisionPair, and ShadowOutcome models.
  */
 
 export interface MarketSnapshotOHLCV {
@@ -33,6 +33,16 @@ export interface MarketSnapshot {
   readonly dataSource: string;
   readonly dataVersion: string;
   readonly sourceSequence?: number;
+  readonly snapshotHash: string;
+}
+
+export interface PortfolioSnapshot {
+  readonly portfolioId: string;
+  readonly timestamp: number;
+  readonly cash: number;
+  readonly equity: number;
+  readonly openPositionsCount: number;
+  readonly portfolioStateHash: string;
 }
 
 export type ExecutionMode = 'LIVE' | 'SHADOW';
@@ -60,11 +70,14 @@ export interface DecisionLatencies {
 export interface DecisionContext {
   readonly decisionId: string;
   readonly snapshotId: string;
+  readonly snapshotHash: string;
   readonly decisionTimestamp: number;
   readonly instrument: MarketSnapshotInstrument;
   readonly marketSnapshot: MarketSnapshot;
+  readonly portfolioSnapshot: PortfolioSnapshot;
   readonly featureVersion: string;
   readonly featureSchemaHash: string;
+  readonly featureInputHash: string;
   readonly featureDataCutoff: number;
   readonly strategyVersion: string;
   readonly strategyConfigHash: string;
@@ -75,6 +88,7 @@ export interface DecisionContext {
   readonly costConfigVersion: string;
   readonly costConfigHash: string;
   readonly portfolioStateVersion: string;
+  readonly portfolioStateHash: string;
   readonly modelIdentity: ModelIdentity;
   readonly evaluationFingerprint: string;
   readonly mode: ExecutionMode;
@@ -171,6 +185,7 @@ export type DecisionDivergenceType =
 export interface ChampionChallengerDecisionPair {
   readonly pairId: string;
   readonly snapshotId: string;
+  readonly snapshotHash: string;
   readonly decisionTimestamp: number;
   readonly championDecisionId: string;
   readonly challengerDecisionId: string;

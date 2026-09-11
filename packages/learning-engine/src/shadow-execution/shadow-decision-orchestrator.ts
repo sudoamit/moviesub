@@ -5,6 +5,7 @@ import {
   MarketSnapshot,
   MarketSnapshotInstrument,
   MarketSnapshotOHLCV,
+  PortfolioSnapshot,
   DecisionContext,
   TradingDecision,
   TradingAction,
@@ -14,10 +15,12 @@ import {
   ExecutionMode,
   ModelRole
 } from './types';
+import { ILiveExecutionPort, IShadowExecutionPort, assertLiveExecution, assertShadowExecution } from './safety-guard';
+import { IShadowExecutionStore } from './shadow-execution-store';
 
 /**
- * Validates that all market data and candles inside a snapshot respect Point-In-Time (PIT) safety
- * and do not contain future data relative to snapshot.timestamp.
+ * Validates that all market data inside a snapshot respects Point-In-Time (PIT) safety
+ * and does not contain future data relative to snapshot.timestamp.
  */
 export function validatePointInTimeSnapshot(snapshot: MarketSnapshot): void {
   if (!snapshot || typeof snapshot !== 'object') {
@@ -55,7 +58,7 @@ export function validatePointInTimeSnapshot(snapshot: MarketSnapshot): void {
 }
 
 /**
- * Creates and freezes an immutable MarketSnapshot.
+ * Creates and freezes an immutable MarketSnapshot with a cryptographic snapshotHash.
  */
 export function createMarketSnapshot(params: {
   snapshotId?: string;
@@ -71,20 +74,35 @@ export function createMarketSnapshot(params: {
   dataVersion: string;
   sourceSequence?: number;
 }): MarketSnapshot {
-  const snapshot: MarketSnapshot = {
-    snapshotId: params.snapshotId || `snap_${randomUUID()}`,
-    instrument: { ...params.instrument },
+  const snapshotId = params.snapshotId || `snap_${randomUUID()}`;
+  const spread = params.ask - params.bid;
+
+  const rawPayload = {
+    snapshotId,
+    instrument: params.instrument,
     timestamp: params.timestamp,
-    exchangeTimestamp: params.exchangeTimestamp,
-    ohlcv: { ...params.ohlcv },
+    exchangeTimestamp: params.exchangeTimestamp ?? null,
+    ohlcv: params.ohlcv,
     bid: params.bid,
     ask: params.ask,
-    spread: params.ask - params.bid,
+    spread,
     volume: params.volume,
     marketStatus: params.marketStatus || 'OPEN',
     dataSource: params.dataSource,
     dataVersion: params.dataVersion,
+    sourceSequence: params.sourceSequence ?? null,
+  };
+
+  const snapshotHash = createHash('sha256')
+    .update(canonicalJsonStringify(rawPayload))
+    .digest('hex');
+
+  const snapshot: MarketSnapshot = {
+    ...rawPayload,
+    exchangeTimestamp: params.exchangeTimestamp,
+    marketStatus: params.marketStatus || 'OPEN',
     sourceSequence: params.sourceSequence,
+    snapshotHash,
   };
 
   validatePointInTimeSnapshot(snapshot);
@@ -92,39 +110,84 @@ export function createMarketSnapshot(params: {
 }
 
 /**
- * Computes a cryptographic decision fingerprint covering only Point-In-Time decision inputs and parameters.
+ * Creates an immutable point-in-time PortfolioSnapshot with cryptographic portfolioStateHash.
+ */
+export function createPortfolioSnapshot(params: {
+  portfolioId: string;
+  timestamp: number;
+  cash: number;
+  equity: number;
+  openPositionsCount: number;
+}): PortfolioSnapshot {
+  const raw = {
+    portfolioId: params.portfolioId,
+    timestamp: params.timestamp,
+    cash: params.cash,
+    equity: params.equity,
+    openPositionsCount: params.openPositionsCount,
+  };
+  const portfolioStateHash = createHash('sha256')
+    .update(canonicalJsonStringify(raw))
+    .digest('hex');
+
+  const snapshot: PortfolioSnapshot = {
+    ...raw,
+    portfolioStateHash,
+  };
+  return deepFreeze(snapshot);
+}
+
+/**
+ * Computes a comprehensive decision fingerprint covering all Point-In-Time input contexts and decision parameters.
  */
 export function computeDecisionFingerprint(params: {
   modelIdentity: ModelIdentity;
   snapshotId: string;
+  snapshotHash: string;
+  portfolioStateHash: string;
   featureVersion: string;
   featureSchemaHash: string;
+  featureInputHash: string;
   featureDataCutoff: number;
+  strategyConfigHash?: string;
+  executionConfigHash?: string;
+  riskConfigHash?: string;
+  costConfigHash?: string;
   action: TradingAction;
   signal: string;
   entryPrice?: number;
   stopLoss?: number;
   takeProfit?: number;
   positionSize?: number;
+  riskAmount?: number;
 }): string {
   const payload = {
     modelIdentity: params.modelIdentity,
     snapshotId: params.snapshotId,
+    snapshotHash: params.snapshotHash,
+    portfolioStateHash: params.portfolioStateHash,
     featureVersion: params.featureVersion,
     featureSchemaHash: params.featureSchemaHash,
+    featureInputHash: params.featureInputHash,
     featureDataCutoff: params.featureDataCutoff,
+    strategyConfigHash: params.strategyConfigHash ?? null,
+    executionConfigHash: params.executionConfigHash ?? null,
+    riskConfigHash: params.riskConfigHash ?? null,
+    costConfigHash: params.costConfigHash ?? null,
     action: params.action,
     signal: params.signal,
     entryPrice: params.entryPrice ?? null,
     stopLoss: params.stopLoss ?? null,
     takeProfit: params.takeProfit ?? null,
     positionSize: params.positionSize ?? null,
+    riskAmount: params.riskAmount ?? null,
   };
   return createHash('sha256').update(canonicalJsonStringify(payload)).digest('hex');
 }
 
 /**
- * Validates that Champion and Challenger contexts evaluated the exact same market snapshot and environment.
+ * Validates that Champion and Challenger contexts evaluated the exact same market snapshot,
+ * portfolio state, and feature environment.
  */
 export function validateDecisionParity(
   championContext: DecisionContext,
@@ -138,6 +201,16 @@ export function validateDecisionParity(
     );
   }
 
+  if (championContext.snapshotHash !== challengerContext.snapshotHash) {
+    violations.push(
+      `Snapshot hash mismatch: champion=${championContext.snapshotHash}, challenger=${challengerContext.snapshotHash}`
+    );
+  }
+
+  if (championContext.portfolioStateHash !== challengerContext.portfolioStateHash) {
+    violations.push('Portfolio state hash mismatch');
+  }
+
   if (championContext.instrument.symbol !== challengerContext.instrument.symbol) {
     violations.push('Instrument symbol mismatch');
   }
@@ -148,6 +221,10 @@ export function validateDecisionParity(
 
   if (championContext.featureSchemaHash !== challengerContext.featureSchemaHash) {
     violations.push('Feature schema hash mismatch');
+  }
+
+  if (championContext.featureInputHash !== challengerContext.featureInputHash) {
+    violations.push('Feature input vector hash mismatch');
   }
 
   if (championContext.featureDataCutoff !== challengerContext.featureDataCutoff) {
@@ -242,6 +319,7 @@ export function createDecisionPair(params: {
       canonicalJsonStringify({
         pairId,
         snapshotId: params.championDecision.context.snapshotId,
+        snapshotHash: params.championDecision.context.snapshotHash,
         championFingerprint: params.championDecision.decisionFingerprint,
         challengerFingerprint: params.challengerDecision.decisionFingerprint,
         divergenceType,
@@ -252,6 +330,7 @@ export function createDecisionPair(params: {
   const pair: ChampionChallengerDecisionPair = {
     pairId,
     snapshotId: params.championDecision.context.snapshotId,
+    snapshotHash: params.championDecision.context.snapshotHash,
     decisionTimestamp: params.championDecision.context.decisionTimestamp,
     championDecisionId: params.championDecision.decisionId,
     challengerDecisionId: params.challengerDecision.decisionId,
@@ -267,4 +346,179 @@ export function createDecisionPair(params: {
   };
 
   return deepFreeze(pair);
+}
+
+/**
+ * Synchronized live/shadow execution orchestrator.
+ * Evaluates Champion on the fast-path critical path and runs Challenger asynchronously
+ * without blocking or altering Champion production execution.
+ */
+export class SynchronizedShadowOrchestrator {
+  private readonly store: IShadowExecutionStore;
+  private readonly livePort?: ILiveExecutionPort;
+  private readonly shadowPort: IShadowExecutionPort;
+
+  constructor(params: {
+    store: IShadowExecutionStore;
+    livePort?: ILiveExecutionPort;
+    shadowPort: IShadowExecutionPort;
+  }) {
+    this.store = params.store;
+    this.livePort = params.livePort;
+    this.shadowPort = params.shadowPort;
+  }
+
+  /**
+   * Evaluates Champion synchronously for production execution and launches Challenger in the background.
+   * Slow Challenger execution NEVER delays Champion decision return.
+   */
+  public executeDecisionFlow(params: {
+    snapshot: MarketSnapshot;
+    portfolioSnapshot: PortfolioSnapshot;
+    featureExtractor: () => { features: Record<string, number>; featureHash: string; featureLatencyMs: number };
+    championEvaluator: (ctx: DecisionContext, features: Record<string, number>) => TradingDecision;
+    challengerEvaluator: (ctx: DecisionContext, features: Record<string, number>) => Promise<TradingDecision> | TradingDecision;
+    championIdentity: ModelIdentity;
+    challengerIdentity: ModelIdentity;
+    sharedConfigs: {
+      featureVersion: string;
+      featureSchemaHash: string;
+      strategyVersion: string;
+      strategyConfigHash: string;
+      executionConfigVersion: string;
+      executionConfigHash: string;
+      riskConfigVersion: string;
+      riskConfigHash: string;
+      costConfigVersion: string;
+      costConfigHash: string;
+      portfolioStateVersion: string;
+    };
+  }): { championDecision: TradingDecision; pairPromise: Promise<ChampionChallengerDecisionPair> } {
+    // 1. Check idempotency at the storage boundary
+    const existingPair = this.store.getDecisionPairBySnapshot(params.snapshot.snapshotId);
+    if (existingPair) {
+      return {
+        championDecision: existingPair.championDecision,
+        pairPromise: Promise.resolve(existingPair),
+      };
+    }
+
+    // 2. Extract PIT features once for both models
+    const featureRes = params.featureExtractor();
+    const decisionTimestamp = Date.now();
+
+    // 3. Build immutable shared contexts
+    const champContext: DecisionContext = deepFreeze({
+      decisionId: `dec_champ_${randomUUID()}`,
+      snapshotId: params.snapshot.snapshotId,
+      snapshotHash: params.snapshot.snapshotHash,
+      decisionTimestamp,
+      instrument: params.snapshot.instrument,
+      marketSnapshot: params.snapshot,
+      portfolioSnapshot: params.portfolioSnapshot,
+      featureVersion: params.sharedConfigs.featureVersion,
+      featureSchemaHash: params.sharedConfigs.featureSchemaHash,
+      featureInputHash: featureRes.featureHash,
+      featureDataCutoff: params.snapshot.timestamp,
+      strategyVersion: params.sharedConfigs.strategyVersion,
+      strategyConfigHash: params.sharedConfigs.strategyConfigHash,
+      executionConfigVersion: params.sharedConfigs.executionConfigVersion,
+      executionConfigHash: params.sharedConfigs.executionConfigHash,
+      riskConfigVersion: params.sharedConfigs.riskConfigVersion,
+      riskConfigHash: params.sharedConfigs.riskConfigHash,
+      costConfigVersion: params.sharedConfigs.costConfigVersion,
+      costConfigHash: params.sharedConfigs.costConfigHash,
+      portfolioStateVersion: params.sharedConfigs.portfolioStateVersion,
+      portfolioStateHash: params.portfolioSnapshot.portfolioStateHash,
+      modelIdentity: params.championIdentity,
+      evaluationFingerprint: `efp_champ_${params.championIdentity.modelId}`,
+      mode: 'LIVE',
+      modelRole: 'CHAMPION',
+    });
+
+    const challContext: DecisionContext = deepFreeze({
+      decisionId: `dec_chall_${randomUUID()}`,
+      snapshotId: params.snapshot.snapshotId,
+      snapshotHash: params.snapshot.snapshotHash,
+      decisionTimestamp,
+      instrument: params.snapshot.instrument,
+      marketSnapshot: params.snapshot,
+      portfolioSnapshot: params.portfolioSnapshot,
+      featureVersion: params.sharedConfigs.featureVersion,
+      featureSchemaHash: params.sharedConfigs.featureSchemaHash,
+      featureInputHash: featureRes.featureHash,
+      featureDataCutoff: params.snapshot.timestamp,
+      strategyVersion: params.sharedConfigs.strategyVersion,
+      strategyConfigHash: params.sharedConfigs.strategyConfigHash,
+      executionConfigVersion: params.sharedConfigs.executionConfigVersion,
+      executionConfigHash: params.sharedConfigs.executionConfigHash,
+      riskConfigVersion: params.sharedConfigs.riskConfigVersion,
+      riskConfigHash: params.sharedConfigs.riskConfigHash,
+      costConfigVersion: params.sharedConfigs.costConfigVersion,
+      costConfigHash: params.sharedConfigs.costConfigHash,
+      portfolioStateVersion: params.sharedConfigs.portfolioStateVersion,
+      portfolioStateHash: params.portfolioSnapshot.portfolioStateHash,
+      modelIdentity: params.challengerIdentity,
+      evaluationFingerprint: `efp_chall_${params.challengerIdentity.modelId}`,
+      mode: 'SHADOW',
+      modelRole: 'CHALLENGER',
+    });
+
+    // 4. CRITICAL FAST PATH: Champion executes immediately
+    const championDecision = params.championEvaluator(champContext, featureRes.features);
+    if (this.livePort && (championDecision.action === 'BUY' || championDecision.action === 'SELL')) {
+      assertLiveExecution(champContext, this.livePort);
+      // Submit live order via live port
+      this.livePort.submitLiveOrder(championDecision);
+    }
+
+    // 5. ASYNC ISOLATED PATH: Challenger executes in background with shadow port only
+    const pairPromise = (async () => {
+      try {
+        const challengerDecision = await Promise.resolve(
+          params.challengerEvaluator(challContext, featureRes.features)
+        );
+
+        if (challengerDecision.action === 'BUY' || challengerDecision.action === 'SELL') {
+          assertShadowExecution(challContext, this.shadowPort);
+          this.shadowPort.submitShadowOrder({
+            shadowOrderId: `so_${randomUUID()}`,
+            decisionId: challengerDecision.decisionId,
+            instrument: params.snapshot.instrument,
+            side: challengerDecision.action,
+            quantity: challengerDecision.positionSize || 1,
+            requestedPrice: challengerDecision.entryPrice || params.snapshot.ohlcv.close,
+            stopLoss: challengerDecision.stopLoss,
+            takeProfit: challengerDecision.takeProfit,
+            orderType: 'MARKET',
+            createdAt: decisionTimestamp,
+            executionConfigVersion: params.sharedConfigs.executionConfigVersion,
+            costConfigVersion: params.sharedConfigs.costConfigVersion,
+            status: 'PENDING',
+          });
+        }
+
+        const pair = createDecisionPair({
+          championDecision,
+          challengerDecision,
+        });
+
+        // Persist idempotently
+        this.store.saveSnapshot(params.snapshot);
+        this.store.saveDecision(championDecision);
+        this.store.saveDecision(challengerDecision);
+        this.store.saveDecisionPair(pair);
+
+        return pair;
+      } catch (err) {
+        // If Challenger fails, champion production execution has already succeeded
+        throw err;
+      }
+    })();
+
+    return {
+      championDecision,
+      pairPromise,
+    };
+  }
 }

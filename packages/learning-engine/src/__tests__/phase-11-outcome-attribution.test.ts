@@ -23,11 +23,21 @@ describe('Phase 11 — Shadow Outcome Attribution & Future Isolation', () => {
 
   const baseShared = {
     snapshotId: snapshot.snapshotId,
+    snapshotHash: snapshot.snapshotHash,
+    portfolioSnapshot: {
+      portfolioId: 'live-port-1',
+      timestamp: snapshot.timestamp,
+      cash: 100000,
+      equity: 100000,
+      openPositionsCount: 0,
+      portfolioStateHash: 'p-state-hash'
+    },
     decisionTimestamp: 1700000000010,
     instrument: snapshot.instrument,
     marketSnapshot: snapshot,
     featureVersion: 'feat-v2',
     featureSchemaHash: 'fhash-schema-01',
+    featureInputHash: 'f-input-hash-01',
     featureDataCutoff: snapshot.timestamp,
     strategyVersion: 'strat-v2',
     strategyConfigHash: 'strat-hash-v2',
@@ -37,7 +47,8 @@ describe('Phase 11 — Shadow Outcome Attribution & Future Isolation', () => {
     riskConfigHash: 'risk-hash-v2',
     costConfigVersion: 'cost-v2',
     costConfigHash: 'cost-hash-v2',
-    portfolioStateVersion: 'port-v2'
+    portfolioStateVersion: 'port-v2',
+    portfolioStateHash: 'port-hash-v2'
   };
 
   const champIdentity = { modelId: 'c1', modelVersion: '1.0', artifactHash: 'h1' };

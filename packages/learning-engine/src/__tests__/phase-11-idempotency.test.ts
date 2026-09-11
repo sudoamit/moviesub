@@ -24,11 +24,21 @@ describe('Phase 11 — Event Idempotency & Duplicate Prevention', () => {
 
   const baseShared = {
     snapshotId: snapshot.snapshotId,
+    snapshotHash: snapshot.snapshotHash,
+    portfolioSnapshot: {
+      portfolioId: 'live-port-1',
+      timestamp: snapshot.timestamp,
+      cash: 100000,
+      equity: 100000,
+      openPositionsCount: 0,
+      portfolioStateHash: 'p-state-hash'
+    },
     decisionTimestamp: 1700000000010,
     instrument: snapshot.instrument,
     marketSnapshot: snapshot,
     featureVersion: 'feat-v2',
     featureSchemaHash: 'fhash',
+    featureInputHash: 'f-input-hash',
     featureDataCutoff: snapshot.timestamp,
     strategyVersion: 's1',
     strategyConfigHash: 'shash',
@@ -38,7 +48,8 @@ describe('Phase 11 — Event Idempotency & Duplicate Prevention', () => {
     riskConfigHash: 'rhash',
     costConfigVersion: 'co1',
     costConfigHash: 'cohash',
-    portfolioStateVersion: 'p1'
+    portfolioStateVersion: 'p1',
+    portfolioStateHash: 'p-state-hash'
   };
 
   const champDecision: TradingDecision = deepFreeze({

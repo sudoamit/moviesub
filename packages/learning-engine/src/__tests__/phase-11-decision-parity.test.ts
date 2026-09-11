@@ -1,5 +1,6 @@
 import {
   createMarketSnapshot,
+  createPortfolioSnapshot,
   computeDecisionFingerprint,
   createDecisionPair,
   validateDecisionParity,
@@ -22,13 +23,24 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
     dataVersion: '1.0'
   });
 
+  const portfolioSnapshot = createPortfolioSnapshot({
+    portfolioId: 'port-sol-01',
+    timestamp: 1700000000000,
+    cash: 100000,
+    equity: 100000,
+    openPositionsCount: 0
+  });
+
   const baseSharedContext = {
     snapshotId: snapshot.snapshotId,
+    snapshotHash: snapshot.snapshotHash,
     decisionTimestamp: 1700000000020,
     instrument: snapshot.instrument,
     marketSnapshot: snapshot,
+    portfolioSnapshot,
     featureVersion: 'feat-v2',
     featureSchemaHash: 'fhash-schema-01',
+    featureInputHash: 'feat-input-hash-sol',
     featureDataCutoff: snapshot.timestamp,
     strategyVersion: 'strat-v2',
     strategyConfigHash: 'strat-hash-v2',
@@ -38,7 +50,8 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
     riskConfigHash: 'risk-hash-v2',
     costConfigVersion: 'cost-v2',
     costConfigHash: 'cost-hash-v2',
-    portfolioStateVersion: 'port-v2'
+    portfolioStateVersion: 'port-v2',
+    portfolioStateHash: portfolioSnapshot.portfolioStateHash
   };
 
   const champIdentity = {
@@ -86,8 +99,11 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
       decisionFingerprint: computeDecisionFingerprint({
         modelIdentity: champIdentity,
         snapshotId: snapshot.snapshotId,
+        snapshotHash: snapshot.snapshotHash,
+        portfolioStateHash: portfolioSnapshot.portfolioStateHash,
         featureVersion: 'feat-v2',
         featureSchemaHash: 'fhash-schema-01',
+        featureInputHash: 'feat-input-hash-sol',
         featureDataCutoff: snapshot.timestamp,
         action: 'BUY',
         signal: 'OB_SWEEP_BUY',
@@ -126,8 +142,11 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
       decisionFingerprint: computeDecisionFingerprint({
         modelIdentity: challIdentity,
         snapshotId: snapshot.snapshotId,
+        snapshotHash: snapshot.snapshotHash,
+        portfolioStateHash: portfolioSnapshot.portfolioStateHash,
         featureVersion: 'feat-v2',
         featureSchemaHash: 'fhash-schema-01',
+        featureInputHash: 'feat-input-hash-sol',
         featureDataCutoff: snapshot.timestamp,
         action: 'BUY',
         signal: 'OB_SWEEP_BUY',
@@ -182,6 +201,7 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
       decisionId: 'dec-champ-01',
       ...baseSharedContext,
       snapshotId: 'snap-1',
+      snapshotHash: 'snap-hash-1',
       modelIdentity: champIdentity,
       evaluationFingerprint: 'fp-champ',
       mode: 'LIVE',
@@ -192,6 +212,7 @@ describe('Phase 11 — Decision Parity & Divergence Classification', () => {
       decisionId: 'dec-chall-01',
       ...baseSharedContext,
       snapshotId: 'snap-DIVERGENT-2',
+      snapshotHash: 'snap-hash-DIVERGENT-2',
       modelIdentity: challIdentity,
       evaluationFingerprint: 'fp-chall',
       mode: 'SHADOW',
