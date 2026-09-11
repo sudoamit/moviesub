@@ -422,6 +422,23 @@ export class ModelRegistry {
   }
 
   /**
+   * Captures the exact in-memory registry state for an outer recoverable transaction journal.
+   */
+  public static captureStateSnapshot(): Readonly<Record<string, unknown>> {
+    return deepFreeze(JSON.parse(JSON.stringify(this.exportSnapshot())));
+  }
+
+  /**
+   * Restores a previously captured registry state transactionally.
+   */
+  public static restoreStateSnapshot(snapshot: Readonly<Record<string, unknown>>): void {
+    this.executeTransaction(
+      () => this.restoreSnapshot(snapshot),
+      { requirePersistence: true },
+    );
+  }
+
+  /**
    * Executes a transactional compound operation with automatic snapshot rollback on failure.
    * If requirePersistence is true (default), rejects if no persistencePath is configured.
    * Re-entrant: nested transactions run within the outer transaction context without duplicate commits.
@@ -884,4 +901,3 @@ export class ModelRegistry {
     return Array.from(this.models.values());
   }
 }
-
