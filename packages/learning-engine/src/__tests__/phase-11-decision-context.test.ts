@@ -1,0 +1,120 @@
+import {
+  createMarketSnapshot,
+  computeDecisionFingerprint,
+  DecisionContext,
+  TradingDecision
+} from '../shadow-execution/index';
+import { deepFreeze } from '../champion-challenger/evaluation-identity';
+
+describe('Phase 11 — Decision Context & Deterministic Fingerprinting', () => {
+  const snapshot = createMarketSnapshot({
+    snapshotId: 'snap-eth-01',
+    instrument: { symbol: 'ETHUSDT', market: 'BINANCE_SPOT' },
+    timestamp: 1700000000000,
+    ohlcv: { open: 3000, high: 3050, low: 2980, close: 3020, volume: 100 },
+    bid: 3019.5,
+    ask: 3020.5,
+    volume: 100,
+    dataSource: 'binance',
+    dataVersion: '1.0'
+  });
+
+  const baseModelIdentity = {
+    modelId: 'champ-model-01',
+    modelVersion: '1.0.0',
+    artifactHash: 'hash-champ-art-123'
+  };
+
+  it('computes deterministic decision fingerprints from point-in-time decision inputs', () => {
+    const fp1 = computeDecisionFingerprint({
+      modelIdentity: baseModelIdentity,
+      snapshotId: snapshot.snapshotId,
+      featureVersion: 'feat-v2',
+      featureSchemaHash: 'fhash-99',
+      featureDataCutoff: snapshot.timestamp,
+      action: 'BUY',
+      signal: 'SMC_BOS_LONG',
+      entryPrice: 3020,
+      stopLoss: 2950,
+      takeProfit: 3150,
+      positionSize: 1.5
+    });
+
+    const fp2 = computeDecisionFingerprint({
+      modelIdentity: baseModelIdentity,
+      snapshotId: snapshot.snapshotId,
+      featureVersion: 'feat-v2',
+      featureSchemaHash: 'fhash-99',
+      featureDataCutoff: snapshot.timestamp,
+      action: 'BUY',
+      signal: 'SMC_BOS_LONG',
+      entryPrice: 3020,
+      stopLoss: 2950,
+      takeProfit: 3150,
+      positionSize: 1.5
+    });
+
+    expect(fp1).toBe(fp2);
+    expect(fp1.length).toBe(64);
+
+    // Position size difference changes fingerprint
+    const fpDiffSize = computeDecisionFingerprint({
+      modelIdentity: baseModelIdentity,
+      snapshotId: snapshot.snapshotId,
+      featureVersion: 'feat-v2',
+      featureSchemaHash: 'fhash-99',
+      featureDataCutoff: snapshot.timestamp,
+      action: 'BUY',
+      signal: 'SMC_BOS_LONG',
+      entryPrice: 3020,
+      stopLoss: 2950,
+      takeProfit: 3150,
+      positionSize: 2.0
+    });
+    expect(fpDiffSize).not.toBe(fp1);
+
+    // Action change changes fingerprint
+    const fpDiffAction = computeDecisionFingerprint({
+      modelIdentity: baseModelIdentity,
+      snapshotId: snapshot.snapshotId,
+      featureVersion: 'feat-v2',
+      featureSchemaHash: 'fhash-99',
+      featureDataCutoff: snapshot.timestamp,
+      action: 'HOLD',
+      signal: 'NO_SETUP'
+    });
+    expect(fpDiffAction).not.toBe(fp1);
+  });
+
+  it('creates frozen immutable DecisionContext', () => {
+    const context: DecisionContext = deepFreeze({
+      decisionId: 'dec-101',
+      snapshotId: snapshot.snapshotId,
+      decisionTimestamp: 1700000000050,
+      instrument: snapshot.instrument,
+      marketSnapshot: snapshot,
+      featureVersion: 'feat-v2',
+      featureSchemaHash: 'fhash-99',
+      featureDataCutoff: snapshot.timestamp,
+      strategyVersion: 'strat-smc-v1',
+      strategyConfigHash: 'strat-hash-1',
+      executionConfigVersion: 'exec-v1',
+      executionConfigHash: 'exec-hash-1',
+      riskConfigVersion: 'risk-v1',
+      riskConfigHash: 'risk-hash-1',
+      costConfigVersion: 'cost-v1',
+      costConfigHash: 'cost-hash-1',
+      portfolioStateVersion: 'port-v1',
+      modelIdentity: baseModelIdentity,
+      evaluationFingerprint: 'eval-fp-101',
+      mode: 'LIVE',
+      modelRole: 'CHAMPION'
+    });
+
+    expect(Object.isFrozen(context)).toBe(true);
+    expect(Object.isFrozen(context.marketSnapshot)).toBe(true);
+    expect(() => {
+      (context as any).mode = 'SHADOW';
+    }).toThrow();
+  });
+});

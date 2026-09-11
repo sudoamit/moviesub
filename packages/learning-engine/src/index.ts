@@ -47,3 +47,4 @@ export * from './candidate-hypothesis-generator';
 export * from './self-improving-retraining-pipeline';
 export * from './retraining-run-store';
 export * from './synchronized-shadow-evaluation-engine';
+export * from './shadow-execution/index';
