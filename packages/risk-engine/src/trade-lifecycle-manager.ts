@@ -1,4 +1,4 @@
-import { Direction, ICandle, IBacktestTrade, ISignalSetup, SignalState } from '@quant/shared';
+import { Direction, ICandle, IBacktestTrade, ISignalSetup, SignalState, isLongPosition, normalizeDirection } from '@quant/shared';
 import {
   IEntryExecutionSnapshot,
   IExecutionEvent,
@@ -49,40 +49,64 @@ export class TradeLifecycleManager {
     entrySlippage = 0,
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
-    const isBull =
-      signal.direction === Direction.BULLISH ||
-      (signal.direction as any) === 'LONG' ||
-      (signal.direction as any) === 'BUY';
-    const rawRisk = signal.stopLoss > 0 ? Math.abs(executionPrice - signal.stopLoss) : 0;
-    const effectiveRisk = rawRisk > 0 ? rawRisk : Math.max(0.1, executionPrice * 0.01);
+    const isLong = isLongPosition(signal.direction);
+
+    // Strict validation of stopLoss (no silent synthetic risk creation)
+    if (typeof signal.stopLoss !== 'number' || !Number.isFinite(signal.stopLoss) || signal.stopLoss <= 0) {
+      throw new Error(`INVALID_SIGNAL_STOP_LOSS: Signal for trade '${tradeId}' must provide a valid positive stopLoss, got ${signal.stopLoss}`);
+    }
+
+    const signalEntry = signal.entryZone?.optimal ?? signal.entryZone?.min ?? executionPrice;
+    const signalRisk = Math.abs(signalEntry - signal.stopLoss) || Math.abs(executionPrice - signal.stopLoss);
 
     const initialStopLoss =
-      signal.stopLoss && (isBull ? signal.stopLoss < executionPrice : signal.stopLoss > executionPrice)
+      (isLong ? signal.stopLoss < executionPrice : signal.stopLoss > executionPrice)
         ? signal.stopLoss
-        : isBull
-          ? Number((executionPrice - effectiveRisk).toFixed(2))
-          : Number((executionPrice + effectiveRisk).toFixed(2));
+        : isLong
+          ? Number((executionPrice - signalRisk).toFixed(2))
+          : Number((executionPrice + signalRisk).toFixed(2));
+
+    const riskDistance = Math.abs(executionPrice - initialStopLoss);
+    const rawTp1 = signal.takeProfits?.tp1;
+    const rawTp2 = signal.takeProfits?.tp2;
+    const rawTp3 = signal.takeProfits?.tp3;
 
     const tp1 =
-      signal.takeProfits?.tp1 && (isBull ? signal.takeProfits.tp1 > executionPrice : signal.takeProfits.tp1 < executionPrice)
-        ? signal.takeProfits.tp1
-        : isBull
-          ? Number((executionPrice + effectiveRisk * 1.5).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - effectiveRisk * 1.5).toFixed(2));
+      typeof rawTp1 === 'number' &&
+      Number.isFinite(rawTp1) &&
+      (isLong ? rawTp1 > executionPrice : rawTp1 < executionPrice)
+        ? rawTp1
+        : isLong
+          ? Number((executionPrice + riskDistance * 1.5).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - riskDistance * 1.5).toFixed(2));
 
     const tp2 =
-      signal.takeProfits?.tp2 && (isBull ? signal.takeProfits.tp2 > executionPrice : signal.takeProfits.tp2 < executionPrice)
-        ? signal.takeProfits.tp2
-        : isBull
-          ? Number((executionPrice + effectiveRisk * 2.5).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - effectiveRisk * 2.5).toFixed(2));
+      typeof rawTp2 === 'number' &&
+      Number.isFinite(rawTp2) &&
+      (isLong ? rawTp2 > executionPrice : rawTp2 < executionPrice)
+        ? rawTp2
+        : isLong
+          ? Number((executionPrice + riskDistance * 2.5).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - riskDistance * 2.5).toFixed(2));
 
     const tp3 =
-      signal.takeProfits?.tp3 && (isBull ? signal.takeProfits.tp3 > executionPrice : signal.takeProfits.tp3 < executionPrice)
-        ? signal.takeProfits.tp3
-        : isBull
-          ? Number((executionPrice + effectiveRisk * 4.0).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - effectiveRisk * 4.0).toFixed(2));
+      typeof rawTp3 === 'number' &&
+      Number.isFinite(rawTp3) &&
+      (isLong ? rawTp3 > executionPrice : rawTp3 < executionPrice)
+        ? rawTp3
+        : isLong
+          ? Number((executionPrice + riskDistance * 4.0).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - riskDistance * 4.0).toFixed(2));
+
+    if (isLong) {
+      if (tp1 <= executionPrice) {
+        throw new Error(`INVALID_SIGNAL_TAKE_PROFIT: TP1 (${tp1}) for LONG position must be strictly above execution price (${executionPrice})`);
+      }
+    } else {
+      if (tp1 >= executionPrice) {
+        throw new Error(`INVALID_SIGNAL_TAKE_PROFIT: TP1 (${tp1}) for SHORT position must be strictly below execution price (${executionPrice})`);
+      }
+    }
 
     const entryEvent: IExecutionEvent = {
       eventId: `evt_entry_${executionTime}_${tradeId}`,
@@ -128,7 +152,7 @@ export class TradeLifecycleManager {
       signalTimestamp,
       executionTimestamp: executionTime,
       orderId,
-      side: isBull ? 'BUY' : 'SELL',
+      side: isLong ? 'BUY' : 'SELL',
       initialStopLoss: initialStopLoss,
       tp1,
       tp2,
@@ -247,12 +271,7 @@ export class TradeLifecycleManager {
     isClosed: boolean;
     isBreakevenStopTriggered: boolean;
   } {
-    const isLong =
-      lot.direction === Direction.BULLISH ||
-      (lot.direction as any) === 'LONG' ||
-      (lot.direction as any) === 'BUY' ||
-      (lot as any).side === 'BUY' ||
-      lot.entrySnapshot?.side === 'BUY';
+    const isLong = isLongPosition(lot.direction || lot.entrySnapshot?.side);
     const fillQty = fill.quantity;
     const chunkDiff = isLong
       ? fill.price - lot.entryPrice
@@ -364,12 +383,7 @@ export class TradeLifecycleManager {
         'Synthetic lifecycle evaluation (evaluateLotTick) is deprecated and disabled for backtesting. Backtests must use ExecutionSimulator.',
       );
     }
-    const isLong =
-      lot.direction === Direction.BULLISH ||
-      (lot.direction as any) === 'LONG' ||
-      (lot.direction as any) === 'BUY' ||
-      (lot as any).side === 'BUY' ||
-      lot.entrySnapshot?.side === 'BUY';
+    const isLong = isLongPosition(lot.direction || lot.entrySnapshot?.side);
     const high = candle.high;
     const low = candle.low;
     const close = candle.close;
@@ -735,10 +749,7 @@ export class TradeLifecycleManager {
    */
   static evaluateTick(signal: ISignalSetup, candle: ICandle): ITradeStateUpdate {
     const { direction, state, entryZone, stopLoss, takeProfits, riskRewardRatios, symbol } = signal;
-    const isLong =
-      direction === Direction.BULLISH ||
-      (direction as any) === 'LONG' ||
-      (direction as any) === 'BUY';
+    const isLong = isLongPosition(direction);
     const currentPrice = candle.close;
     const high = candle.high;
     const low = candle.low;

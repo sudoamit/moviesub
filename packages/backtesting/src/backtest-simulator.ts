@@ -6,6 +6,7 @@ import {
   SignalGrade,
   SignalState,
   Timeframe,
+  isLongPosition,
 } from '@quant/shared';
 import {
   SignalGenerator,
@@ -55,10 +56,7 @@ export class BacktestSimulator {
     policy = DEFAULT_PARTIAL_EXIT_POLICY,
     timestamp: number,
   ) {
-    const isLong =
-      lot.direction === Direction.BULLISH ||
-      (lot.direction as any) === 'LONG' ||
-      (lot.direction as any) === 'BUY';
+    const isLong = isLongPosition(lot.direction || lot.entrySnapshot?.side);
     const exitSide = isLong ? 'SELL' : 'BUY';
     const remainingQty = lot.remainingQuantity;
 
@@ -350,10 +348,7 @@ export class BacktestSimulator {
 
       // 3. Handle Active Position Lot Exits & Fills
       if (activeLot && activeLot.status !== 'CLOSED') {
-        const isLong =
-          activeLot.direction === Direction.BULLISH ||
-          (activeLot.direction as any) === 'LONG' ||
-          (activeLot.direction as any) === 'BUY';
+        const isLong = isLongPosition(activeLot.direction || activeLot.entrySnapshot?.side);
         const low = currentCandle.low;
         const high = currentCandle.high;
         const close = currentCandle.close;
@@ -379,21 +374,6 @@ export class BacktestSimulator {
         for (const exitFill of tradeFills) {
           if (!activeLot || activeLot.status === 'CLOSED') break;
 
-          const fillQty = exitFill.quantity;
-          const chunkDiff = isLong
-            ? exitFill.price - activeLot.entryPrice
-            : activeLot.entryPrice - exitFill.price;
-          const grossPnl = Number((chunkDiff * fillQty).toFixed(2));
-          const initialRiskPerUnit = Math.max(
-            0.0001,
-            Math.abs(activeLot.entryPrice - activeLot.initialStopLoss),
-          );
-          const chunkR = Number((chunkDiff / initialRiskPerUnit).toFixed(2));
-
-          activeLot.realizedPnl = Number((activeLot.realizedPnl + grossPnl).toFixed(2));
-          activeLot.remainingQuantity = Number(
-            Math.max(0, activeLot.remainingQuantity - fillQty).toFixed(4),
-          );
           cumulativeFees += exitFill.fee;
           cumulativeSlippage += exitFill.slippage;
 
@@ -406,129 +386,36 @@ export class BacktestSimulator {
                 : 'SL'
               : 'TP1');
 
-          activeLot.partialFills.push({
-            fillId: exitFill.fillId,
-            targetType: targetType as any,
-            timestamp: exitFill.timestamp,
-            price: exitFill.price,
-            quantity: fillQty,
-            remainingQuantity: activeLot.remainingQuantity,
-            realizedPnl: grossPnl,
-            realizedR: chunkR,
-            fee: exitFill.fee,
-            slippage: exitFill.slippage,
-            exitOrderId: exitFill.orderId,
-            exitOrderCreatedAt: exitFill.exitOrderCreatedAt,
-            exitOrderSubmittedAt: exitFill.exitOrderSubmittedAt,
-            exitTriggerTimestamp: exitFill.exitTriggerTimestamp,
-            exitFillTimestamp: exitFill.exitFillTimestamp,
-            segmentIndex: exitFill.segmentIndex,
-            segmentType: exitFill.segmentType,
-          });
+          const exitResult = TradeLifecycleManager.processExitFill(
+            activeLot,
+            {
+              ...exitFill,
+              targetType,
+            },
+            partialPolicy,
+            String(execSim.getExecutionModelConfig().fillModel),
+            String(execSim.getExecutionModelConfig().ambiguityMode),
+          );
 
-          if (activeLot.remainingQuantity <= 0) {
-            activeLot.status = 'CLOSED';
-            activeLot.closedAt = exitFill.timestamp;
-            activeLot.unrealizedPnl = 0;
+          activeLot = exitResult.lot;
+
+          if (exitResult.isClosed) {
             execSim.cancelTradeOrders(activeLot.tradeId);
-          } else {
-            activeLot.status = 'PARTIALLY_CLOSED';
-            if (targetType === 'TP1' && partialPolicy.moveStopToBreakevenOnTp1) {
-              activeLot.currentStopLoss = activeLot.entryPrice;
-              // Update resting SL order stop price in execSim if present
-              const slOrder = Array.from((execSim as any).orders.values()).find(
-                (o: any) => o.tradeId === activeLot!.tradeId && o.orderType === 'STOP' && o.status === 'PENDING',
-              );
-              if (slOrder) {
-                (slOrder as any).stopPrice = activeLot.entryPrice;
-              }
+            if (exitResult.completedTrade) {
+              const tradeRecord: IBacktestTrade = {
+                ...exitResult.completedTrade,
+                id: `${runId}_tr_${trades.length + 1}`,
+              };
+              trades.push(tradeRecord);
+              positionLots.push(activeLot);
+
+              const realizedNet = tradeRecord.netPnL ?? tradeRecord.pnl ?? 0;
+              currentCash = Number((currentCash + realizedNet).toFixed(2));
+              currentEquity = currentCash;
             }
+            activeLot = null;
+            break;
           }
-        }
-
-        // Record Closed Trade Record
-        if (activeLot && activeLot.status === 'CLOSED') {
-          const totalFees = activeLot.partialFills.reduce((sum, f) => sum + f.fee, 0);
-          const totalSlippageCost = activeLot.partialFills.reduce((sum, f) => sum + f.slippage, 0);
-          const grossPnl = activeLot.realizedPnl;
-          const netPnl = Number((grossPnl - totalFees).toFixed(2));
-
-          currentCash = Number((currentCash + netPnl).toFixed(2));
-          currentEquity = currentCash;
-
-          const lastFill = activeLot.partialFills[activeLot.partialFills.length - 1];
-          const firstFill = activeLot.partialFills[0];
-
-          const initialRiskDist = Math.abs(activeLot.entryPrice - activeLot.initialStopLoss);
-          const tradeRecord: IBacktestTrade = {
-            id: `${runId}_tr_${trades.length + 1}`,
-            direction: activeLot.direction,
-            entryTime: new Date(activeLot.openedAt),
-            entryPrice: activeLot.entryPrice,
-            exitTime: new Date(activeLot.closedAt || candleTime),
-            exitPrice: lastFill?.price || activeLot.entryPrice,
-            stopLoss: activeLot.initialStopLoss,
-            takeProfit: activeLot.tp2,
-            positionSize: activeLot.initialQuantity,
-            marginRequired: Number(
-              ((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2),
-            ),
-            riskAmount: Number((initialRiskDist * activeLot.initialQuantity).toFixed(2)),
-            pnl: netPnl,
-            pnlRMultiple: Number(
-              (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
-            ),
-            exitReason:
-              (lastFill?.targetType as string) === 'SL' ||
-              (lastFill?.targetType as string) === 'STOP' ||
-              lastFill?.targetType === 'STOP_LOSS' ||
-              lastFill?.targetType === 'TRAILING_STOP'
-                ? SignalState.SL_HIT
-                : lastFill?.targetType === 'TP3'
-                  ? SignalState.TP3_HIT
-                  : lastFill?.targetType === 'TP2'
-                    ? SignalState.TP2_HIT
-                    : SignalState.TP1_HIT,
-            signalTimestamp: new Date(
-              activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
-            ),
-            orderCreatedAt: new Date(
-              activeLot.entrySnapshot?.orderCreatedAt || activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
-            ),
-            orderSubmittedAt: new Date(
-              activeLot.entrySnapshot?.orderSubmittedAt || activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
-            ),
-            entryFillTimestamp: new Date(
-              activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt,
-            ),
-            entryReferencePrice:
-              activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
-            entryFillPrice:
-              activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
-            entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
-            entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
-            exitOrderTimestamp: new Date(lastFill?.timestamp || candleTime),
-            exitOrderCreatedAt: lastFill?.exitOrderCreatedAt ? new Date(lastFill.exitOrderCreatedAt) : new Date(lastFill?.timestamp || candleTime),
-            exitOrderSubmittedAt: lastFill?.exitOrderSubmittedAt ? new Date(lastFill.exitOrderSubmittedAt) : new Date(lastFill?.timestamp || candleTime),
-            exitTriggerTimestamp: lastFill?.exitTriggerTimestamp ? new Date(lastFill.exitTriggerTimestamp) : new Date(lastFill?.timestamp || candleTime),
-            exitFillTimestamp: new Date(lastFill?.timestamp || candleTime),
-            exitFillPrice: lastFill?.price || activeLot.entryPrice,
-            exitFees: totalFees - (firstFill?.fee || 0),
-            exitSlippage: totalSlippageCost - (firstFill?.slippage || 0),
-            grossPnL: grossPnl,
-            netPnL: netPnl,
-            realizedR: Number(
-              (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
-            ),
-            fillModel: String(fillModel),
-            ambiguityMode: String(ambiguityMode),
-            entrySnapshot: activeLot.entrySnapshot,
-          };
-
-          trades.push(tradeRecord);
-          positionLots.push(activeLot);
-
-          activeLot = null;
         }
 
         // Record Bar-by-bar Snapshot
@@ -562,7 +449,7 @@ export class BacktestSimulator {
           ),
           grossExposure: activeLot ? activeLot.remainingQuantity * activeLot.entryPrice : 0,
           netExposure: activeLot
-            ? (activeLot.direction === Direction.BULLISH ? 1 : -1) *
+            ? (isLong ? 1 : -1) *
               activeLot.remainingQuantity *
               activeLot.entryPrice
             : 0,

@@ -33,6 +33,35 @@ export enum Direction {
   NEUTRAL = 'NEUTRAL',
 }
 
+export enum PositionSide {
+  LONG = 'LONG',
+  SHORT = 'SHORT',
+}
+
+export function normalizeDirection(dir: Direction | string | undefined | null): PositionSide | 'NEUTRAL' {
+  if (!dir) return 'NEUTRAL';
+  const upper = String(dir).toUpperCase();
+  if (upper === 'BULLISH' || upper === 'LONG' || upper === 'BUY') return PositionSide.LONG;
+  if (upper === 'BEARISH' || upper === 'SHORT' || upper === 'SELL') return PositionSide.SHORT;
+  return 'NEUTRAL';
+}
+
+export function isLongPosition(dir: Direction | string | undefined | null): boolean {
+  return normalizeDirection(dir) === PositionSide.LONG;
+}
+
+export function isShortPosition(dir: Direction | string | undefined | null): boolean {
+  return normalizeDirection(dir) === PositionSide.SHORT;
+}
+
+export function toOrderSide(dir: Direction | string | undefined | null, isExit = false): 'BUY' | 'SELL' {
+  const isLong = isLongPosition(dir);
+  if (isExit) {
+    return isLong ? 'SELL' : 'BUY';
+  }
+  return isLong ? 'BUY' : 'SELL';
+}
+
 export enum SignalState {
   PENDING = 'PENDING',
   ACTIVE = 'ACTIVE',

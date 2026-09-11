@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { createHash } from 'crypto';
-import { Direction, IBacktestTrade, ICandle, ISignalSetup, SignalState } from '@quant/shared';
+import { Direction, IBacktestTrade, ICandle, ISignalSetup, SignalState, isLongPosition } from '@quant/shared';
 import {
   ExecutionSimulator,
   FillModel,
@@ -136,12 +136,7 @@ export class ShadowOrchestrator {
     timestamp: number,
   ): IOrder[] {
     const createdOrders: IOrder[] = [];
-    const isLong =
-      (lot as any).side === 'BUY' ||
-      (lot.direction as any) === 'LONG' ||
-      (lot.direction as any) === Direction.BULLISH ||
-      (lot.direction as any) === 'BUY' ||
-      lot.entrySnapshot?.side === 'BUY';
+    const isLong = isLongPosition(lot.direction || lot.entrySnapshot?.side);
     const exitSide = isLong ? 'SELL' : 'BUY';
     const remainingQty = lot.remainingQuantity;
     if (remainingQty <= 0) return [];
