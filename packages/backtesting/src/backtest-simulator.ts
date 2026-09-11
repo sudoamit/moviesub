@@ -6,6 +6,7 @@ import {
   SignalGrade,
   SignalState,
   Timeframe,
+  PositionSide,
   isLongPosition,
 } from '@quant/shared';
 import {
@@ -58,6 +59,7 @@ export class BacktestSimulator {
   ) {
     const isLong = isLongPosition(lot.direction || lot.entrySnapshot?.side);
     const exitSide = isLong ? 'SELL' : 'BUY';
+    const posSide = isLong ? PositionSide.LONG : PositionSide.SHORT;
     const remainingQty = lot.remainingQuantity;
 
     if (remainingQty <= 0) return;
@@ -73,6 +75,7 @@ export class BacktestSimulator {
       symbol,
       side: exitSide,
       orderType: 'STOP',
+      positionSide: posSide,
       stopPrice: lot.currentStopLoss,
       quantity: remainingQty,
       timestamp,
@@ -98,6 +101,7 @@ export class BacktestSimulator {
         symbol,
         side: exitSide,
         orderType: 'LIMIT',
+        positionSide: posSide,
         price: lot.tp1,
         quantity: Math.min(remainingQty, tp1Qty),
         timestamp,
@@ -112,6 +116,7 @@ export class BacktestSimulator {
         symbol,
         side: exitSide,
         orderType: 'LIMIT',
+        positionSide: posSide,
         price: lot.tp2,
         quantity: Math.min(remainingQty, tp2Qty),
         timestamp,
@@ -126,6 +131,7 @@ export class BacktestSimulator {
         symbol,
         side: exitSide,
         orderType: 'LIMIT',
+        positionSide: posSide,
         price: lot.tp3,
         quantity: Math.min(remainingQty, tp3Qty),
         timestamp,
@@ -726,6 +732,7 @@ export class BacktestSimulator {
                 symbol,
                 side,
                 orderType,
+                positionSide: isLong ? PositionSide.LONG : PositionSide.SHORT,
                 price: decisionPrice,
                 quantity: finalQuantity,
                 timestamp: candleTime,

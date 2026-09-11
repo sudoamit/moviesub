@@ -16,7 +16,7 @@ import {
   EXECUTION_PRECISION,
   ISubmitOrderParams,
 } from './types';
-import { ICandle } from '@quant/shared';
+import { ICandle, isLongPosition } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
 import { OHLCPathCursor } from './ohlc-path-cursor';
@@ -234,6 +234,7 @@ export class ExecutionSimulator {
       symbol: params.symbol,
       side: params.side,
       orderType: params.orderType,
+      positionSide: params.positionSide,
       price: params.price,
       stopPrice: params.stopPrice,
       stopLoss: params.stopLoss,
@@ -403,10 +404,12 @@ export class ExecutionSimulator {
 
           // Pre-Execution Invariant Gates for Entry Orders
           if (order.exitTarget === 'ENTRY') {
+            const isLong = order.positionSide ? isLongPosition(order.positionSide) : order.side === 'BUY';
+
             // 1. Protective Stop Invariant (gap/slippage through stop)
             if (
               order.stopLoss !== undefined &&
-              (order.side === 'BUY' ? fill.price <= order.stopLoss : fill.price >= order.stopLoss)
+              (isLong ? fill.price <= order.stopLoss : fill.price >= order.stopLoss)
             ) {
               order.status = 'REJECTED';
               order.rejectionReason = `REJECTED_GAP_THROUGH_STOP: Candidate fill price ${fill.price} violates protective stop loss ${order.stopLoss}`;
@@ -449,13 +452,50 @@ export class ExecutionSimulator {
               order.referencePrice !== undefined &&
               order.stopLoss !== undefined
             ) {
-              const isLong = order.side === 'BUY';
               const initialRisk = isLong
                 ? order.referencePrice - order.stopLoss
                 : order.stopLoss - order.referencePrice;
               const actualRisk = isLong
                 ? fill.price - order.stopLoss
                 : order.stopLoss - fill.price;
+
+              // Defense-in-depth: If actualRisk <= 0, candidate fill price penetrated protective stop
+              if (actualRisk <= 0) {
+                order.status = 'REJECTED';
+                order.rejectionReason = `REJECTED_GAP_THROUGH_STOP: Candidate fill price ${fill.price} violates protective stop loss ${order.stopLoss}`;
+                this.eventCounter++;
+                const rejectEvent: IExecutionEvent = {
+                  eventId: `${this.runId}_evt_reject_${this.eventCounter}`,
+                  tradeId: order.tradeId,
+                  orderId: order.orderId,
+                  symbol: order.symbol,
+                  eventType: 'ORDER_REJECTED',
+                  timestamp: fill.timestamp,
+                  price: fill.price,
+                  quantity: fill.quantity,
+                  remainingQuantity: 0,
+                  fees: 0,
+                  slippage: 0,
+                  reason: order.rejectionReason,
+                  exitTarget: 'ENTRY',
+                  triggerPrice: order.stopPrice || order.price,
+                  executedPrice: fill.price,
+                  exitOrderCreatedAt: order.createdAt,
+                  exitOrderSubmittedAt: order.submittedAt,
+                  exitTriggerTimestamp: fill.timestamp,
+                  exitFillTimestamp: fill.timestamp,
+                  segmentIndex: cursor.segmentIndex,
+                  segmentType: seg.type,
+                };
+                this.events.push(rejectEvent);
+                newEvents.push(rejectEvent);
+
+                currentOrders = Array.from(this.orders.values()).filter(
+                  (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED') && !filledThisBar.has(o.orderId),
+                );
+                continue;
+              }
+
               const riskDriftRatio = initialRisk > 0 ? (actualRisk - initialRisk) / initialRisk : 0;
               if (initialRisk > 0 && riskDriftRatio > order.maxRiskDrift) {
                 order.status = 'REJECTED';
@@ -1124,6 +1164,9 @@ export class ExecutionSimulator {
       }
       if (ord.stopLoss !== undefined && (!Number.isFinite(ord.stopLoss) || ord.stopLoss <= 0)) {
         throw new Error(`CORRUPT_EXECUTION_ORDER: stopLoss must be a positive finite number, got ${ord.stopLoss}`);
+      }
+      if (ord.positionSide !== undefined && (typeof ord.positionSide !== 'string' || ord.positionSide.trim() === '')) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: positionSide must be a non-empty string, got ${ord.positionSide}`);
       }
 
       const candidateOrder: IOrder = {

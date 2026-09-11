@@ -1,4 +1,4 @@
-import { Direction, ICandle } from '@quant/shared';
+import { Direction, ICandle, PositionSide } from '@quant/shared';
 import { IExecutionEvent } from '@quant/risk-engine';
 
 export enum FillModel {
@@ -30,6 +30,7 @@ export interface IOrder {
   symbol: string;
   side: OrderSide;
   orderType: OrderType;
+  positionSide?: PositionSide | string;
   price?: number;
   stopPrice?: number;
   quantity: number;
@@ -70,6 +71,7 @@ export interface ISubmitOrderParams {
   symbol: string;
   side: OrderSide;
   orderType: OrderType;
+  positionSide?: PositionSide | string;
   price?: number;
   stopPrice?: number;
   stopLoss?: number;

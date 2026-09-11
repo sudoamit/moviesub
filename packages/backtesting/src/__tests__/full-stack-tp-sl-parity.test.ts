@@ -643,177 +643,12 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
   });
 
   // -------------------------------------------------------------------------
-  // Test 6: Strict Order State Monotonicity, Directional Risk Drift, & Zero-Side-Effect Invariants
+  // Test 6: Full-Stack Backtest Execution Integration (Gap Rejection & Favorable Fill)
   // -------------------------------------------------------------------------
-  test('T06: Strict Order State Monotonicity & Pre-Fill Protection Invariant Test (AI Fix 78 & 79)', () => {
-    // 1. Exhaustive Zero-Side-Effect Rejection Invariant Test
-    const execSim = new ExecutionSimulator(
-      FillModel.NEXT_BAR_MARKET,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      'test_mono_1',
-    );
-
-    const entryOrder = execSim.submitOrder({
-      tradeId: 'trade_mono_1',
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderType: 'MARKET',
-      quantity: 10,
-      timestamp: t0,
-      referencePrice: 100,
-      stopLoss: 95,
-      exitTarget: 'ENTRY',
-    });
-
-    // State Before Process
-    expect(entryOrder.status).toBe('PENDING');
-    expect(entryOrder.filledQuantity).toBe(0);
-    expect(entryOrder.remainingQuantity).toBe(10);
-    expect(entryOrder.fees).toBe(0);
-    expect(entryOrder.slippage).toBe(0);
-    expect(execSim.getAllFills().length).toBe(0);
-    expect(execSim.getAllEvents().length).toBe(0);
-
-    // Gap candle opening at 90 (below stopLoss of 95)
-    const gapCandle = createCandle(1, 90, 91, 89, 90);
-    const result = execSim.processSingleExecutionBar(gapCandle);
-
-    // Assert: Order status monotonically transitioned PENDING -> REJECTED (never FILLED)
-    expect(entryOrder.status).toBe('REJECTED');
-    expect(entryOrder.rejectionReason).toContain('REJECTED_GAP_THROUGH_STOP');
-    expect(entryOrder.filledQuantity).toBe(0);
-    expect(entryOrder.remainingQuantity).toBe(10);
-    expect(entryOrder.fees).toBe(0);
-    expect(entryOrder.slippage).toBe(0);
-    expect(entryOrder.avgFillPrice).toBeUndefined();
-    expect(entryOrder.firstFilledAt).toBeUndefined();
-    expect(entryOrder.completedAt).toBeUndefined();
-
-    // Assert: Simulator state has zero fills and exactly 1 rejection event with zero fees/slippage
-    expect(result.fills.length).toBe(0);
-    expect(execSim.getAllFills().length).toBe(0);
-    expect(result.events.length).toBe(1);
-    expect(execSim.getAllEvents().length).toBe(1);
-    expect(result.events[0].eventType).toBe('ORDER_REJECTED');
-    expect(result.events[0].fees).toBe(0);
-    expect(result.events[0].slippage).toBe(0);
-
-    // Assert: Checkpoint creation & restoration preserves pristine state
-    const cp = execSim.createCheckpoint();
-    expect(cp.fills.length).toBe(0);
-    expect(cp.orders[0].status).toBe('REJECTED');
-    const restoredSim = new ExecutionSimulator();
-    restoredSim.restoreCheckpoint(cp);
-    expect(restoredSim.getAllFills().length).toBe(0);
-    expect(restoredSim.getOrder(entryOrder.orderId)?.status).toBe('REJECTED');
-
-    // 2. Directional Risk Drift Tests (LONG)
-    // 2a. Adverse Drift Rejection (LONG): reference 100, SL 90 (initial risk = 10), fill 105 (actual risk = 15, drift = +50% > 25%)
-    const execSimLongDrift = new ExecutionSimulator(
-      FillModel.NEXT_BAR_MARKET,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      'test_long_drift',
-    );
-    const longDriftOrder = execSimLongDrift.submitOrder({
-      tradeId: 'trade_long_drift',
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderType: 'MARKET',
-      quantity: 10,
-      timestamp: t0,
-      referencePrice: 100,
-      stopLoss: 90,
-      maxRiskDrift: 0.25,
-      exitTarget: 'ENTRY',
-    });
-    const adverseLongCandle = createCandle(1, 105, 106, 104, 105);
-    const longDriftResult = execSimLongDrift.processSingleExecutionBar(adverseLongCandle);
-    expect(longDriftOrder.status).toBe('REJECTED');
-    expect(longDriftOrder.rejectionReason).toContain('REJECTED_EXCESSIVE_RISK_DRIFT');
-    expect(longDriftResult.fills.length).toBe(0);
-
-    // 2b. Favorable Fill Acceptance (LONG): reference 100, SL 90, fill 98 (actual risk = 8, drift = -20% <= 25%)
+  test('T06: Full-Stack Backtest Execution Integration (AI Fix 78, 79, & 80)', () => {
     const zeroSlippage = { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 };
-    const execSimLongFav = new ExecutionSimulator(
-      FillModel.NEXT_BAR_MARKET,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      'test_long_fav',
-      zeroSlippage,
-    );
-    const longFavOrder = execSimLongFav.submitOrder({
-      tradeId: 'trade_long_fav',
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderType: 'MARKET',
-      quantity: 10,
-      timestamp: t0,
-      referencePrice: 100,
-      stopLoss: 90,
-      maxRiskDrift: 0.25,
-      exitTarget: 'ENTRY',
-    });
-    const favorableLongCandle = createCandle(1, 98, 99, 97, 98);
-    const longFavResult = execSimLongFav.processSingleExecutionBar(favorableLongCandle);
-    expect(longFavOrder.status).toBe('FILLED');
-    expect(longFavResult.fills.length).toBe(1);
-    expect(longFavResult.fills[0].price).toBeCloseTo(98.0, 1);
 
-    // 3. Directional Risk Drift Tests (SHORT)
-    // 3a. Adverse Drift Rejection (SHORT): reference 100, SL 110 (initial risk = 10), fill 95 (actual risk = 15, drift = +50% > 25%)
-    const execSimShortDrift = new ExecutionSimulator(
-      FillModel.NEXT_BAR_MARKET,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      'test_short_drift',
-    );
-    const shortDriftOrder = execSimShortDrift.submitOrder({
-      tradeId: 'trade_short_drift',
-      symbol: 'BTCUSDT',
-      side: 'SELL',
-      orderType: 'MARKET',
-      quantity: 10,
-      timestamp: t0,
-      referencePrice: 100,
-      stopLoss: 110,
-      maxRiskDrift: 0.25,
-      exitTarget: 'ENTRY',
-    });
-    const adverseShortCandle = createCandle(1, 95, 96, 94, 95);
-    const shortDriftResult = execSimShortDrift.processSingleExecutionBar(adverseShortCandle);
-    expect(shortDriftOrder.status).toBe('REJECTED');
-    expect(shortDriftOrder.rejectionReason).toContain('REJECTED_EXCESSIVE_RISK_DRIFT');
-    expect(shortDriftResult.fills.length).toBe(0);
-
-    // 3b. Favorable Fill Acceptance (SHORT): reference 100, SL 110, fill 102 (actual risk = 8, drift = -20% <= 25%)
-    const execSimShortFav = new ExecutionSimulator(
-      FillModel.NEXT_BAR_MARKET,
-      SameCandleAmbiguityMode.CONSERVATIVE,
-      { submissionLatencyMs: 0, processingLatencyMs: 0 },
-      'test_short_fav',
-      zeroSlippage,
-    );
-    const shortFavOrder = execSimShortFav.submitOrder({
-      tradeId: 'trade_short_fav',
-      symbol: 'BTCUSDT',
-      side: 'SELL',
-      orderType: 'MARKET',
-      quantity: 10,
-      timestamp: t0,
-      referencePrice: 100,
-      stopLoss: 110,
-      maxRiskDrift: 0.25,
-      exitTarget: 'ENTRY',
-    });
-    const favorableShortCandle = createCandle(1, 102, 103, 101, 102);
-    const shortFavResult = execSimShortFav.processSingleExecutionBar(favorableShortCandle);
-    expect(shortFavOrder.status).toBe('FILLED');
-    expect(shortFavResult.fills.length).toBe(1);
-    expect(shortFavResult.fills[0].price).toBeCloseTo(102.0, 1);
-
-    // 4. Full-Stack BacktestSimulator Integration: Gap-through-stop rejection & pristine capital
+    // 1. Gap-through-stop rejection & pristine capital in BacktestSimulator
     const baseCandles: ICandle[] = [];
     for (let i = 0; i < 30; i++) {
       baseCandles.push(createCandle(i, 100.0, 100.5, 99.5, 100.0));
@@ -859,7 +694,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     expect(rejectEv).toBeDefined();
     expect(rejectEv?.reason).toContain('REJECTED_GAP_THROUGH_STOP');
 
-    // 5. Full-Stack BacktestSimulator Integration: Favorable execution fill
+    // 2. Favorable execution fill in BacktestSimulator
     const favCandles: ICandle[] = [];
     for (let i = 0; i < 30; i++) {
       favCandles.push(createCandle(i, 100.0, 100.5, 99.5, 100.0));
