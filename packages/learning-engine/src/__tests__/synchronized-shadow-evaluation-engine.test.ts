@@ -450,7 +450,8 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     };
 
     const finalized = adapter.finalizeBacktest(state, 'CANCEL_PENDING_AT_END', lastCandle, { snapshotId: 'snap-last' } as any);
-    expect(finalized.finalState.pendingOrders.length).toBe(0);
+    expect(finalized.finalState.pendingOrders[0].status).toBe('CANCELLED');
+    expect(finalized.finalState.pendingOrders[0].cancelReason).toBe('BACKTEST_END');
     expect(finalized.finalState.openOrders.length).toBe(0);
   });
 
@@ -1016,7 +1017,9 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
 
     const { options } = setupEvaluation(5, 0, { ...executionConfig, backtestEndPolicy: 'CANCEL_PENDING_AT_END' });
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    expect(result.champion.state.pendingOrders.length).toBe(0);
+    expect(result.champion.state.pendingOrders.every((o) => o.status === 'CANCELLED')).toBe(true);
+    expect(result.champion.state.pendingOrders[0].cancelReason).toBe('BACKTEST_END');
+    expect(result.champion.state.openOrders.length).toBe(0);
     expect(result.champion.state.position).toBe('FLAT');
   });
 
@@ -1036,5 +1039,139 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
     expect(result.champion.state.position).toBe('FLAT');
     expect(result.champion.executions.length).toBe(2); // 1 entry + 1 force close exit
+  });
+
+  it('46. Fractional quantities support partial fills without floor-of-1 violation', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, { ...executionConfig, partialFillRatio: 0.5 }, 'test-frac');
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order = {
+      orderId: 'ord-frac', tradeId: 'trade-frac', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 0.5, filledQuantity: 0, remainingQuantity: 0.5, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const result = adapter.processMarketEvent(candle, [order], {
+      capital: 100000, position: 'FLAT', quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [order], openOrders: [order.orderId], closedTrades: [], riskState: {}, portfolioState: {},
+    }, snapshot);
+
+    expect(result.executions.length).toBe(1);
+    expect(result.executions[0].quantity).toBe(0.25);
+    expect(result.newState.quantity).toBe(0.25);
+    expect(result.updatedPendingOrders[0].remainingQuantity).toBe(0.25);
+    expect(result.updatedPendingOrders[0].status).toBe('PARTIALLY_FILLED');
+  });
+
+  it('47. Scale-in entries maintain consistent weighted average entry price', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feePerTrade: 0, slippagePerTrade: 0, slippageBps: 0 },
+      'test-scalein',
+    );
+    const candle1 = { ...options.candles[1], close: 100, open: 100, high: 100, low: 100 };
+    const candle2 = { ...options.candles[2], close: 110, open: 110, high: 110, low: 110 };
+    const snapshot1 = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+    const snapshot2 = { snapshotId: 'snap-2', marketDataCutoffTimestamp: 1700000060000, executionContextHash: 'ech' } as any;
+
+    const initialOrder = {
+      orderId: 'ord-in-1', tradeId: 'trade-scale', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const res1 = adapter.processMarketEvent(candle1, [initialOrder], {
+      capital: 100000, position: 'FLAT', quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [initialOrder], openOrders: [initialOrder.orderId], closedTrades: [], riskState: {}, portfolioState: {},
+    }, snapshot1);
+
+    const fill1 = res1.executions[0].entryPrice;
+    expect(res1.newState.entryPrice).toBe(fill1);
+    expect(res1.newState.averageEntryPrice).toBe(fill1);
+
+    const scaleInOrder = {
+      orderId: 'ord-in-2', tradeId: 'trade-scale', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000060000, arrivalTimestamp: 1700000060015, createdAtMarketTimestamp: 1700000060000,
+    };
+
+    const res2 = adapter.processMarketEvent(candle2, [scaleInOrder], res1.newState, snapshot2);
+    const fill2 = res2.executions[0].entryPrice;
+    const expectedAvg = Number(((fill1 + fill2) / 2).toFixed(8));
+
+    expect(res2.newState.quantity).toBe(2);
+    expect(res2.newState.averageEntryPrice).toBe(expectedAvg);
+    expect(res2.newState.entryPrice).toBe(expectedAvg);
+    expect(res2.newState.rawEntryPrice).toBe(expectedAvg);
+  });
+
+  it('48. Reversal entry is blocked when reversal exit only partially fills', () => {
+    const { options } = setupEvaluation(5);
+    // partialFillRatio: 0.5 -> exit will fill 1 out of 2, leaving position LONG 1
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, { ...executionConfig, partialFillRatio: 0.5 }, 'test-rev-block');
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const revExit = {
+      orderId: 'ord-rev-exit', tradeId: 'trade-rev', symbol: 'BTCUSDT', side: 'SELL' as const, orderType: 'MARKET' as const,
+      positionEffect: 'REVERSE_EXIT' as const, requestedQuantity: 2, filledQuantity: 0, remainingQuantity: 2, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+    const revEnter = {
+      orderId: 'ord-rev-enter', tradeId: 'trade-rev', symbol: 'BTCUSDT', side: 'SELL' as const, orderType: 'MARKET' as const,
+      positionEffect: 'REVERSE_ENTRY' as const, requestedQuantity: 2, filledQuantity: 0, remainingQuantity: 2, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const state = {
+      capital: 100000, position: 'LONG' as const, quantity: 2, initialQuantity: 2, entryPrice: 100, rawEntryPrice: 100,
+      averageEntryPrice: 100, entryFees: 1, remainingEntryFees: 1, entrySlippage: 0.5, remainingEntrySlippage: 0.5,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [revExit, revEnter], openOrders: [revExit.orderId, revEnter.orderId],
+      closedTrades: [], riskState: {}, portfolioState: {},
+    };
+
+    const res = adapter.processMarketEvent(candle, [revExit, revEnter], state, snapshot);
+
+    // Only exit was evaluated and filled 1; reversal enter was blocked because position is still LONG 1
+    expect(res.executions.length).toBe(1);
+    expect(res.executions[0].executionType).toBe('REVERSAL_EXIT');
+    expect(res.newState.position).toBe('LONG');
+    expect(res.newState.quantity).toBe(1);
+    expect(res.updatedPendingOrders.length).toBe(2);
+    expect(res.updatedPendingOrders.find(o => o.orderId === 'ord-rev-enter')?.status).toBe('PENDING');
+  });
+
+  it('49. Force close at backtest end applies exit fee and slippage in addition to remaining entry costs', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feePerTrade: undefined, slippagePerTrade: undefined, feeRate: 0.001, slippageBps: 10 },
+      'test-fc-costs',
+    );
+    const lastCandle = { ...options.candles[4], close: 100, open: 100, high: 100, low: 100 };
+    const snapshot = { snapshotId: 'snap-end', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const state = {
+      capital: 100000, position: 'LONG' as const, quantity: 2, initialQuantity: 2, entryPrice: 100, rawEntryPrice: 100,
+      averageEntryPrice: 100, entryFees: 0.2, remainingEntryFees: 0.2, entrySlippage: 0.2, remainingEntrySlippage: 0.2,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [], openOrders: [], closedTrades: [], riskState: {}, portfolioState: {},
+    };
+
+    const finalized = adapter.finalizeBacktest(state, 'FORCE_CLOSE_POSITION_AT_END', lastCandle, snapshot);
+
+    expect(finalized.finalExecutions.length).toBe(1);
+    const exec = finalized.finalExecutions[0];
+    // notional = 2 * 100 = 200. Exit fee = 200 * 0.001 = 0.2. Total fees = 0.2 (entry) + 0.2 (exit) = 0.4.
+    // Exit slippage = 200 * 0.001 = 0.2. Total slippage = 0.2 (entry) + 0.2 (exit) = 0.4.
+    expect(exec.fees).toBe(0.4);
+    expect(exec.slippage).toBe(0.4);
+    expect(finalized.finalState.position).toBe('FLAT');
   });
 });

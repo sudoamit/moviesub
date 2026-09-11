@@ -104,6 +104,8 @@ export interface ShadowPendingOrder {
   readonly decisionId?: string;
   readonly createdAtMarketTimestamp: number;
   readonly exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+  readonly cancelReason?: string;
+  readonly cancelTimestamp?: number;
 }
 
 export interface ShadowExecutionResult {
@@ -232,6 +234,7 @@ export interface ShadowExecutionConfig {
   readonly feePerTrade?: number;
   readonly slippagePerTrade?: number;
   readonly feeRate?: number;
+  readonly feeBps?: number;
   readonly slippageBps?: number;
   readonly riskPerTrade: number;
   readonly quantity: number;
@@ -336,19 +339,27 @@ export class SynchronizedEvaluationClock {
 }
 
 /**
- * Restricted Shadow Execution Adapter wrapping the canonical ExecutionSimulator.
- * Exposes event-driven simulation capabilities only and strictly forbids live order routing for shadow branches.
- * Enforces persistent pending-order lifecycle, causal temporal eligibility, and rejects synthetic fallback fills.
+ * Adapter integrating Shadow Evaluations with the canonical ExecutionSimulator.
+ * Follows a clean event-driven order lifecycle:
+ * Decision -> ShadowPendingOrder -> arrivalTimestamp reached -> Simulator Evaluation -> State Reducer.
  */
 export class ShadowExecutionAdapter {
-  private readonly simulator: ExecutionSimulator;
   public readonly simulatorId: string;
-  public readonly feeModelHash: string;
+  public readonly fillModelHash: string;
   public readonly slippageModelHash: string;
+  public readonly feeModelHash: string;
   public readonly hasProductionOrderRouter: boolean;
-  public readonly fillModel: FillModel;
+  public readonly simulator: ExecutionSimulator;
   public readonly latencyMs: number;
   public readonly symbol: string;
+  private readonly fillModel: FillModel;
+  private readonly ambiguityMode: SameCandleAmbiguityMode;
+  private readonly latencyConfig: ILatencyConfig;
+  private readonly slippageConfig?: ISlippageConfig;
+  private readonly feeConfig?: IFeeConfig;
+  private readonly spreadConfig?: ISpreadConfig;
+  private readonly costStressConfig?: ExecutionCostStressConfig;
+  private readonly runId: string;
   private orderSequence = 0;
 
   public constructor(
@@ -357,72 +368,89 @@ export class ShadowExecutionAdapter {
     private readonly config: ShadowExecutionConfig,
     runId = 'shadow-eval',
   ) {
-    // Challenger in SHADOW mode strictly has NO live order router
     this.hasProductionOrderRouter = mode !== 'SHADOW';
     this.simulatorId = `canonical-execution-simulator-${runId}`;
     this.symbol = executionContext.symbol;
+    this.runId = runId;
 
     this.fillModel = ((executionContext.fillModel || config.fillModel || 'OHLC_PATH') as FillModel);
-    const ambiguityMode = ((executionContext.ambiguityMode || config.ambiguityMode || 'CONSERVATIVE') as SameCandleAmbiguityMode);
+    this.ambiguityMode = ((executionContext.ambiguityMode || config.ambiguityMode || 'CONSERVATIVE') as SameCandleAmbiguityMode);
     this.latencyMs =
       config.latencyMs !== undefined
         ? config.latencyMs
         : (executionContext.latencyConfig?.submissionLatencyMs ?? 15);
-    const latencyConfig: ILatencyConfig = {
+    this.latencyConfig = {
       submissionLatencyMs: this.latencyMs,
       processingLatencyMs: executionContext.latencyConfig?.processingLatencyMs ?? 5,
     };
-    this.latencyMs = latencyConfig.submissionLatencyMs;
 
-    let feeConfig: IFeeConfig | undefined = executionContext.feeConfig;
-    if (!feeConfig && config.feePerTrade !== undefined) {
+    let feeConfig: IFeeConfig | undefined;
+    if (config.feePerTrade !== undefined) {
       feeConfig = { brokerageFlat: config.feePerTrade };
-    } else if (!feeConfig && config.feeRate !== undefined) {
+    } else if (config.feeRate !== undefined) {
       feeConfig = { brokerageRateBps: config.feeRate * 10000 };
+    } else if (config.feeBps !== undefined) {
+      feeConfig = { brokerageRateBps: config.feeBps };
+    } else {
+      feeConfig = executionContext.feeConfig;
     }
+    this.feeConfig = feeConfig;
 
-    let slippageConfig: ISlippageConfig | undefined = executionContext.slippageConfig;
-    if (!slippageConfig && config.slippageBps !== undefined) {
+    let slippageConfig: ISlippageConfig | undefined;
+    if (config.slippageBps !== undefined) {
       slippageConfig = {
         baseSlippageBps: config.slippageBps,
         volatilityMultiplier: 1.0,
         impactMultiplier: 1.0,
         maxSlippageBps: Math.max(25.0, config.slippageBps * 2),
       };
-    } else if (!slippageConfig && config.slippagePerTrade !== undefined) {
+    } else if (config.slippagePerTrade !== undefined) {
       slippageConfig = {
         baseSlippageBps: 0,
         volatilityMultiplier: 0,
         impactMultiplier: 0,
         maxSlippageBps: 0,
       };
+    } else {
+      slippageConfig = executionContext.slippageConfig;
     }
+    this.slippageConfig = slippageConfig;
 
     const spreadConfig: ISpreadConfig | undefined =
       executionContext.spreadConfig ||
       (config.feePerTrade !== undefined || config.slippagePerTrade !== undefined
         ? { baseSpreadBps: 0, illiquidMultiplier: 1.0 }
         : undefined);
-    const costStressConfig: ExecutionCostStressConfig | undefined = executionContext.costStressConfig;
+    this.spreadConfig = spreadConfig;
+    this.costStressConfig = executionContext.costStressConfig;
 
+    this.fillModelHash = hash(this.fillModel);
     this.feeModelHash = hash(feeConfig ?? { type: 'zero-fee' });
     this.slippageModelHash = hash(slippageConfig ?? { type: 'zero-slippage' });
 
-    this.simulator = new ExecutionSimulator(
+    this.simulator = this.createSimulator();
+  }
+
+  /**
+   * Factory creating a canonical ExecutionSimulator instance configured with authoritative settings.
+   */
+  public createSimulator(customRunId?: string): ExecutionSimulator {
+    return new ExecutionSimulator(
       this.fillModel,
-      ambiguityMode,
-      latencyConfig,
-      runId,
-      slippageConfig,
-      feeConfig,
-      spreadConfig,
-      costStressConfig,
+      this.ambiguityMode,
+      this.latencyConfig,
+      customRunId || this.runId,
+      this.slippageConfig,
+      this.feeConfig,
+      this.spreadConfig,
+      this.costStressConfig,
     );
   }
 
   /**
    * Submits persistent pending orders resulting from a strategy decision.
    * Computes exact causal timestamps (submissionTimestamp and arrivalTimestamp).
+   * Note: Orders are stored purely in shadow pending state; they are NOT sent to the simulator until arrival.
    */
   public submitDecisionOrders(
     decision: ShadowDecision,
@@ -460,24 +488,12 @@ export class ShadowExecutionAdapter {
 
       this.orderSequence += 1;
       const orderId = `ord-${decision.decisionId}-exit-${this.orderSequence}`;
-      const simOrder = this.simulator.submitOrder({
-        clientOrderId: orderId,
-        tradeId: `trade-${decision.decisionId}-exit`,
-        symbol: this.symbol,
-        side: exitSide,
-        orderType: 'MARKET',
-        quantity: exitQty,
-        timestamp: orderSubmissionTimestamp,
-        referencePrice: snapshot.candle.close,
-        signalTimestamp: decisionTimestamp,
-        exitTarget: 'SL',
-      });
 
       newOrders.push(
         freeze({
-          orderId: simOrder.orderId,
+          orderId,
           clientOrderId: orderId,
-          tradeId: simOrder.tradeId,
+          tradeId: `trade-${decision.decisionId}-exit`,
           symbol: this.symbol,
           side: exitSide,
           orderType: 'MARKET',
@@ -508,24 +524,12 @@ export class ShadowExecutionAdapter {
 
       this.orderSequence += 1;
       const exitOrderId = `ord-${decision.decisionId}-rev-exit-${this.orderSequence}`;
-      const simExitOrder = this.simulator.submitOrder({
-        clientOrderId: exitOrderId,
-        tradeId: `trade-${decision.decisionId}-reversal-exit`,
-        symbol: this.symbol,
-        side: exitSide,
-        orderType: 'MARKET',
-        quantity: exitQty,
-        timestamp: orderSubmissionTimestamp,
-        referencePrice: snapshot.candle.close,
-        signalTimestamp: decisionTimestamp,
-        exitTarget: 'SL',
-      });
 
       newOrders.push(
         freeze({
-          orderId: simExitOrder.orderId,
+          orderId: exitOrderId,
           clientOrderId: exitOrderId,
-          tradeId: simExitOrder.tradeId,
+          tradeId: `trade-${decision.decisionId}-reversal-exit`,
           symbol: this.symbol,
           side: exitSide,
           orderType: 'MARKET',
@@ -548,24 +552,12 @@ export class ShadowExecutionAdapter {
 
       this.orderSequence += 1;
       const enterOrderId = `ord-${decision.decisionId}-rev-enter-${this.orderSequence}`;
-      const simEnterOrder = this.simulator.submitOrder({
-        clientOrderId: enterOrderId,
-        tradeId: `trade-${decision.decisionId}-reversal-enter`,
-        symbol: this.symbol,
-        side: enterSide,
-        orderType: 'MARKET',
-        quantity: enterQty,
-        timestamp: orderSubmissionTimestamp,
-        referencePrice: snapshot.candle.close,
-        signalTimestamp: decisionTimestamp,
-        exitTarget: 'ENTRY',
-      });
 
       newOrders.push(
         freeze({
-          orderId: simEnterOrder.orderId,
+          orderId: enterOrderId,
           clientOrderId: enterOrderId,
-          tradeId: simEnterOrder.tradeId,
+          tradeId: `trade-${decision.decisionId}-reversal-enter`,
           symbol: this.symbol,
           side: enterSide,
           orderType: 'MARKET',
@@ -597,24 +589,12 @@ export class ShadowExecutionAdapter {
 
       this.orderSequence += 1;
       const enterOrderId = `ord-${decision.decisionId}-enter-${this.orderSequence}`;
-      const simOrder = this.simulator.submitOrder({
-        clientOrderId: enterOrderId,
-        tradeId: `trade-${decision.decisionId}-enter`,
-        symbol: this.symbol,
-        side: enterSide,
-        orderType: 'MARKET',
-        quantity: enterQty,
-        timestamp: orderSubmissionTimestamp,
-        referencePrice: snapshot.candle.close,
-        signalTimestamp: decisionTimestamp,
-        exitTarget: 'ENTRY',
-      });
 
       newOrders.push(
         freeze({
-          orderId: simOrder.orderId,
+          orderId: enterOrderId,
           clientOrderId: enterOrderId,
-          tradeId: simOrder.tradeId,
+          tradeId: `trade-${decision.decisionId}-enter`,
           symbol: this.symbol,
           side: enterSide,
           orderType: 'MARKET',
@@ -637,40 +617,18 @@ export class ShadowExecutionAdapter {
   }
 
   /**
-   * Ensures an order exists in the underlying ExecutionSimulator.
+   * Compatibility method for external order ingestion.
    */
-  public ensureOrderInSimulator(order: ShadowPendingOrder): void {
-    const existing = (this.simulator as any).orders?.get(order.orderId);
-    if (!existing) {
-      const simOrder = this.simulator.submitOrder({
-        clientOrderId: order.clientOrderId,
-        tradeId: order.tradeId,
-        symbol: order.symbol,
-        side: order.side,
-        orderType: order.orderType,
-        price: order.limitPrice,
-        stopPrice: order.stopPrice,
-        quantity: order.remainingQuantity,
-        timestamp: order.submissionTimestamp,
-        signalTimestamp: order.submissionTimestamp,
-        exitTarget: order.exitTarget,
-      });
-      if (simOrder.orderId !== order.orderId) {
-        (this.simulator as any).orders.delete(simOrder.orderId);
-        (simOrder as any).orderId = order.orderId;
-        (this.simulator as any).orders.set(order.orderId, simOrder);
-      }
-    } else {
-      existing.quantity = order.remainingQuantity;
-      existing.remainingQuantity = order.remainingQuantity;
-      existing.status = 'PENDING';
-    }
+  public ensureOrderInSimulator(_order: ShadowPendingOrder): void {
+    // No-op: Orders are ingested on-demand at arrival eligibility during processMarketEvent.
   }
 
   /**
-   * Processes all active pending orders against the current market candle event.
-   * Only orders that have arrived (arrivalTimestamp <= candleTime) are eligible to execute.
-   * Unfilled or partially filled orders persist in pending state.
+   * Processes active pending orders against the current market candle event.
+   * - Only orders that have arrived (arrivalTimestamp <= candleTime) are evaluated.
+   * - Exits are evaluated first, then entries if position conditions permit.
+   * - Blocked reversal entries remain pending until prior position is fully FLAT.
+   * - Unfilled or partially filled orders persist in pending state.
    */
   public processMarketEvent(
     candle: ICandle,
@@ -684,112 +642,244 @@ export class ShadowExecutionAdapter {
   } {
     const candleTime = timestampOf(candle);
     const executions: ShadowExecutionResult[] = [];
-    const updatedPendingOrders: ShadowPendingOrder[] = [];
     let state = cloneState(currentState);
 
-    const eligibleOrders: ShadowPendingOrder[] = [];
     const ineligibleOrders: ShadowPendingOrder[] = [];
+    const eligibleExits: ShadowPendingOrder[] = [];
+    const eligibleEntries: ShadowPendingOrder[] = [];
 
     for (const order of pendingOrders) {
+      if (order.status === 'CANCELLED' || order.status === 'FILLED' || order.status === 'REJECTED') {
+        continue;
+      }
       if (candleTime < order.arrivalTimestamp) {
         ineligibleOrders.push(order);
-      } else {
-        eligibleOrders.push(order);
-        this.ensureOrderInSimulator(order);
-      }
-    }
-
-    if (eligibleOrders.length === 0) {
-      return freeze({
-        executions: [],
-        updatedPendingOrders: freeze([...ineligibleOrders]),
-        newState: freeze({
-          ...state,
-          pendingOrders: freeze([...ineligibleOrders]),
-          openOrders: freeze(ineligibleOrders.map((o) => o.orderId)),
-        }),
-      });
-    }
-
-    // Sort eligible orders so that exits are evaluated before entries on the same bar
-    eligibleOrders.sort((a, b) => {
-      const isExitA = a.positionEffect === 'CLOSE' || a.positionEffect === 'PARTIAL_EXIT' || a.positionEffect === 'REVERSE_EXIT';
-      const isExitB = b.positionEffect === 'CLOSE' || b.positionEffect === 'PARTIAL_EXIT' || b.positionEffect === 'REVERSE_EXIT';
-      if (isExitA && !isExitB) return -1;
-      if (!isExitA && isExitB) return 1;
-      return 0;
-    });
-
-    const simResult = this.simulator.processSingleExecutionBar(candle);
-    const fillsByOrderId = new Map(simResult.fills.map((f) => [f.orderId, f]));
-
-    for (const order of eligibleOrders) {
-      const fill = fillsByOrderId.get(order.orderId);
-
-      if (!fill) {
-        // NO_FILL: order remains pending
-        updatedPendingOrders.push(order);
         continue;
       }
 
-      const executionTimestamp = fill.timestamp;
-      if (executionTimestamp < order.arrivalTimestamp) {
-        throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
-      }
+      const isExit =
+        order.positionEffect === 'CLOSE' ||
+        order.positionEffect === 'PARTIAL_EXIT' ||
+        order.positionEffect === 'REVERSE_EXIT';
 
-      let fillQty = fill.quantity;
-      if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
-        fillQty = Math.max(1, Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(4))));
-      }
-
-      let executionType: ShadowExecutionType;
-      if (order.positionEffect === 'REVERSE_EXIT') {
-        executionType = 'REVERSAL_EXIT';
-      } else if (order.positionEffect === 'REVERSE_ENTRY') {
-        executionType = 'REVERSAL_ENTRY';
-      } else if (order.positionEffect === 'PARTIAL_EXIT') {
-        executionType = 'PARTIAL_EXIT';
-      } else if (order.positionEffect === 'CLOSE') {
-        executionType = fillQty < order.requestedQuantity ? 'PARTIAL_EXIT' : 'EXIT';
+      if (isExit) {
+        eligibleExits.push(order);
       } else {
-        executionType = 'ENTRY';
-      }
-
-      const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
-      const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
-
-      const { updatedState, executionResult } = this.reduceStateOnFill(
-        state,
-        fill,
-        order,
-        fillQty,
-        executionType,
-        fillFee,
-        fillSlippage,
-        snapshot,
-        executionTimestamp,
-      );
-
-      state = updatedState;
-      executions.push(executionResult);
-
-      const newFilledQty = Number((order.filledQuantity + fillQty).toFixed(8));
-      const newRemainingQty = Math.max(0, Number((order.remainingQuantity - fillQty).toFixed(8)));
-      const isComplete = newRemainingQty <= 1e-6;
-
-      if (!isComplete) {
-        updatedPendingOrders.push(
-          freeze({
-            ...order,
-            filledQuantity: newFilledQty,
-            remainingQuantity: newRemainingQty,
-            status: 'PARTIALLY_FILLED',
-          }),
-        );
+        eligibleEntries.push(order);
       }
     }
 
-    const allRemainingPending = [...ineligibleOrders, ...updatedPendingOrders];
+    const pendingAfterExits: ShadowPendingOrder[] = [];
+
+    // PASS 1: Evaluate Eligible Exits
+    if (eligibleExits.length > 0) {
+      const exitSim = this.createSimulator(`exit-${candleTime}`);
+      for (const order of eligibleExits) {
+        exitSim.submitOrder({
+          clientOrderId: order.clientOrderId || order.orderId,
+          tradeId: order.tradeId,
+          symbol: order.symbol,
+          side: order.side,
+          orderType: order.orderType,
+          price: order.limitPrice,
+          stopPrice: order.stopPrice,
+          quantity: order.remainingQuantity,
+          timestamp: order.submissionTimestamp,
+          signalTimestamp: order.submissionTimestamp,
+          exitTarget: order.exitTarget,
+        });
+      }
+
+      const simResult = exitSim.processSingleExecutionBar(candle);
+      const fills = simResult.fills;
+      let fillIdx = 0;
+
+      for (const order of eligibleExits) {
+        const fill =
+          fills.find(
+            (f, idx) =>
+              idx >= fillIdx &&
+              f.side === order.side &&
+              f.symbol === order.symbol &&
+              (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
+          ) || fills[fillIdx];
+
+        if (!fill) {
+          pendingAfterExits.push(order);
+          continue;
+        }
+        fillIdx++;
+
+        const executionTimestamp = fill.timestamp;
+        if (executionTimestamp < order.arrivalTimestamp) {
+          throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
+        }
+
+        let fillQty = fill.quantity;
+        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
+          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
+        } else {
+          fillQty = Math.min(order.remainingQuantity, fillQty);
+        }
+
+        let executionType: ShadowExecutionType;
+        if (order.positionEffect === 'REVERSE_EXIT') {
+          executionType = 'REVERSAL_EXIT';
+        } else if (order.positionEffect === 'PARTIAL_EXIT') {
+          executionType = 'PARTIAL_EXIT';
+        } else if (order.positionEffect === 'CLOSE') {
+          executionType = fillQty < order.requestedQuantity ? 'PARTIAL_EXIT' : 'EXIT';
+        } else {
+          executionType = 'EXIT';
+        }
+
+        const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
+        const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+
+        const { updatedState, executionResult } = this.reduceStateOnFill(
+          state,
+          fill,
+          order,
+          fillQty,
+          executionType,
+          fillFee,
+          fillSlippage,
+          snapshot,
+          executionTimestamp,
+        );
+
+        state = updatedState;
+        executions.push(executionResult);
+
+        const newFilledQty = Number((order.filledQuantity + fillQty).toFixed(8));
+        const newRemainingQty = Math.max(0, Number((order.remainingQuantity - fillQty).toFixed(8)));
+        const isComplete = newRemainingQty <= 1e-6;
+
+        if (!isComplete) {
+          pendingAfterExits.push(
+            freeze({
+              ...order,
+              filledQuantity: newFilledQty,
+              remainingQuantity: newRemainingQty,
+              status: 'PARTIALLY_FILLED',
+            }),
+          );
+        }
+      }
+    }
+
+    // PASS 2: Evaluate Eligible Entries (Only block opposite-direction entries when position is non-FLAT)
+    const pendingAfterEntries: ShadowPendingOrder[] = [];
+    const entriesToEvaluate: ShadowPendingOrder[] = [];
+    const blockedEntries: ShadowPendingOrder[] = [];
+
+    for (const order of eligibleEntries) {
+      const isOppositeDirection =
+        (state.position === 'LONG' && order.side === 'SELL') ||
+        (state.position === 'SHORT' && order.side === 'BUY');
+
+      if (!isOppositeDirection) {
+        entriesToEvaluate.push(order);
+      } else {
+        // Blocked because existing opposite position is not yet closed (e.g. reversal exit partially filled or pending)
+        blockedEntries.push(order);
+      }
+    }
+
+    if (entriesToEvaluate.length > 0) {
+      const entrySim = this.createSimulator(`entry-${candleTime}`);
+      for (const order of entriesToEvaluate) {
+        entrySim.submitOrder({
+          clientOrderId: order.clientOrderId || order.orderId,
+          tradeId: order.tradeId,
+          symbol: order.symbol,
+          side: order.side,
+          orderType: order.orderType,
+          price: order.limitPrice,
+          stopPrice: order.stopPrice,
+          quantity: order.remainingQuantity,
+          timestamp: order.submissionTimestamp,
+          signalTimestamp: order.submissionTimestamp,
+          exitTarget: order.exitTarget,
+        });
+      }
+
+      const simResult = entrySim.processSingleExecutionBar(candle);
+      const fills = simResult.fills;
+      let fillIdx = 0;
+
+      for (const order of entriesToEvaluate) {
+        const fill =
+          fills.find(
+            (f, idx) =>
+              idx >= fillIdx &&
+              f.side === order.side &&
+              f.symbol === order.symbol &&
+              (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
+          ) || fills[fillIdx];
+
+        if (!fill) {
+          pendingAfterEntries.push(order);
+          continue;
+        }
+        fillIdx++;
+
+        const executionTimestamp = fill.timestamp;
+        if (executionTimestamp < order.arrivalTimestamp) {
+          throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
+        }
+
+        let fillQty = fill.quantity;
+        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
+          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
+        } else {
+          fillQty = Math.min(order.remainingQuantity, fillQty);
+        }
+
+        const executionType: ShadowExecutionType =
+          order.positionEffect === 'REVERSE_ENTRY' ? 'REVERSAL_ENTRY' : 'ENTRY';
+
+        const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
+        const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+
+        const { updatedState, executionResult } = this.reduceStateOnFill(
+          state,
+          fill,
+          order,
+          fillQty,
+          executionType,
+          fillFee,
+          fillSlippage,
+          snapshot,
+          executionTimestamp,
+        );
+
+        state = updatedState;
+        executions.push(executionResult);
+
+        const newFilledQty = Number((order.filledQuantity + fillQty).toFixed(8));
+        const newRemainingQty = Math.max(0, Number((order.remainingQuantity - fillQty).toFixed(8)));
+        const isComplete = newRemainingQty <= 1e-6;
+
+        if (!isComplete) {
+          pendingAfterEntries.push(
+            freeze({
+              ...order,
+              filledQuantity: newFilledQty,
+              remainingQuantity: newRemainingQty,
+              status: 'PARTIALLY_FILLED',
+            }),
+          );
+        }
+      }
+    }
+
+    const allRemainingPending = [
+      ...ineligibleOrders,
+      ...pendingAfterExits,
+      ...blockedEntries,
+      ...pendingAfterEntries,
+    ];
 
     return freeze({
       executions: freeze(executions),
@@ -797,7 +887,7 @@ export class ShadowExecutionAdapter {
       newState: freeze({
         ...state,
         pendingOrders: freeze(allRemainingPending),
-        openOrders: freeze(allRemainingPending.map((o) => o.orderId)),
+        openOrders: freeze(allRemainingPending.filter((o) => o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED').map((o) => o.orderId)),
       }),
     });
   }
@@ -840,8 +930,8 @@ export class ShadowExecutionAdapter {
         position: isLongOrder ? 'LONG' : 'SHORT',
         quantity: newQty,
         initialQuantity: newQty,
-        entryPrice: fillPrice,
-        rawEntryPrice: fillPrice,
+        entryPrice: averageEntryPrice,
+        rawEntryPrice: averageEntryPrice,
         averageEntryPrice,
         entryFees: Number((currentState.entryFees + fee).toFixed(8)),
         remainingEntryFees: newRemainingFees,
@@ -960,9 +1050,17 @@ export class ShadowExecutionAdapter {
     let finalPending = [...state.pendingOrders];
     let currentState = cloneState(state);
     const finalExecutions: ShadowExecutionResult[] = [];
+    const lastCandleTime = timestampOf(lastCandle);
 
     if (policy === 'CANCEL_PENDING_AT_END') {
-      finalPending = [];
+      finalPending = state.pendingOrders.map((o) =>
+        freeze({
+          ...o,
+          status: 'CANCELLED' as const,
+          cancelReason: 'BACKTEST_END',
+          cancelTimestamp: lastCandleTime,
+        }),
+      );
     } else if (policy === 'FORCE_CLOSE_POSITION_AT_END' && currentState.position !== 'FLAT' && currentState.quantity > 0) {
       // Force close position on final candle close
       const exitSide = currentState.position === 'LONG' ? 'SELL' : 'BUY';
@@ -972,8 +1070,16 @@ export class ShadowExecutionAdapter {
 
       const isLong = currentState.position === 'LONG';
       const grossPnL = Number(((isLong ? exitPrice - currentState.entryPrice : currentState.entryPrice - exitPrice) * exitQty).toFixed(8));
-      const totalFees = currentState.remainingEntryFees;
-      const totalSlippage = currentState.remainingEntrySlippage;
+
+      const exitFee = this.config.feePerTrade !== undefined
+        ? this.config.feePerTrade
+        : Number((notional * (this.config.feeRate ?? (this.config.feeBps ? this.config.feeBps / 10000 : 0.001))).toFixed(8));
+      const exitSlippage = this.config.slippagePerTrade !== undefined
+        ? this.config.slippagePerTrade
+        : Number((notional * (this.config.slippageBps ? this.config.slippageBps / 10000 : 0.0005)).toFixed(8));
+
+      const totalFees = Number((currentState.remainingEntryFees + exitFee).toFixed(8));
+      const totalSlippage = Number((currentState.remainingEntrySlippage + exitSlippage).toFixed(8));
       const netPnL = Number((grossPnL - totalFees - totalSlippage).toFixed(8));
 
       const executionResult: ShadowExecutionResult = freeze({
@@ -990,11 +1096,11 @@ export class ShadowExecutionAdapter {
         realizedPnL: netPnL,
         unrealizedPnL: 0,
         rMultiple: 0,
-        decisionTimestamp: timestampOf(lastCandle),
-        decisionCutoffTimestamp: timestampOf(lastCandle),
-        orderSubmissionTimestamp: timestampOf(lastCandle),
-        orderArrivalTimestamp: timestampOf(lastCandle),
-        executionTimestamp: timestampOf(lastCandle),
+        decisionTimestamp: lastCandleTime,
+        decisionCutoffTimestamp: lastCandleTime,
+        orderSubmissionTimestamp: lastCandleTime,
+        orderArrivalTimestamp: lastCandleTime,
+        executionTimestamp: lastCandleTime,
         executionContextHash: snapshot.executionContextHash,
       });
 
@@ -1012,13 +1118,20 @@ export class ShadowExecutionAdapter {
         realizedPnL: Number((currentState.realizedPnL + netPnL).toFixed(8)),
         unrealizedPnL: 0,
       };
-      finalPending = [];
+      finalPending = state.pendingOrders.map((o) =>
+        freeze({
+          ...o,
+          status: 'CANCELLED' as const,
+          cancelReason: 'BACKTEST_END',
+          cancelTimestamp: lastCandleTime,
+        }),
+      );
     }
 
     const finalState: ShadowBranchState = freeze({
       ...currentState,
       pendingOrders: freeze(finalPending),
-      openOrders: freeze(finalPending.map((o) => o.orderId)),
+      openOrders: freeze(finalPending.filter((o) => o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED').map((o) => o.orderId)),
       unrealizedPnL: currentState.position === 'FLAT' ? 0 : currentState.unrealizedPnL,
     });
 
