@@ -72,7 +72,7 @@ export class ExecutionSimulator {
         if (
           existingOrder.tradeId === params.tradeId &&
           existingOrder.exitTarget === params.exitTarget &&
-          existingOrder.status === 'PENDING'
+          (existingOrder.status === 'PENDING' || existingOrder.status === 'PARTIALLY_FILLED')
         ) {
           existingOrder.status = 'CANCELLED';
         }
@@ -248,26 +248,54 @@ export class ExecutionSimulator {
           fill.segmentType = seg.type;
 
           filledThisBar.add(order.orderId);
+
+          // P0: Explicit protection against fill overshoot / overfill
+          const remainingBefore = order.remainingQuantity;
+          if (fill.quantity <= 0 || fill.quantity > remainingBefore + 1e-6) {
+            throw new Error(
+              `FILL_EXCEEDS_REMAINING_QUANTITY: Fill quantity (${fill.quantity}) exceeds order remaining quantity (${remainingBefore})`,
+            );
+          }
+
           const prevFilledQty = order.filledQuantity || 0;
           const newFilledQty = Number((prevFilledQty + fill.quantity).toFixed(8));
-          const newRemainingQty = Math.max(0, Number((order.quantity - newFilledQty).toFixed(8)));
+          const newRemainingQty = Number(Math.max(0, order.remainingQuantity - fill.quantity).toFixed(8));
 
-          // Strict invariant validation
-          const expectedRemaining = Number((order.quantity - newFilledQty).toFixed(8));
-          if (Math.abs(newRemainingQty - expectedRemaining) > 1e-6) {
-            throw new Error(`ORDER_QUANTITY_INVARIANT_VIOLATION: remainingQuantity (${newRemainingQty}) != quantity (${order.quantity}) - filledQuantity (${newFilledQty})`);
+          // Independent Invariant 1: previous remaining - fill quantity = new remaining
+          const expectedRemainingFromPrev = Number((order.remainingQuantity - fill.quantity).toFixed(8));
+          if (Math.abs(newRemainingQty - expectedRemainingFromPrev) > 1e-6) {
+            throw new Error(
+              `ORDER_REMAINING_INVARIANT_VIOLATION: newRemainingQty (${newRemainingQty}) != remainingQuantity (${order.remainingQuantity}) - fill.quantity (${fill.quantity})`,
+            );
+          }
+
+          // Independent Invariant 2: total quantity balance (quantity = filledQuantity + remainingQuantity)
+          const totalQuantityBalance = Number((order.quantity - (newFilledQty + newRemainingQty)).toFixed(8));
+          if (Math.abs(totalQuantityBalance) > 1e-6) {
+            throw new Error(
+              `ORDER_QUANTITY_INVARIANT_VIOLATION: order.quantity (${order.quantity}) != filledQuantity (${newFilledQty}) + remainingQuantity (${newRemainingQty})`,
+            );
           }
 
           const isComplete = newRemainingQty <= 1e-6;
           order.status = isComplete ? 'FILLED' : 'PARTIALLY_FILLED';
-          order.filledAt = fill.timestamp;
 
-          // Cumulative VWAP fill price
+          // Explicit fill timestamps
+          if (order.firstFilledAt === undefined) {
+            order.firstFilledAt = fill.timestamp;
+          }
+          order.lastFilledAt = fill.timestamp;
+          order.filledAt = fill.timestamp;
+          if (isComplete) {
+            order.completedAt = fill.timestamp;
+          }
+
+          // Cumulative VWAP fill price across all executions for this order
           const prevTotalCost = (order.avgFillPrice || 0) * prevFilledQty;
           const newTotalCost = prevTotalCost + (fill.price * fill.quantity);
           order.avgFillPrice = newFilledQty > 0 ? Number((newTotalCost / newFilledQty).toFixed(8)) : fill.price;
 
-          // Cumulative fees and slippage
+          // Cumulative fees and slippage across all fills for this order
           order.fees = Number(((order.fees || 0) + fill.fee).toFixed(8));
           order.slippage = Number(((order.slippage || 0) + fill.slippage).toFixed(8));
 

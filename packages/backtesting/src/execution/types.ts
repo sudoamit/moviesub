@@ -35,9 +35,19 @@ export interface IOrder {
   createdAt: number;
   submittedAt: number;
   acknowledgedAt?: number;
+  /** Timestamp of the first fill event */
+  firstFilledAt?: number;
+  /** Timestamp of the most recent fill event */
+  lastFilledAt?: number;
+  /** Timestamp when order reached terminal FILLED status */
+  completedAt?: number;
+  /** Alias for lastFilledAt / filled timestamp */
   filledAt?: number;
+  /** Volume-weighted average fill price across all executions for this order */
   avgFillPrice?: number;
+  /** Cumulative total fees paid across all fills for this order */
   fees: number;
+  /** Cumulative total slippage incurred across all fills for this order */
   slippage: number;
   rejectionReason?: string;
   referencePrice?: number;

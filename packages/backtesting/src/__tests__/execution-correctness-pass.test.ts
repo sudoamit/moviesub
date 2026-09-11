@@ -1,6 +1,6 @@
 import { ExecutionSimulator } from '../execution/execution-simulator';
 import { FillModelEngine } from '../execution/fill-model';
-import { FillModel, SameCandleAmbiguityMode } from '../execution/types';
+import { FillModel, SameCandleAmbiguityMode, ISpreadConfig, ISlippageConfig, ExecutionCostStressConfig } from '../execution/types';
 import { OHLCPathCursor } from '../execution/ohlc-path-cursor';
 import { TradeLifecycleManager } from '@quant/risk-engine';
 import { Direction, ICandle, MockMarketDataProvider, SignalState } from '@quant/shared';
@@ -2679,15 +2679,22 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
   // 58. Volume-Weighted Average Fill Price (VWAP) Across Multiple Partial Fills
   test('58. avgFillPrice computes exact volume-weighted average price across partial fills', () => {
+    const slippageConfig: ISlippageConfig = { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 };
+    const spreadConfig: ISpreadConfig = { baseSpreadBps: 0, illiquidMultiplier: 0 };
+    const costStressConfig: ExecutionCostStressConfig = {
+      mode: 'ABSOLUTE',
+      slippageConfig,
+      spreadConfig,
+    };
     const execSim = new ExecutionSimulator(
       FillModel.OHLC_PATH,
       SameCandleAmbiguityMode.CONSERVATIVE,
       { submissionLatencyMs: 0, processingLatencyMs: 0 },
       'sim_vwap',
+      slippageConfig,
       undefined,
-      undefined,
-      undefined,
-      undefined,
+      spreadConfig,
+      costStressConfig,
       0.5,
     );
 
@@ -2702,20 +2709,139 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       exitTarget: 'ENTRY',
     });
 
-    // Fill 1: 50 units
-    const candle1: ICandle = { timestamp: new Date(timestamp + 60000), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+    // Fill 1: 50 units @ 102.0
+    const candle1: ICandle = { timestamp: new Date(timestamp + 60000), open: 102, high: 105, low: 99, close: 103, volume: 100 };
     const res1 = execSim.processCandle(candle1);
     const fill1 = res1.fills[0];
-    expect(order.avgFillPrice).toBeCloseTo(fill1.price, 4);
+    expect(fill1.price).toBe(102.0);
+    expect(order.avgFillPrice).toBe(102.0);
 
-    // Fill 2: 25 units
-    const candle2: ICandle = { timestamp: new Date(timestamp + 120000), open: 200, high: 205, low: 199, close: 202, volume: 100 };
+    // Fill 2: 25 units @ 202.0
+    const candle2: ICandle = { timestamp: new Date(timestamp + 120000), open: 202, high: 205, low: 199, close: 203, volume: 100 };
     const res2 = execSim.processCandle(candle2);
     const fill2 = res2.fills[0];
+    expect(fill2.price).toBe(202.0);
 
-    // Expected VWAP = (fill1.qty * fill1.price + fill2.qty * fill2.price) / totalQty
+    // Explicit independent calculation:
+    // fill1: 50 * 102 = 5100
+    // fill2: 25 * 202 = 5050
+    // Total cost = 10150, Total Qty = 75
+    // VWAP = 10150 / 75 = 135.33333333...
     const expectedVwap = (fill1.quantity * fill1.price + fill2.quantity * fill2.price) / (fill1.quantity + fill2.quantity);
-    expect(order.avgFillPrice).toBeCloseTo(expectedVwap, 4);
+    expect(order.avgFillPrice).toBeCloseTo(expectedVwap, 6);
+    expect(order.avgFillPrice).toBeCloseTo(135.333333, 6);
+  });
+
+  // 59. P0: Protection against Overshoot / Overfill Invariant
+  test('59. ExecutionSimulator immediately throws FILL_EXCEEDS_REMAINING_QUANTITY when fill quantity exceeds order remainingQuantity', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_overfill',
+    );
+
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_overfill',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10.0,
+      timestamp,
+    });
+
+    // Artificially reduce remainingQuantity to 5.0
+    order.remainingQuantity = 5.0;
+    order.filledQuantity = 5.0;
+    order.status = 'PARTIALLY_FILLED';
+
+    // Market candle triggers full order size (10.0), which exceeds remainingQuantity (5.0)
+    // Spy on FillModelEngine.evaluateFill to return a fill of 6.0
+    const candle: ICandle = { timestamp: new Date(timestamp + 60000), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_overshoot',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: 6.0, // Exceeds remainingQuantity 5.0!
+        fee: 1,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+
+    expect(() => {
+      execSim.processCandle(candle);
+    }).toThrow('FILL_EXCEEDS_REMAINING_QUANTITY');
+  });
+
+  // 60. Granular Fill Timestamps: submittedAt, firstFilledAt, lastFilledAt, completedAt
+  test('60. ExecutionSimulator records firstFilledAt, lastFilledAt, and completedAt accurately across partial fills', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 15, processingLatencyMs: 0 },
+      'sim_timestamps',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      0.5, // 50% partial fill ratio
+    );
+
+    const t0 = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_ts',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 100.0,
+      timestamp: t0,
+    });
+
+    expect(order.createdAt).toBe(t0);
+    expect(order.submittedAt).toBe(t0 + 15);
+    expect(order.firstFilledAt).toBeUndefined();
+    expect(order.lastFilledAt).toBeUndefined();
+    expect(order.completedAt).toBeUndefined();
+
+    // Fill 1 at t1
+    const t1 = t0 + 60000;
+    const c1: ICandle = { timestamp: new Date(t1), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+    execSim.processCandle(c1);
+
+    expect(order.status).toBe('PARTIALLY_FILLED');
+    expect(order.firstFilledAt).toBe(t1);
+    expect(order.lastFilledAt).toBe(t1);
+    expect(order.completedAt).toBeUndefined();
+
+    // Fill 2 at t2
+    const t2 = t0 + 120000;
+    const c2: ICandle = { timestamp: new Date(t2), open: 101, high: 106, low: 100, close: 104, volume: 100 };
+    execSim.processCandle(c2);
+
+    expect(order.status).toBe('PARTIALLY_FILLED');
+    expect(order.firstFilledAt).toBe(t1);
+    expect(order.lastFilledAt).toBe(t2);
+    expect(order.completedAt).toBeUndefined();
+
+    // Set remaining 25 to fill completely on next bar
+    (execSim as any).partialFillRatio = 1.0;
+    const t3 = t0 + 180000;
+    const c3: ICandle = { timestamp: new Date(t3), open: 102, high: 107, low: 101, close: 105, volume: 100 };
+    execSim.processCandle(c3);
+
+    expect(order.status).toBe('FILLED');
+    expect(order.firstFilledAt).toBe(t1);
+    expect(order.lastFilledAt).toBe(t3);
+    expect(order.completedAt).toBe(t3);
   });
 });
+
 
