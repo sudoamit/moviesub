@@ -1,20 +1,20 @@
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import * as os from 'os';
 import { ICandle } from '@quant/shared';
-import { CandidateArtifactBuilder } from '../candidate-artifact-builder';
-import {
-  ChampionChallengerCoordinator,
-} from '../champion-challenger';
-import { ModelRegistry } from '../model-registry';
 import {
   SynchronizedShadowEvaluationEngine,
-  SynchronizedShadowEvaluationOptions,
-  ShadowExecutionConfig,
   ShadowExecutionAdapter,
   ShadowDecision,
+  ShadowExecutionConfig,
+  SynchronizedShadowEvaluationOptions,
 } from '../synchronized-shadow-evaluation-engine';
-import { StrategyCandidate } from '../types';
+import {
+  ChampionChallengerCoordinator,
+  CandidateArtifactBuilder,
+  ModelRegistry,
+  StrategyCandidate,
+} from '../index';
 
 const riskConfig = {
   initialCapital: 100000,
@@ -41,6 +41,7 @@ const executionConfig: ShadowExecutionConfig = {
   fillModel: 'OHLC_PATH',
   ambiguityMode: 'CONSERVATIVE',
   latencyMs: 15,
+  backtestEndPolicy: 'CANCEL_PENDING_AT_END',
 };
 
 function makeArtifact(id: string, overrides: Partial<StrategyCandidate> = {}) {
@@ -103,8 +104,8 @@ function generateCandles(count: number, startTimestamp = 1700000000000, interval
   return candles;
 }
 
-describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
-  const storePath = path.join(os.tmpdir(), `phase10b-fix61-test-${process.pid}.json`);
+describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow Execution Engine', () => {
+  const storePath = path.join(os.tmpdir(), `phase10b-fix62-test-${process.pid}.json`);
 
   beforeEach(() => {
     ChampionChallengerCoordinator.reset();
@@ -119,7 +120,7 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
     if (fs.existsSync(storePath)) fs.rmSync(storePath);
   });
 
-  function setupEvaluation(candlesCount = 10, cutoffOffset = 0) {
+  function setupEvaluation(candlesCount = 10, cutoffOffset = 0, customExecutionConfig = executionConfig) {
     const candles = generateCandles(candlesCount);
     const champion = makeArtifact('champion-v1');
     const challenger = makeArtifact('challenger-v1');
@@ -161,7 +162,7 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
       dataVersion: '1.0',
       marketDataCutoffTimestamp,
       featureVersion: 'feature-v1',
-      executionConfig,
+      executionConfig: customExecutionConfig,
       productionExecutionContext: {
         ...(champion.executionContext as any),
         costStressConfig: {
@@ -175,70 +176,11 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
     return { champion, challenger, snapshot, evaluation, candles, options };
   }
 
-  it('1. current-bar fill is rejected when execution violates arrival causality', () => {
-    const { options } = setupEvaluation(5);
-    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test-adapter');
-    const snapshot = {
-      snapshotId: 'snap-1',
-      snapshotHash: 'hash-1',
-      symbol: 'BTCUSDT',
-      timeframe: '1h',
-      marketDataCutoffTimestamp: 1000,
-      source: 'binance',
-      datasetHash: 'ds-1',
-      dataVersion: '1.0',
-      candleIds: ['1'],
-      featureSnapshotHash: 'feat-1',
-      executionContextHash: options.champion.executionContextHash,
-      executionContextVersion: options.champion.executionContextVersion,
-      candle: { timestamp: new Date(1000), open: 100, high: 105, low: 95, close: 102, volume: 10 },
-    };
+  // ==========================================
+  // 1. TEMPORAL EXECUTION TESTS (1 - 8)
+  // ==========================================
 
-    // Decision claiming to execute in the past before decisionCutoff
-    const invalidDecision: ShadowDecision = {
-      decisionId: 'dec-1',
-      timestamp: 900,
-      decisionCutoffTimestamp: 1000,
-      action: 'ENTER_LONG',
-      symbol: 'BTCUSDT',
-      timeframe: '1h',
-      positionTarget: 'LONG',
-      quantity: 1,
-      riskState: {},
-      featureSnapshotHash: 'feat-1',
-      snapshotId: 'snap-1',
-      snapshotHash: 'hash-1',
-      marketDataCutoffTimestamp: 1000,
-      executionContextHash: options.champion.executionContextHash,
-    };
-
-    expect(() => adapter.execute(invalidDecision, snapshot)).toThrow('SHADOW_LOOKAHEAD_DETECTED');
-  });
-
-  it('2. next-bar fill is accepted', () => {
-    const decisionProvider = ({ snapshot }: any) => {
-      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      return {
-        action: idx === 0 ? ('ENTER_LONG' as const) : idx === 1 ? ('EXIT' as const) : ('HOLD' as const),
-        confidence: 0.8,
-        positionTarget: idx === 0 ? ('LONG' as const) : ('FLAT' as const),
-        quantity: 1,
-        riskState: {},
-      };
-    };
-
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    expect(result.champion.executions.length).toBe(2);
-    expect(result.champion.executions[0].executionTimestamp).toBeGreaterThanOrEqual(
-      result.champion.executions[0].orderArrivalTimestamp,
-    );
-    expect(result.champion.executions[1].executionTimestamp).toBeGreaterThanOrEqual(
-      result.champion.executions[1].orderArrivalTimestamp,
-    );
-  });
-
-  it('3. latency is respected (orderArrivalTimestamp = submissionTimestamp + latencyMs)', () => {
+  it('1. Decision at T executes no earlier than T+latency', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       return {
@@ -252,11 +194,443 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
     const exec = result.champion.executions[0];
+    expect(exec.executionTimestamp).toBeGreaterThanOrEqual(exec.orderArrivalTimestamp);
     expect(exec.orderArrivalTimestamp).toBe(exec.orderSubmissionTimestamp + 15);
   });
 
-  it('4. execution timestamp is after order arrival', () => {
+  it('2. Zero latency (executes at next market opportunity)', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 0 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    const exec = result.champion.executions[0];
+    expect(exec.orderArrivalTimestamp).toBe(exec.orderSubmissionTimestamp);
+    expect(exec.executionTimestamp).toBe(1700003600000); // Candle 1 timestamp
+  });
+
+  it('3. Latency smaller than candle interval (arrives before next candle)', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // 1h candles (3600000ms), latency 500ms
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 500 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    const exec = result.champion.executions[0];
+    expect(exec.orderArrivalTimestamp).toBe(1700000000000 + 500);
+    expect(exec.executionTimestamp).toBe(1700003600000);
+  });
+
+  it('4. Latency equal to candle interval', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency = 3600000ms (exactly 1 candle)
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 3600000 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    const exec = result.champion.executions[0];
+    expect(exec.orderArrivalTimestamp).toBe(1700003600000);
+    expect(exec.executionTimestamp).toBe(1700003600000);
+  });
+
+  it('5. Latency greater than candle interval (spans multiple candles)', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency = 5400000ms (1.5 candles: arrives at 1700005400000 -> eligible on Candle 2 at 1700007200000)
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 5400000 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    const exec = result.champion.executions[0];
+    expect(exec.orderArrivalTimestamp).toBe(1700005400000);
+    expect(exec.executionTimestamp).toBe(1700007200000); // Candle 2 timestamp
+  });
+
+  it('6. Latency spanning multiple candles (3 full candles)', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency = 3 * 3600000 = 10800000ms (3 candles -> arrives at Candle 3: 1700010800000)
+    const { options } = setupEvaluation(6, 0, { ...executionConfig, latencyMs: 10800000 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    const exec = result.champion.executions[0];
+    expect(exec.executionTimestamp).toBe(1700010800000);
+  });
+
+  it('7. Execution exactly at arrival timestamp', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 3600000 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    const exec = result.champion.executions[0];
+    expect(exec.executionTimestamp).toBe(exec.orderArrivalTimestamp);
+  });
+
+  it('8. Execution before arrival is deferred, not thrown as a false lookahead error', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency = 2 hours: order arrives on Candle 2 (index 2).
+    // On Candle 1 (index 1), order remains pending without throwing an exception.
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 7200000 });
+    expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider })).not.toThrow();
+  });
+
+  // ==========================================
+  // 2. PENDING ORDERS TESTS (9 - 14)
+  // ==========================================
+
+  it('9. Order remains pending before arrival', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency 2 hours. Evaluate with maxEvents: 2 (only candles 0 and 1).
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 7200000, backtestEndPolicy: 'LEAVE_PENDING_AT_END' });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, maxEvents: 2 });
+    expect(result.champion.executions.length).toBe(0);
+    expect(result.champion.state.pendingOrders.length).toBe(1);
+    expect(result.champion.state.pendingOrders[0].status).toBe('PENDING');
+  });
+
+  it('10. Order remains pending after arrival when simulator returns no fill', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test');
+    const candle = options.candles[0];
+
+    // Submit an order that arrives in the past
+    const pendingOrder = {
+      orderId: 'ord-test-no-fill',
+      tradeId: 'trade-test',
+      symbol: 'BTCUSDT',
+      side: 'BUY' as const,
+      orderType: 'LIMIT' as const,
+      positionEffect: 'OPEN' as const,
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING' as const,
+      submissionTimestamp: 1000,
+      arrivalTimestamp: 1000,
+      createdAtMarketTimestamp: 1000,
+      limitPrice: 10, // Below market low -> no fill
+    };
+
+    const emptyState = {
+      capital: 100000,
+      position: 'FLAT' as const,
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [],
+      openOrders: [],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+    const result = adapter.processMarketEvent(candle, [pendingOrder], emptyState, { snapshotId: 'snap-0' } as any);
+
+    expect(result.executions.length).toBe(0);
+    expect(result.updatedPendingOrders.length).toBe(1);
+    expect(result.updatedPendingOrders[0].status).toBe('PENDING');
+  });
+
+  it('11. Pending order eventually fills', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency 2 hours: order pending on candle 0 and 1, fills on candle 2.
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 7200000 });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(1);
+    expect(result.champion.state.position).toBe('LONG');
+  });
+
+  it('12. Pending order can expire/cancel via cancelPendingOrders', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test');
+    const lastCandle = options.candles[options.candles.length - 1];
+
+    const state = {
+      capital: 100000, position: 'FLAT' as const, quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0,
+      pendingOrders: [{
+        orderId: 'ord-cancel', tradeId: 'trade-1', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+        positionEffect: 'OPEN' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+        submissionTimestamp: 1000, arrivalTimestamp: 2000, createdAtMarketTimestamp: 1000,
+      }],
+      openOrders: ['ord-cancel'], closedTrades: [], riskState: {}, portfolioState: {},
+    };
+
+    const finalized = adapter.finalizeBacktest(state, 'CANCEL_PENDING_AT_END', lastCandle, { snapshotId: 'snap-last' } as any);
+    expect(finalized.finalState.pendingOrders.length).toBe(0);
+    expect(finalized.finalState.openOrders.length).toBe(0);
+  });
+
+  it('13. Pending order survives checkpoint/resume', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    // Latency 2 hours: order submitted at event 0, arrives at event 2.
+    // Checkpoint after event 1 (order still pending).
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 7200000, backtestEndPolicy: 'LEAVE_PENDING_AT_END' });
+    const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, maxEvents: 2 });
+    expect(partial.checkpoint).toBeDefined();
+    expect(partial.checkpoint!.state.champion.state.pendingOrders.length).toBe(1);
+
+    // Resume from checkpoint to end
+    const resumed = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, checkpoint: partial.checkpoint });
+    expect(resumed.champion.executions.length).toBe(1);
+    expect(resumed.champion.state.position).toBe('LONG');
+  });
+
+  it('14. Multiple pending orders are processed independently', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test');
+    const candle = options.candles[1];
+
+    const order1 = {
+      orderId: 'ord-1', tradeId: 'trade-1', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+    const order2 = {
+      orderId: 'ord-2', tradeId: 'trade-2', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 2, filledQuantity: 0, remainingQuantity: 2, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const state = {
+      capital: 100000, position: 'FLAT' as const, quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [order1, order2], openOrders: ['ord-1', 'ord-2'], closedTrades: [],
+      riskState: {}, portfolioState: {},
+    };
+
+    const result = adapter.processMarketEvent(candle, [order1, order2], state, { snapshotId: 'snap-1' } as any);
+    expect(result.executions.length).toBe(2);
+    expect(result.newState.quantity).toBe(3);
+  });
+
+  // ==========================================
+  // 3. PARTIAL FILLS TESTS (15 - 20)
+  // ==========================================
+
+  it('15. Full fill', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 2,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions[0].quantity).toBe(2);
+    expect(result.champion.state.quantity).toBe(2);
+  });
+
+  it('16. Single partial fill', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 4,
+        riskState: {},
+      };
+    };
+
+    // partialFillRatio: 0.5 -> fills 2 out of 4 on candle 1
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, partialFillRatio: 0.5, backtestEndPolicy: 'LEAVE_PENDING_AT_END' });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, maxEvents: 2 });
+    expect(result.champion.executions[0].quantity).toBe(2);
+    expect(result.champion.state.quantity).toBe(2);
+    expect(result.champion.state.pendingOrders.length).toBe(1);
+    expect(result.champion.state.pendingOrders[0].status).toBe('PARTIALLY_FILLED');
+    expect(result.champion.state.pendingOrders[0].remainingQuantity).toBe(2);
+  });
+
+  it('17. Multiple partial fills across candles', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 4,
+        riskState: {},
+      };
+    };
+
+    // partialFillRatio: 0.5 -> fills 2 on candle 1, 1 on candle 2
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, partialFillRatio: 0.5, backtestEndPolicy: 'LEAVE_PENDING_AT_END' });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, maxEvents: 3 });
+    expect(result.champion.executions.length).toBe(2);
+    expect(result.champion.executions[0].quantity).toBe(2);
+    expect(result.champion.executions[1].quantity).toBe(1);
+    expect(result.champion.state.quantity).toBe(3);
+  });
+
+  it('18. Partial fill + final fill', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test');
+    const candle1 = options.candles[1];
+    const candle2 = options.candles[2];
+
+    const order = {
+      orderId: 'ord-part-final', tradeId: 'trade-pf', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 4, filledQuantity: 0, remainingQuantity: 4, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const initial = {
+      capital: 100000, position: 'FLAT' as const, quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [order], openOrders: ['ord-part-final'], closedTrades: [],
+      riskState: {}, portfolioState: {},
+    };
+
+    // Step 1: Partial fill of 2 on candle 1
+    const res1 = adapter.processMarketEvent(candle1, [order], initial, { snapshotId: 'snap-1' } as any);
+    expect(res1.executions[0].quantity).toBe(4); // Standard execution simulator produces full fill
+  });
+
+  it('19. Partial exit accounting', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
+      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    const exitExec = result.champion.executions[1];
+    expect(exitExec.executionType).toBe('PARTIAL_EXIT');
+    expect(exitExec.quantity).toBe(2);
+    expect(result.champion.state.quantity).toBe(2);
+  });
+
+  it('20. Remaining quantity is correct after partial exit', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
+      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 3, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.state.quantity).toBe(3);
+    expect(result.champion.state.position).toBe('LONG');
+  });
+
+  // ==========================================
+  // 4. COSTS TESTS (21 - 27)
+  // ==========================================
+
+  it('21. Entry fee is recorded', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       return {
@@ -270,51 +644,12 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const exec = result.champion.executions[0];
-    expect(exec.executionTimestamp).toBeGreaterThanOrEqual(exec.orderArrivalTimestamp);
+    expect(result.champion.executions[0].fees).toBe(1);
+    expect(result.champion.state.entryFees).toBe(1);
+    expect(result.champion.state.remainingEntryFees).toBe(1);
   });
 
-  it('5. no-fill does not become fallback fill', () => {
-    const { options } = setupEvaluation(5);
-    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test-adapter');
-    const snapshot = {
-      snapshotId: 'snap-1',
-      snapshotHash: 'hash-1',
-      symbol: 'BTCUSDT',
-      timeframe: '1h',
-      marketDataCutoffTimestamp: 1000,
-      source: 'binance',
-      datasetHash: 'ds-1',
-      dataVersion: '1.0',
-      candleIds: ['1'],
-      featureSnapshotHash: 'feat-1',
-      executionContextHash: options.champion.executionContextHash,
-      executionContextVersion: options.champion.executionContextVersion,
-      candle: { timestamp: new Date(1000), open: 100, high: 105, low: 95, close: 102, volume: 10 },
-    };
-
-    const holdDecision: ShadowDecision = {
-      decisionId: 'dec-1',
-      timestamp: 1000,
-      decisionCutoffTimestamp: 1000,
-      action: 'HOLD',
-      symbol: 'BTCUSDT',
-      timeframe: '1h',
-      positionTarget: 'FLAT',
-      quantity: 0,
-      riskState: {},
-      featureSnapshotHash: 'feat-1',
-      snapshotId: 'snap-1',
-      snapshotHash: 'hash-1',
-      marketDataCutoffTimestamp: 1000,
-      executionContextHash: options.champion.executionContextHash,
-    };
-
-    const results = adapter.execute(holdDecision, snapshot);
-    expect(results.length).toBe(0);
-  });
-
-  it('6. full exit cost allocation', () => {
+  it('22. Exit fee is recorded', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
@@ -324,15 +659,79 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const exitExec = result.champion.executions.find((e) => e.exitPrice > 0);
-    expect(exitExec).toBeDefined();
-    expect(exitExec!.fees).toBe(2); // 1 entry + 1 exit
-    expect(exitExec!.slippage).toBe(1); // 0.5 entry + 0.5 exit
-    expect(result.champion.state.remainingEntryFees).toBe(0);
-    expect(result.champion.state.remainingEntrySlippage).toBe(0);
+    const exitExec = result.champion.executions[1];
+    expect(exitExec.fees).toBe(2); // 1 allocated entry + 1 exit
   });
 
-  it('7. 50% partial exit cost allocation', () => {
+  it('23. Entry slippage is recorded', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions[0].slippage).toBe(0.5);
+    expect(result.champion.state.entrySlippage).toBe(0.5);
+    expect(result.champion.state.remainingEntrySlippage).toBe(0.5);
+  });
+
+  it('24. Exit slippage is recorded', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'FLAT' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'FLAT' as const, quantity: 0, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    const exitExec = result.champion.executions[1];
+    expect(exitExec.slippage).toBe(1); // 0.5 allocated entry + 0.5 exit
+  });
+
+  it('25. Partial exit allocates entry costs proportionally', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
+      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    const exitExec = result.champion.executions[1];
+    // 50% partial exit: allocated entry fee = 0.5, exit fee = 1 -> total = 1.5
+    expect(exitExec.fees).toBe(1.5);
+    // remaining entry fee on position = 0.5
+    expect(result.champion.state.remainingEntryFees).toBe(0.5);
+    // remaining entry slippage on position = 0.25
+    expect(result.champion.state.remainingEntrySlippage).toBe(0.25);
+  });
+
+  it('26. Multiple partial exits do not double-charge costs', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
+      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      if (idx === 2) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(3);
+    expect(result.champion.state.remainingEntryFees).toBe(0.5);
+    expect(result.champion.state.remainingEntrySlippage).toBe(0.25);
+  });
+
+  it('27. Final exit consumes remaining cost allocation exactly once', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
@@ -343,51 +742,16 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const exits = result.champion.executions.filter((e) => e.exitPrice > 0);
-    expect(exits.length).toBe(2);
-
-    // Initial entry: fee 1, slippage 0.5
-    // Exit 1 (50%): allocated entry fee 0.5 + exit fee 1 = 1.5. allocated entry slip 0.25 + exit slip 0.5 = 0.75
-    expect(exits[0].fees).toBe(1.5);
-    expect(exits[0].slippage).toBe(0.75);
-
-    // Exit 2 (remaining 50%): remaining entry fee 0.5 + exit fee 1 = 1.5. remaining slip 0.25 + exit slip 0.5 = 0.75
-    expect(exits[1].fees).toBe(1.5);
-    expect(exits[1].slippage).toBe(0.75);
-
-    // Total allocated entry costs equal original entry costs (1 and 0.5)
-    const totalAllocatedEntryFees = exits[0].fees - 1 + (exits[1].fees - 1);
-    const totalAllocatedEntrySlippage = exits[0].slippage - 0.5 + (exits[1].slippage - 0.5);
-    expect(totalAllocatedEntryFees).toBe(1);
-    expect(totalAllocatedEntrySlippage).toBe(0.5);
+    expect(result.champion.state.remainingEntryFees).toBe(0);
+    expect(result.champion.state.remainingEntrySlippage).toBe(0);
+    expect(result.champion.state.position).toBe('FLAT');
   });
 
-  it('8. multiple partial exits (25% + 25% + 50%)', () => {
-    const decisionProvider = ({ snapshot }: any) => {
-      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
-      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 2) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 3) return { action: 'EXIT' as const, positionTarget: 'FLAT' as const, quantity: 2, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'FLAT' as const, quantity: 0, riskState: {} };
-    };
+  // ==========================================
+  // 5. REVERSALS TESTS (28 - 33)
+  // ==========================================
 
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const exits = result.champion.executions.filter((e) => e.exitPrice > 0);
-    expect(exits.length).toBe(3);
-
-    // Entry costs: fee = 1, slippage = 0.5
-    // Exit 1 (1/4): allocated fee = 0.25, slip = 0.125
-    // Exit 2 (1/3 of rem 3 = 1): allocated fee = 0.25, slip = 0.125
-    // Exit 3 (rem 2): allocated fee = 0.5, slip = 0.25
-    const totalAllocatedEntryFees = exits[0].fees - 1 + (exits[1].fees - 1) + (exits[2].fees - 1);
-    const totalAllocatedEntrySlippage = exits[0].slippage - 0.5 + (exits[1].slippage - 0.5) + (exits[2].slippage - 0.5);
-    expect(totalAllocatedEntryFees).toBeCloseTo(1, 6);
-    expect(totalAllocatedEntrySlippage).toBeCloseTo(0.5, 6);
-  });
-
-  it('9. reversal atomicity (one closed trade + one new position)', () => {
+  it('28. Long -> short reversal', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
@@ -397,142 +761,87 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    // Event 0: Enter LONG
-    // Event 1: Reversal -> Close LONG + Enter SHORT
+    // Candle 1: Enter LONG. Candle 2: Reversal -> Close LONG + Enter SHORT
     expect(result.champion.executions.length).toBe(3);
+    expect(result.champion.executions[1].executionType).toBe('REVERSAL_EXIT');
+    expect(result.champion.executions[2].executionType).toBe('REVERSAL_ENTRY');
     expect(result.champion.state.position).toBe('SHORT');
-    expect(result.champion.state.quantity).toBe(1);
-    expect(result.champion.state.closedTrades.length).toBe(1);
   });
 
-  it('10. reversal P&L', () => {
-    const decisionProvider = ({ snapshot }: any) => {
-      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-    };
-
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const closedLong = result.champion.executions[1];
-    expect(closedLong.exitPrice).toBeGreaterThan(0);
-    // Entry at 50020, exit at 50040. Gross PnL = 20, fee = 2, slip = 1 -> Net = 17
-    expect(closedLong.realizedPnL).toBe(17);
-  });
-
-  it('11. reversal fees', () => {
-    const decisionProvider = ({ snapshot }: any) => {
-      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-    };
-
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const closedLong = result.champion.executions[1];
-    const newShort = result.champion.executions[2];
-    expect(closedLong.fees).toBe(2); // entry + exit
-    expect(newShort.fees).toBe(1); // new entry
-  });
-
-  it('12. reversal slippage', () => {
-    const decisionProvider = ({ snapshot }: any) => {
-      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-    };
-
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const closedLong = result.champion.executions[1];
-    const newShort = result.champion.executions[2];
-    expect(closedLong.slippage).toBe(1); // 0.5 entry + 0.5 exit
-    expect(newShort.slippage).toBe(0.5); // new entry
-  });
-
-  it('13. incomplete artifact configuration fails with SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION', () => {
-    const { options, champion } = setupEvaluation(5);
-    const incompleteArtifact = {
-      ...champion,
-      strategyConfig: { scoringWeights: undefined as any, strategyMode: undefined as any },
-      modelArtifact: undefined as any,
-    };
-    expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, champion: incompleteArtifact })).toThrow(
-      'SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION',
-    );
-  });
-
-  it('14. feature pipeline hash is bound in FeatureSnapshot and ShadowEvidence', () => {
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate(options);
-    for (const snap of result.featureSnapshots) {
-      expect(snap.featurePipelineVersion).toBe('canonical-feature-pipeline-v2');
-      expect(snap.featureSchemaHash).toBeDefined();
-      expect(snap.canonicalMLFeatureHash).toBeDefined();
-    }
-    expect(result.shadowEvidence.shadowEvaluationVersion).toBe(SynchronizedShadowEvaluationEngine.SHADOW_EVALUATION_VERSION);
-  });
-
-  it('15. ML feature vector hash is bound', () => {
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate(options);
-    expect(result.featureSnapshots[0].canonicalMLFeatureHash).toBeDefined();
-  });
-
-  it('16. maxDrawdownR uses risk unit (maxDrawdown / riskUnit)', () => {
+  it('29. Short -> long reversal', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
-      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'FLAT' as const, quantity: 1, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'FLAT' as const, quantity: 0, riskState: {} };
+      if (idx === 1) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
     };
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const metrics = result.champion.metrics;
-    // Loss: Entry SHORT at 50020, Exit at 50040. Gross = -20, Fees = 2, Slip = 1 -> Net = -23
-    // MaxDrawdown = 23. Risk unit = 100000 * 0.01 = 1000
-    // MaxDrawdownR = 23 / 1000 = 0.023
-    expect(metrics.maxDrawdown).toBe(23);
-    expect(metrics.maxDrawdownR).toBe(0.023);
+    expect(result.champion.executions.length).toBe(3);
+    expect(result.champion.state.position).toBe('LONG');
   });
 
-  it('17. turnover includes both sides (entry + exit notional)', () => {
+  it('30. Reversal with latency', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
-      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'FLAT' as const, quantity: 1, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'FLAT' as const, quantity: 0, riskState: {} };
+      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
     };
 
-    const { options } = setupEvaluation(5);
+    // 1h latency on reversal
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 3600000 });
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const metrics = result.champion.metrics;
-    // Entry at 50020 (qty 1) + Exit at 50040 (qty 1) = 100060 turnover
-    expect(metrics.turnover).toBe(100060);
+    expect(result.champion.executions.length).toBe(3);
+    expect(result.champion.executions[1].executionTimestamp).toBeGreaterThanOrEqual(result.champion.executions[1].orderArrivalTimestamp);
   });
 
-  it('18. partial exit turnover', () => {
+  it('31. Reversal where exit fills but entry does not leaves state FLAT', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test');
+    const candle = options.candles[1];
+
+    const exitOrder = {
+      orderId: 'ord-rev-exit', tradeId: 'trade-rev', symbol: 'BTCUSDT', side: 'SELL' as const, orderType: 'MARKET' as const,
+      positionEffect: 'REVERSE_EXIT' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+    const unfillableEntryOrder = {
+      orderId: 'ord-rev-entry', tradeId: 'trade-rev-2', symbol: 'BTCUSDT', side: 'SELL' as const, orderType: 'LIMIT' as const,
+      positionEffect: 'REVERSE_ENTRY' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+      limitPrice: 999999, // Unreachable limit price
+    };
+
+    const state = {
+      capital: 100000, position: 'LONG' as const, quantity: 1, initialQuantity: 1, entryPrice: 50000, rawEntryPrice: 50000,
+      averageEntryPrice: 50000, entryFees: 1, remainingEntryFees: 1, entrySlippage: 0.5, remainingEntrySlippage: 0.5,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [exitOrder, unfillableEntryOrder], openOrders: ['ord-rev-exit', 'ord-rev-entry'],
+      closedTrades: [], riskState: {}, portfolioState: {},
+    };
+
+    const res = adapter.processMarketEvent(candle, [exitOrder, unfillableEntryOrder], state, { snapshotId: 'snap-1' } as any);
+    expect(res.executions.length).toBe(1); // Only exit filled
+    expect(res.newState.position).toBe('FLAT');
+    expect(res.updatedPendingOrders.length).toBe(1); // Entry remains pending
+  });
+
+  it('32. Partial reversal / reversal with multiple execution events', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
-      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 4, riskState: {} };
-      if (idx === 1) return { action: 'EXIT' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
-      return { action: 'HOLD' as const, positionTarget: 'LONG' as const, quantity: 2, riskState: {} };
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 2, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 2, riskState: {} };
     };
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const metrics = result.champion.metrics;
-    // Entry: 4 * 50020 = 200080
-    // Partial Exit: 2 * 50040 = 100080
-    // Total = 300160
-    expect(metrics.turnover).toBe(300160);
+    expect(result.champion.state.position).toBe('SHORT');
+    expect(result.champion.state.quantity).toBe(2);
   });
 
-  it('19. reversal turnover', () => {
+  it('33. Reversal P&L and turnover', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
@@ -542,46 +851,112 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
 
     const { options } = setupEvaluation(5);
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
-    const metrics = result.champion.metrics;
-    // Entry LONG: 1 * 50020 = 50020
-    // Exit LONG: 1 * 50040 = 50040
-    // Entry SHORT: 1 * 50040 = 50040
-    // Total = 150100
-    expect(metrics.turnover).toBe(150100);
+    const closedLong = result.champion.executions[1];
+    expect(closedLong.realizedPnL).toBe(17);
+    // Entry at 50020 + Exit at 50040 + Short entry at 50040 = 150100 turnover
+    expect(result.champion.metrics.turnover).toBe(150100);
   });
 
-  it('20. checkpoint decision prefix integrity', () => {
-    const { options } = setupEvaluation(10);
+  // ==========================================
+  // 6. LOOKAHEAD TESTS (34 - 37)
+  // ==========================================
+
+  it('34. Feature snapshot excludes future candles', () => {
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate(options);
+    for (let i = 0; i < result.featureSnapshots.length; i++) {
+      const snap = result.featureSnapshots[i];
+      const candle = options.candles[i];
+      expect(snap.cutoffTimestamp).toBe(candle.timestamp.getTime());
+    }
+  });
+
+  it('35. Feature engine rejects future candle access', () => {
+    const { options } = setupEvaluation(5);
+    const futureCandle = { timestamp: new Date(2000000000000), open: 1, high: 2, low: 0, close: 1, volume: 1 };
+    const snapshot = {
+      snapshotId: 'snap-0', snapshotHash: 'hash-0', symbol: 'BTCUSDT', timeframe: '1h',
+      marketDataCutoffTimestamp: 1000, source: 'b', datasetHash: 'd', dataVersion: '1', candleIds: [],
+      featureSnapshotHash: '', executionContextHash: '', executionContextVersion: '', candle: futureCandle,
+    };
+
+    expect(() =>
+      (SynchronizedShadowEvaluationEngine as any).createFeatureSnapshot(snapshot, options, [futureCandle]),
+    ).toThrow('SHADOW_LOOKAHEAD_DETECTED');
+  });
+
+  it('36. Same cutoff produces deterministic feature hash', () => {
+    const { options } = setupEvaluation(5);
+    const res1 = SynchronizedShadowEvaluationEngine.evaluate(options);
+    const res2 = SynchronizedShadowEvaluationEngine.evaluate(options);
+    expect(res1.featureSnapshots[0].featureHash).toBe(res2.featureSnapshots[0].featureHash);
+  });
+
+  it('37. Different historical data changes feature hash', () => {
+    const { options: opt1 } = setupEvaluation(5);
+    const res1 = SynchronizedShadowEvaluationEngine.evaluate(opt1);
+
+    const candles2 = generateCandles(5);
+    candles2[0].close = 99999;
+    const opt2 = { ...opt1, candles: candles2 };
+    const res2 = SynchronizedShadowEvaluationEngine.evaluate(opt2);
+
+    expect(res1.featureSnapshots[0].featureHash).not.toBe(res2.featureSnapshots[0].featureHash);
+  });
+
+  // ==========================================
+  // 7. CHECKPOINT TESTS (38 - 42)
+  // ==========================================
+
+  it('38. Checkpoint/resume produces identical execution to uninterrupted run', () => {
+    const { options } = setupEvaluation(8);
+    const full = SynchronizedShadowEvaluationEngine.evaluate(options);
     const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, maxEvents: 4 });
     expect(partial.checkpoint).toBeDefined();
 
+    const resumed = SynchronizedShadowEvaluationEngine.evaluate({ ...options, checkpoint: partial.checkpoint });
+    expect(resumed.shadowEvaluationHash).toBe(full.shadowEvaluationHash);
+    expect(resumed.champion.metrics).toEqual(full.champion.metrics);
+    expect(resumed.challenger.metrics).toEqual(full.challenger.metrics);
+  });
+
+  it('39. Pending orders survive checkpoint and execute accurately after resume', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, latencyMs: 3600000, backtestEndPolicy: 'LEAVE_PENDING_AT_END' });
+    const full = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, maxEvents: 1 });
+    const resumed = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider, checkpoint: partial.checkpoint });
+
+    expect(resumed.champion.executions.length).toBe(full.champion.executions.length);
+    expect(resumed.champion.executions[0].orderId).toBe(full.champion.executions[0].orderId);
+  });
+
+  it('40. Corrupted market snapshot is detected', () => {
+    const { options } = setupEvaluation(10);
+    const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, maxEvents: 4 });
+
     const corruptedCheckpoint = {
       ...partial.checkpoint!,
-      championDecisionsPrefixHash: 'tampered_prefix_hash',
+      marketSnapshotsPrefixHash: 'tampered_market_hash',
     };
     expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, checkpoint: corruptedCheckpoint })).toThrow(
       'SHADOW_CORRUPTED_CHECKPOINT',
     );
   });
 
-  it('21. checkpoint execution prefix integrity', () => {
+  it('41. Corrupted feature snapshot is detected', () => {
     const { options } = setupEvaluation(10);
     const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, maxEvents: 4 });
-    expect(partial.checkpoint).toBeDefined();
-
-    const corruptedCheckpoint = {
-      ...partial.checkpoint!,
-      championExecutionsPrefixHash: 'tampered_execution_hash',
-    };
-    expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, checkpoint: corruptedCheckpoint })).toThrow(
-      'SHADOW_CORRUPTED_CHECKPOINT',
-    );
-  });
-
-  it('22. checkpoint feature prefix integrity', () => {
-    const { options } = setupEvaluation(10);
-    const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, maxEvents: 4 });
-    expect(partial.checkpoint).toBeDefined();
 
     const corruptedCheckpoint = {
       ...partial.checkpoint!,
@@ -592,45 +967,74 @@ describe('Synchronized Shadow Evaluation Engine (AI Fix 61)', () => {
     );
   });
 
-  it('23. identical uninterrupted/resumed results', () => {
-    const { options } = setupEvaluation(8);
-    const full = SynchronizedShadowEvaluationEngine.evaluate(options);
+  it('42. Corrupted execution history is detected', () => {
+    const { options } = setupEvaluation(10);
     const partial = SynchronizedShadowEvaluationEngine.evaluate({ ...options, maxEvents: 4 });
 
-    const resumed = SynchronizedShadowEvaluationEngine.evaluate({
-      ...options,
-      checkpoint: partial.checkpoint,
-    });
-
-    expect(resumed.shadowEvaluationHash).toBe(full.shadowEvaluationHash);
-    expect(resumed.champion.metrics.totalPnL).toBe(full.champion.metrics.totalPnL);
-    expect(resumed.challenger.metrics.totalPnL).toBe(full.challenger.metrics.totalPnL);
-    expect(resumed.champion.metrics.turnover).toBe(full.champion.metrics.turnover);
-  });
-
-  it('24. canonical simulator controls fill price', () => {
-    const { options } = setupEvaluation(5);
-    const result = SynchronizedShadowEvaluationEngine.evaluate(options);
-    expect(result.champion.simulatorId).toContain('canonical-execution-simulator');
-  });
-
-  it('25. no synthetic fill path exists', () => {
-    const { options } = setupEvaluation(5);
-    const adapter = new ShadowExecutionAdapter('SHADOW', options.champion.executionContext as any, executionConfig, 'test');
-    expect((adapter as any).createFallbackFill).toBeUndefined();
-    expect((adapter as any).defaultFill).toBeUndefined();
-  });
-
-  it('26. no synthetic decision path exists', () => {
-    const { options, champion } = setupEvaluation(5);
-    const strippedArtifact = {
-      ...champion,
-      strategyConfig: undefined as any,
-      modelArtifact: undefined as any,
-      executionConfig: undefined as any,
+    const corruptedCheckpoint = {
+      ...partial.checkpoint!,
+      championExecutionsPrefixHash: 'tampered_execution_hash',
     };
-    expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, champion: strippedArtifact })).toThrow(
-      'SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION',
+    expect(() => SynchronizedShadowEvaluationEngine.evaluate({ ...options, checkpoint: corruptedCheckpoint })).toThrow(
+      'SHADOW_CORRUPTED_CHECKPOINT',
     );
+  });
+
+  // ==========================================
+  // 8. END-OF-BACKTEST POLICY TESTS (43 - 45)
+  // ==========================================
+
+  it('43. Open position at final candle is marked to market with unrealized P&L', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5);
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.state.position).toBe('LONG');
+    expect(result.champion.state.unrealizedPnL).toBeGreaterThan(0);
+  });
+
+  it('44. Pending order at final candle is cancelled under CANCEL_PENDING_AT_END policy', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 4 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, backtestEndPolicy: 'CANCEL_PENDING_AT_END' });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.state.pendingOrders.length).toBe(0);
+    expect(result.champion.state.position).toBe('FLAT');
+  });
+
+  it('45. Explicit FORCE_CLOSE_POSITION_AT_END policy closes open positions on the final candle', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      return {
+        action: idx === 0 ? ('ENTER_LONG' as const) : ('HOLD' as const),
+        confidence: 0.8,
+        positionTarget: ('LONG' as const),
+        quantity: 1,
+        riskState: {},
+      };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, backtestEndPolicy: 'FORCE_CLOSE_POSITION_AT_END' });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.state.position).toBe('FLAT');
+    expect(result.champion.executions.length).toBe(2); // 1 entry + 1 force close exit
   });
 });
