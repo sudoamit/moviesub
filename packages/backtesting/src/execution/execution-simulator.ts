@@ -443,18 +443,23 @@ export class ExecutionSimulator {
               continue;
             }
 
-            // 2. Pre-fill Non-Lookahead Risk Drift Gate
+            // 2. Pre-fill Non-Lookahead Risk Drift Gate (Directional Risk Deterioration)
             if (
               order.maxRiskDrift !== undefined &&
               order.referencePrice !== undefined &&
               order.stopLoss !== undefined
             ) {
-              const initialRiskDist = Math.abs(order.referencePrice - order.stopLoss);
-              const priceDrift = Math.abs(fill.price - order.referencePrice);
-              const riskDriftRatio = initialRiskDist > 0 ? priceDrift / initialRiskDist : 0;
-              if (initialRiskDist > 0 && riskDriftRatio > order.maxRiskDrift) {
+              const isLong = order.side === 'BUY';
+              const initialRisk = isLong
+                ? order.referencePrice - order.stopLoss
+                : order.stopLoss - order.referencePrice;
+              const actualRisk = isLong
+                ? fill.price - order.stopLoss
+                : order.stopLoss - fill.price;
+              const riskDriftRatio = initialRisk > 0 ? (actualRisk - initialRisk) / initialRisk : 0;
+              if (initialRisk > 0 && riskDriftRatio > order.maxRiskDrift) {
                 order.status = 'REJECTED';
-                order.rejectionReason = `REJECTED_EXCESSIVE_RISK_DRIFT: Risk drift ratio ${(riskDriftRatio * 100).toFixed(1)}% exceeds max permitted ${(order.maxRiskDrift * 100).toFixed(1)}%`;
+                order.rejectionReason = `REJECTED_EXCESSIVE_RISK_DRIFT: Directional risk drift ${(riskDriftRatio * 100).toFixed(1)}% exceeds max permitted ${(order.maxRiskDrift * 100).toFixed(1)}%`;
                 this.eventCounter++;
                 const rejectEvent: IExecutionEvent = {
                   eventId: `${this.runId}_evt_reject_${this.eventCounter}`,
