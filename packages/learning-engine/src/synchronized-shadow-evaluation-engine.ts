@@ -1,4 +1,4 @@
-import { randomUUID, createHash } from 'crypto';
+import { createHash } from 'crypto';
 import { ICandle, Direction, SignalGrade } from '@quant/shared';
 import {
   ExecutionSimulator,
@@ -17,7 +17,6 @@ import {
   CANONICAL_FEATURE_NAMES_V2,
   CANONICAL_V2_DIMENSION,
 } from '@quant/trading-engine';
-import { PositionSizer } from '@quant/risk-engine';
 import { CandidateArtifact, ShadowEvaluationMetrics } from './types';
 import { canonicalJsonStringify } from './canonical-serializer';
 import { ChallengerEvaluation, ChampionChallengerCoordinator, ChampionSnapshot, ShadowEvidence } from './champion-challenger';
@@ -51,7 +50,10 @@ export interface EvaluationMarketSnapshot {
 }
 
 export interface FeatureSnapshot {
+  readonly featurePipelineVersion: string;
   readonly featureVersion: string;
+  readonly featureSchemaHash: string;
+  readonly canonicalMLFeatureHash: string;
   readonly featureHash: string;
   readonly generatedAt: number;
   readonly sourceSnapshotHash: string;
@@ -89,8 +91,11 @@ export interface ShadowExecutionResult {
   readonly realizedPnL: number;
   readonly unrealizedPnL: number;
   readonly rMultiple: number;
-  readonly executionTimestamp: number;
+  readonly decisionTimestamp: number;
   readonly decisionCutoffTimestamp: number;
+  readonly orderSubmissionTimestamp: number;
+  readonly orderArrivalTimestamp: number;
+  readonly executionTimestamp: number;
   readonly executionContextHash: string;
 }
 
@@ -98,11 +103,14 @@ export interface ShadowBranchState {
   readonly capital: number;
   readonly position: 'LONG' | 'SHORT' | 'FLAT';
   readonly quantity: number;
+  readonly initialQuantity: number;
   readonly entryPrice: number;
   readonly rawEntryPrice: number;
   readonly averageEntryPrice: number;
   readonly entryFees: number;
+  readonly remainingEntryFees: number;
   readonly entrySlippage: number;
+  readonly remainingEntrySlippage: number;
   readonly realizedPnL: number;
   readonly unrealizedPnL: number;
   readonly openOrders: readonly string[];
@@ -158,6 +166,12 @@ export interface ShadowEvaluationCheckpoint {
   readonly evaluationId: string;
   readonly lastProcessedTimestamp: number;
   readonly lastSnapshotId: string;
+  readonly marketSnapshotsPrefixHash: string;
+  readonly featureSnapshotsPrefixHash: string;
+  readonly championDecisionsPrefixHash: string;
+  readonly challengerDecisionsPrefixHash: string;
+  readonly championExecutionsPrefixHash: string;
+  readonly challengerExecutionsPrefixHash: string;
   readonly championStateHash: string;
   readonly challengerStateHash: string;
   readonly metricsStateHash: string;
@@ -277,6 +291,7 @@ export class SynchronizedEvaluationClock {
 /**
  * Restricted Shadow Execution Adapter wrapping the canonical ExecutionSimulator.
  * Exposes simulation capabilities only and strictly forbids live order routing for shadow branches.
+ * Enforces true causal temporal eligibility and rejects synthetic fallback fills.
  */
 export class ShadowExecutionAdapter {
   private readonly simulator: ExecutionSimulator;
@@ -315,24 +330,27 @@ export class ShadowExecutionAdapter {
     }
 
     let slippageConfig: ISlippageConfig | undefined = executionContext.slippageConfig;
-    if (!slippageConfig && config.slippagePerTrade !== undefined) {
-      const baseSlippageBps = (config.slippagePerTrade / 100) * 10000;
-      slippageConfig = {
-        baseSlippageBps,
-        volatilityMultiplier: 1.0,
-        impactMultiplier: 1.0,
-        maxSlippageBps: Math.max(25.0, baseSlippageBps * 2),
-      };
-    } else if (!slippageConfig && config.slippageBps !== undefined) {
+    if (!slippageConfig && config.slippageBps !== undefined) {
       slippageConfig = {
         baseSlippageBps: config.slippageBps,
         volatilityMultiplier: 1.0,
         impactMultiplier: 1.0,
         maxSlippageBps: Math.max(25.0, config.slippageBps * 2),
       };
+    } else if (!slippageConfig && config.slippagePerTrade !== undefined) {
+      slippageConfig = {
+        baseSlippageBps: 0,
+        volatilityMultiplier: 0,
+        impactMultiplier: 0,
+        maxSlippageBps: 0,
+      };
     }
 
-    const spreadConfig: ISpreadConfig | undefined = executionContext.spreadConfig;
+    const spreadConfig: ISpreadConfig | undefined =
+      executionContext.spreadConfig ||
+      (config.feePerTrade !== undefined || config.slippagePerTrade !== undefined
+        ? { baseSpreadBps: 0, illiquidMultiplier: 1.0 }
+        : undefined);
     const costStressConfig: ExecutionCostStressConfig | undefined = executionContext.costStressConfig;
 
     this.feeModelHash = hash(feeConfig ?? { type: 'zero-fee' });
@@ -351,8 +369,9 @@ export class ShadowExecutionAdapter {
   }
 
   /**
-   * Simulates decision execution against the current market candle and next candle using the canonical simulator.
-   * Strictly enforces temporal ordering and lookahead prevention.
+   * Simulates decision execution strictly via the canonical ExecutionSimulator.
+   * Enforces temporal causality: decisionTimestamp -> orderSubmission -> orderArrival -> execution.
+   * NO synthetic fallback fills are allowed.
    */
   public execute(
     decision: ShadowDecision,
@@ -364,20 +383,32 @@ export class ShadowExecutionAdapter {
       throw new Error('SHADOW_PRODUCTION_ROUTER_FORBIDDEN');
     }
 
-    // Temporal lookahead verification: decision must not look into future
-    if (decision.decisionCutoffTimestamp > snapshot.marketDataCutoffTimestamp) {
-      throw new Error('SHADOW_LOOKAHEAD_DETECTED');
+    const decisionCutoffTimestamp = decision.decisionCutoffTimestamp;
+    const decisionTimestamp = decision.timestamp;
+
+    // Temporal requirement: decisionTimestamp >= decisionCutoffTimestamp
+    if (decisionTimestamp < decisionCutoffTimestamp) {
+      throw new Error('SHADOW_LOOKAHEAD_DETECTED: Decision timestamp cannot precede decision cutoff');
+    }
+    if (decisionCutoffTimestamp > snapshot.marketDataCutoffTimestamp) {
+      throw new Error('SHADOW_LOOKAHEAD_DETECTED: Decision cutoff exceeds snapshot cutoff');
     }
 
-    const state = currentState ?? {
+    const orderSubmissionTimestamp = decisionTimestamp;
+    const orderArrivalTimestamp = orderSubmissionTimestamp + this.latencyMs;
+
+    let state: ShadowBranchState = currentState ?? {
       capital: this.config.initialCapital,
       position: 'FLAT' as const,
       quantity: 0,
+      initialQuantity: 0,
       entryPrice: 0,
       rawEntryPrice: 0,
       averageEntryPrice: 0,
       entryFees: 0,
+      remainingEntryFees: 0,
       entrySlippage: 0,
+      remainingEntrySlippage: 0,
       realizedPnL: 0,
       unrealizedPnL: 0,
       openOrders: [],
@@ -387,76 +418,83 @@ export class ShadowExecutionAdapter {
     };
 
     const results: ShadowExecutionResult[] = [];
-    const orderTimestamp = decision.timestamp + this.latencyMs;
-
-    // Check if decision is attempting to execute with invalid timing
-    if (orderTimestamp < decision.decisionCutoffTimestamp) {
-      throw new Error('SHADOW_LOOKAHEAD_DETECTED');
-    }
-
-    // Determine target actions based on position lifecycle
-    const currentPosition = state.position;
     const action = decision.action;
 
     if (action === 'HOLD') {
       return results;
     }
 
-    // Handle EXIT or REVERSAL when position is open
-    if (currentPosition !== 'FLAT') {
-      const isClosing = action === 'EXIT' || (currentPosition === 'LONG' && action === 'ENTER_SHORT') || (currentPosition === 'SHORT' && action === 'ENTER_LONG');
+    // P1 #3: Close-of-Bar execution semantics
+    // Orders generated at close of candle T are executed on nextCandle (candle T+1).
+    // If no nextCandle is available yet, no fill can occur.
+    if (!nextCandle) {
+      return results;
+    }
+
+    // Handle EXIT or REVERSAL when an active position exists
+    if (state.position !== 'FLAT') {
+      const isClosing =
+        action === 'EXIT' ||
+        (state.position === 'LONG' && action === 'ENTER_SHORT') ||
+        (state.position === 'SHORT' && action === 'ENTER_LONG');
+
       if (isClosing) {
-        const exitSide = currentPosition === 'LONG' ? 'SELL' : 'BUY';
-        const exitQty = action === 'EXIT' && decision.quantity > 0 && decision.quantity < state.quantity
-          ? decision.quantity
-          : state.quantity;
+        const exitSide = state.position === 'LONG' ? 'SELL' : 'BUY';
+        const isPartial = action === 'EXIT' && decision.quantity > 0 && decision.quantity < state.quantity;
+        const exitQty = isPartial ? decision.quantity : state.quantity;
 
         const exitOrder = this.simulator.submitOrder({
           tradeId: `trade-${decision.decisionId}-exit`,
           symbol: this.symbol,
           side: exitSide,
-          orderType: this.fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'MARKET',
+          orderType: 'MARKET',
           quantity: exitQty,
-          timestamp: orderTimestamp,
+          timestamp: orderSubmissionTimestamp,
           referencePrice: snapshot.candle.close,
-          signalTimestamp: decision.timestamp,
+          signalTimestamp: decisionTimestamp,
           exitTarget: 'SL',
         });
 
-        const simResult = this.simulator.processSingleExecutionBar(snapshot.candle, nextCandle);
-        const fill = simResult.fills.find((f) => f.orderId === exitOrder.orderId) || {
-          orderId: exitOrder.orderId,
-          price: snapshot.candle.close,
-          quantity: exitQty,
-          fee: this.config.feePerTrade ?? 0,
-          slippage: this.config.slippagePerTrade ?? 0,
-          timestamp: orderTimestamp,
-        };
+        const simResult = this.simulator.processSingleExecutionBar(nextCandle);
+        const fill = simResult.fills.find((f) => f.orderId === exitOrder.orderId);
 
-        const isLong = currentPosition === 'LONG';
-        const rawExitPrice = snapshot.candle.close;
+        // P1 #2 & P2 #12: NO synthetic fallback fills. If not filled, return no fill.
+        if (!fill) {
+          return results;
+        }
+
+        const executionTimestamp = fill.timestamp;
+
+        // P1 #1: Enforce true execution eligibility
+        if (executionTimestamp < orderArrivalTimestamp) {
+          throw new Error('SHADOW_LOOKAHEAD_DETECTED: Execution timestamp cannot precede order arrival timestamp');
+        }
+
+        const isLong = state.position === 'LONG';
+        // P1 #6: Canonical simulator controls fill price
+        const rawExitPrice = fill.price;
         const rawEntryPrice = state.rawEntryPrice > 0 ? state.rawEntryPrice : state.entryPrice;
 
         const grossPnL = Number(
           ((isLong ? (rawExitPrice - rawEntryPrice) : (rawEntryPrice - rawExitPrice)) * fill.quantity).toFixed(8),
         );
 
-        const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
-        const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+        // P1 #4: Partial exit cost allocation
+        const exitFraction = state.quantity > 0 ? fill.quantity / state.quantity : 1;
+        const allocatedEntryFees = Number((state.remainingEntryFees * exitFraction).toFixed(8));
+        const allocatedEntrySlippage = Number((state.remainingEntrySlippage * exitFraction).toFixed(8));
 
-        const totalFees = Number((state.entryFees + fillFee).toFixed(8));
-        const totalSlippage = Number((state.entrySlippage + fillSlippage).toFixed(8));
+        const exitFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
+        const exitSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+
+        const totalFees = Number((allocatedEntryFees + exitFee).toFixed(8));
+        const totalSlippage = Number((allocatedEntrySlippage + exitSlippage).toFixed(8));
         const netPnL = Number((grossPnL - totalFees - totalSlippage).toFixed(8));
 
-        const initialRisk = Math.max(Math.abs(state.entryPrice) * (this.config.riskPerTrade || 0.01) * fill.quantity, 1);
-        const rMultiple = Number((netPnL / initialRisk).toFixed(8));
+        const riskUnit = Math.max(Math.abs(state.entryPrice) * (this.config.riskPerTrade || 0.01) * fill.quantity, 1);
+        const rMultiple = Number((netPnL / riskUnit).toFixed(8));
 
-        // Enforce execution timestamp >= decision boundary
-        if (fill.timestamp < decision.decisionCutoffTimestamp) {
-          throw new Error('SHADOW_LOOKAHEAD_DETECTED');
-        }
-
-        results.push(freeze({
+        const exitResult: ShadowExecutionResult = freeze({
           orderId: exitOrder.orderId,
           decisionId: decision.decisionId,
           entryPrice: state.entryPrice,
@@ -468,15 +506,41 @@ export class ShadowExecutionAdapter {
           realizedPnL: netPnL,
           unrealizedPnL: 0,
           rMultiple,
-          executionTimestamp: fill.timestamp,
-          decisionCutoffTimestamp: decision.decisionCutoffTimestamp,
+          decisionTimestamp,
+          decisionCutoffTimestamp,
+          orderSubmissionTimestamp,
+          orderArrivalTimestamp,
+          executionTimestamp,
           executionContextHash: snapshot.executionContextHash,
-        }));
+        });
+
+        results.push(exitResult);
+
+        // Update state after closing/partial exit to maintain atomicity
+        const newQty = Math.max(0, state.quantity - fill.quantity);
+        const newRemainingFees = Math.max(0, Number((state.remainingEntryFees - allocatedEntryFees).toFixed(8)));
+        const newRemainingSlippage = Math.max(0, Number((state.remainingEntrySlippage - allocatedEntrySlippage).toFixed(8)));
+
+        state = {
+          ...state,
+          capital: Number((state.capital + netPnL).toFixed(8)),
+          quantity: newQty,
+          position: newQty === 0 ? 'FLAT' : state.position,
+          entryPrice: newQty === 0 ? 0 : state.entryPrice,
+          rawEntryPrice: newQty === 0 ? 0 : state.rawEntryPrice,
+          averageEntryPrice: newQty === 0 ? 0 : state.averageEntryPrice,
+          remainingEntryFees: newRemainingFees,
+          remainingEntrySlippage: newRemainingSlippage,
+          realizedPnL: Number((state.realizedPnL + netPnL).toFixed(8)),
+        };
       }
     }
 
-    // Handle ENTRY (either initial or as part of reversal)
-    const isEntering = (action === 'ENTER_LONG' && currentPosition !== 'LONG') || (action === 'ENTER_SHORT' && currentPosition !== 'SHORT');
+    // Handle ENTRY (either from FLAT or as second half of an atomic reversal)
+    const isEntering =
+      (action === 'ENTER_LONG' && state.position !== 'LONG') ||
+      (action === 'ENTER_SHORT' && state.position !== 'SHORT');
+
     if (isEntering) {
       const enterSide = action === 'ENTER_LONG' ? 'BUY' : 'SELL';
       const enterQty = decision.quantity > 0 ? decision.quantity : 1;
@@ -485,35 +549,37 @@ export class ShadowExecutionAdapter {
         tradeId: `trade-${decision.decisionId}-enter`,
         symbol: this.symbol,
         side: enterSide,
-        orderType: this.fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'MARKET',
+        orderType: 'MARKET',
         quantity: enterQty,
-        timestamp: orderTimestamp,
+        timestamp: orderSubmissionTimestamp,
         referencePrice: snapshot.candle.close,
-        signalTimestamp: decision.timestamp,
+        signalTimestamp: decisionTimestamp,
         exitTarget: 'ENTRY',
       });
 
-      const simResult = this.simulator.processSingleExecutionBar(snapshot.candle, nextCandle);
-      const fill = simResult.fills.find((f) => f.orderId === enterOrder.orderId) || {
-        orderId: enterOrder.orderId,
-        price: snapshot.candle.close,
-        quantity: enterQty,
-        fee: this.config.feePerTrade ?? 0,
-        slippage: this.config.slippagePerTrade ?? 0,
-        timestamp: orderTimestamp,
-      };
+      const simResult = this.simulator.processSingleExecutionBar(nextCandle);
+      const fill = simResult.fills.find((f) => f.orderId === enterOrder.orderId);
 
-      if (fill.timestamp < decision.decisionCutoffTimestamp) {
-        throw new Error('SHADOW_LOOKAHEAD_DETECTED');
+      // P1 #2 & P2 #12: NO synthetic fallback fills. If not filled, return results.
+      if (!fill) {
+        return results;
+      }
+
+      const executionTimestamp = fill.timestamp;
+
+      // P1 #1: Enforce true execution eligibility
+      if (executionTimestamp < orderArrivalTimestamp) {
+        throw new Error('SHADOW_LOOKAHEAD_DETECTED: Execution timestamp cannot precede order arrival timestamp');
       }
 
       const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
       const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
 
-      results.push(freeze({
+      // P1 #6: Canonical simulator controls fill price
+      const enterResult: ShadowExecutionResult = freeze({
         orderId: enterOrder.orderId,
         decisionId: decision.decisionId,
-        entryPrice: snapshot.candle.close,
+        entryPrice: fill.price,
         exitPrice: 0,
         quantity: fill.quantity,
         fees: fillFee,
@@ -522,10 +588,15 @@ export class ShadowExecutionAdapter {
         realizedPnL: 0,
         unrealizedPnL: 0,
         rMultiple: 0,
-        executionTimestamp: fill.timestamp,
-        decisionCutoffTimestamp: decision.decisionCutoffTimestamp,
+        decisionTimestamp,
+        decisionCutoffTimestamp,
+        orderSubmissionTimestamp,
+        orderArrivalTimestamp,
+        executionTimestamp,
         executionContextHash: snapshot.executionContextHash,
-      }));
+      });
+
+      results.push(enterResult);
     }
 
     return freeze(results);
@@ -551,7 +622,9 @@ export class SynchronizedShadowEvaluationEngine {
     };
 
     const marketSnapshots = this.createMarketSnapshots(options);
-    const featureSnapshots = marketSnapshots.map((snapshot) => this.createFeatureSnapshot(snapshot, options));
+    const featureSnapshots = marketSnapshots.map((snapshot, idx) =>
+      this.createFeatureSnapshot(snapshot, options, options.candles.slice(0, idx + 1)),
+    );
     const snapshots = marketSnapshots.map((snapshot, index) =>
       freeze({ ...snapshot, featureSnapshotHash: featureSnapshots[index].featureHash }),
     );
@@ -751,7 +824,11 @@ export class SynchronizedShadowEvaluationEngine {
     );
   }
 
-  private static createFeatureSnapshot(snapshot: EvaluationMarketSnapshot, options: SynchronizedShadowEvaluationOptions): FeatureSnapshot {
+  private static createFeatureSnapshot(
+    snapshot: EvaluationMarketSnapshot,
+    options: SynchronizedShadowEvaluationOptions,
+    historicalCandles: readonly ICandle[],
+  ): FeatureSnapshot {
     const candleTime = timestampOf(snapshot.candle);
     const decisionCutoff = snapshot.marketDataCutoffTimestamp;
 
@@ -770,8 +847,32 @@ export class SynchronizedShadowEvaluationEngine {
       body: Number((snapshot.candle.close - snapshot.candle.open).toFixed(8)),
     });
 
+    const featureSchemaHash = hash({
+      names: ['open', 'high', 'low', 'close', 'volume', 'range', 'body'],
+      dimension: 7,
+    });
+
+    let canonicalMLFeatureHash = 'none';
+    if (historicalCandles.length >= 20) {
+      try {
+        const snap = SnapshotBuilder.buildSnapshot({
+          symbol: snapshot.symbol,
+          executionCandles: historicalCandles as ICandle[],
+          executionTimeframe: snapshot.timeframe,
+          asOfTimestamp: new Date(decisionCutoff),
+        });
+        const feats = CanonicalMLEngineV2.extractFeatures(snap);
+        canonicalMLFeatureHash = hash(CanonicalMLEngineV2.toArray(feats));
+      } catch {
+        canonicalMLFeatureHash = 'none';
+      }
+    }
+
     const payload = {
+      featurePipelineVersion: 'canonical-feature-pipeline-v2',
       featureVersion: options.featureVersion,
+      featureSchemaHash,
+      canonicalMLFeatureHash,
       generatedAt: options.generatedAt ?? decisionCutoff,
       sourceSnapshotHash: snapshot.snapshotHash,
       cutoffTimestamp: decisionCutoff,
@@ -840,7 +941,7 @@ export class SynchronizedShadowEvaluationEngine {
       state,
       decisions: [...branch.decisions, decision],
       executions,
-      metrics: this.calculateMetrics(executions, config.initialCapital, snapshot.marketDataCutoffTimestamp),
+      metrics: this.calculateMetrics(executions, config.initialCapital, config.riskPerTrade, snapshot.marketDataCutoffTimestamp),
       simulatorId: adapter.simulatorId,
       feeModelHash: adapter.feeModelHash,
       slippageModelHash: adapter.slippageModelHash,
@@ -850,7 +951,7 @@ export class SynchronizedShadowEvaluationEngine {
 
   /**
    * Evaluates real candidate strategy/model decision using repository abstractions.
-   * Fail closed if strategy configuration is missing or invalid.
+   * Fail closed if strategy configuration is missing or incomplete.
    */
   private static evaluateCandidateStrategyDecision(
     artifact: CandidateArtifact,
@@ -875,8 +976,15 @@ export class SynchronizedShadowEvaluationEngine {
     const strategyConfig = artifact.strategyConfig;
     const execConfig = artifact.executionConfig as Record<string, any> | undefined;
 
-    if (!strategyConfig && !artifact.modelArtifact && !execConfig) {
-      throw new Error('SHADOW_DECISION_PROVIDER_REQUIRED');
+    // P1 #7: Incomplete artifact configuration must fail closed
+    if (!strategyConfig && !artifact.modelArtifact) {
+      throw new Error('SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION: Candidate artifact is missing strategyConfig and modelArtifact');
+    }
+    if (strategyConfig && !strategyConfig.strategyMode && !artifact.modelArtifact) {
+      throw new Error('SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION: Candidate artifact is missing strategyMode in strategyConfig');
+    }
+    if (strategyConfig && !strategyConfig.scoringWeights && !artifact.modelArtifact) {
+      throw new Error('SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION: Candidate artifact is missing scoringWeights in strategyConfig');
     }
 
     try {
@@ -894,7 +1002,7 @@ export class SynchronizedShadowEvaluationEngine {
         minimumCandles: 1,
       });
 
-      const minScore = typeof execConfig?.minMtfScore === 'number' ? execConfig.minMtfScore : 65;
+      const minScore = typeof execConfig?.minMtfScore === 'number' ? execConfig.minMtfScore : 50;
       const conditionRules = Array.isArray(execConfig?.conditionRules) ? execConfig.conditionRules : undefined;
       const filterRegime = typeof execConfig?.filterRegime === 'string' ? execConfig.filterRegime : undefined;
       const regimeMode = execConfig?.regimeMode;
@@ -1013,6 +1121,9 @@ export class SynchronizedShadowEvaluationEngine {
         riskState: state.riskState,
       };
     } catch (err: any) {
+      if (err.message?.includes('SHADOW_INCOMPLETE_ARTIFACT_CONFIGURATION')) {
+        throw err;
+      }
       throw new Error(`SHADOW_DECISION_PROVIDER_REQUIRED: ${err.message || 'Strategy execution failed'}`);
     }
   }
@@ -1022,11 +1133,14 @@ export class SynchronizedShadowEvaluationEngine {
       capital: config.initialCapital,
       position: 'FLAT' as const,
       quantity: 0,
+      initialQuantity: 0,
       entryPrice: 0,
       rawEntryPrice: 0,
       averageEntryPrice: 0,
       entryFees: 0,
+      remainingEntryFees: 0,
       entrySlippage: 0,
+      remainingEntrySlippage: 0,
       realizedPnL: 0,
       unrealizedPnL: 0,
       openOrders: [],
@@ -1048,7 +1162,7 @@ export class SynchronizedShadowEvaluationEngine {
       state: cloneState(initialState),
       decisions: [],
       executions: [],
-      metrics: this.calculateMetrics([], config.initialCapital, 0),
+      metrics: this.calculateMetrics([], config.initialCapital, config.riskPerTrade, 0),
       simulatorId: adapter.simulatorId,
       feeModelHash: adapter.feeModelHash,
       slippageModelHash: adapter.slippageModelHash,
@@ -1066,11 +1180,14 @@ export class SynchronizedShadowEvaluationEngine {
     let capital = state.capital;
     let position = state.position;
     let quantity = state.quantity;
+    let initialQuantity = state.initialQuantity;
     let entryPrice = state.entryPrice;
     let rawEntryPrice = state.rawEntryPrice;
     let averageEntryPrice = state.averageEntryPrice;
     let entryFees = state.entryFees;
+    let remainingEntryFees = state.remainingEntryFees;
     let entrySlippage = state.entrySlippage;
+    let remainingEntrySlippage = state.remainingEntrySlippage;
     let realizedPnL = state.realizedPnL;
     const closedTrades = [...state.closedTrades];
 
@@ -1080,24 +1197,37 @@ export class SynchronizedShadowEvaluationEngine {
         realizedPnL = Number((realizedPnL + exec.realizedPnL).toFixed(8));
         capital = Number((capital + exec.realizedPnL).toFixed(8));
         closedTrades.push(exec);
+        const exitFraction = quantity > 0 ? exec.quantity / quantity : 1;
+        const allocatedFees = Number((remainingEntryFees * exitFraction).toFixed(8));
+        const allocatedSlippage = Number((remainingEntrySlippage * exitFraction).toFixed(8));
+
         quantity = Math.max(0, quantity - exec.quantity);
+        remainingEntryFees = Math.max(0, Number((remainingEntryFees - allocatedFees).toFixed(8)));
+        remainingEntrySlippage = Math.max(0, Number((remainingEntrySlippage - allocatedSlippage).toFixed(8)));
+
         if (quantity === 0) {
           position = 'FLAT';
+          initialQuantity = 0;
           entryPrice = 0;
           rawEntryPrice = 0;
           averageEntryPrice = 0;
           entryFees = 0;
+          remainingEntryFees = 0;
           entrySlippage = 0;
+          remainingEntrySlippage = 0;
         }
       } else {
         // Entry execution
         position = decision.positionTarget;
         quantity = exec.quantity;
+        initialQuantity = exec.quantity;
         entryPrice = exec.entryPrice;
         rawEntryPrice = exec.entryPrice;
         averageEntryPrice = exec.entryPrice;
         entryFees = exec.fees;
+        remainingEntryFees = exec.fees;
         entrySlippage = exec.slippage;
+        remainingEntrySlippage = exec.slippage;
       }
     }
 
@@ -1113,11 +1243,14 @@ export class SynchronizedShadowEvaluationEngine {
       capital,
       position,
       quantity,
+      initialQuantity,
       entryPrice,
       rawEntryPrice,
       averageEntryPrice,
       entryFees,
+      remainingEntryFees,
       entrySlippage,
+      remainingEntrySlippage,
       realizedPnL,
       unrealizedPnL,
       openOrders: executions.length > 0 ? [] : state.openOrders,
@@ -1130,6 +1263,7 @@ export class SynchronizedShadowEvaluationEngine {
   private static calculateMetrics(
     executions: readonly ShadowExecutionResult[],
     initialCapital: number,
+    riskPerTrade: number,
     observationsCount: number,
   ): Phase10BShadowMetrics {
     // Only completed trades (exits) contribute to realized PnL and trade statistics
@@ -1161,6 +1295,9 @@ export class SynchronizedShadowEvaluationEngine {
       maxDrawdown = Math.max(maxDrawdown, peak - curve);
     }
 
+    const riskUnit = Math.max(1, initialCapital * (riskPerTrade || 0.01));
+    const maxDrawdownR = Number((maxDrawdown / riskUnit).toFixed(8));
+
     const sortedR = [...rValues].sort((a, b) => a - b);
     const medianR = sortedR.length === 0 ? 0 : sortedR.length % 2 === 1
       ? sortedR[Math.floor(sortedR.length / 2)]
@@ -1168,7 +1305,11 @@ export class SynchronizedShadowEvaluationEngine {
 
     const totalTrades = closedTrades.length;
     const averageTrade = totalTrades ? Number((totalPnL / totalTrades).toFixed(8)) : 0;
-    const turnover = Number(closedTrades.reduce((sum, t) => sum + Math.abs(t.quantity * t.entryPrice), 0).toFixed(8));
+
+    // P2 #10: Turnover includes all executed notional (both entry and exit sides)
+    const turnover = Number(
+      executions.reduce((sum, t) => sum + Math.abs(t.quantity * (t.exitPrice > 0 ? t.exitPrice : t.entryPrice)), 0).toFixed(8),
+    );
 
     return freeze({
       totalTrades,
@@ -1180,7 +1321,7 @@ export class SynchronizedShadowEvaluationEngine {
       pnlR,
       profitFactor: grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(8)) : grossProfit > 0 ? Number.POSITIVE_INFINITY : 0,
       maxDrawdown: Number(maxDrawdown.toFixed(8)),
-      maxDrawdownR: Number(maxDrawdown.toFixed(8)),
+      maxDrawdownR,
       expectancy: totalTrades ? Number((pnlR / totalTrades).toFixed(8)) : 0,
       averageR: totalTrades ? Number((pnlR / totalTrades).toFixed(8)) : 0,
       medianR: Number(medianR.toFixed(8)),
@@ -1312,6 +1453,12 @@ export class SynchronizedShadowEvaluationEngine {
       evaluationId,
       lastProcessedTimestamp: timestampOf(last.candle),
       lastSnapshotId: last.snapshotId,
+      marketSnapshotsPrefixHash: hash(snapshots.slice(0, processedEventCount)),
+      featureSnapshotsPrefixHash: hash(featureSnapshots.slice(0, processedEventCount)),
+      championDecisionsPrefixHash: hash(champion.decisions),
+      challengerDecisionsPrefixHash: hash(challenger.decisions),
+      championExecutionsPrefixHash: hash(champion.executions),
+      challengerExecutionsPrefixHash: hash(challenger.executions),
       championStateHash: hash(champion.state),
       challengerStateHash: hash(challenger.state),
       metricsStateHash: hash({ champion: champion.metrics, challenger: challenger.metrics }),
@@ -1356,7 +1503,7 @@ export class SynchronizedShadowEvaluationEngine {
       throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
     }
 
-    // Prefix Integrity Verification
+    // P2 #11: Causal prefix integrity verification
     const expectedLastSnapshot = currentSnapshots[checkpoint.processedEventCount - 1];
     if (!expectedLastSnapshot) {
       throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
@@ -1368,6 +1515,42 @@ export class SynchronizedShadowEvaluationEngine {
       throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
     }
     if (hash(checkpoint.state.marketSnapshots) !== hash(currentSnapshots.slice(0, checkpoint.processedEventCount))) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.marketSnapshotsPrefixHash &&
+      checkpoint.marketSnapshotsPrefixHash !== hash(currentSnapshots.slice(0, checkpoint.processedEventCount))
+    ) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.featureSnapshotsPrefixHash &&
+      checkpoint.featureSnapshotsPrefixHash !== hash(checkpoint.state.featureSnapshots)
+    ) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.championDecisionsPrefixHash &&
+      checkpoint.championDecisionsPrefixHash !== hash(checkpoint.state.champion.decisions)
+    ) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.challengerDecisionsPrefixHash &&
+      checkpoint.challengerDecisionsPrefixHash !== hash(checkpoint.state.challenger.decisions)
+    ) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.championExecutionsPrefixHash &&
+      checkpoint.championExecutionsPrefixHash !== hash(checkpoint.state.champion.executions)
+    ) {
+      throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
+    }
+    if (
+      checkpoint.challengerExecutionsPrefixHash &&
+      checkpoint.challengerExecutionsPrefixHash !== hash(checkpoint.state.challenger.executions)
+    ) {
       throw new Error('SHADOW_CORRUPTED_CHECKPOINT');
     }
   }
