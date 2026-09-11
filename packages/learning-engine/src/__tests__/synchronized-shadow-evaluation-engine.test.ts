@@ -8,6 +8,9 @@ import {
   ShadowDecision,
   ShadowExecutionConfig,
   SynchronizedShadowEvaluationOptions,
+  ShadowPendingOrder,
+  ShadowExecutionResult,
+  ShadowBranchState,
 } from '../synchronized-shadow-evaluation-engine';
 import {
   ChampionChallengerCoordinator,
@@ -1245,5 +1248,334 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     expect(result.champion.executions[2].executionType).toBe('REVERSAL_ENTRY');
     // Under Policy A, short entry executed on the same candle at 50040
     expect(result.champion.executions[2].executionTimestamp).toBe(result.champion.executions[1].executionTimestamp);
+  });
+
+  it('53. Canonical fill identity & single fill consumption: two distinct orders with identical tradeId consume fills independently without reuse', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feeRate: 0, slippageBps: 0 },
+      'run-53',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order1: ShadowPendingOrder = {
+      orderId: 'ord-unique-1',
+      clientOrderId: 'ord-unique-1',
+      tradeId: 'shared-trade-id',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'OPEN',
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    const order2: ShadowPendingOrder = {
+      orderId: 'ord-unique-2',
+      clientOrderId: 'ord-unique-2',
+      tradeId: 'shared-trade-id',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'OPEN',
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    const initial: ShadowBranchState = {
+      capital: 100000,
+      position: 'FLAT',
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [order1, order2],
+      openOrders: [order1.orderId, order2.orderId],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+
+    const res = adapter.processMarketEvent(candle, [order1, order2], initial, snapshot);
+
+    expect(res.executions.length).toBe(2);
+    expect(res.executions[0].orderId).toBe('ord-unique-1');
+    expect(res.executions[1].orderId).toBe('ord-unique-2');
+    expect(res.updatedPendingOrders.length).toBe(0);
+    expect(res.newState.quantity).toBe(2);
+  });
+
+  it('54. Early invariant validation rejects invalid or excessive fill quantities', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      executionConfig,
+      'run-54',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order: ShadowPendingOrder = {
+      orderId: 'ord-invalid-qty',
+      tradeId: 't1',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'OPEN',
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    const initial: ShadowBranchState = {
+      capital: 100000,
+      position: 'FLAT',
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [order],
+      openOrders: [order.orderId],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+
+    // Mock createSimulator to return an excessive fill quantity
+    jest.spyOn(adapter, 'createSimulator').mockReturnValueOnce({
+      submitOrder: () => ({ orderId: 'mock-sim-1' } as any),
+      processSingleExecutionBar: () => ({
+        fills: [{
+          orderId: 'mock-sim-1',
+          tradeId: 't1',
+          symbol: 'BTCUSDT',
+          side: 'BUY',
+          price: 50000,
+          quantity: 2.5, // Exceeds order.remainingQuantity (1)
+          fee: 0,
+          slippage: 0,
+          timestamp: 1700000000015,
+          isPartial: false,
+          fillId: 'f1',
+        }],
+        events: [],
+      }),
+    } as any);
+
+    expect(() => {
+      adapter.processMarketEvent(candle, [order], initial, snapshot);
+    }).toThrow('FILL_EXCEEDS_REMAINING_QUANTITY');
+  });
+
+  it('55. Exact residual flat fee allocation across 4 partial fills (4 x 25%) avoids penny drift', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feePerTrade: 20, slippageBps: 0, partialFillRatio: 0.25 },
+      'run-55',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order: ShadowPendingOrder = {
+      orderId: 'ord-4-fills',
+      tradeId: 't-flat-4',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'OPEN',
+      requestedQuantity: 1.0,
+      filledQuantity: 0,
+      remainingQuantity: 1.0,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    let state: ShadowBranchState = {
+      capital: 100000,
+      position: 'FLAT',
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [order],
+      openOrders: [order.orderId],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+
+    let pending: readonly ShadowPendingOrder[] = [order];
+    const allExecutions: ShadowExecutionResult[] = [];
+
+    // 1st partial fill (25% -> 0.25 qty, ₹5.00 fee)
+    const res1 = adapter.processMarketEvent(candle, pending, state, snapshot);
+    expect(res1.executions.length).toBe(1);
+    expect(res1.executions[0].fees).toBe(5.0);
+    expect(res1.updatedPendingOrders[0].remainingQuantity).toBe(0.75);
+    allExecutions.push(...res1.executions);
+    state = res1.newState;
+    pending = res1.updatedPendingOrders;
+
+    // 2nd partial fill (25% of remaining 0.75 -> 0.1875 qty, ₹3.75 fee)
+    const res2 = adapter.processMarketEvent(candle, pending, state, snapshot);
+    expect(res2.executions.length).toBe(1);
+    expect(res2.executions[0].fees).toBe(3.75);
+    allExecutions.push(...res2.executions);
+    state = res2.newState;
+    pending = res2.updatedPendingOrders;
+
+    // 3rd partial fill
+    const res3 = adapter.processMarketEvent(candle, pending, state, snapshot);
+    expect(res3.executions.length).toBe(1);
+    allExecutions.push(...res3.executions);
+    state = res3.newState;
+    pending = res3.updatedPendingOrders;
+
+    // 4th fill - final full execution of remaining
+    const adapterFinal = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feePerTrade: 20, slippageBps: 0 },
+      'run-55-final',
+    );
+    const res4 = adapterFinal.processMarketEvent(candle, pending, state, snapshot);
+    expect(res4.executions.length).toBe(1);
+    expect(res4.updatedPendingOrders.length).toBe(0);
+    allExecutions.push(...res4.executions);
+
+    const totalFees = allExecutions.reduce((sum, e) => sum + e.fees, 0);
+    expect(Number(totalFees.toFixed(6))).toBe(20.0);
+  });
+
+  it('56. Policy B linked reversal entry isolation: unrelated exit does not block independent reversal entry', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      executionConfig,
+      'run-56',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    // Position is already FLAT
+    const state: ShadowBranchState = {
+      capital: 100000,
+      position: 'FLAT',
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [],
+      openOrders: [],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+
+    // Order 1: Unrelated exit that executed on this candle
+    const unrelatedExit: ShadowPendingOrder = {
+      orderId: 'ord-unrelated-exit',
+      tradeId: 't-unrelated',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'MARKET',
+      positionEffect: 'CLOSE',
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    // Order 2: Reversal entry linked to a different exit (e.g., ord-linked-exit-prior which was filled on previous candle)
+    const reversalEntry: ShadowPendingOrder = {
+      orderId: 'ord-rev-enter',
+      tradeId: 't-rev',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'REVERSE_ENTRY',
+      requestedQuantity: 1,
+      filledQuantity: 0,
+      remainingQuantity: 1,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      linkedReversalExitOrderId: 'ord-linked-exit-prior', // NOT executed on this candle!
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    const res = adapter.processMarketEvent(candle, [unrelatedExit, reversalEntry], state, snapshot);
+
+    // Unrelated exit executed (PASS 1), and reversal entry also executed (PASS 2) because its linked exit was NOT executed on this candle
+    expect(res.executions.length).toBe(2);
+    expect(res.executions[0].orderId).toBe('ord-unrelated-exit');
+    expect(res.executions[1].orderId).toBe('ord-rev-enter');
+    expect(res.executions[1].executionType).toBe('REVERSAL_ENTRY');
   });
 });
