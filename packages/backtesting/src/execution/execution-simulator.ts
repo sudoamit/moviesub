@@ -1,4 +1,19 @@
-import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ExecutionCostStressConfig, ExecutionModelConfig, IExecutionSimulatorCheckpoint } from './types';
+import {
+  FillModel,
+  IFill,
+  ILatencyConfig,
+  IOrder,
+  OrderSide,
+  OrderType,
+  SameCandleAmbiguityMode,
+  IFeeConfig,
+  ISlippageConfig,
+  ISpreadConfig,
+  ExecutionCostStressConfig,
+  ExecutionModelConfig,
+  IExecutionSimulatorCheckpoint,
+  validateExecutionModelConfig,
+} from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
@@ -40,20 +55,13 @@ export class ExecutionSimulator {
     this.feeConfig = feeConfig;
     this.spreadConfig = spreadConfig;
     this.costStressConfig = costStressConfig;
-    if (partialFillRatio !== undefined) {
-      this.setPartialFillRatio(partialFillRatio);
-    }
+    this.partialFillRatio = partialFillRatio;
+
+    validateExecutionModelConfig(this.getExecutionModelConfig());
   }
 
   setPartialFillRatio(ratio?: number): void {
-    if (ratio !== undefined) {
-      if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
-        throw new Error(
-          `INVALID_PARTIAL_FILL_RATIO: partialFillRatio must be a finite number between 0 and 1, got ${ratio}`,
-        );
-      }
-    }
-    this.partialFillRatio = ratio;
+    this.updateExecutionModel({ partialFillRatio: ratio });
   }
 
   getPartialFillRatio(): number | undefined {
@@ -80,55 +88,46 @@ export class ExecutionSimulator {
     };
   }
 
-  updateExecutionModel(config: {
-    fillModel?: FillModel;
-    ambiguityMode?: SameCandleAmbiguityMode;
-    latencyConfig?: ILatencyConfig;
-    slippageConfig?: ISlippageConfig;
-    feeConfig?: IFeeConfig;
-    spreadConfig?: ISpreadConfig;
-    costStressConfig?: ExecutionCostStressConfig;
-    partialFillRatio?: number;
-  }): void {
-    if (!config || typeof config !== 'object') {
+  updateExecutionModel(patch: Partial<ExecutionModelConfig>): void {
+    if (!patch || typeof patch !== 'object') {
       throw new Error('INVALID_EXECUTION_MODEL_CONFIG: Config must be an object');
     }
 
-    // Step 1: Pre-validation of all candidate fields without mutating state
-    if (config.partialFillRatio !== undefined) {
-      if (
-        !Number.isFinite(config.partialFillRatio) ||
-        config.partialFillRatio <= 0 ||
-        config.partialFillRatio > 1
-      ) {
-        throw new Error(
-          `INVALID_PARTIAL_FILL_RATIO: partialFillRatio must be a finite number between 0 and 1, got ${config.partialFillRatio}`,
-        );
-      }
-    }
+    // 1. Get current complete execution configuration
+    const current = this.getExecutionModelConfig();
 
-    if (config.latencyConfig !== undefined) {
-      if (
-        !Number.isFinite(config.latencyConfig.submissionLatencyMs) ||
-        config.latencyConfig.submissionLatencyMs < 0 ||
-        !Number.isFinite(config.latencyConfig.processingLatencyMs) ||
-        config.latencyConfig.processingLatencyMs < 0
-      ) {
-        throw new Error('INVALID_LATENCY_CONFIG: Latency values must be non-negative finite numbers');
-      }
-    }
+    // 2. Build candidate configuration
+    const candidate: ExecutionModelConfig = {
+      fillModel: patch.fillModel !== undefined ? patch.fillModel : current.fillModel,
+      ambiguityMode: patch.ambiguityMode !== undefined ? patch.ambiguityMode : current.ambiguityMode,
+      latencyConfig: patch.latencyConfig !== undefined ? { ...patch.latencyConfig } : { ...current.latencyConfig },
+      slippageConfig: patch.slippageConfig !== undefined
+        ? (patch.slippageConfig ? { ...patch.slippageConfig } : undefined)
+        : (current.slippageConfig ? { ...current.slippageConfig } : undefined),
+      feeConfig: patch.feeConfig !== undefined
+        ? (patch.feeConfig ? { ...patch.feeConfig } : undefined)
+        : (current.feeConfig ? { ...current.feeConfig } : undefined),
+      spreadConfig: patch.spreadConfig !== undefined
+        ? (patch.spreadConfig ? { ...patch.spreadConfig } : undefined)
+        : (current.spreadConfig ? { ...current.spreadConfig } : undefined),
+      costStressConfig: patch.costStressConfig !== undefined
+        ? (patch.costStressConfig ? { ...patch.costStressConfig } : undefined)
+        : (current.costStressConfig ? { ...current.costStressConfig } : undefined),
+      partialFillRatio: patch.partialFillRatio !== undefined ? patch.partialFillRatio : current.partialFillRatio,
+    };
 
-    // Step 2: Atomic commit only after ALL validations pass
-    if (config.fillModel !== undefined) this.fillModel = config.fillModel;
-    if (config.ambiguityMode !== undefined) this.ambiguityMode = config.ambiguityMode;
-    if (config.latencyConfig !== undefined) this.latencyConfig = { ...config.latencyConfig };
-    if (config.slippageConfig !== undefined) this.slippageConfig = { ...config.slippageConfig };
-    if (config.feeConfig !== undefined) this.feeConfig = { ...config.feeConfig };
-    if (config.spreadConfig !== undefined) this.spreadConfig = { ...config.spreadConfig };
-    if (config.costStressConfig !== undefined) this.costStressConfig = { ...config.costStressConfig };
-    if (config.partialFillRatio !== undefined) {
-      this.partialFillRatio = config.partialFillRatio;
-    }
+    // 3. Validate COMPLETE candidate configuration
+    validateExecutionModelConfig(candidate);
+
+    // 4. Commit candidate configuration atomically
+    this.fillModel = candidate.fillModel;
+    this.ambiguityMode = candidate.ambiguityMode;
+    this.latencyConfig = candidate.latencyConfig;
+    this.slippageConfig = candidate.slippageConfig;
+    this.feeConfig = candidate.feeConfig;
+    this.spreadConfig = candidate.spreadConfig;
+    this.costStressConfig = candidate.costStressConfig;
+    this.partialFillRatio = candidate.partialFillRatio;
   }
 
   submitOrder(params: {
@@ -181,6 +180,7 @@ export class ExecutionSimulator {
       price: params.price,
       stopPrice: params.stopPrice,
       quantity: params.quantity,
+      initialQuantity: params.quantity,
       filledQuantity: 0,
       remainingQuantity: params.quantity,
       status: 'PENDING',
@@ -195,13 +195,10 @@ export class ExecutionSimulator {
       exitTarget: params.exitTarget,
       ocoGroupId: params.ocoGroupId,
     };
-    (order as any)._initialQty = params.quantity;
 
     this.orders.set(orderId, order);
     return order;
   }
-
-
 
   /**
    * Processes execution logic against a single candle/bar (non-recursive primitive).
@@ -470,7 +467,7 @@ export class ExecutionSimulator {
 
             const slOrder = remainingOrders.find((o) => o.orderType === 'STOP');
             if (slOrder) {
-              const initialQty = (slOrder as any)._initialQty || slOrder.quantity;
+              const initialQty = slOrder.initialQuantity ?? slOrder.quantity;
               const totalExitFilledQty = this.fills
                 .filter((f) => f.tradeId === tradeId && f.exitTarget !== 'ENTRY')
                 .reduce((sum, f) => sum + f.quantity, 0);
@@ -488,7 +485,7 @@ export class ExecutionSimulator {
                     entryFill?.price ?? (order.referencePrice ?? slOrder.price);
                   if (bePrice !== undefined) {
                     slOrder.stopPrice = bePrice;
-                    (slOrder as any).exitTarget = 'TRAILING_STOP';
+                    slOrder.exitTarget = 'TRAILING_STOP';
                   }
                 }
               } else {
@@ -761,7 +758,7 @@ export class ExecutionSimulator {
       executionConfig: this.getExecutionModelConfig(),
       orders: Array.from(this.orders.values()).map((o) => ({
         ...o,
-        _initialQty: (o as any)._initialQty !== undefined ? (o as any)._initialQty : o.quantity,
+        initialQuantity: o.initialQuantity ?? o.quantity,
       })),
       fills: this.fills.map((f) => ({ ...f })),
       events: this.events.map((e) => ({ ...e })),
@@ -775,48 +772,239 @@ export class ExecutionSimulator {
     if (checkpoint.version !== 1) {
       throw new Error(`UNSUPPORTED_CHECKPOINT_VERSION: Expected version 1, got ${checkpoint.version}`);
     }
+    if (typeof checkpoint.runId !== 'string' || checkpoint.runId.trim() === '') {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: runId must be a non-empty string');
+    }
+    if (!Number.isInteger(checkpoint.orderCounter) || checkpoint.orderCounter < 0) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: orderCounter must be a non-negative integer');
+    }
+    if (!Number.isInteger(checkpoint.fillCounter) || checkpoint.fillCounter < 0) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: fillCounter must be a non-negative integer');
+    }
+    if (!Number.isInteger(checkpoint.eventCounter) || checkpoint.eventCounter < 0) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: eventCounter must be a non-negative integer');
+    }
+    if (!Array.isArray(checkpoint.orders)) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: orders must be an array');
+    }
+    if (!Array.isArray(checkpoint.fills)) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: fills must be an array');
+    }
+    if (!Array.isArray(checkpoint.events)) {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: events must be an array');
+    }
 
-    // 1. Restore sequences and identifiers
-    this.runId = checkpoint.runId || this.runId;
-    this.orderCounter = typeof checkpoint.orderCounter === 'number' ? checkpoint.orderCounter : 0;
-    this.fillCounter = typeof checkpoint.fillCounter === 'number' ? checkpoint.fillCounter : 0;
-    this.eventCounter = typeof checkpoint.eventCounter === 'number' ? checkpoint.eventCounter : 0;
-
-    // 2. Restore execution model configuration
-    if (checkpoint.executionConfig) {
-      const cfg = checkpoint.executionConfig;
-      this.fillModel = cfg.fillModel;
-      this.ambiguityMode = cfg.ambiguityMode;
-      this.latencyConfig = { ...cfg.latencyConfig };
-      this.slippageConfig = cfg.slippageConfig ? { ...cfg.slippageConfig } : undefined;
-      this.feeConfig = cfg.feeConfig ? { ...cfg.feeConfig } : undefined;
-      this.spreadConfig = cfg.spreadConfig ? { ...cfg.spreadConfig } : undefined;
-      this.costStressConfig = cfg.costStressConfig
+    // Step 1: Validate execution model configuration
+    validateExecutionModelConfig(checkpoint.executionConfig);
+    const cfg = checkpoint.executionConfig;
+    const candidateConfig: ExecutionModelConfig = {
+      fillModel: cfg.fillModel,
+      ambiguityMode: cfg.ambiguityMode,
+      latencyConfig: { ...cfg.latencyConfig },
+      slippageConfig: cfg.slippageConfig ? { ...cfg.slippageConfig } : undefined,
+      feeConfig: cfg.feeConfig ? { ...cfg.feeConfig } : undefined,
+      spreadConfig: cfg.spreadConfig ? { ...cfg.spreadConfig } : undefined,
+      costStressConfig: cfg.costStressConfig
         ? {
             ...cfg.costStressConfig,
             feeConfig: cfg.costStressConfig.feeConfig ? { ...cfg.costStressConfig.feeConfig } : undefined,
             slippageConfig: cfg.costStressConfig.slippageConfig ? { ...cfg.costStressConfig.slippageConfig } : undefined,
             spreadConfig: cfg.costStressConfig.spreadConfig ? { ...cfg.costStressConfig.spreadConfig } : undefined,
           }
-        : undefined;
-      this.partialFillRatio = cfg.partialFillRatio;
-    }
+        : undefined,
+      partialFillRatio: cfg.partialFillRatio,
+    };
 
-    // 3. Clear and restore orders
-    this.orders.clear();
-    if (Array.isArray(checkpoint.orders)) {
-      for (const ord of checkpoint.orders) {
-        const restoredOrd: IOrder = { ...ord };
-        if ((ord as any)._initialQty !== undefined) {
-          (restoredOrd as any)._initialQty = (ord as any)._initialQty;
-        }
-        this.orders.set(restoredOrd.orderId, restoredOrd);
+    // Step 2: Validate orders and construct candidate orders map
+    const candidateOrders = new Map<string, IOrder>();
+    for (const ord of checkpoint.orders) {
+      if (!ord || typeof ord !== 'object') {
+        throw new Error('CORRUPT_EXECUTION_ORDER: Order must be an object');
       }
+      if (typeof ord.orderId !== 'string' || ord.orderId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_ORDER: Invalid orderId');
+      }
+      if (typeof ord.tradeId !== 'string' || ord.tradeId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_ORDER: Invalid tradeId');
+      }
+      if (typeof ord.symbol !== 'string' || ord.symbol.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_ORDER: Invalid symbol');
+      }
+      if (ord.side !== 'BUY' && ord.side !== 'SELL') {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: Invalid side "${ord.side}"`);
+      }
+      if (!['MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT'].includes(ord.orderType)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: Invalid orderType "${ord.orderType}"`);
+      }
+      if (!['PENDING', 'FILLED', 'PARTIALLY_FILLED', 'CANCELLED', 'REJECTED'].includes(ord.status)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: Invalid status "${ord.status}"`);
+      }
+
+      // Numerical validations
+      if (typeof ord.quantity !== 'number' || !Number.isFinite(ord.quantity) || ord.quantity <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: quantity must be a positive finite number, got ${ord.quantity}`);
+      }
+      const filledQty = ord.filledQuantity !== undefined ? ord.filledQuantity : 0;
+      if (typeof filledQty !== 'number' || !Number.isFinite(filledQty) || filledQty < 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: filledQuantity must be a non-negative finite number, got ${filledQty}`);
+      }
+      if (typeof ord.remainingQuantity !== 'number' || !Number.isFinite(ord.remainingQuantity) || ord.remainingQuantity < 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: remainingQuantity must be a non-negative finite number, got ${ord.remainingQuantity}`);
+      }
+
+      // Quantity invariants
+      if (filledQty > ord.quantity + 1e-6) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: filledQuantity (${filledQty}) exceeds total quantity (${ord.quantity})`,
+        );
+      }
+      const balanceDiff = Math.abs(ord.quantity - (filledQty + ord.remainingQuantity));
+      if (balanceDiff > 1e-6) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: quantity balance invariant violated: ${ord.quantity} != ${filledQty} + ${ord.remainingQuantity}`,
+        );
+      }
+
+      // Status consistency
+      if (ord.status === 'FILLED' && ord.remainingQuantity > 1e-6) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: Order with status FILLED cannot have remainingQuantity > 0, got ${ord.remainingQuantity}`,
+        );
+      }
+      if (ord.status === 'PARTIALLY_FILLED' && (ord.remainingQuantity <= 1e-6 || filledQty <= 0)) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: Order with status PARTIALLY_FILLED must have remainingQuantity > 0 and filledQuantity > 0`,
+        );
+      }
+      if (ord.status === 'PENDING' && filledQty > 1e-6) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: Order with status PENDING cannot have filledQuantity > 0, got ${filledQty}`,
+        );
+      }
+
+      // Timestamps and costs
+      if (typeof ord.createdAt !== 'number' || !Number.isFinite(ord.createdAt) || ord.createdAt <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: createdAt must be a positive finite timestamp, got ${ord.createdAt}`);
+      }
+      if (typeof ord.submittedAt !== 'number' || !Number.isFinite(ord.submittedAt) || ord.submittedAt <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: submittedAt must be a positive finite timestamp, got ${ord.submittedAt}`);
+      }
+      if (typeof ord.fees !== 'number' || !Number.isFinite(ord.fees) || ord.fees < 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: fees must be a non-negative finite number, got ${ord.fees}`);
+      }
+      if (typeof ord.slippage !== 'number' || !Number.isFinite(ord.slippage) || ord.slippage < 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: slippage must be a non-negative finite number, got ${ord.slippage}`);
+      }
+      if (ord.avgFillPrice !== undefined && (!Number.isFinite(ord.avgFillPrice) || ord.avgFillPrice <= 0)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: avgFillPrice must be a positive finite number, got ${ord.avgFillPrice}`);
+      }
+      if (ord.price !== undefined && (!Number.isFinite(ord.price) || ord.price <= 0)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: price must be a positive finite number, got ${ord.price}`);
+      }
+      if (ord.stopPrice !== undefined && (!Number.isFinite(ord.stopPrice) || ord.stopPrice <= 0)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: stopPrice must be a positive finite number, got ${ord.stopPrice}`);
+      }
+
+      const candidateOrder: IOrder = {
+        ...ord,
+        initialQuantity: ord.initialQuantity !== undefined ? ord.initialQuantity : ord.quantity,
+      };
+      candidateOrders.set(candidateOrder.orderId, candidateOrder);
     }
 
-    // 4. Restore fills and events
-    this.fills = Array.isArray(checkpoint.fills) ? checkpoint.fills.map((f) => ({ ...f })) : [];
-    this.events = Array.isArray(checkpoint.events) ? checkpoint.events.map((e) => ({ ...e })) : [];
+    // Step 3: Validate fills and construct candidate fills array
+    const candidateFills: IFill[] = [];
+    const fillsByOrder = new Map<string, number>();
+
+    for (const f of checkpoint.fills) {
+      if (!f || typeof f !== 'object') {
+        throw new Error('CORRUPT_EXECUTION_FILL: Fill must be an object');
+      }
+      if (typeof f.fillId !== 'string' || f.fillId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_FILL: Invalid fillId');
+      }
+      if (typeof f.orderId !== 'string' || f.orderId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_FILL: Invalid orderId');
+      }
+      if (typeof f.tradeId !== 'string' || f.tradeId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_FILL: Invalid tradeId');
+      }
+      if (typeof f.symbol !== 'string' || f.symbol.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_FILL: Invalid symbol');
+      }
+      if (f.side !== 'BUY' && f.side !== 'SELL') {
+        throw new Error(`CORRUPT_EXECUTION_FILL: Invalid side "${f.side}"`);
+      }
+      if (typeof f.price !== 'number' || !Number.isFinite(f.price) || f.price <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: price must be a positive finite number, got ${f.price}`);
+      }
+      if (typeof f.quantity !== 'number' || !Number.isFinite(f.quantity) || f.quantity <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: quantity must be a positive finite number, got ${f.quantity}`);
+      }
+      if (typeof f.fee !== 'number' || !Number.isFinite(f.fee) || f.fee < 0) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: fee must be a non-negative finite number, got ${f.fee}`);
+      }
+      if (typeof f.slippage !== 'number' || !Number.isFinite(f.slippage) || f.slippage < 0) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: slippage must be a non-negative finite number, got ${f.slippage}`);
+      }
+      if (typeof f.timestamp !== 'number' || !Number.isFinite(f.timestamp) || f.timestamp <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: timestamp must be a positive finite number, got ${f.timestamp}`);
+      }
+
+      // Check against candidate order
+      const ord = candidateOrders.get(f.orderId);
+      if (ord) {
+        const cumQty = (fillsByOrder.get(f.orderId) || 0) + f.quantity;
+        if (cumQty > ord.quantity + 1e-6) {
+          throw new Error(
+            `CORRUPT_EXECUTION_FILL: Cumulative fill quantity (${cumQty}) exceeds order quantity (${ord.quantity})`,
+          );
+        }
+        fillsByOrder.set(f.orderId, cumQty);
+      }
+
+      candidateFills.push({ ...f });
+    }
+
+    // Step 4: Validate events and construct candidate events array
+    const candidateEvents: IExecutionEvent[] = [];
+    for (const ev of checkpoint.events) {
+      if (!ev || typeof ev !== 'object') {
+        throw new Error('CORRUPT_EXECUTION_EVENT: Event must be an object');
+      }
+      if (typeof ev.eventId !== 'string' || ev.eventId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_EVENT: Invalid eventId');
+      }
+      if (typeof ev.tradeId !== 'string' || ev.tradeId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_EVENT: Invalid tradeId');
+      }
+      if (typeof ev.orderId !== 'string' || ev.orderId.trim() === '') {
+        throw new Error('CORRUPT_EXECUTION_EVENT: Invalid orderId');
+      }
+      if (typeof ev.timestamp !== 'number' || !Number.isFinite(ev.timestamp) || ev.timestamp <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_EVENT: timestamp must be a positive finite number, got ${ev.timestamp}`);
+      }
+      candidateEvents.push({ ...ev });
+    }
+
+    // Step 5: ATOMIC COMMIT — All validations passed, commit candidate state
+    this.runId = checkpoint.runId;
+    this.orderCounter = checkpoint.orderCounter;
+    this.fillCounter = checkpoint.fillCounter;
+    this.eventCounter = checkpoint.eventCounter;
+
+    this.fillModel = candidateConfig.fillModel;
+    this.ambiguityMode = candidateConfig.ambiguityMode;
+    this.latencyConfig = candidateConfig.latencyConfig;
+    this.slippageConfig = candidateConfig.slippageConfig;
+    this.feeConfig = candidateConfig.feeConfig;
+    this.spreadConfig = candidateConfig.spreadConfig;
+    this.costStressConfig = candidateConfig.costStressConfig;
+    this.partialFillRatio = candidateConfig.partialFillRatio;
+
+    this.orders = candidateOrders;
+    this.fills = candidateFills;
+    this.events = candidateEvents;
   }
 
   static fromCheckpoint(checkpoint: IExecutionSimulatorCheckpoint): ExecutionSimulator {

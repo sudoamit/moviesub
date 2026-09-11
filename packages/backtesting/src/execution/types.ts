@@ -1,4 +1,5 @@
 import { Direction, ICandle } from '@quant/shared';
+import { IExecutionEvent } from '@quant/risk-engine';
 
 export enum FillModel {
   NEXT_BAR_MARKET = 'NEXT_BAR_MARKET',
@@ -29,6 +30,7 @@ export interface IOrder {
   price?: number;
   stopPrice?: number;
   quantity: number;
+  initialQuantity?: number;
   filledQuantity?: number;
   remainingQuantity: number;
   status: OrderStatus;
@@ -137,6 +139,141 @@ export interface IExecutionSimulatorCheckpoint {
   executionConfig: ExecutionModelConfig;
   orders: IOrder[];
   fills: IFill[];
-  events: any[];
+  events: IExecutionEvent[];
 }
+
+export function validateExecutionModelConfig(config: ExecutionModelConfig): void {
+  if (!config || typeof config !== 'object') {
+    throw new Error('INVALID_EXECUTION_MODEL_CONFIG: Config must be an object');
+  }
+
+  // 1. fillModel
+  if (!Object.values(FillModel).includes(config.fillModel)) {
+    throw new Error(`INVALID_FILL_MODEL: Invalid fill model "${config.fillModel}"`);
+  }
+
+  // 2. ambiguityMode
+  if (!Object.values(SameCandleAmbiguityMode).includes(config.ambiguityMode)) {
+    throw new Error(`INVALID_AMBIGUITY_MODE: Invalid ambiguity mode "${config.ambiguityMode}"`);
+  }
+
+  // 3. latencyConfig
+  if (!config.latencyConfig || typeof config.latencyConfig !== 'object') {
+    throw new Error('INVALID_LATENCY_CONFIG: latencyConfig must be an object');
+  }
+  if (
+    !Number.isFinite(config.latencyConfig.submissionLatencyMs) ||
+    config.latencyConfig.submissionLatencyMs < 0 ||
+    !Number.isFinite(config.latencyConfig.processingLatencyMs) ||
+    config.latencyConfig.processingLatencyMs < 0
+  ) {
+    throw new Error('INVALID_LATENCY_CONFIG: Latency values must be non-negative finite numbers');
+  }
+
+  // 4. slippageConfig (if defined)
+  if (config.slippageConfig !== undefined) {
+    const s = config.slippageConfig;
+    if (!s || typeof s !== 'object') {
+      throw new Error('INVALID_SLIPPAGE_CONFIG: slippageConfig must be an object');
+    }
+    if (
+      !Number.isFinite(s.baseSlippageBps) || s.baseSlippageBps < 0 ||
+      !Number.isFinite(s.volatilityMultiplier) || s.volatilityMultiplier < 0 ||
+      !Number.isFinite(s.impactMultiplier) || s.impactMultiplier < 0 ||
+      !Number.isFinite(s.maxSlippageBps) || s.maxSlippageBps < 0 ||
+      s.maxSlippageBps < s.baseSlippageBps
+    ) {
+      throw new Error('INVALID_SLIPPAGE_CONFIG: Slippage parameters must be non-negative finite numbers with maxSlippageBps >= baseSlippageBps');
+    }
+  }
+
+  // 5. feeConfig (if defined)
+  if (config.feeConfig !== undefined) {
+    const f = config.feeConfig;
+    if (!f || typeof f !== 'object') {
+      throw new Error('INVALID_FEE_CONFIG: feeConfig must be an object');
+    }
+    const feeFields: (keyof IFeeConfig)[] = [
+      'brokerageFlat',
+      'brokerageRateBps',
+      'sttRateBps',
+      'exchangeTurnoverBps',
+      'gstRate',
+      'sebiTurnoverBps',
+    ];
+    for (const field of feeFields) {
+      if (f[field] !== undefined) {
+        const val = f[field];
+        if (typeof val !== 'number' || !Number.isFinite(val) || val < 0) {
+          throw new Error(`INVALID_FEE_CONFIG: ${field} must be a non-negative finite number, got ${val}`);
+        }
+      }
+    }
+  }
+
+  // 6. spreadConfig (if defined)
+  if (config.spreadConfig !== undefined) {
+    const sp = config.spreadConfig;
+    if (!sp || typeof sp !== 'object') {
+      throw new Error('INVALID_SPREAD_CONFIG: spreadConfig must be an object');
+    }
+    if (
+      !Number.isFinite(sp.baseSpreadBps) || sp.baseSpreadBps < 0 ||
+      !Number.isFinite(sp.illiquidMultiplier) || sp.illiquidMultiplier < 0
+    ) {
+      throw new Error('INVALID_SPREAD_CONFIG: Spread parameters must be non-negative finite numbers');
+    }
+  }
+
+  // 7. costStressConfig (if defined)
+  if (config.costStressConfig !== undefined) {
+    const cs = config.costStressConfig;
+    if (!cs || typeof cs !== 'object') {
+      throw new Error('INVALID_COST_STRESS_CONFIG: costStressConfig must be an object');
+    }
+    const validModes: CostStressMode[] = ['NORMAL', 'MULTIPLIER', 'ABSOLUTE'];
+    if (!validModes.includes(cs.mode)) {
+      throw new Error(`INVALID_COST_STRESS_CONFIG: Invalid mode "${cs.mode}"`);
+    }
+    if (cs.multiplier !== undefined) {
+      if (!Number.isFinite(cs.multiplier) || cs.multiplier < 0) {
+        throw new Error(`INVALID_COST_STRESS_CONFIG: multiplier must be a non-negative finite number, got ${cs.multiplier}`);
+      }
+    }
+    if (cs.slippageConfig !== undefined) {
+      const s = cs.slippageConfig;
+      if (
+        !Number.isFinite(s.baseSlippageBps) || s.baseSlippageBps < 0 ||
+        !Number.isFinite(s.volatilityMultiplier) || s.volatilityMultiplier < 0 ||
+        !Number.isFinite(s.impactMultiplier) || s.impactMultiplier < 0 ||
+        !Number.isFinite(s.maxSlippageBps) || s.maxSlippageBps < 0
+      ) {
+        throw new Error('INVALID_COST_STRESS_CONFIG: Nested slippageConfig contains invalid values');
+      }
+    }
+    if (cs.spreadConfig !== undefined) {
+      const sp = cs.spreadConfig;
+      if (
+        !Number.isFinite(sp.baseSpreadBps) || sp.baseSpreadBps < 0 ||
+        !Number.isFinite(sp.illiquidMultiplier) || sp.illiquidMultiplier < 0
+      ) {
+        throw new Error('INVALID_COST_STRESS_CONFIG: Nested spreadConfig contains invalid values');
+      }
+    }
+  }
+
+  // 8. partialFillRatio (if defined)
+  if (config.partialFillRatio !== undefined) {
+    if (
+      !Number.isFinite(config.partialFillRatio) ||
+      config.partialFillRatio <= 0 ||
+      config.partialFillRatio > 1
+    ) {
+      throw new Error(
+        `INVALID_PARTIAL_FILL_RATIO: partialFillRatio must be a finite number between 0 and 1, got ${config.partialFillRatio}`,
+      );
+    }
+  }
+}
+
 

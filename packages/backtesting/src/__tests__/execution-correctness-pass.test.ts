@@ -1,6 +1,15 @@
 import { ExecutionSimulator } from '../execution/execution-simulator';
 import { FillModelEngine } from '../execution/fill-model';
-import { FillModel, SameCandleAmbiguityMode, ISpreadConfig, ISlippageConfig, ExecutionCostStressConfig } from '../execution/types';
+import {
+  FillModel,
+  SameCandleAmbiguityMode,
+  ISpreadConfig,
+  ISlippageConfig,
+  ExecutionCostStressConfig,
+  validateExecutionModelConfig,
+  ExecutionModelConfig,
+  IExecutionSimulatorCheckpoint,
+} from '../execution/types';
 import { OHLCPathCursor } from '../execution/ohlc-path-cursor';
 import { TradeLifecycleManager } from '@quant/risk-engine';
 import { Direction, ICandle, MockMarketDataProvider, SignalState } from '@quant/shared';
@@ -2999,8 +3008,8 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_SLIPPAGE');
   });
 
-  // 63. AI Fix 70 — Atomic execution-model update with rollback on failure
-  test('63. updateExecutionModel is atomic: invalid candidate field aborts update and preserves exact prior config without partial mutation', () => {
+  // 63. AI Fix 71 — Truly Transactional updateExecutionModel and validateExecutionModelConfig
+  test('63. updateExecutionModel is truly transactional across all execution configuration fields', () => {
     const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, {
       submissionLatencyMs: 20,
       processingLatencyMs: 10,
@@ -3009,39 +3018,97 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     const before = execSim.getExecutionModelConfig();
 
-    // 1. Invalid partialFillRatio (-1) should fail atomically
-    expect(() =>
-      execSim.updateExecutionModel({
-        fillModel: FillModel.NEXT_BAR_MARKET,
-        partialFillRatio: -1,
-      }),
-    ).toThrow('INVALID_PARTIAL_FILL_RATIO');
-
+    // 1. Invalid fillModel
+    expect(() => execSim.updateExecutionModel({ fillModel: 'INVALID_MODEL' as any })).toThrow('INVALID_FILL_MODEL');
     expect(execSim.getExecutionModelConfig()).toEqual(before);
 
-    // 2. Invalid latencyConfig (negative latency) should fail atomically
+    // 2. Invalid ambiguityMode
+    expect(() => execSim.updateExecutionModel({ ambiguityMode: 'INVALID_MODE' as any })).toThrow('INVALID_AMBIGUITY_MODE');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 3. Invalid latencyConfig (negative / NaN)
     expect(() =>
       execSim.updateExecutionModel({
-        fillModel: FillModel.LIMIT_TOUCH,
         latencyConfig: { submissionLatencyMs: -5, processingLatencyMs: 10 },
       }),
     ).toThrow('INVALID_LATENCY_CONFIG');
-
     expect(execSim.getExecutionModelConfig()).toEqual(before);
 
-    // 3. Valid update succeeds completely
+    expect(() =>
+      execSim.updateExecutionModel({
+        latencyConfig: { submissionLatencyMs: NaN, processingLatencyMs: 10 },
+      }),
+    ).toThrow('INVALID_LATENCY_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 4. Invalid slippageConfig (maxSlippageBps < baseSlippageBps or negative)
+    expect(() =>
+      execSim.updateExecutionModel({
+        slippageConfig: { baseSlippageBps: 10, volatilityMultiplier: 1, impactMultiplier: 1, maxSlippageBps: 5 },
+      }),
+    ).toThrow('INVALID_SLIPPAGE_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    expect(() =>
+      execSim.updateExecutionModel({
+        slippageConfig: { baseSlippageBps: -2, volatilityMultiplier: 1, impactMultiplier: 1, maxSlippageBps: 10 },
+      }),
+    ).toThrow('INVALID_SLIPPAGE_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 5. Invalid feeConfig (negative field)
+    expect(() =>
+      execSim.updateExecutionModel({
+        feeConfig: { brokerageRateBps: -1 },
+      }),
+    ).toThrow('INVALID_FEE_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 6. Invalid spreadConfig (negative baseSpreadBps)
+    expect(() =>
+      execSim.updateExecutionModel({
+        spreadConfig: { baseSpreadBps: -0.5, illiquidMultiplier: 1 },
+      }),
+    ).toThrow('INVALID_SPREAD_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 7. Invalid costStressConfig (invalid mode or negative multiplier)
+    expect(() =>
+      execSim.updateExecutionModel({
+        costStressConfig: { mode: 'INVALID' as any },
+      }),
+    ).toThrow('INVALID_COST_STRESS_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    expect(() =>
+      execSim.updateExecutionModel({
+        costStressConfig: { mode: 'MULTIPLIER', multiplier: -2 },
+      }),
+    ).toThrow('INVALID_COST_STRESS_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 8. Invalid partialFillRatio
+    expect(() => execSim.updateExecutionModel({ partialFillRatio: -1 })).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.updateExecutionModel({ partialFillRatio: 0 })).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.updateExecutionModel({ partialFillRatio: 1.5 })).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.updateExecutionModel({ partialFillRatio: NaN })).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 9. Valid atomic update succeeds completely
     execSim.updateExecutionModel({
       fillModel: FillModel.NEXT_BAR_MARKET,
       ambiguityMode: SameCandleAmbiguityMode.OPTIMISTIC,
       partialFillRatio: 0.8,
+      slippageConfig: { baseSlippageBps: 2, volatilityMultiplier: 1, impactMultiplier: 1, maxSlippageBps: 20 },
     });
     const after = execSim.getExecutionModelConfig();
     expect(after.fillModel).toBe(FillModel.NEXT_BAR_MARKET);
     expect(after.ambiguityMode).toBe(SameCandleAmbiguityMode.OPTIMISTIC);
     expect(after.partialFillRatio).toBe(0.8);
+    expect(after.slippageConfig?.baseSlippageBps).toBe(2);
   });
 
-  // 64. AI Fix 70 — Typed execution-model snapshot returns safe isolated copy
+  // 64. AI Fix 71 — Typed execution-model snapshot returns safe isolated copy
   test('64. getExecutionModelConfig returns complete typed snapshot isolated from internal state mutations', () => {
     const execSim = new ExecutionSimulator(
       FillModel.OHLC_PATH,
@@ -3076,12 +3143,18 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(freshSnapshot.slippageConfig?.baseSlippageBps).toBe(2);
   });
 
-  // 65. AI Fix 70 — Configuration-change timing semantics (intra-candle snapshot consistency)
-  test('65. Configuration updates take effect on subsequent candles and do not split execution models intra-candle', () => {
-    const execSim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE);
+  // 65. AI Fix 71 — Strict Intra-Candle Configuration Timing Semantics
+  test('65. Mid-candle configuration updates do NOT affect orders in current candle N, taking effect strictly on candle N+1', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      't_timing',
+      { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 }, // 0 bps initial slippage
+    );
     const startTime = 1700000000000;
 
-    // Submit two orders for the same candle
+    // Submit two orders for Candle 1
     const o1 = execSim.submitOrder({
       tradeId: 't_timing_1',
       symbol: 'BTCUSDT',
@@ -3102,21 +3175,79 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       timestamp: startTime,
     });
 
-    const c1: ICandle = { timestamp: new Date(startTime + 60000), open: 102, high: 103, low: 98, close: 101, volume: 100 };
+    const candle1: ICandle = { timestamp: new Date(startTime + 60000), open: 100, high: 102, low: 98, close: 101, volume: 100 };
+    const candle2: ICandle = { timestamp: new Date(startTime + 120000), open: 100, high: 102, low: 98, close: 101, volume: 100 };
 
-    // Update config before processing c1 -> c1 uses new config
-    execSim.updateExecutionModel({
-      ambiguityMode: SameCandleAmbiguityMode.OPTIMISTIC,
+    let firstCallSlippageBps: number | undefined;
+    let secondCallSlippageBps: number | undefined;
+    let thirdCallSlippageBps: number | undefined;
+
+    const spy = jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockImplementation(
+      (order, start, end, ts, sym, fm, slippageConfig, feeConfig, spreadConfig, costStress, partialFill) => {
+        if (order.tradeId === 't_timing_1') {
+          firstCallSlippageBps = slippageConfig?.baseSlippageBps;
+          // Mutate configuration mid-way during Candle 1 processing!
+          execSim.updateExecutionModel({
+            slippageConfig: { baseSlippageBps: 50, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 50 },
+          });
+        } else if (order.tradeId === 't_timing_2') {
+          secondCallSlippageBps = slippageConfig?.baseSlippageBps;
+        } else if (order.tradeId === 't_timing_3') {
+          thirdCallSlippageBps = slippageConfig?.baseSlippageBps;
+        }
+
+        return {
+          isFilled: true,
+          fill: {
+            fillId: `f_${order.orderId}`,
+            orderId: order.orderId,
+            tradeId: order.tradeId,
+            symbol: order.symbol,
+            side: order.side,
+            price: 100,
+            quantity: order.quantity,
+            fee: 0,
+            slippage: slippageConfig?.baseSlippageBps ? 0.5 : 0,
+            timestamp: ts,
+            isPartial: false,
+          },
+        };
+      },
+    );
+
+    // Process Candle 1
+    const res1 = execSim.processCandle(candle1);
+    expect(res1.fills).toHaveLength(2);
+    // Both orders in Candle 1 must use initial snapshot (0 slippage)
+    expect(firstCallSlippageBps).toBe(0);
+    expect(secondCallSlippageBps).toBe(0);
+    expect(res1.fills[0].slippage).toBe(0);
+    expect(res1.fills[1].slippage).toBe(0);
+
+    // Now submit order 3 for Candle 2
+    const o3 = execSim.submitOrder({
+      tradeId: 't_timing_3',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 1.0,
+      timestamp: startTime + 60000,
     });
 
-    const res1 = execSim.processCandle(c1);
-    expect(res1.fills).toHaveLength(2);
-    expect(o1.status).toBe('FILLED');
-    expect(o2.status).toBe('FILLED');
+    // Process Candle 2
+    const res2 = execSim.processCandle(candle2);
+    expect(res2.fills).toHaveLength(1);
+    // Order 3 in Candle 2 MUST use new snapshot (50 bps slippage)
+    expect(thirdCallSlippageBps).toBe(50);
+    expect(res2.fills[0].slippage).toBe(0.5);
+    expect(o3.status).toBe('FILLED');
+
+    spy.mockRestore();
   });
 
-  // 66. AI Fix 70 — ExecutionSimulator Checkpoint creation and restoration
-  test('66. ExecutionSimulator createCheckpoint and restoreCheckpoint correctly export and restore state', () => {
+  // 66. AI Fix 71 — ExecutionSimulator Checkpoint creation and restoration with explicit initialQuantity
+  test('66. ExecutionSimulator createCheckpoint and restoreCheckpoint correctly export and restore state without any usage', () => {
     const sim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, undefined, 'run_ckpt');
     sim.setPartialFillRatio(0.5);
 
@@ -3129,6 +3260,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       quantity: 10.0,
       timestamp: 1700000000000,
     });
+    expect(order.initialQuantity).toBe(10.0);
 
     // Fill 5 units (50% partial fill)
     const c1: ICandle = { timestamp: new Date(1700000060000), open: 102, high: 103, low: 98, close: 101, volume: 100 };
@@ -3143,6 +3275,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(checkpoint.version).toBe(1);
     expect(checkpoint.runId).toBe('run_ckpt');
     expect(checkpoint.orders).toHaveLength(1);
+    expect(checkpoint.orders[0].initialQuantity).toBe(10.0);
     expect(checkpoint.fills).toHaveLength(1);
     expect(checkpoint.events).toHaveLength(1);
     expect(checkpoint.executionConfig.partialFillRatio).toBe(0.5);
@@ -3157,6 +3290,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     const restoredOrder = restored.getOrder(order.orderId);
     expect(restoredOrder).toBeDefined();
     expect(restoredOrder?.status).toBe('PARTIALLY_FILLED');
+    expect(restoredOrder?.initialQuantity).toBe(10.0);
     expect(restoredOrder?.filledQuantity).toBe(5.0);
     expect(restoredOrder?.remainingQuantity).toBe(5.0);
 
@@ -3164,10 +3298,11 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     const sim2 = new ExecutionSimulator();
     sim2.restoreCheckpoint(checkpoint);
     expect(sim2.getOrder(order.orderId)?.remainingQuantity).toBe(5.0);
+    expect(sim2.getOrder(order.orderId)?.initialQuantity).toBe(10.0);
   });
 
-  // 67. AI Fix 70 — Continuous execution (Run A) vs Checkpoint/Resume execution (Run B) equivalence
-  test('67. Run A (continuous) and Run B (checkpoint + restore at midpoint) produce identical execution states, fills, VWAP, fees, slippage, and timestamps', () => {
+  // 67. AI Fix 71 — Continuous execution (Run A) vs JSON Round-Trip Checkpoint/Resume (Run B) equivalence
+  test('67. Run A (continuous) and Run B (JSON round-trip checkpoint + restore at midpoint) produce identical execution states, fills, VWAP, fees, slippage, and timestamps', () => {
     const startTime = 1700000000000;
 
     const candles: ICandle[] = [
@@ -3178,10 +3313,14 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     ];
 
     // RUN A: Continuous
-    const simA = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, {
-      submissionLatencyMs: 10,
-      processingLatencyMs: 5,
-    }, 'run_eq');
+    const simA = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 10, processingLatencyMs: 5 },
+      'run_eq',
+      { baseSlippageBps: 2, volatilityMultiplier: 1, impactMultiplier: 1, maxSlippageBps: 10 },
+      { brokerageFlat: 20, brokerageRateBps: 3 },
+    );
     simA.setPartialFillRatio(0.5);
 
     const o1_A = simA.submitOrder({
@@ -3217,11 +3356,15 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     simA.processCandle(candles[2]);
     simA.processCandle(candles[3]);
 
-    // RUN B: Checkpoint & Resume
-    const simB = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, {
-      submissionLatencyMs: 10,
-      processingLatencyMs: 5,
-    }, 'run_eq');
+    // RUN B: Checkpoint, JSON Round-Trip, and Resume
+    const simB = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 10, processingLatencyMs: 5 },
+      'run_eq',
+      { baseSlippageBps: 2, volatilityMultiplier: 1, impactMultiplier: 1, maxSlippageBps: 10 },
+      { brokerageFlat: 20, brokerageRateBps: 3 },
+    );
     simB.setPartialFillRatio(0.5);
 
     const o1_B = simB.submitOrder({
@@ -3254,9 +3397,11 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       timestamp: startTime + 150000,
     });
 
-    // CHECKPOINT SIM B & RESTORE INTO FRESH SIMULATOR
+    // CHECKPOINT SIM B -> JSON STRINGIFY -> JSON PARSE -> RESTORE
     const checkpointB = simB.createCheckpoint();
-    const restoredSimB = ExecutionSimulator.fromCheckpoint(checkpointB);
+    const jsonSerialized = JSON.stringify(checkpointB);
+    const jsonParsed = JSON.parse(jsonSerialized) as IExecutionSimulatorCheckpoint;
+    const restoredSimB = ExecutionSimulator.fromCheckpoint(jsonParsed);
 
     // Process remaining half (c3, c4) on Restored Sim B
     restoredSimB.processCandle(candles[2]);
@@ -3271,6 +3416,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       const a = ordersA[i];
       const b = ordersB[i];
       expect(a.orderId).toBe(b.orderId);
+      expect(a.initialQuantity).toBe(b.initialQuantity);
       expect(a.status).toBe(b.status);
       expect(a.filledQuantity).toBeCloseTo(b.filledQuantity!, 6);
       expect(a.remainingQuantity).toBeCloseTo(b.remainingQuantity, 6);
@@ -3297,10 +3443,11 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       expect(fa.timestamp).toBe(fb.timestamp);
     }
 
+    expect(simA.getExecutionSequences()).toEqual(restoredSimB.getExecutionSequences());
     expect(simA.getExecutionModelConfig()).toEqual(restoredSimB.getExecutionModelConfig());
   });
 
-  // 68. AI Fix 70 — Deterministic replay test across two independent simulators
+  // 68. AI Fix 71 — Deterministic replay test across two independent simulators
   test('68. Two independently constructed simulators with identical config and order/candle sequence produce bit-exact identical executions', () => {
     const startTime = 1700000000000;
     const sim1 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OPTIMISTIC, {
@@ -3352,12 +3499,184 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(sim1.getAllEvents()).toEqual(sim2.getAllEvents());
   });
 
-  // 69. AI Fix 70 — Invalid fill causes zero state mutation (order atomicity)
-  test('69. Invalid fill (zero/negative/NaN/Infinity qty/price/fee/slippage or overfill) causes zero mutation on order state', () => {
+  // 69. AI Fix 71 — Strict Checkpoint Schema and State Invariant Validation on restoreCheckpoint
+  test('69. restoreCheckpoint rejects invalid/corrupted checkpoints and schema errors strictly', () => {
+    const sim = new ExecutionSimulator();
+    const validCheckpoint = sim.createCheckpoint();
+
+    // 1. Invalid version
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, version: 2 })).toThrow('UNSUPPORTED_CHECKPOINT_VERSION');
+
+    // 2. Empty / invalid runId
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, runId: '' })).toThrow('CORRUPT_EXECUTION_CHECKPOINT');
+
+    // 3. Negative / non-integer counters
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orderCounter: -1 })).toThrow('CORRUPT_EXECUTION_CHECKPOINT');
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, fillCounter: 1.5 })).toThrow('CORRUPT_EXECUTION_CHECKPOINT');
+
+    // 4. Corrupted order: filledQuantity > quantity
+    const corruptOrder1: any = {
+      orderId: 'ord_bad1',
+      clientOrderId: 'cl_bad1',
+      tradeId: 't_bad',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      quantity: 10.0,
+      filledQuantity: 15.0,
+      remainingQuantity: 0,
+      status: 'FILLED',
+      createdAt: 1000,
+      submittedAt: 1010,
+      fees: 0,
+      slippage: 0,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder1] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 5. Corrupted order: balance invariant violated (10 != 4 + 4)
+    const corruptOrder2: any = {
+      ...corruptOrder1,
+      filledQuantity: 4.0,
+      remainingQuantity: 4.0,
+      status: 'PARTIALLY_FILLED',
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder2] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 6. Corrupted order: FILLED with remainingQuantity > 0
+    const corruptOrder3: any = {
+      ...corruptOrder1,
+      filledQuantity: 8.0,
+      remainingQuantity: 2.0,
+      status: 'FILLED',
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder3] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 7. Corrupted order: PARTIALLY_FILLED with filledQuantity = 0
+    const corruptOrder4: any = {
+      ...corruptOrder1,
+      filledQuantity: 0,
+      remainingQuantity: 10.0,
+      status: 'PARTIALLY_FILLED',
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder4] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 8. Corrupted order: PENDING with filledQuantity > 0
+    const corruptOrder5: any = {
+      ...corruptOrder1,
+      filledQuantity: 2.0,
+      remainingQuantity: 8.0,
+      status: 'PENDING',
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder5] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 9. Corrupted fill: cumulative fill exceeds order quantity
+    const goodOrder: any = {
+      orderId: 'ord_good',
+      clientOrderId: 'cl_good',
+      tradeId: 't_good',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      quantity: 5.0,
+      filledQuantity: 5.0,
+      remainingQuantity: 0,
+      status: 'FILLED',
+      createdAt: 1000,
+      submittedAt: 1010,
+      fees: 0,
+      slippage: 0,
+    };
+    const corruptFill: any = {
+      fillId: 'f_over',
+      orderId: 'ord_good',
+      tradeId: 't_good',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: 100,
+      quantity: 10.0, // > 5.0
+      fee: 0,
+      slippage: 0,
+      timestamp: 1020,
+      isPartial: false,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [corruptFill] })).toThrow('CORRUPT_EXECUTION_FILL');
+  });
+
+  // 70. AI Fix 71 — Restore-Failure Atomicity (zero state change on failed restore)
+  test('70. restoreCheckpoint is strictly atomic: failed restore preserves exact prior simulator state without partial corruption', () => {
+    const sim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OPTIMISTIC, {
+      submissionLatencyMs: 15,
+      processingLatencyMs: 5,
+    }, 'sim_prior');
+    sim.setPartialFillRatio(0.4);
+
+    const o1 = sim.submitOrder({
+      tradeId: 't_prior',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 100.0,
+      quantity: 10.0,
+      timestamp: 1700000000000,
+    });
+
+    const c1: ICandle = { timestamp: new Date(1700000060000), open: 100, high: 102, low: 98, close: 101, volume: 100 };
+    sim.processCandle(c1);
+
+    const snapshotBefore = {
+      runId: 'sim_prior',
+      orders: sim.getAllOrders().map((o) => ({ ...o })),
+      fills: sim.getAllFills().map((f) => ({ ...f })),
+      events: sim.getAllEvents().map((e) => ({ ...e })),
+      sequences: sim.getExecutionSequences(),
+      config: sim.getExecutionModelConfig(),
+    };
+
+    // Attempt restoring deliberately corrupted checkpoint
+    const corruptedCheckpoint: any = {
+      version: 1,
+      runId: 'corrupted_run',
+      orderCounter: 100,
+      fillCounter: 100,
+      eventCounter: 100,
+      executionConfig: sim.getExecutionModelConfig(),
+      orders: [
+        {
+          orderId: 'bad_ord',
+          tradeId: 'bad_t',
+          symbol: 'BTCUSDT',
+          side: 'BUY',
+          orderType: 'LIMIT',
+          quantity: 10.0,
+          filledQuantity: 50.0, // > 10.0 (Corrupted!)
+          remainingQuantity: 0,
+          status: 'FILLED',
+          createdAt: 1000,
+          submittedAt: 1010,
+          fees: 0,
+          slippage: 0,
+        },
+      ],
+      fills: [],
+      events: [],
+    };
+
+    expect(() => sim.restoreCheckpoint(corruptedCheckpoint)).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // Assert simulator is completely untouched
+    expect(sim.getAllOrders()).toEqual(snapshotBefore.orders);
+    expect(sim.getAllFills()).toEqual(snapshotBefore.fills);
+    expect(sim.getAllEvents()).toEqual(snapshotBefore.events);
+    expect(sim.getExecutionSequences()).toEqual(snapshotBefore.sequences);
+    expect(sim.getExecutionModelConfig()).toEqual(snapshotBefore.config);
+  });
+
+  // 71. AI Fix 71 — Full 15-Category Invalid-Fill Atomicity Verification
+  test('71. Full 15-category invalid fill validation causes ZERO state mutation on order, VWAP, fees, slippage, and timestamps', () => {
     const execSim = new ExecutionSimulator();
     const timestamp = 1700000000000;
     const order = execSim.submitOrder({
-      tradeId: 't_invalid_fill_atomicity',
+      tradeId: 't_all_15_invalid_fills',
       symbol: 'BTCUSDT',
       side: 'BUY',
       orderType: 'LIMIT',
@@ -3380,65 +3699,58 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       completedAt: order.completedAt,
     };
 
-    // 1. Overfill attempt (fill quantity 15 > remaining 10)
-    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
-      isFilled: true,
-      fill: {
-        fillId: 'f_overfill',
-        orderId: order.orderId,
-        tradeId: order.tradeId,
-        symbol: order.symbol,
-        side: order.side,
-        price: 100.0,
-        quantity: 15.0,
-        fee: 0.1,
-        slippage: 0.05,
-        timestamp: timestamp + 60000,
-        isPartial: false,
-      },
-    });
+    const invalidTestCases = [
+      { name: '1. Zero quantity', patch: { quantity: 0 }, expectedError: 'INVALID_FILL_QUANTITY' },
+      { name: '2. Negative quantity', patch: { quantity: -5 }, expectedError: 'INVALID_FILL_QUANTITY' },
+      { name: '3. NaN quantity', patch: { quantity: NaN }, expectedError: 'INVALID_FILL_QUANTITY' },
+      { name: '4. Infinity quantity', patch: { quantity: Infinity }, expectedError: 'INVALID_FILL_QUANTITY' },
+      { name: '5. Zero price', patch: { price: 0 }, expectedError: 'INVALID_FILL_PRICE' },
+      { name: '6. Negative price', patch: { price: -100 }, expectedError: 'INVALID_FILL_PRICE' },
+      { name: '7. NaN price', patch: { price: NaN }, expectedError: 'INVALID_FILL_PRICE' },
+      { name: '8. Infinity price', patch: { price: Infinity }, expectedError: 'INVALID_FILL_PRICE' },
+      { name: '9. Negative fee', patch: { fee: -5 }, expectedError: 'INVALID_FILL_FEE' },
+      { name: '10. NaN fee', patch: { fee: NaN }, expectedError: 'INVALID_FILL_FEE' },
+      { name: '11. Infinity fee', patch: { fee: Infinity }, expectedError: 'INVALID_FILL_FEE' },
+      { name: '12. Negative slippage', patch: { slippage: -1 }, expectedError: 'INVALID_FILL_SLIPPAGE' },
+      { name: '13. NaN slippage', patch: { slippage: NaN }, expectedError: 'INVALID_FILL_SLIPPAGE' },
+      { name: '14. Infinity slippage', patch: { slippage: Infinity }, expectedError: 'INVALID_FILL_SLIPPAGE' },
+      { name: '15. Overfill (qty 15 > remaining 10)', patch: { quantity: 15 }, expectedError: 'FILL_EXCEEDS_REMAINING_QUANTITY' },
+    ];
 
-    expect(() => execSim.processCandle(candle)).toThrow('FILL_EXCEEDS_REMAINING_QUANTITY');
+    for (const tc of invalidTestCases) {
+      jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+        isFilled: true,
+        fill: {
+          fillId: 'f_test',
+          orderId: order.orderId,
+          tradeId: order.tradeId,
+          symbol: order.symbol,
+          side: order.side,
+          price: 100.0,
+          quantity: 5.0,
+          fee: 0.1,
+          slippage: 0.05,
+          timestamp: timestamp + 60000,
+          isPartial: false,
+          ...tc.patch,
+        },
+      });
 
-    // Verify order state unchanged
-    expect(order.filledQuantity).toBe(snapshotBefore.filledQuantity);
-    expect(order.remainingQuantity).toBe(snapshotBefore.remainingQuantity);
-    expect(order.status).toBe(snapshotBefore.status);
-    expect(order.avgFillPrice).toBe(snapshotBefore.avgFillPrice);
-    expect(order.fees).toBe(snapshotBefore.fees);
-    expect(order.slippage).toBe(snapshotBefore.slippage);
-    expect(order.firstFilledAt).toBe(snapshotBefore.firstFilledAt);
-    expect(order.lastFilledAt).toBe(snapshotBefore.lastFilledAt);
-    expect(order.completedAt).toBe(snapshotBefore.completedAt);
-    expect(execSim.getAllFills()).toHaveLength(0);
-    expect(execSim.getAllEvents()).toHaveLength(0);
+      expect(() => execSim.processCandle(candle)).toThrow(tc.expectedError);
 
-    // 2. NaN quantity fill attempt
-    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
-      isFilled: true,
-      fill: {
-        fillId: 'f_nan_qty',
-        orderId: order.orderId,
-        tradeId: order.tradeId,
-        symbol: order.symbol,
-        side: order.side,
-        price: 100.0,
-        quantity: NaN,
-        fee: 0.1,
-        slippage: 0.05,
-        timestamp: timestamp + 60000,
-        isPartial: false,
-      },
-    });
-
-    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_QUANTITY');
-
-    // Verify order state STILL unchanged
-    expect(order.filledQuantity).toBe(snapshotBefore.filledQuantity);
-    expect(order.remainingQuantity).toBe(snapshotBefore.remainingQuantity);
-    expect(order.status).toBe(snapshotBefore.status);
-    expect(order.fees).toBe(snapshotBefore.fees);
-    expect(execSim.getAllFills()).toHaveLength(0);
+      // Verify order state remains unchanged after every error
+      expect(order.filledQuantity).toBe(snapshotBefore.filledQuantity);
+      expect(order.remainingQuantity).toBe(snapshotBefore.remainingQuantity);
+      expect(order.status).toBe(snapshotBefore.status);
+      expect(order.avgFillPrice).toBe(snapshotBefore.avgFillPrice);
+      expect(order.fees).toBe(snapshotBefore.fees);
+      expect(order.slippage).toBe(snapshotBefore.slippage);
+      expect(order.firstFilledAt).toBe(snapshotBefore.firstFilledAt);
+      expect(order.lastFilledAt).toBe(snapshotBefore.lastFilledAt);
+      expect(order.completedAt).toBe(snapshotBefore.completedAt);
+      expect(execSim.getAllFills()).toHaveLength(0);
+      expect(execSim.getAllEvents()).toHaveLength(0);
+    }
   });
 });
 
