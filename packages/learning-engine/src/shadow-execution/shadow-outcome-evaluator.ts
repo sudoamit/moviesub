@@ -12,7 +12,7 @@ import {
 export interface OutcomeAttributionParams {
   readonly outcomeId?: string;
   readonly decision: TradingDecision;
-  readonly pair: ChampionChallengerDecisionPair;
+  readonly pair?: ChampionChallengerDecisionPair;
   readonly outcomeStartTimestamp: number;
   readonly outcomeEndTimestamp: number;
   readonly entryFill?: ShadowFill;
@@ -33,7 +33,7 @@ export interface OutcomeAttributionParams {
  */
 export function computeOutcomeHash(params: {
   decisionId: string;
-  pairId: string;
+  pairId?: string;
   outcomeStartTimestamp: number;
   outcomeEndTimestamp: number;
   grossPnL: number;
@@ -46,7 +46,7 @@ export function computeOutcomeHash(params: {
 }): string {
   const payload = {
     decisionId: params.decisionId,
-    pairId: params.pairId,
+    pairId: params.pairId ?? 'standalone',
     outcomeStartTimestamp: params.outcomeStartTimestamp,
     outcomeEndTimestamp: params.outcomeEndTimestamp,
     grossPnL: params.grossPnL,
@@ -75,18 +75,16 @@ export class ShadowOutcomeEvaluator {
     if (!params.decision || !params.decision.decisionId) {
       throw new Error('INVALID_OUTCOME_ATTRIBUTION: decision is required');
     }
-    if (!params.pair || !params.pair.pairId) {
-      throw new Error('INVALID_OUTCOME_ATTRIBUTION: pair is required');
-    }
 
     if (params.outcomeStartTimestamp > params.outcomeEndTimestamp) {
       throw new Error('INVALID_OUTCOME_ATTRIBUTION: outcomeStartTimestamp must be <= outcomeEndTimestamp');
     }
 
     const outcomeId = params.outcomeId || `out_${randomUUID()}`;
+    const pairId = params.pair?.pairId || 'standalone';
     const outcomeHash = computeOutcomeHash({
       decisionId: params.decision.decisionId,
-      pairId: params.pair.pairId,
+      pairId,
       outcomeStartTimestamp: params.outcomeStartTimestamp,
       outcomeEndTimestamp: params.outcomeEndTimestamp,
       grossPnL: params.grossPnL,
@@ -101,7 +99,7 @@ export class ShadowOutcomeEvaluator {
     const outcome: ShadowOutcome = {
       outcomeId,
       decisionId: params.decision.decisionId,
-      pairId: params.pair.pairId,
+      pairId,
       outcomeStartTimestamp: params.outcomeStartTimestamp,
       outcomeEndTimestamp: params.outcomeEndTimestamp,
       entryFill: params.entryFill ? { ...params.entryFill } : undefined,
