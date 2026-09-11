@@ -6,8 +6,9 @@ import {
   ModelStatus,
   ChampionRecord,
   ChallengerRecord,
-  ChallengerStatus,
+  IModelRegistryStore,
 } from './types';
+import { InMemoryModelRegistryStore } from './model-registry-store';
 
 const VALID_MODEL_STATUS_TRANSITIONS: Record<ModelStatus, readonly ModelStatus[]> = {
   CANDIDATE: ['CHALLENGER', 'CHAMPION', 'RETIRED', 'INVALID'],
@@ -18,10 +19,12 @@ const VALID_MODEL_STATUS_TRANSITIONS: Record<ModelStatus, readonly ModelStatus[]
 };
 
 export class ModelRegistryService {
-  private readonly models = new Map<string, ModelRecord>();
-  private readonly champions = new Map<string, ChampionRecord>(); // slotId -> ChampionRecord
-  private readonly challengers = new Map<string, Map<string, ChallengerRecord>>(); // slotId -> modelId -> ChallengerRecord
+  private readonly store: IModelRegistryStore;
   private registryVersion = 1;
+
+  constructor(store?: IModelRegistryStore) {
+    this.store = store || new InMemoryModelRegistryStore();
+  }
 
   /**
    * Computes a cryptographic SHA-256 hash of any model artifact using canonical serialization.
@@ -36,6 +39,7 @@ export class ModelRegistryService {
 
   /**
    * Registers a new model record with cryptographic artifact validation.
+   * Fails closed if any required metadata is missing (no silent defaults).
    */
   public registerModel(params: {
     modelId: string;
@@ -52,11 +56,21 @@ export class ModelRegistryService {
     metadata?: Record<string, unknown>;
     createdAt?: number;
   }): ModelRecord {
-    if (!params.modelId || typeof params.modelId !== 'string' || params.modelId.trim() === '') {
-      throw new Error('INVALID_MODEL_RECORD: modelId is required');
-    }
-    if (!params.modelVersion || typeof params.modelVersion !== 'string' || params.modelVersion.trim() === '') {
-      throw new Error('INVALID_MODEL_RECORD: modelVersion is required');
+    const requiredStrings: Array<[string, string | undefined]> = [
+      ['modelId', params.modelId],
+      ['modelVersion', params.modelVersion],
+      ['modelType', params.modelType],
+      ['artifactLocation', params.artifactLocation],
+      ['trainingRunId', params.trainingRunId],
+      ['datasetVersion', params.datasetVersion],
+      ['featureVersion', params.featureVersion],
+      ['labelVersion', params.labelVersion],
+    ];
+
+    for (const [key, value] of requiredStrings) {
+      if (!value || typeof value !== 'string' || value.trim() === '') {
+        throw new Error(`INVALID_MODEL_RECORD: ${key} is required and cannot be empty`);
+      }
     }
 
     let finalArtifactHash = params.artifactHash;
@@ -68,14 +82,14 @@ export class ModelRegistryService {
       throw new Error('INVALID_MODEL_RECORD: artifactHash or artifactData is required');
     }
 
-    if (this.models.has(params.modelId)) {
+    if (this.store.getModel(params.modelId)) {
       throw new Error(`DUPLICATE_MODEL_ID: Model with ID "${params.modelId}" is already registered`);
     }
 
     // Ensure no collision for the exact same artifactHash across different modelIds unless explicit
-    for (const existing of this.models.values()) {
+    const existingModels = this.store.getAllModels();
+    for (const existing of existingModels) {
       if (existing.modelVersion === params.modelVersion && existing.artifactHash !== finalArtifactHash) {
-        // Same version string but different artifact hash -> requires distinct modelId
         if (existing.modelId === params.modelId) {
           throw new Error(
             `MODEL_VERSION_COLLISION: Model version "${params.modelVersion}" has conflicting artifact hashes`,
@@ -87,20 +101,20 @@ export class ModelRegistryService {
     const record: ModelRecord = {
       modelId: params.modelId,
       modelVersion: params.modelVersion,
-      modelType: params.modelType || 'CANONICAL_ML',
-      artifactLocation: params.artifactLocation || `artifacts/models/${params.modelId}.json`,
+      modelType: params.modelType,
+      artifactLocation: params.artifactLocation,
       artifactHash: finalArtifactHash,
-      trainingRunId: params.trainingRunId || `run_${params.modelId}`,
-      datasetVersion: params.datasetVersion || '1.0',
-      featureVersion: params.featureVersion || '2.0',
-      labelVersion: params.labelVersion || '1.0',
+      trainingRunId: params.trainingRunId,
+      datasetVersion: params.datasetVersion,
+      featureVersion: params.featureVersion,
+      labelVersion: params.labelVersion,
       createdAt: params.createdAt ?? Date.now(),
       status: params.status || 'CANDIDATE',
       metadata: params.metadata ? { ...params.metadata } : {},
     };
 
     const frozenRecord = deepFreeze(record);
-    this.models.set(record.modelId, frozenRecord);
+    this.store.saveModel(frozenRecord);
     return frozenRecord;
   }
 
@@ -108,7 +122,7 @@ export class ModelRegistryService {
    * Updates model status enforcing state transition validity.
    */
   public updateModelStatus(modelId: string, newStatus: ModelStatus): ModelRecord {
-    const existing = this.models.get(modelId);
+    const existing = this.store.getModel(modelId);
     if (!existing) {
       throw new Error(`MODEL_NOT_FOUND: Model with ID "${modelId}" does not exist in registry`);
     }
@@ -130,35 +144,57 @@ export class ModelRegistryService {
     };
 
     const frozen = deepFreeze(updated);
-    this.models.set(modelId, frozen);
+    this.store.saveModel(frozen);
     return frozen;
   }
 
   /**
    * Explicitly assigns a registered model as the active Champion for a strategy slot.
-   * Enforces: ONE active Champion per strategy slot.
+   * Enforces: Strictly ONE active Champion per strategy slot.
+   * If the model was previously an active Challenger in this slot, retires its ChallengerRecord.
+   * If a previous Champion was active in this slot, retires the previous model.
    */
-  public assignChampion(slotId: string, modelId: string): ChampionRecord {
+  public assignChampion(
+    slotId: string,
+    modelId: string,
+    options?: {
+      reason?: string;
+      promotionDecisionId?: string;
+      evaluationId?: string;
+    }
+  ): ChampionRecord {
     if (!slotId || typeof slotId !== 'string' || slotId.trim() === '') {
       throw new Error('INVALID_SLOT_ID: slotId is required');
     }
-    const model = this.models.get(modelId);
+    const model = this.store.getModel(modelId);
     if (!model) {
       throw new Error(`MODEL_NOT_FOUND: Cannot assign non-existent model "${modelId}" as Champion`);
     }
 
-    // Update model status if candidate or challenger
+    // Update model status to CHAMPION if not already
     if (model.status !== 'CHAMPION') {
       this.updateModelStatus(modelId, 'CHAMPION');
     }
 
-    // If an existing Champion was assigned to this slot, retire previous champion model
-    const previousChampion = this.champions.get(slotId);
+    // 1. If previous Champion was assigned to this slot, retire previous champion model
+    const previousChampion = this.store.getChampion(slotId);
     if (previousChampion && previousChampion.modelId !== modelId) {
-      const prevModel = this.models.get(previousChampion.modelId);
+      const prevModel = this.store.getModel(previousChampion.modelId);
       if (prevModel && prevModel.status === 'CHAMPION') {
         this.updateModelStatus(prevModel.modelId, 'RETIRED');
       }
+    }
+
+    // 2. If this model had an active Challenger record in this slot, retire it
+    const existingChallengers = this.store.getChallengers(slotId);
+    const existingChallenger = existingChallengers.find((c) => c.modelId === modelId);
+    if (existingChallenger && existingChallenger.status === 'ACTIVE_CHALLENGER') {
+      const retiredChallenger: ChallengerRecord = {
+        ...existingChallenger,
+        status: 'RETIRED',
+        statusReason: options?.reason || 'PROMOTED_TO_CHAMPION',
+      };
+      this.store.saveChallenger(deepFreeze(retiredChallenger));
     }
 
     this.registryVersion++;
@@ -169,10 +205,13 @@ export class ModelRegistryService {
       artifactHash: model.artifactHash,
       assignedAt: Date.now(),
       registryVersion: this.registryVersion,
+      assignmentReason: options?.reason,
+      promotionDecisionId: options?.promotionDecisionId,
+      evaluationId: options?.evaluationId,
     };
 
     const frozen = deepFreeze(championRecord);
-    this.champions.set(slotId, frozen);
+    this.store.saveChampion(frozen);
     return frozen;
   }
 
@@ -187,7 +226,7 @@ export class ModelRegistryService {
     if (!slotId || typeof slotId !== 'string' || slotId.trim() === '') {
       throw new Error('INVALID_SLOT_ID: slotId is required');
     }
-    const model = this.models.get(modelId);
+    const model = this.store.getModel(modelId);
     if (!model) {
       throw new Error(`MODEL_NOT_FOUND: Cannot register non-existent model "${modelId}" as Challenger`);
     }
@@ -207,22 +246,16 @@ export class ModelRegistryService {
     };
 
     const frozen = deepFreeze(challengerRecord);
-    let slotChallengers = this.challengers.get(slotId);
-    if (!slotChallengers) {
-      slotChallengers = new Map();
-      this.challengers.set(slotId, slotChallengers);
-    }
-    slotChallengers.set(modelId, frozen);
-
+    this.store.saveChallenger(frozen);
     return frozen;
   }
 
   public getModel(modelId: string): ModelRecord | undefined {
-    return this.models.get(modelId);
+    return this.store.getModel(modelId);
   }
 
   public getChampion(slotId: string): ChampionRecord | undefined {
-    return this.champions.get(slotId);
+    return this.store.getChampion(slotId);
   }
 
   public getActiveChampion(slotId: string): ChampionRecord | undefined {
@@ -230,8 +263,7 @@ export class ModelRegistryService {
   }
 
   public getChallengers(slotId: string): ChallengerRecord[] {
-    const slotMap = this.challengers.get(slotId);
-    return slotMap ? Array.from(slotMap.values()) : [];
+    return this.store.getChallengers(slotId);
   }
 
   public getChallengersForSlot(slotId: string): ChallengerRecord[] {
@@ -239,7 +271,7 @@ export class ModelRegistryService {
   }
 
   public getAllModels(): ModelRecord[] {
-    return Array.from(this.models.values());
+    return this.store.getAllModels();
   }
 
   public listModels(): ModelRecord[] {
@@ -247,11 +279,14 @@ export class ModelRegistryService {
   }
 
   public getAllChampions(): ChampionRecord[] {
-    return Array.from(this.champions.values());
+    return this.store.getAllChampions();
   }
 
   public listActiveChampions(): ChampionRecord[] {
     return this.getAllChampions();
   }
-}
 
+  public getStore(): IModelRegistryStore {
+    return this.store;
+  }
+}

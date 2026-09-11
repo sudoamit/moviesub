@@ -27,6 +27,9 @@ export interface ChampionRecord {
   readonly artifactHash: string;
   readonly assignedAt: number;
   readonly registryVersion: number;
+  readonly assignmentReason?: string;
+  readonly promotionDecisionId?: string;
+  readonly evaluationId?: string;
 }
 
 export type ChallengerStatus = 'ACTIVE_CHALLENGER' | 'EVALUATING' | 'REJECTED' | 'RETIRED';
@@ -39,6 +42,7 @@ export interface ChallengerRecord {
   readonly registeredAt: number;
   readonly sourceTrainingRunId: string;
   readonly status: ChallengerStatus;
+  readonly statusReason?: string;
 }
 
 export interface EvaluationIdentity {
@@ -54,6 +58,7 @@ export interface EvaluationIdentity {
   readonly labelVersion: string;
   readonly codeCommit: string;
   readonly walkForwardConfigVersion: string;
+  readonly walkForwardConfigHash: string;
   readonly executionConfigVersion: string;
   readonly executionConfigHash: string;
   readonly riskConfigVersion: string;
@@ -61,7 +66,9 @@ export interface EvaluationIdentity {
   readonly costConfigVersion: string;
   readonly costConfigHash: string;
   readonly partialExitPolicyVersion: string;
+  readonly partialExitPolicyHash: string;
   readonly strategyConfigVersion: string;
+  readonly strategyConfigHash: string;
   readonly evaluationWindowStart: number;
   readonly evaluationWindowEnd: number;
   readonly randomSeed: number;
@@ -113,6 +120,8 @@ export interface CostStatistics {
 export interface EvaluationBundle {
   readonly evaluationIdentity: EvaluationIdentity;
   readonly evaluationFingerprint: string;
+  readonly resultHash: string;
+  readonly bundleHash: string;
   readonly modelMetadata: Readonly<Record<string, unknown>>;
   readonly metrics: EvaluationMetrics;
   readonly tradeStatistics: TradeStatistics;
@@ -144,6 +153,8 @@ export interface ComparisonResult {
   readonly challengerEvaluationId: string;
   readonly championFingerprint: string;
   readonly challengerFingerprint: string;
+  readonly championBundleHash?: string;
+  readonly challengerBundleHash?: string;
   readonly championMetrics?: EvaluationMetrics;
   readonly challengerMetrics?: EvaluationMetrics;
   readonly deltas?: MetricDeltas;
@@ -168,3 +179,18 @@ export interface PromotionEligibility {
   readonly evaluatedAt: number;
 }
 
+/**
+ * Model Registry Persistence Storage Interface
+ */
+export interface IModelRegistryStore {
+  saveModel(model: ModelRecord): void;
+  getModel(modelId: string): ModelRecord | undefined;
+  saveChampion(champion: ChampionRecord): void;
+  getChampion(slotId: string): ChampionRecord | undefined;
+  saveChallenger(challenger: ChallengerRecord): void;
+  getChallengers(slotId: string): ChallengerRecord[];
+  getAllModels(): ModelRecord[];
+  getAllChampions(): ChampionRecord[];
+  getAllChallengers(): ChallengerRecord[];
+  clear(): void;
+}
