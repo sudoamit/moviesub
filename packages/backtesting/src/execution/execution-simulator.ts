@@ -1,4 +1,4 @@
-import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ExecutionCostStressConfig } from './types';
+import { FillModel, IFill, ILatencyConfig, IOrder, OrderSide, OrderType, SameCandleAmbiguityMode, IFeeConfig, ISlippageConfig, ISpreadConfig, ExecutionCostStressConfig, ExecutionModelConfig, IExecutionSimulatorCheckpoint } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
@@ -60,6 +60,26 @@ export class ExecutionSimulator {
     return this.partialFillRatio;
   }
 
+  getExecutionModelConfig(): ExecutionModelConfig {
+    return {
+      fillModel: this.fillModel,
+      ambiguityMode: this.ambiguityMode,
+      latencyConfig: { ...this.latencyConfig },
+      slippageConfig: this.slippageConfig ? { ...this.slippageConfig } : undefined,
+      feeConfig: this.feeConfig ? { ...this.feeConfig } : undefined,
+      spreadConfig: this.spreadConfig ? { ...this.spreadConfig } : undefined,
+      costStressConfig: this.costStressConfig
+        ? {
+            ...this.costStressConfig,
+            feeConfig: this.costStressConfig.feeConfig ? { ...this.costStressConfig.feeConfig } : undefined,
+            slippageConfig: this.costStressConfig.slippageConfig ? { ...this.costStressConfig.slippageConfig } : undefined,
+            spreadConfig: this.costStressConfig.spreadConfig ? { ...this.costStressConfig.spreadConfig } : undefined,
+          }
+        : undefined,
+      partialFillRatio: this.partialFillRatio,
+    };
+  }
+
   updateExecutionModel(config: {
     fillModel?: FillModel;
     ambiguityMode?: SameCandleAmbiguityMode;
@@ -70,15 +90,44 @@ export class ExecutionSimulator {
     costStressConfig?: ExecutionCostStressConfig;
     partialFillRatio?: number;
   }): void {
+    if (!config || typeof config !== 'object') {
+      throw new Error('INVALID_EXECUTION_MODEL_CONFIG: Config must be an object');
+    }
+
+    // Step 1: Pre-validation of all candidate fields without mutating state
+    if (config.partialFillRatio !== undefined) {
+      if (
+        !Number.isFinite(config.partialFillRatio) ||
+        config.partialFillRatio <= 0 ||
+        config.partialFillRatio > 1
+      ) {
+        throw new Error(
+          `INVALID_PARTIAL_FILL_RATIO: partialFillRatio must be a finite number between 0 and 1, got ${config.partialFillRatio}`,
+        );
+      }
+    }
+
+    if (config.latencyConfig !== undefined) {
+      if (
+        !Number.isFinite(config.latencyConfig.submissionLatencyMs) ||
+        config.latencyConfig.submissionLatencyMs < 0 ||
+        !Number.isFinite(config.latencyConfig.processingLatencyMs) ||
+        config.latencyConfig.processingLatencyMs < 0
+      ) {
+        throw new Error('INVALID_LATENCY_CONFIG: Latency values must be non-negative finite numbers');
+      }
+    }
+
+    // Step 2: Atomic commit only after ALL validations pass
     if (config.fillModel !== undefined) this.fillModel = config.fillModel;
     if (config.ambiguityMode !== undefined) this.ambiguityMode = config.ambiguityMode;
-    if (config.latencyConfig !== undefined) this.latencyConfig = config.latencyConfig;
-    if (config.slippageConfig !== undefined) this.slippageConfig = config.slippageConfig;
-    if (config.feeConfig !== undefined) this.feeConfig = config.feeConfig;
-    if (config.spreadConfig !== undefined) this.spreadConfig = config.spreadConfig;
-    if (config.costStressConfig !== undefined) this.costStressConfig = config.costStressConfig;
+    if (config.latencyConfig !== undefined) this.latencyConfig = { ...config.latencyConfig };
+    if (config.slippageConfig !== undefined) this.slippageConfig = { ...config.slippageConfig };
+    if (config.feeConfig !== undefined) this.feeConfig = { ...config.feeConfig };
+    if (config.spreadConfig !== undefined) this.spreadConfig = { ...config.spreadConfig };
+    if (config.costStressConfig !== undefined) this.costStressConfig = { ...config.costStressConfig };
     if (config.partialFillRatio !== undefined) {
-      this.setPartialFillRatio(config.partialFillRatio);
+      this.partialFillRatio = config.partialFillRatio;
     }
   }
 
@@ -164,6 +213,9 @@ export class ExecutionSimulator {
     const newFills: IFill[] = [];
     const newEvents: IExecutionEvent[] = [];
 
+    // Configuration snapshot for intra-candle consistency
+    const configSnapshot = this.getExecutionModelConfig();
+
     // Group pending and partially filled orders by tradeId
     const pendingByTrade = new Map<string, IOrder[]>();
     for (const order of this.orders.values()) {
@@ -197,7 +249,7 @@ export class ExecutionSimulator {
             if (order.status !== 'PENDING' && order.status !== 'PARTIALLY_FILLED') continue;
 
             let res: { isFilled: boolean; fill?: IFill };
-            if (this.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
+            if (configSnapshot.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
               const orderSubTime = order.submittedAt || order.createdAt;
               if (orderSubTime < candleTime) {
                 res = FillModelEngine.evaluateFill(
@@ -207,25 +259,25 @@ export class ExecutionSimulator {
                   FillModel.OHLC_PATH,
                   undefined,
                   undefined,
-                  this.slippageConfig,
-                  this.feeConfig,
-                  this.spreadConfig,
-                  this.costStressConfig,
-                  this.partialFillRatio,
+                  configSnapshot.slippageConfig,
+                  configSnapshot.feeConfig,
+                  configSnapshot.spreadConfig,
+                  configSnapshot.costStressConfig,
+                  configSnapshot.partialFillRatio,
                 );
               } else {
                 res = FillModelEngine.evaluateFill(
                   order,
                   bar,
                   nextCandle,
-                  this.fillModel,
+                  configSnapshot.fillModel,
                   undefined,
                   undefined,
-                  this.slippageConfig,
-                  this.feeConfig,
-                  this.spreadConfig,
-                  this.costStressConfig,
-                  this.partialFillRatio,
+                  configSnapshot.slippageConfig,
+                  configSnapshot.feeConfig,
+                  configSnapshot.spreadConfig,
+                  configSnapshot.costStressConfig,
+                  configSnapshot.partialFillRatio,
                 );
               }
             } else {
@@ -235,12 +287,12 @@ export class ExecutionSimulator {
                 seg.end,
                 candleTime,
                 order.symbol,
-                this.fillModel,
-                this.slippageConfig,
-                this.feeConfig,
-                this.spreadConfig,
-                this.costStressConfig,
-                this.partialFillRatio,
+                configSnapshot.fillModel,
+                configSnapshot.slippageConfig,
+                configSnapshot.feeConfig,
+                configSnapshot.spreadConfig,
+                configSnapshot.costStressConfig,
+                configSnapshot.partialFillRatio,
               );
             }
 
@@ -259,7 +311,7 @@ export class ExecutionSimulator {
               triggered,
               currentSegStart,
               seg.end,
-              this.ambiguityMode,
+              configSnapshot.ambiguityMode,
             );
             if (segResolved.winningOrder && segResolved.winningFill) {
               nextTrigger = { order: segResolved.winningOrder, fill: segResolved.winningFill };
@@ -697,5 +749,79 @@ export class ExecutionSimulator {
 
   getAllEvents(): IExecutionEvent[] {
     return [...this.events];
+  }
+
+  createCheckpoint(): IExecutionSimulatorCheckpoint {
+    return {
+      version: 1,
+      runId: this.runId,
+      orderCounter: this.orderCounter,
+      fillCounter: this.fillCounter,
+      eventCounter: this.eventCounter,
+      executionConfig: this.getExecutionModelConfig(),
+      orders: Array.from(this.orders.values()).map((o) => ({
+        ...o,
+        _initialQty: (o as any)._initialQty !== undefined ? (o as any)._initialQty : o.quantity,
+      })),
+      fills: this.fills.map((f) => ({ ...f })),
+      events: this.events.map((e) => ({ ...e })),
+    };
+  }
+
+  restoreCheckpoint(checkpoint: IExecutionSimulatorCheckpoint): void {
+    if (!checkpoint || typeof checkpoint !== 'object') {
+      throw new Error('CORRUPT_EXECUTION_CHECKPOINT: Checkpoint must be a valid object');
+    }
+    if (checkpoint.version !== 1) {
+      throw new Error(`UNSUPPORTED_CHECKPOINT_VERSION: Expected version 1, got ${checkpoint.version}`);
+    }
+
+    // 1. Restore sequences and identifiers
+    this.runId = checkpoint.runId || this.runId;
+    this.orderCounter = typeof checkpoint.orderCounter === 'number' ? checkpoint.orderCounter : 0;
+    this.fillCounter = typeof checkpoint.fillCounter === 'number' ? checkpoint.fillCounter : 0;
+    this.eventCounter = typeof checkpoint.eventCounter === 'number' ? checkpoint.eventCounter : 0;
+
+    // 2. Restore execution model configuration
+    if (checkpoint.executionConfig) {
+      const cfg = checkpoint.executionConfig;
+      this.fillModel = cfg.fillModel;
+      this.ambiguityMode = cfg.ambiguityMode;
+      this.latencyConfig = { ...cfg.latencyConfig };
+      this.slippageConfig = cfg.slippageConfig ? { ...cfg.slippageConfig } : undefined;
+      this.feeConfig = cfg.feeConfig ? { ...cfg.feeConfig } : undefined;
+      this.spreadConfig = cfg.spreadConfig ? { ...cfg.spreadConfig } : undefined;
+      this.costStressConfig = cfg.costStressConfig
+        ? {
+            ...cfg.costStressConfig,
+            feeConfig: cfg.costStressConfig.feeConfig ? { ...cfg.costStressConfig.feeConfig } : undefined,
+            slippageConfig: cfg.costStressConfig.slippageConfig ? { ...cfg.costStressConfig.slippageConfig } : undefined,
+            spreadConfig: cfg.costStressConfig.spreadConfig ? { ...cfg.costStressConfig.spreadConfig } : undefined,
+          }
+        : undefined;
+      this.partialFillRatio = cfg.partialFillRatio;
+    }
+
+    // 3. Clear and restore orders
+    this.orders.clear();
+    if (Array.isArray(checkpoint.orders)) {
+      for (const ord of checkpoint.orders) {
+        const restoredOrd: IOrder = { ...ord };
+        if ((ord as any)._initialQty !== undefined) {
+          (restoredOrd as any)._initialQty = (ord as any)._initialQty;
+        }
+        this.orders.set(restoredOrd.orderId, restoredOrd);
+      }
+    }
+
+    // 4. Restore fills and events
+    this.fills = Array.isArray(checkpoint.fills) ? checkpoint.fills.map((f) => ({ ...f })) : [];
+    this.events = Array.isArray(checkpoint.events) ? checkpoint.events.map((e) => ({ ...e })) : [];
+  }
+
+  static fromCheckpoint(checkpoint: IExecutionSimulatorCheckpoint): ExecutionSimulator {
+    const sim = new ExecutionSimulator();
+    sim.restoreCheckpoint(checkpoint);
+    return sim;
   }
 }

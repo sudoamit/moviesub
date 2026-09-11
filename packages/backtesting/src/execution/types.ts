@@ -116,3 +116,27 @@ export interface ExecutionCostStressConfig {
   slippageConfig?: ISlippageConfig;
   spreadConfig?: ISpreadConfig;
 }
+
+export interface ExecutionModelConfig {
+  fillModel: FillModel;
+  ambiguityMode: SameCandleAmbiguityMode;
+  latencyConfig: ILatencyConfig;
+  slippageConfig?: ISlippageConfig;
+  feeConfig?: IFeeConfig;
+  spreadConfig?: ISpreadConfig;
+  costStressConfig?: ExecutionCostStressConfig;
+  partialFillRatio?: number;
+}
+
+export interface IExecutionSimulatorCheckpoint {
+  version: number;
+  runId: string;
+  orderCounter: number;
+  fillCounter: number;
+  eventCounter: number;
+  executionConfig: ExecutionModelConfig;
+  orders: IOrder[];
+  fills: IFill[];
+  events: any[];
+}
+
