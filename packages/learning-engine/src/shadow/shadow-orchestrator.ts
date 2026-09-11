@@ -1156,6 +1156,7 @@ export class ShadowOrchestrator {
         minimumTrades: minTrades,
       },
       shadowDatasetHash,
+      executionContextHash: ctx.artifact.executionContextHash,
       shadowStartTimestamp: startTimestamp,
       shadowEndTimestamp: endTimestamp,
       evaluatedAt: now,

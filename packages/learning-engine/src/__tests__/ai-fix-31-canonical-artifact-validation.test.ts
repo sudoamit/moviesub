@@ -61,7 +61,8 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
     },
   };
 
-  const createValidCandidate = (overrides?: Partial<StrategyCandidate>): StrategyCandidate => ({
+  const createValidCandidate = (overrides?: Partial<StrategyCandidate>): StrategyCandidate => {
+    const base: StrategyCandidate = {
     id: 'cand_valid_31_001',
     baseStrategyVersion: '1.0.0',
     candidateVersion: 'cand_valid_31_001',
@@ -71,6 +72,11 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
     riskConfig: baseValidRiskConfig,
     change: {
       minMtfScore: 75,
+      fillModel: 'OHLC_PATH',
+      ambiguityMode: 'CONSERVATIVE',
+      latencyMs: 10,
+      stopLossAtrMultiplier: 1.5,
+      sizingMultiplier: 1,
       datasetHash: 'dataset_hash_valid_31_001',
     },
     evidence: {
@@ -80,8 +86,13 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
     },
     status: 'TRAINED',
     createdAt: new Date(),
-    ...overrides,
-  });
+    };
+    return {
+      ...base,
+      ...overrides,
+      change: { ...base.change, ...(overrides?.change || {}) },
+    };
+  };
 
   describe('P0-1: Canonical CandidateArtifactValidator & ValidatedCandidateArtifact Boundary', () => {
     test('CandidateArtifactBuilder builds an immutable ValidatedCandidateArtifact passing all contract checks', () => {
@@ -168,7 +179,15 @@ describe('AI Fix 31 — Canonical CandidateArtifactValidator, Builder & Validate
   describe('P1-1: Strict minMtfScore Contract', () => {
     test('Fails closed if minMtfScore is missing or undefined', () => {
       const candidateMissingScore = createValidCandidate({
-        change: { datasetHash: 'd_hash_001' }, // minMtfScore omitted
+        change: {
+          datasetHash: 'd_hash_001',
+          minMtfScore: undefined,
+          fillModel: 'OHLC_PATH',
+          ambiguityMode: 'CONSERVATIVE',
+          latencyMs: 10,
+          stopLossAtrMultiplier: 1.5,
+          sizingMultiplier: 1,
+        }, // minMtfScore omitted
       });
 
       expect(() => CandidateArtifactBuilder.build(candidateMissingScore)).toThrow(/MISSING_MIN_MTF_SCORE/);

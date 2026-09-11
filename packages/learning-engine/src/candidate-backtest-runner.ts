@@ -14,6 +14,7 @@ import { DatasetManager } from './dataset-manager';
 import { CandidateArtifactValidator } from './candidate-artifact-validator';
 import { CandidateArtifactBuilder, CandidateArtifactBuildOptions } from './candidate-artifact-builder';
 import { DeterministicTestStrategyAdapter } from './deterministic-test-adapter';
+import { ProductionExecutionContext } from './execution-context';
 
 export { CandidateExecutionConfig };
 
@@ -50,6 +51,7 @@ export interface ICandidateBacktestOptions {
   slippageBps?: number;
   costStressConfig?: ExecutionCostStressConfig;
   executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
+  productionExecutionContext?: ProductionExecutionContext;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
   executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
   provenance?: {
@@ -107,6 +109,8 @@ export class CandidateBacktestRunner {
       createdBy?: string;
       symbol?: string;
       riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+      productionExecutionContext?: ProductionExecutionContext;
+      executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
     },
   ): ValidatedCandidateArtifact {
     const options: CandidateArtifactBuildOptions = {
@@ -115,6 +119,8 @@ export class CandidateBacktestRunner {
       provenance,
       symbol: provenance?.symbol || candidate.symbol,
       riskConfig: provenance?.riskConfig || candidate.riskConfig || (candidate.change as any)?.riskConfig,
+      productionExecutionContext: provenance?.productionExecutionContext,
+      executionContext: provenance?.executionContext,
     };
     return CandidateArtifactBuilder.build(candidate, options);
   }
@@ -228,6 +234,16 @@ export class CandidateBacktestRunner {
             riskConfig: options?.riskConfig,
             executionConfig: options?.executionConfig,
             provenance: options?.provenance,
+            productionExecutionContext: options?.productionExecutionContext,
+            executionContext: options?.executionContext,
+            minimumCandles: options?.minimumCandles,
+            warmupBars: options?.warmupBars,
+            timeframe: options?.timeframe || dataset?.timeframe,
+            latencyConfig: options?.latencyConfig,
+            feeConfig: options?.feeConfig,
+            slippageConfig: options?.slippageConfig,
+            spreadConfig: options?.spreadConfig,
+            costStressConfig: options?.costStressConfig,
           });
 
     const config = artifact.executionConfig;
@@ -258,15 +274,26 @@ export class CandidateBacktestRunner {
       ...artifact.strategyConfig,
       scoringWeights: artifact.strategyConfig.scoringWeights,
     };
+    const productionContext = artifact.executionContext;
+    if (!productionContext || artifact.executionContextHash !== productionContext.executionContextHash) {
+      throw new Error(`EXECUTION_CONTEXT_MISSING: Candidate '${candidateId}' has no canonical execution context`);
+    }
+    if (options?.executionContext === 'PRODUCTION' && productionContext.executionContext !== 'PRODUCTION') {
+      throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate '${candidateId}' cannot run in production context`);
+    }
 
     // Production replay owns execution geometry; experiments must opt in explicitly.
     const minimumCandles =
-      options?.executionContext === 'EXPERIMENTAL' && options.minimumCandles !== undefined
+      productionContext.executionContext === 'PRODUCTION'
+        ? productionContext.minimumCandles
+        : options?.minimumCandles !== undefined
         ? options.minimumCandles
         : PRODUCTION_DEFAULT_MINIMUM_CANDLES;
 
     const warmupBars =
-      options?.executionContext === 'EXPERIMENTAL' && options.warmupBars !== undefined
+      productionContext.executionContext === 'PRODUCTION'
+        ? productionContext.warmupBars
+        : options?.warmupBars !== undefined
         ? options.warmupBars
         : PRODUCTION_DEFAULT_WARMUP_BARS;
 
@@ -275,8 +302,8 @@ export class CandidateBacktestRunner {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in backtest execution`);
     }
 
-    let feeConfig = options?.feeConfig;
-    let slippageConfig = options?.slippageConfig;
+    let feeConfig = productionContext.executionContext === 'PRODUCTION' ? productionContext.feeConfig : options?.feeConfig;
+    let slippageConfig = productionContext.executionContext === 'PRODUCTION' ? productionContext.slippageConfig : options?.slippageConfig;
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: sym,
@@ -287,11 +314,17 @@ export class CandidateBacktestRunner {
       warmupBars,
       feeConfig,
       slippageConfig,
-      spreadConfig: options?.spreadConfig,
-      latencyConfig: options?.latencyConfig,
+      spreadConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.spreadConfig : options?.spreadConfig,
+      latencyConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.latencyConfig : options?.latencyConfig,
       feeRate: options?.feeRate,
       slippageBps: options?.slippageBps,
-      costStressConfig: options?.costStressConfig,
+      costStressConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.costStressConfig : options?.costStressConfig,
+      ...(productionContext.executionContext === 'PRODUCTION'
+        ? {
+            fillModel: productionContext.fillModel as any,
+            ambiguityMode: productionContext.ambiguityMode as any,
+          }
+        : {}),
       candidateArtifact: artifact,
       minScore: config.minMtfScore,
       stopLossAtrMultiplier: (riskConfig.stopLossAtrMultiplier as number | undefined) ?? config.stopLossAtrMultiplier,

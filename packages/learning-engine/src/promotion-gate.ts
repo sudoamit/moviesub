@@ -10,8 +10,20 @@ import {
 } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { ModelRegistry } from './model-registry';
+import { assertCompatibleExecutionContexts } from './execution-context';
 
 export class PromotionGate {
+  public static assertCompatibleCandidates(
+    championArtifact: CandidateArtifact,
+    challengerArtifact: CandidateArtifact,
+    experimental = false,
+  ): void {
+    assertCompatibleExecutionContexts(
+      championArtifact.executionContext,
+      challengerArtifact.executionContext,
+      experimental,
+    );
+  }
   public static readonly DEFAULT_POLICY: PromotionPolicy = {
     policyVersion: 'v2.0',
     minimumShadowTrades: 5,
@@ -46,6 +58,13 @@ export class PromotionGate {
     const policyVersion = policy.policyVersion || 'v2.0';
     const reasons: string[] = [];
     const rejectionReasons: string[] = [];
+
+    if (candidateArtifact.productionEligible !== true || candidateArtifact.executionContext?.executionContext !== 'PRODUCTION') {
+      rejectionReasons.push('EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE');
+    }
+    if (shadowResult?.executionContextHash !== undefined && shadowResult.executionContextHash !== candidateArtifact.executionContextHash) {
+      rejectionReasons.push('INCOMPATIBLE_EXECUTION_CONTEXT: Shadow evidence context does not match artifact context');
+    }
 
     // 1. Validate Candidate Artifact Integrity
     const artifactValidation = CandidateBacktestRunner.validateArtifactIntegrity(candidateArtifact);
@@ -161,6 +180,8 @@ export class PromotionGate {
       promotionDecision: decision,
       decisionReasons: decision === 'PROMOTE' ? reasons : rejectionReasons,
       evaluatedAt,
+      executionContextHash: candidateArtifact.executionContextHash,
+      executionContextVersion: candidateArtifact.executionContextVersion,
     };
 
     const resultDecision: PromotionDecision = {

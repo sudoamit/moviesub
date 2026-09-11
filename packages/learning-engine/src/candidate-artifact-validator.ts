@@ -11,6 +11,7 @@ import { TemporalFeatureScaler } from './feature-scaler';
 import { canonicalJsonStringify } from './canonical-serializer';
 import { ALLOWED_AMBIGUITY_MODES, ALLOWED_FILL_MODELS } from './candidate-artifact-builder';
 import { ModelTrainer } from './model-trainer';
+import { computeExecutionContextHash, EXECUTION_CONTEXT_VERSION } from './execution-context';
 
 export class CandidateArtifactValidator {
   /**
@@ -40,6 +41,24 @@ export class CandidateArtifactValidator {
     const strategyVersion = art.strategyVersion;
     if (typeof strategyVersion !== 'string' || strategyVersion.trim() === '') {
       throw new Error(`STRATEGY_VERSION_MISSING: Candidate '${candidateId}' is missing strategyVersion`);
+    }
+
+    const executionContext = art.executionContext as Record<string, unknown> | undefined;
+    if (!executionContext || typeof executionContext !== 'object') {
+      throw new Error(`EXECUTION_CONTEXT_MISSING: Candidate '${candidateId}' is missing canonical execution context`);
+    }
+    if (executionContext.executionContextVersion !== EXECUTION_CONTEXT_VERSION) {
+      throw new Error(`EXECUTION_CONTEXT_VERSION_INVALID: Candidate '${candidateId}' has unsupported execution context version`);
+    }
+    const contextHash = executionContext.executionContextHash;
+    if (typeof contextHash !== 'string' || contextHash !== computeExecutionContextHash(executionContext as any)) {
+      throw new Error(`EXECUTION_CONTEXT_HASH_MISMATCH: Candidate '${candidateId}' execution context hash is invalid`);
+    }
+    if (art.executionContextHash !== contextHash || art.executionContextVersion !== executionContext.executionContextVersion) {
+      throw new Error(`EXECUTION_CONTEXT_BINDING_MISMATCH: Candidate '${candidateId}' artifact context binding is invalid`);
+    }
+    if (typeof art.productionEligible !== 'boolean' || art.productionEligible !== (executionContext.productionEligible === true)) {
+      throw new Error(`PRODUCTION_ELIGIBILITY_MISMATCH: Candidate '${candidateId}' eligibility does not match execution context`);
     }
 
     // 2. Authoritative Symbol Validation (Canonical authority on artifact root)
@@ -339,6 +358,10 @@ export class CandidateArtifactValidator {
       riskConfig,
       executionConfig: execConfig,
       strategyConfig: stratConfig,
+      productionEligible: art.productionEligible,
+      executionContext: art.executionContext,
+      executionContextHash: art.executionContextHash,
+      executionContextVersion: art.executionContextVersion,
     };
 
     const computedArtifactHash = createHash('sha256')

@@ -472,6 +472,14 @@ export class ModelRegistry {
       throw new Error(`DUPLICATE_CANDIDATE_ARTIFACT: Artifact for candidate ${artifact.candidateId} already registered`);
     }
 
+    if (artifact.productionEligible !== true || artifact.executionContext?.executionContext !== 'PRODUCTION') {
+      throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate ${artifact.candidateId} cannot be registered for production`);
+    }
+    const validation = CandidateBacktestRunner.validateArtifactIntegrity(artifact);
+    if (!validation.isValid) {
+      throw new Error(`ARTIFACT_INTEGRITY_VIOLATION: ${validation.reason}`);
+    }
+
     const frozen = deepFreeze(JSON.parse(JSON.stringify(artifact)));
     this.artifacts.set(artifact.candidateId, frozen);
 
@@ -493,6 +501,9 @@ export class ModelRegistry {
    * Performs cryptographic integrity checks, deep-freezes, and immediately persists transactionally to disk.
    */
   public static registerCandidateArtifact(artifact: CandidateArtifact): CandidateArtifact {
+    if (artifact.productionEligible !== true || artifact.executionContext?.executionContext !== 'PRODUCTION') {
+      throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate ${artifact.candidateId} cannot be registered for production`);
+    }
     return this.executeTransaction(
       () => this.registerCandidateArtifactInternal(artifact),
       { requirePersistence: true },
@@ -557,6 +568,12 @@ export class ModelRegistry {
     const existing = this.getCandidateArtifact(candidateId);
     if (!existing) {
       throw new Error(`CANDIDATE_NOT_FOUND: Candidate ${candidateId} does not exist in registry`);
+    }
+    if (
+      ['PROMOTION_ELIGIBLE', 'PROMOTED', 'REACTIVATED'].includes(newStatus) &&
+      (existing.productionEligible !== true || existing.executionContext?.executionContext !== 'PRODUCTION')
+    ) {
+      throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate ${candidateId} cannot enter ${newStatus}`);
     }
 
     const previousStatus = existing.status;

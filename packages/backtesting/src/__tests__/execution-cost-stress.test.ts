@@ -1,6 +1,7 @@
 import { ICandle } from '@quant/shared';
 import {
   ExecutionSimulator,
+  ExecutionCostStressConfig,
   FeeModel,
   FillModel,
   FillModelEngine,
@@ -27,8 +28,8 @@ describe('Execution cost stress semantics', () => {
   };
 
   it.each([
-    ['fee', (stress: any) => FeeModel.calculateFees('BTCUSDT', 100, 1, 'BUY', false, undefined, stress)],
-    ['spread', (stress: any) => SpreadModel.getHalfSpread(100, 'NIFTY', undefined, stress)],
+    ['fee', (stress: ExecutionCostStressConfig) => FeeModel.calculateFees('BTCUSDT', 100, 1, 'BUY', false, undefined, stress)],
+    ['spread', (stress: ExecutionCostStressConfig) => SpreadModel.getHalfSpread(100, 'NIFTY', undefined, stress)],
   ])('%s is monotonic across NORMAL, 2x, and 3x', (_name, calculate) => {
     const normal = calculate({ mode: 'NORMAL' });
     const double = calculate({ mode: 'MULTIPLIER', multiplier: 2 });

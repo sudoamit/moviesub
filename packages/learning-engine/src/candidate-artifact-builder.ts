@@ -10,6 +10,10 @@ import {
   StrategyCandidate,
   ValidatedCandidateArtifact,
 } from './types';
+import {
+  createExecutionContext,
+  ProductionExecutionContext,
+} from './execution-context';
 import { TemporalFeatureScaler } from './feature-scaler';
 import { DEFAULT_LEARNING_SEED } from './walk-forward-validator';
 import { CandidateArtifactValidator } from './candidate-artifact-validator';
@@ -52,10 +56,22 @@ export interface CandidateArtifactBuildOptions {
     createdBy?: string;
     symbol?: string;
     riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+    productionExecutionContext?: ProductionExecutionContext;
+    executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
   };
   symbol?: string;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
   executionConfig?: CandidateExecutionConfig | Record<string, unknown>;
+  productionExecutionContext?: ProductionExecutionContext;
+  executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
+  minimumCandles?: number;
+  warmupBars?: number;
+  timeframe?: string;
+  latencyConfig?: any;
+  feeConfig?: any;
+  slippageConfig?: any;
+  spreadConfig?: any;
+  costStressConfig?: any;
 }
 
 function deepFreeze<T extends object>(obj: T): Readonly<T> {
@@ -397,6 +413,44 @@ export class CandidateArtifactBuilder {
       maxRiskPerTrade: candidateRisk.maxRiskPerTrade,
       partialExitPolicy: candidateRisk.partialExitPolicy,
     } as CandidateRiskConfig);
+    const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
+    const candidateVersion = candidate.candidateVersion || candidate.id;
+    const artifactVersion = 'v2.0';
+
+    const candidateChangeConfig = candidateChange || {};
+    const suppliedExecutionContext = options?.productionExecutionContext;
+    const productionExecutionContext = suppliedExecutionContext
+      ? suppliedExecutionContext.executionContext === (options?.executionContext || suppliedExecutionContext.executionContext)
+        ? suppliedExecutionContext
+        : createExecutionContext(suppliedExecutionContext, options?.executionContext)
+      : createExecutionContext(
+      {
+        symbol: config.symbol,
+        timeframe: options?.timeframe || (candidateChangeConfig.timeframe as string) || 'UNSPECIFIED',
+        minimumCandles: Number(options?.minimumCandles ?? candidateChangeConfig.minimumCandles ?? 50),
+        warmupBars: Number(options?.warmupBars ?? candidateChangeConfig.warmupBars ?? 40),
+        fillModel: config.fillModel,
+        ambiguityMode: config.ambiguityMode,
+        latencyConfig: {
+          submissionLatencyMs: options?.latencyConfig?.submissionLatencyMs ?? config.latencyMs,
+          processingLatencyMs: Number(candidateChangeConfig.processingLatencyMs ?? 0),
+        },
+        feeConfig: options?.feeConfig || candidateChangeConfig.feeConfig as any,
+        slippageConfig: options?.slippageConfig || candidateChangeConfig.slippageConfig as any,
+        spreadConfig: options?.spreadConfig || candidateChangeConfig.spreadConfig as any,
+        costStressConfig: options?.costStressConfig || candidateChangeConfig.costStressConfig as any,
+        riskConfig: resolvedRiskConfig,
+        sizingConfig: {
+          lotSize: resolvedRiskConfig.lotSize,
+          contractSize: resolvedRiskConfig.contractSize,
+          sizingMultiplier: config.sizingMultiplier,
+          highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
+        },
+        strategyVersion,
+        executionVersion: artifactVersion,
+      },
+      options?.executionContext || 'PRODUCTION',
+      );
 
     const modelArtifact = candidateChange?.modelArtifact as ModelArtifact | undefined;
     const scalerArtifact =
@@ -485,9 +539,6 @@ export class CandidateArtifactBuilder {
       modelVersion = mVer;
     }
 
-    const strategyVersion = candidate.baseStrategyVersion || '1.0.0';
-    const candidateVersion = candidate.candidateVersion || candidate.id;
-    const artifactVersion = 'v2.0';
     const createdBy = provenance?.createdBy || 'LearningEngine';
     const createdAt = candidate.createdAt instanceof Date ? candidate.createdAt : new Date();
 
@@ -539,6 +590,10 @@ export class CandidateArtifactBuilder {
       riskConfig: resolvedRiskConfig,
       executionConfig: config,
       strategyConfig,
+      productionEligible: productionExecutionContext.productionEligible,
+      executionContext: productionExecutionContext,
+      executionContextHash: productionExecutionContext.executionContextHash,
+      executionContextVersion: productionExecutionContext.executionContextVersion,
     };
 
     const artifactHash = createHash('sha256')
@@ -577,6 +632,10 @@ export class CandidateArtifactBuilder {
       trainingSeed,
       riskConfig: resolvedRiskConfig,
       executionConfig: config,
+      productionEligible: productionExecutionContext.productionEligible,
+      executionContext: productionExecutionContext,
+      executionContextHash: productionExecutionContext.executionContextHash,
+      executionContextVersion: productionExecutionContext.executionContextVersion,
       status: (candidate.status as CandidateStatus) || 'TRAINED',
       createdBy,
       createdAt,

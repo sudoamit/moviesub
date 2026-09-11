@@ -1058,6 +1058,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         promotionDecision: 'PROMOTE',
         decisionReasons: ['All thresholds passed'],
         evaluatedAt: Date.now(),
+        executionContextHash: 'missing-context',
+        executionContextVersion: '1.0',
       };
 
       expect(() => {
@@ -1079,6 +1081,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         promotionDecision: 'PROMOTE',
         decisionReasons: ['All thresholds passed'],
         evaluatedAt: Date.now(),
+        executionContextHash: artifact.executionContextHash,
+        executionContextVersion: artifact.executionContextVersion,
       };
 
       // Evidence with wrong artifactHash must be rejected
@@ -1155,6 +1159,8 @@ describe('AI Fix 16 — Model Registry, Independent Shadow Evaluation, & Promoti
         promotionDecision: 'PROMOTE',
         decisionReasons: ['All thresholds passed'],
         evaluatedAt: Date.now(),
+        executionContextHash: artifact.executionContextHash,
+        executionContextVersion: artifact.executionContextVersion,
       };
 
       const invalidDecision: PromotionDecision = {

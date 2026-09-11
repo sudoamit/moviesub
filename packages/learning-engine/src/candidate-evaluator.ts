@@ -229,6 +229,8 @@ export class CandidateEvaluator {
         feeRate: options?.feeRate,
         slippageBps: options?.slippageBps,
         costStressConfig: options?.costStressConfig,
+        productionExecutionContext: options?.productionExecutionContext,
+        executionContext: options?.executionContext,
         riskConfig: (baselineCandidate as any).riskConfig || resolvedRisk,
       });
       baselineExpectancy = baselineRes.expectancyR;
@@ -252,6 +254,8 @@ export class CandidateEvaluator {
       feeRate: options?.feeRate,
       slippageBps: options?.slippageBps,
       costStressConfig: options?.costStressConfig,
+      productionExecutionContext: options?.productionExecutionContext,
+      executionContext: options?.executionContext,
       riskConfig: resolvedRisk,
     });
 

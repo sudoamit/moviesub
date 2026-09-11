@@ -49,6 +49,9 @@ export class ProductionModelActivator {
     if (!candidate) {
       throw new Error(`CANDIDATE_NOT_FOUND: Candidate ${options.candidateId} not found in model registry`);
     }
+    if (candidate.productionEligible !== true || candidate.executionContext?.executionContext !== 'PRODUCTION') {
+      throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate ${options.candidateId} cannot be activated`);
+    }
 
     // 1. Strict Status Gate Invariant
     if (candidate.status !== 'PROMOTION_ELIGIBLE') {
@@ -95,6 +98,13 @@ export class ProductionModelActivator {
       // Execute atomic transaction with automatic rollback on failure
       return ModelRegistry.executeTransaction(() => {
         const currentState = ModelRegistry.getProductionState(strategyId, environment);
+
+        if (currentState?.activeCandidateId && currentState.activeCandidateId !== 'baseline-candidate') {
+          const champion = ModelRegistry.getCandidateArtifact(currentState.activeCandidateId);
+          if (champion && champion.executionContextHash !== candidate.executionContextHash) {
+            throw new Error('INCOMPATIBLE_EXECUTION_CONTEXT: Champion and challenger contexts differ');
+          }
+        }
 
         // Retire previous active model if present
         if (currentState?.activeCandidateId && currentState.activeCandidateId !== candidate.candidateId) {

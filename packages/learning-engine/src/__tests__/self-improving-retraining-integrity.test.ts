@@ -1710,6 +1710,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       configHash: 'hash_c_init',
       resultHash: 'hash_r_init',
       status: 'COMPLETED',
+      executionContextHash: 'context_hash_init',
+      executionContextVersion: '1.0',
     });
 
     const initialRuns = RetrainingRunStore.listRuns();
@@ -1735,6 +1737,8 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
               configHash: 'hash_c',
               resultHash: 'hash_r',
               status: 'COMPLETED',
+              executionContextHash: 'context_hash_tx',
+              executionContextVersion: '1.0',
             });
             // Intentionally throw inside transaction to test multi-store rollback
             throw new Error('SIMULATED_TRANSACTION_FAILURE');
@@ -2639,6 +2643,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
+      executionContext: 'EXPERIMENTAL',
     });
 
     // 2. Measure candidate with double cost (0.10R)
@@ -2647,6 +2652,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
+      executionContext: 'EXPERIMENTAL',
     });
 
     // 3. Measure candidate with triple cost (0.15R)
@@ -2655,6 +2661,7 @@ describe('Self-Improving Retraining & Candidate Generation Integrity', () => {
       minimumCandles: 50,
       warmupBars: 40,
       symbol: 'BTCUSDT',
+      executionContext: 'EXPERIMENTAL',
     });
 
     // Assert guaranteed trade execution unconditionally (no skipping)

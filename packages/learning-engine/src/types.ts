@@ -1,5 +1,6 @@
 import { Direction, ICandle, IBacktestTrade, ISignalSetup, MarketRegimeType, Timeframe } from '@quant/shared';
 import { PointInTimeMarketSnapshot } from '@quant/trading-engine';
+import type { ProductionExecutionContext } from './execution-context';
 export { PointInTimeMarketSnapshot };
 
 export type SimulatedTrade = IBacktestTrade;
@@ -431,6 +432,10 @@ export interface CandidateArtifact {
   readonly createdAt: Date;
   readonly configHash: string;
   readonly artifactHash: string;
+  readonly productionEligible: boolean;
+  readonly executionContext: ProductionExecutionContext;
+  readonly executionContextHash: string;
+  readonly executionContextVersion: string;
   readonly symbol?: string;
   readonly evidence?: {
     readonly sampleSize: number;
@@ -541,6 +546,8 @@ export interface ICandidateMeasurementOptions {
   symbol?: string;
   timeframe?: string;
   riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+  productionExecutionContext?: ProductionExecutionContext;
+  executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
 }
 
 export interface ShadowTradeRecord {
@@ -599,6 +606,7 @@ export interface ShadowEvaluationResult {
   shadowMarketDatasetHash?: string;
   shadowFeatureObservationHash?: string;
   shadowExecutionEvidenceHash?: string;
+  executionContextHash?: string;
   shadowStartTimestamp: number;
   shadowEndTimestamp: number;
   evaluatedAt: number;
@@ -649,6 +657,8 @@ export interface PromotionEvidence {
   promotionDecision: 'PROMOTE' | 'REJECT';
   decisionReasons: string[];
   evaluatedAt: number;
+  executionContextHash: string;
+  executionContextVersion: string;
 }
 
 export interface ProductionModelState {
@@ -857,6 +867,7 @@ export interface CandidateValidationResult {
   readonly walkForwardTotalFolds: number;
   readonly rejectionReason?: string;
   readonly simulatedRMultiples: readonly number[];
+  readonly executionContextHash?: string;
 }
 
 export interface CandidateOOSResult {
@@ -871,6 +882,7 @@ export interface CandidateOOSResult {
   readonly monteCarloRuinProbability?: number;
   readonly isMonteCarloAvailable: boolean;
   readonly transactionCostSurvived: boolean;
+  readonly executionContextHash?: string;
 }
 
 export interface RetrainingRunConfig {
@@ -894,6 +906,13 @@ export interface RetrainingRunConfig {
   readonly minOOSTrades?: number;
   readonly minValidationExpectancyR?: number;
   readonly minValidationProfitFactor?: number;
+  readonly productionExecutionContext?: ProductionExecutionContext;
+  readonly latencyConfig?: import('@quant/backtesting').ILatencyConfig;
+  readonly feeConfig?: import('@quant/backtesting').IFeeConfig;
+  readonly slippageConfig?: import('@quant/backtesting').ISlippageConfig;
+  readonly spreadConfig?: import('@quant/backtesting').ISpreadConfig;
+  readonly costStressConfig?: import('@quant/backtesting').ExecutionCostStressConfig;
+  readonly highVolatilitySizingMultiplier?: number;
 }
 
 export type RetrainingRunStatus =
@@ -926,4 +945,6 @@ export interface RetrainingRunRecord {
   readonly resultHash?: string;
   readonly status: RetrainingRunStatus;
   readonly failureReason?: string;
+  readonly executionContextHash: string;
+  readonly executionContextVersion: string;
 }

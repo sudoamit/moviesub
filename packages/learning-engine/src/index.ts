@@ -32,6 +32,7 @@ export * from './seeded-rng';
 export * from './candidate-backtest-runner';
 export * from './candidate-artifact-validator';
 export * from './candidate-artifact-builder';
+export * from './execution-context';
 export * from './deterministic-test-adapter';
 export * from './market-dataset-validator';
 export * from './shadow-evaluator';

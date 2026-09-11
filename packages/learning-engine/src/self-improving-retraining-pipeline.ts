@@ -37,6 +37,7 @@ import { ModelRegistry } from './model-registry';
 import { DatasetManager } from './dataset-manager';
 import { canonicalJsonStringify } from './canonical-serializer';
 import { RetrainingRunStore } from './retraining-run-store';
+import { createExecutionContext } from './execution-context';
 
 export interface PipelineExecutionResult {
   readonly runRecord: RetrainingRunRecord;
@@ -221,6 +222,31 @@ export class SelfImprovingRetrainingPipeline {
     const expHash = PITExperienceDatasetBuilder.computeDatasetHash(rawExamples);
     const strategyVersion = config.baseStrategyVersion;
     const symbol = config.symbol;
+    const productionExecutionContext = config.productionExecutionContext || createExecutionContext({
+      symbol,
+      timeframe: config.timeframe,
+      minimumCandles: config.minimumCandles ?? PRODUCTION_DEFAULT_MINIMUM_CANDLES,
+      warmupBars: config.warmupBars ?? PRODUCTION_DEFAULT_WARMUP_BARS,
+      fillModel: config.executionConfig.fillModel,
+      ambiguityMode: config.executionConfig.ambiguityMode,
+      latencyConfig: config.latencyConfig || {
+        submissionLatencyMs: config.executionConfig.latencyMs,
+        processingLatencyMs: 0,
+      },
+      feeConfig: config.feeConfig,
+      slippageConfig: config.slippageConfig,
+      spreadConfig: config.spreadConfig,
+      costStressConfig: config.costStressConfig,
+      riskConfig: config.riskConfig,
+      sizingConfig: {
+        lotSize: config.riskConfig.lotSize,
+        contractSize: config.riskConfig.contractSize,
+        sizingMultiplier: config.executionConfig.sizingMultiplier,
+        highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
+      },
+      strategyVersion,
+      executionVersion: config.executionConfig.strategyVersion || strategyVersion,
+    });
 
     const runId = this.computeRunId(strategyVersion, symbol, mktHash, expHash, configHash);
 
@@ -444,6 +470,7 @@ export class SelfImprovingRetrainingPipeline {
           symbol,
           timeframe: config.timeframe,
           riskConfig: candidateObj.riskConfig,
+          productionExecutionContext,
           criteria: {
             minExpectancyDelta: 0.0,
             minProfitFactor: config.minValidationProfitFactor,
@@ -557,6 +584,7 @@ export class SelfImprovingRetrainingPipeline {
             ? valEval.rejectionReason || (wfEval.folds.length === 0 ? 'Walk-forward validation produced zero folds' : !wfEval.isRobust ? 'Walk-forward validation failed' : 'Validation criteria failed')
             : undefined,
           simulatedRMultiples: valEval.simulatedRMultiples,
+          executionContextHash: productionExecutionContext.executionContextHash,
         };
         validationResults.push(valRes);
 
@@ -600,6 +628,7 @@ export class SelfImprovingRetrainingPipeline {
           symbol,
           timeframe: config.timeframe,
           riskConfig: candidateObj.riskConfig,
+          productionExecutionContext,
           criteria: {
             minExpectancyDelta: 0.0,
             minProfitFactor: config.minValidationProfitFactor,
@@ -641,6 +670,7 @@ export class SelfImprovingRetrainingPipeline {
           oosMaxDrawdownPercent: oosEval.maxDrawdownPercent,
           oosTradeCount: oosEval.totalSimulatedTrades,
           oosMarketDatasetHash: oosMktHash,
+          executionContextHash: productionExecutionContext.executionContextHash,
           executionDerived: true,
           isMonteCarloAvailable,
           monteCarloRuinProbability: mcRuinProb,
@@ -681,6 +711,7 @@ export class SelfImprovingRetrainingPipeline {
             validationExperienceDatasetHash: splits.validation.datasetHash,
             oosExperienceDatasetHash: splits.oos.datasetHash,
             createdBy: 'SelfImprovingRetrainingPipeline',
+            productionExecutionContext,
           },
         );
 
@@ -704,6 +735,7 @@ export class SelfImprovingRetrainingPipeline {
         createdArtifactCount: createdArtifacts.length,
         validationPassedCount: passedHypotheses.length,
         oosResultCount: oosResults.length,
+        executionContextHash: productionExecutionContext.executionContextHash,
       };
       const resultHash = crypto.createHash('sha256').update(canonicalJsonStringify(resultPayload)).digest('hex').substring(0, 16);
 
@@ -722,6 +754,8 @@ export class SelfImprovingRetrainingPipeline {
         configHash,
         resultHash,
         status: finalStatus,
+        executionContextHash: productionExecutionContext.executionContextHash,
+        executionContextVersion: productionExecutionContext.executionContextVersion,
       });
 
       const runStoreSnapshot = RetrainingRunStore.createSnapshot();
@@ -771,6 +805,8 @@ export class SelfImprovingRetrainingPipeline {
         modelVersions: Object.freeze([...activeModelVersions]),
         configHash,
         status: 'FAILED',
+        executionContextHash: config.productionExecutionContext?.executionContextHash || 'unavailable',
+        executionContextVersion: config.productionExecutionContext?.executionContextVersion || 'unavailable',
         failureReason: err instanceof Error ? err.message : String(err),
       });
       RetrainingRunStore.saveRun(failedRecord);

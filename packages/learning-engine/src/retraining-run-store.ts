@@ -139,7 +139,7 @@ export class RetrainingRunStore {
         if (!runId || !record || typeof record !== 'object' || record.runId !== runId) {
           throw new Error(`CORRUPT_RUN_ENTRY: Corrupt or mismatched run record for runId ${runId}`);
         }
-        if (!record.status || !record.startedAt || !record.configHash) {
+        if (!record.status || !record.startedAt || !record.configHash || !record.executionContextHash || !record.executionContextVersion) {
           throw new Error(`INVALID_RUN_RECORD: Missing mandatory fields for runId ${runId}`);
         }
         tempRuns.set(runId, deepFreeze(JSON.parse(JSON.stringify(record))));
