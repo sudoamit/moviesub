@@ -13,6 +13,7 @@ import {
   ExecutionModelConfig,
   IExecutionSimulatorCheckpoint,
   validateExecutionModelConfig,
+  EXECUTION_PRECISION,
 } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
@@ -61,7 +62,21 @@ export class ExecutionSimulator {
   }
 
   setPartialFillRatio(ratio?: number): void {
+    if (ratio === undefined) {
+      this.clearPartialFillRatio();
+      return;
+    }
     this.updateExecutionModel({ partialFillRatio: ratio });
+  }
+
+  clearPartialFillRatio(): void {
+    const current = this.getExecutionModelConfig();
+    const candidate: ExecutionModelConfig = {
+      ...current,
+      partialFillRatio: undefined,
+    };
+    validateExecutionModelConfig(candidate);
+    this.partialFillRatio = undefined;
   }
 
   getPartialFillRatio(): number | undefined {
@@ -113,7 +128,7 @@ export class ExecutionSimulator {
       costStressConfig: patch.costStressConfig !== undefined
         ? (patch.costStressConfig ? { ...patch.costStressConfig } : undefined)
         : (current.costStressConfig ? { ...current.costStressConfig } : undefined),
-      partialFillRatio: patch.partialFillRatio !== undefined ? patch.partialFillRatio : current.partialFillRatio,
+      partialFillRatio: 'partialFillRatio' in patch ? patch.partialFillRatio : current.partialFillRatio,
     };
 
     // 3. Validate COMPLETE candidate configuration
@@ -246,7 +261,7 @@ export class ExecutionSimulator {
             if (order.status !== 'PENDING' && order.status !== 'PARTIALLY_FILLED') continue;
 
             let res: { isFilled: boolean; fill?: IFill };
-            if (configSnapshot.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
+            if ((configSnapshot.fillModel === FillModel.NEXT_BAR_MARKET || configSnapshot.fillModel === FillModel.NEXT_BAR_OPEN) && order.orderType === 'MARKET') {
               const orderSubTime = order.submittedAt || order.createdAt;
               if (orderSubTime < candleTime) {
                 res = FillModelEngine.evaluateFill(
@@ -824,6 +839,9 @@ export class ExecutionSimulator {
       if (typeof ord.orderId !== 'string' || ord.orderId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_ORDER: Invalid orderId');
       }
+      if (candidateOrders.has(ord.orderId)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: Duplicate orderId "${ord.orderId}"`);
+      }
       if (typeof ord.tradeId !== 'string' || ord.tradeId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_ORDER: Invalid tradeId');
       }
@@ -852,31 +870,52 @@ export class ExecutionSimulator {
         throw new Error(`CORRUPT_EXECUTION_ORDER: remainingQuantity must be a non-negative finite number, got ${ord.remainingQuantity}`);
       }
 
+      // initialQuantity validation
+      const initialQty = ord.initialQuantity !== undefined ? ord.initialQuantity : ord.quantity;
+      if (typeof initialQty !== 'number' || !Number.isFinite(initialQty) || initialQty <= 0) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: initialQuantity must be a positive finite number, got ${initialQty}`);
+      }
+      if (ord.quantity > initialQty + EXECUTION_PRECISION.quantityEpsilon) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: quantity (${ord.quantity}) exceeds initialQuantity (${initialQty})`,
+        );
+      }
+      if (filledQty > initialQty + EXECUTION_PRECISION.quantityEpsilon) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: filledQuantity (${filledQty}) exceeds initialQuantity (${initialQty})`,
+        );
+      }
+      if (ord.remainingQuantity > initialQty + EXECUTION_PRECISION.quantityEpsilon) {
+        throw new Error(
+          `CORRUPT_EXECUTION_ORDER: remainingQuantity (${ord.remainingQuantity}) exceeds initialQuantity (${initialQty})`,
+        );
+      }
+
       // Quantity invariants
-      if (filledQty > ord.quantity + 1e-6) {
+      if (filledQty > ord.quantity + EXECUTION_PRECISION.quantityEpsilon) {
         throw new Error(
           `CORRUPT_EXECUTION_ORDER: filledQuantity (${filledQty}) exceeds total quantity (${ord.quantity})`,
         );
       }
       const balanceDiff = Math.abs(ord.quantity - (filledQty + ord.remainingQuantity));
-      if (balanceDiff > 1e-6) {
+      if (balanceDiff > EXECUTION_PRECISION.quantityEpsilon) {
         throw new Error(
           `CORRUPT_EXECUTION_ORDER: quantity balance invariant violated: ${ord.quantity} != ${filledQty} + ${ord.remainingQuantity}`,
         );
       }
 
       // Status consistency
-      if (ord.status === 'FILLED' && ord.remainingQuantity > 1e-6) {
+      if (ord.status === 'FILLED' && ord.remainingQuantity > EXECUTION_PRECISION.quantityEpsilon) {
         throw new Error(
           `CORRUPT_EXECUTION_ORDER: Order with status FILLED cannot have remainingQuantity > 0, got ${ord.remainingQuantity}`,
         );
       }
-      if (ord.status === 'PARTIALLY_FILLED' && (ord.remainingQuantity <= 1e-6 || filledQty <= 0)) {
+      if (ord.status === 'PARTIALLY_FILLED' && (ord.remainingQuantity <= EXECUTION_PRECISION.quantityEpsilon || filledQty <= 0)) {
         throw new Error(
           `CORRUPT_EXECUTION_ORDER: Order with status PARTIALLY_FILLED must have remainingQuantity > 0 and filledQuantity > 0`,
         );
       }
-      if (ord.status === 'PENDING' && filledQty > 1e-6) {
+      if (ord.status === 'PENDING' && filledQty > EXECUTION_PRECISION.quantityEpsilon) {
         throw new Error(
           `CORRUPT_EXECUTION_ORDER: Order with status PENDING cannot have filledQuantity > 0, got ${filledQty}`,
         );
@@ -907,7 +946,7 @@ export class ExecutionSimulator {
 
       const candidateOrder: IOrder = {
         ...ord,
-        initialQuantity: ord.initialQuantity !== undefined ? ord.initialQuantity : ord.quantity,
+        initialQuantity: initialQty,
       };
       candidateOrders.set(candidateOrder.orderId, candidateOrder);
     }
@@ -915,6 +954,7 @@ export class ExecutionSimulator {
     // Step 3: Validate fills and construct candidate fills array
     const candidateFills: IFill[] = [];
     const fillsByOrder = new Map<string, number>();
+    const seenFillIds = new Set<string>();
 
     for (const f of checkpoint.fills) {
       if (!f || typeof f !== 'object') {
@@ -923,6 +963,11 @@ export class ExecutionSimulator {
       if (typeof f.fillId !== 'string' || f.fillId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_FILL: Invalid fillId');
       }
+      if (seenFillIds.has(f.fillId)) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: Duplicate fillId "${f.fillId}"`);
+      }
+      seenFillIds.add(f.fillId);
+
       if (typeof f.orderId !== 'string' || f.orderId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_FILL: Invalid orderId');
       }
@@ -953,21 +998,28 @@ export class ExecutionSimulator {
 
       // Check against candidate order
       const ord = candidateOrders.get(f.orderId);
-      if (ord) {
-        const cumQty = (fillsByOrder.get(f.orderId) || 0) + f.quantity;
-        if (cumQty > ord.quantity + 1e-6) {
-          throw new Error(
-            `CORRUPT_EXECUTION_FILL: Cumulative fill quantity (${cumQty}) exceeds order quantity (${ord.quantity})`,
-          );
-        }
-        fillsByOrder.set(f.orderId, cumQty);
+      if (!ord) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: Fill references unknown orderId "${f.orderId}"`);
       }
+      if (f.tradeId !== ord.tradeId) {
+        throw new Error(`CORRUPT_EXECUTION_FILL: Fill tradeId "${f.tradeId}" does not match order tradeId "${ord.tradeId}"`);
+      }
+
+      const cumQty = (fillsByOrder.get(f.orderId) || 0) + f.quantity;
+      if (cumQty > ord.quantity + EXECUTION_PRECISION.quantityEpsilon) {
+        throw new Error(
+          `CORRUPT_EXECUTION_FILL: Cumulative fill quantity (${cumQty}) exceeds order quantity (${ord.quantity})`,
+        );
+      }
+      fillsByOrder.set(f.orderId, cumQty);
 
       candidateFills.push({ ...f });
     }
 
     // Step 4: Validate events and construct candidate events array
     const candidateEvents: IExecutionEvent[] = [];
+    const seenEventIds = new Set<string>();
+
     for (const ev of checkpoint.events) {
       if (!ev || typeof ev !== 'object') {
         throw new Error('CORRUPT_EXECUTION_EVENT: Event must be an object');
@@ -975,6 +1027,11 @@ export class ExecutionSimulator {
       if (typeof ev.eventId !== 'string' || ev.eventId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_EVENT: Invalid eventId');
       }
+      if (seenEventIds.has(ev.eventId)) {
+        throw new Error(`CORRUPT_EXECUTION_EVENT: Duplicate eventId "${ev.eventId}"`);
+      }
+      seenEventIds.add(ev.eventId);
+
       if (typeof ev.tradeId !== 'string' || ev.tradeId.trim() === '') {
         throw new Error('CORRUPT_EXECUTION_EVENT: Invalid tradeId');
       }
@@ -984,6 +1041,15 @@ export class ExecutionSimulator {
       if (typeof ev.timestamp !== 'number' || !Number.isFinite(ev.timestamp) || ev.timestamp <= 0) {
         throw new Error(`CORRUPT_EXECUTION_EVENT: timestamp must be a positive finite number, got ${ev.timestamp}`);
       }
+
+      const ord = candidateOrders.get(ev.orderId);
+      if (!ord) {
+        throw new Error(`CORRUPT_EXECUTION_EVENT: Event references unknown orderId "${ev.orderId}"`);
+      }
+      if (ev.tradeId !== ord.tradeId) {
+        throw new Error(`CORRUPT_EXECUTION_EVENT: Event tradeId "${ev.tradeId}" does not match order tradeId "${ord.tradeId}"`);
+      }
+
       candidateEvents.push({ ...ev });
     }
 

@@ -479,7 +479,7 @@ export class FillModelEngine {
     }
 
     // 3. Next Bar Market Model for MARKET Orders
-    if (model === FillModel.NEXT_BAR_MARKET) {
+    if (model === FillModel.NEXT_BAR_MARKET || model === FillModel.NEXT_BAR_OPEN) {
       if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
       const rawPrice = nextCandle.open;
       const fillTime = this.requireCandleTimestamp(nextCandle);

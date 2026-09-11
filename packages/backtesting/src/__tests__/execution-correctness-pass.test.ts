@@ -3094,7 +3094,18 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(() => execSim.updateExecutionModel({ partialFillRatio: NaN })).toThrow('INVALID_PARTIAL_FILL_RATIO');
     expect(execSim.getExecutionModelConfig()).toEqual(before);
 
-    // 9. Valid atomic update succeeds completely
+    // 9. Nested costStressConfig slippage validation (maxSlippageBps < baseSlippageBps)
+    expect(() =>
+      execSim.updateExecutionModel({
+        costStressConfig: {
+          mode: 'MULTIPLIER',
+          slippageConfig: { baseSlippageBps: 20, maxSlippageBps: 5, volatilityMultiplier: 1, impactMultiplier: 1 },
+        },
+      }),
+    ).toThrow('INVALID_COST_STRESS_CONFIG');
+    expect(execSim.getExecutionModelConfig()).toEqual(before);
+
+    // 10. Valid atomic update succeeds completely
     execSim.updateExecutionModel({
       fillModel: FillModel.NEXT_BAR_MARKET,
       ambiguityMode: SameCandleAmbiguityMode.OPTIMISTIC,
@@ -3106,6 +3117,26 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(after.ambiguityMode).toBe(SameCandleAmbiguityMode.OPTIMISTIC);
     expect(after.partialFillRatio).toBe(0.8);
     expect(after.slippageConfig?.baseSlippageBps).toBe(2);
+
+    // 11. setPartialFillRatio / clearPartialFillRatio API regression tests
+    execSim.setPartialFillRatio(0.5);
+    expect(execSim.getPartialFillRatio()).toBe(0.5);
+    expect(execSim.getExecutionModelConfig().partialFillRatio).toBe(0.5);
+
+    execSim.setPartialFillRatio(undefined);
+    expect(execSim.getPartialFillRatio()).toBeUndefined();
+    expect(execSim.getExecutionModelConfig().partialFillRatio).toBeUndefined();
+
+    execSim.setPartialFillRatio(0.7);
+    expect(execSim.getPartialFillRatio()).toBe(0.7);
+    execSim.clearPartialFillRatio();
+    expect(execSim.getPartialFillRatio()).toBeUndefined();
+    expect(execSim.getExecutionModelConfig().partialFillRatio).toBeUndefined();
+
+    execSim.setPartialFillRatio(0.6);
+    expect(execSim.getPartialFillRatio()).toBe(0.6);
+    execSim.updateExecutionModel({ partialFillRatio: undefined });
+    expect(execSim.getPartialFillRatio()).toBeUndefined();
   });
 
   // 64. AI Fix 71 — Typed execution-model snapshot returns safe isolated copy
@@ -3578,6 +3609,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       side: 'BUY',
       orderType: 'LIMIT',
       quantity: 5.0,
+      initialQuantity: 5.0,
       filledQuantity: 5.0,
       remainingQuantity: 0,
       status: 'FILLED',
@@ -3600,6 +3632,115 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       isPartial: false,
     };
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [corruptFill] })).toThrow('CORRUPT_EXECUTION_FILL');
+
+    // 10. Corrupted order: Duplicate orderId
+    const duplicateOrder: any = { ...goodOrder, clientOrderId: 'cl_dup' };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder, duplicateOrder] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 11. Corrupted order: invalid initialQuantity (<= 0 or non-finite)
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, initialQuantity: 0 }] })).toThrow('CORRUPT_EXECUTION_ORDER');
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, initialQuantity: -5 }] })).toThrow('CORRUPT_EXECUTION_ORDER');
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, initialQuantity: NaN }] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 12. Corrupted order: quantity > initialQuantity
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, quantity: 10.0, initialQuantity: 5.0 }] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 13. Corrupted order: filledQuantity > initialQuantity
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, initialQuantity: 4.0 }] })).toThrow('CORRUPT_EXECUTION_ORDER');
+
+    // 14. Corrupted fill: Orphan fill referencing unknown orderId
+    const orphanFill: any = {
+      fillId: 'f_orphan',
+      orderId: 'ord_unknown',
+      tradeId: 't_good',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: 100,
+      quantity: 5.0,
+      fee: 0,
+      slippage: 0,
+      timestamp: 1020,
+      isPartial: false,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [orphanFill] })).toThrow('CORRUPT_EXECUTION_FILL');
+
+    // 15. Corrupted fill: tradeId mismatch with order
+    const mismatchFill: any = {
+      fillId: 'f_mismatch',
+      orderId: 'ord_good',
+      tradeId: 't_different_trade',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: 100,
+      quantity: 5.0,
+      fee: 0,
+      slippage: 0,
+      timestamp: 1020,
+      isPartial: false,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [mismatchFill] })).toThrow('CORRUPT_EXECUTION_FILL');
+
+    // 16. Corrupted fill: Duplicate fillId
+    const validFill1: any = {
+      fillId: 'f_dup_1',
+      orderId: 'ord_good',
+      tradeId: 't_good',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: 100,
+      quantity: 2.5,
+      fee: 0,
+      slippage: 0,
+      timestamp: 1020,
+      isPartial: true,
+    };
+    const duplicateFill: any = {
+      fillId: 'f_dup_1', // Duplicate fillId
+      orderId: 'ord_good',
+      tradeId: 't_good',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: 100,
+      quantity: 2.5,
+      fee: 0,
+      slippage: 0,
+      timestamp: 1030,
+      isPartial: false,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [validFill1, duplicateFill] })).toThrow('CORRUPT_EXECUTION_FILL');
+
+    // 17. Corrupted event: Orphan event referencing unknown orderId
+    const orphanEvent: any = {
+      eventId: 'ev_orphan',
+      tradeId: 't_good',
+      orderId: 'ord_unknown',
+      timestamp: 1020,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [orphanEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
+
+    // 18. Corrupted event: tradeId mismatch with order
+    const mismatchEvent: any = {
+      eventId: 'ev_mismatch',
+      tradeId: 't_different_trade',
+      orderId: 'ord_good',
+      timestamp: 1020,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [mismatchEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
+
+    // 19. Corrupted event: Duplicate eventId
+    const validEvent1: any = {
+      eventId: 'ev_dup',
+      tradeId: 't_good',
+      orderId: 'ord_good',
+      timestamp: 1020,
+    };
+    const duplicateEvent: any = {
+      eventId: 'ev_dup', // Duplicate eventId
+      tradeId: 't_good',
+      orderId: 'ord_good',
+      timestamp: 1030,
+    };
+    expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [validEvent1, duplicateEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
   });
 
   // 70. AI Fix 71 — Restore-Failure Atomicity (zero state change on failed restore)
