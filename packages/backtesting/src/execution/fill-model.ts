@@ -377,7 +377,9 @@ export class FillModelEngine {
     costStressConfig?: ExecutionCostStressConfig,
     partialFillRatio?: number,
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
-    if (order.status !== 'PENDING') return { isFilled: false, reason: `ORDER_${order.status}` };
+    if (order.status !== 'PENDING' && order.status !== 'PARTIALLY_FILLED') {
+      return { isFilled: false, reason: `ORDER_${order.status}` };
+    }
 
     const minPrice = Math.min(segStart, segEnd);
     const maxPrice = Math.max(segStart, segEnd);

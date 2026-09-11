@@ -29,6 +29,7 @@ export interface IOrder {
   price?: number;
   stopPrice?: number;
   quantity: number;
+  filledQuantity?: number;
   remainingQuantity: number;
   status: OrderStatus;
   createdAt: number;

@@ -2569,5 +2569,153 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     const candleBadStr = { timestamp: 'invalid-date-string', open: 100, high: 105, low: 99, close: 102, volume: 100 } as unknown as ICandle;
     expect(() => FillModelEngine.requireCandleTimestamp(candleBadStr)).toThrow('Invalid non-finite candle timestamp value');
   });
+
+  // 56. Multi-bar Partial Fill State Machine & Accounting Invariant
+  test('56. PARTIALLY_FILLED orders continue evaluating across sequential bars with exact filledQuantity invariant', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_partial_inv',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      0.5, // 50% partial fill per bar
+    );
+
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_part_inv',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    expect(order.status).toBe('PENDING');
+    expect(order.filledQuantity).toBe(0);
+    expect(order.remainingQuantity).toBe(100.0);
+
+    // Bar 1: Fills 50% of 100 = 50.0
+    const candle1: ICandle = {
+      timestamp: new Date(timestamp + 60000),
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 102,
+      volume: 100,
+    };
+    const res1 = execSim.processCandle(candle1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].quantity).toBe(50.0);
+    expect(order.status).toBe('PARTIALLY_FILLED');
+    expect(order.filledQuantity).toBe(50.0);
+    expect(order.remainingQuantity).toBe(50.0);
+    expect(order.quantity).toBe(order.filledQuantity! + order.remainingQuantity);
+
+    // Bar 2: PARTIALLY_FILLED order evaluates and fills 50% of 50 = 25.0
+    const candle2: ICandle = {
+      timestamp: new Date(timestamp + 120000),
+      open: 102,
+      high: 106,
+      low: 101,
+      close: 105,
+      volume: 100,
+    };
+    const res2 = execSim.processCandle(candle2);
+    expect(res2.fills).toHaveLength(1);
+    expect(res2.fills[0].quantity).toBe(25.0);
+    expect(order.status).toBe('PARTIALLY_FILLED');
+    expect(order.filledQuantity).toBe(75.0);
+    expect(order.remainingQuantity).toBe(25.0);
+    expect(order.quantity).toBe(order.filledQuantity! + order.remainingQuantity);
+  });
+
+  // 57. Cumulative Fees and Slippage Accumulation Across Partial Fills
+  test('57. Order fees and slippage accumulate across partial fills instead of being overwritten', () => {
+    const feeConfig = { brokerageFlat: 5 }; // 5 per trade fill
+    const slippageConfig = { baseSlippageBps: 10, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 10 };
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_fees_accum',
+      slippageConfig,
+      feeConfig,
+      undefined,
+      undefined,
+      0.5,
+    );
+
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_fees_accum',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    const candle1: ICandle = { timestamp: new Date(timestamp + 60000), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+    const res1 = execSim.processCandle(candle1);
+    const fee1 = res1.fills[0].fee;
+    const slip1 = res1.fills[0].slippage;
+    expect(order.fees).toBe(fee1);
+    expect(order.slippage).toBe(slip1);
+
+    const candle2: ICandle = { timestamp: new Date(timestamp + 120000), open: 102, high: 106, low: 101, close: 105, volume: 100 };
+    const res2 = execSim.processCandle(candle2);
+    const fee2 = res2.fills[0].fee;
+    const slip2 = res2.fills[0].slippage;
+
+    expect(order.fees).toBeCloseTo(fee1 + fee2, 6);
+    expect(order.slippage).toBeCloseTo(slip1 + slip2, 6);
+  });
+
+  // 58. Volume-Weighted Average Fill Price (VWAP) Across Multiple Partial Fills
+  test('58. avgFillPrice computes exact volume-weighted average price across partial fills', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_vwap',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      0.5,
+    );
+
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_vwap',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 100.0,
+      timestamp,
+      exitTarget: 'ENTRY',
+    });
+
+    // Fill 1: 50 units
+    const candle1: ICandle = { timestamp: new Date(timestamp + 60000), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+    const res1 = execSim.processCandle(candle1);
+    const fill1 = res1.fills[0];
+    expect(order.avgFillPrice).toBeCloseTo(fill1.price, 4);
+
+    // Fill 2: 25 units
+    const candle2: ICandle = { timestamp: new Date(timestamp + 120000), open: 200, high: 205, low: 199, close: 202, volume: 100 };
+    const res2 = execSim.processCandle(candle2);
+    const fill2 = res2.fills[0];
+
+    // Expected VWAP = (fill1.qty * fill1.price + fill2.qty * fill2.price) / totalQty
+    const expectedVwap = (fill1.quantity * fill1.price + fill2.quantity * fill2.price) / (fill1.quantity + fill2.quantity);
+    expect(order.avgFillPrice).toBeCloseTo(expectedVwap, 4);
+  });
 });
 

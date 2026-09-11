@@ -93,6 +93,7 @@ export class ExecutionSimulator {
       price: params.price,
       stopPrice: params.stopPrice,
       quantity: params.quantity,
+      filledQuantity: 0,
       remainingQuantity: params.quantity,
       status: 'PENDING',
       createdAt: params.timestamp,
@@ -124,10 +125,10 @@ export class ExecutionSimulator {
     const newFills: IFill[] = [];
     const newEvents: IExecutionEvent[] = [];
 
-    // Group pending orders by tradeId
+    // Group pending and partially filled orders by tradeId
     const pendingByTrade = new Map<string, IOrder[]>();
     for (const order of this.orders.values()) {
-      if (order.status !== 'PENDING') continue;
+      if (order.status !== 'PENDING' && order.status !== 'PARTIALLY_FILLED') continue;
       const list = pendingByTrade.get(order.tradeId) || [];
       list.push(order);
       pendingByTrade.set(order.tradeId, list);
@@ -139,6 +140,7 @@ export class ExecutionSimulator {
     for (const [tradeId, tradeOrders] of pendingByTrade.entries()) {
       // P0/P1-1: OHLCPathCursor for progressive segment evaluation
       const cursor = new OHLCPathCursor(bar);
+      const filledThisBar = new Set<string>();
 
       while (!cursor.isFinished) {
         const seg = cursor.currentSegment;
@@ -147,13 +149,13 @@ export class ExecutionSimulator {
         let segHasTrigger = false;
         let currentSegStart = seg.start;
         let currentOrders = Array.from(this.orders.values()).filter(
-          (o) => o.tradeId === tradeId && o.status === 'PENDING',
+          (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED') && !filledThisBar.has(o.orderId),
         );
 
         while (currentOrders.length > 0) {
           const triggered: { order: IOrder; fill: IFill }[] = [];
           for (const order of currentOrders) {
-            if (order.status !== 'PENDING') continue;
+            if (order.status !== 'PENDING' && order.status !== 'PARTIALLY_FILLED') continue;
 
             let res: { isFilled: boolean; fill?: IFill };
             if (this.fillModel === FillModel.NEXT_BAR_MARKET && order.orderType === 'MARKET') {
@@ -245,14 +247,32 @@ export class ExecutionSimulator {
           fill.segmentIndex = cursor.segmentIndex;
           fill.segmentType = seg.type;
 
-          const newRemaining = Math.max(0, Number((order.remainingQuantity - fill.quantity).toFixed(8)));
-          const isComplete = newRemaining <= 1e-6;
+          filledThisBar.add(order.orderId);
+          const prevFilledQty = order.filledQuantity || 0;
+          const newFilledQty = Number((prevFilledQty + fill.quantity).toFixed(8));
+          const newRemainingQty = Math.max(0, Number((order.quantity - newFilledQty).toFixed(8)));
+
+          // Strict invariant validation
+          const expectedRemaining = Number((order.quantity - newFilledQty).toFixed(8));
+          if (Math.abs(newRemainingQty - expectedRemaining) > 1e-6) {
+            throw new Error(`ORDER_QUANTITY_INVARIANT_VIOLATION: remainingQuantity (${newRemainingQty}) != quantity (${order.quantity}) - filledQuantity (${newFilledQty})`);
+          }
+
+          const isComplete = newRemainingQty <= 1e-6;
           order.status = isComplete ? 'FILLED' : 'PARTIALLY_FILLED';
           order.filledAt = fill.timestamp;
-          order.avgFillPrice = fill.price;
-          order.fees = fill.fee;
-          order.slippage = fill.slippage;
-          order.remainingQuantity = newRemaining;
+
+          // Cumulative VWAP fill price
+          const prevTotalCost = (order.avgFillPrice || 0) * prevFilledQty;
+          const newTotalCost = prevTotalCost + (fill.price * fill.quantity);
+          order.avgFillPrice = newFilledQty > 0 ? Number((newTotalCost / newFilledQty).toFixed(8)) : fill.price;
+
+          // Cumulative fees and slippage
+          order.fees = Number(((order.fees || 0) + fill.fee).toFixed(8));
+          order.slippage = Number(((order.slippage || 0) + fill.slippage).toFixed(8));
+
+          order.filledQuantity = newFilledQty;
+          order.remainingQuantity = newRemainingQty;
 
           this.fills.push(fill);
           newFills.push(fill);
@@ -274,7 +294,7 @@ export class ExecutionSimulator {
             timestamp: fill.timestamp,
             price: fill.price,
             quantity: fill.quantity,
-            remainingQuantity: 0,
+            remainingQuantity: newRemainingQty,
             fees: fill.fee,
             slippage: fill.slippage,
             reason: `Order ${order.orderId} filled at ${fill.price}`,
@@ -301,7 +321,7 @@ export class ExecutionSimulator {
           } else {
             // Target limit order triggered -> Update protective stop order quantity to remaining open position size
             const remainingOrders = Array.from(this.orders.values()).filter(
-              (o) => o.tradeId === tradeId && o.status === 'PENDING',
+              (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED'),
             );
             if (remainingOrders.length === 0) break;
 
@@ -336,7 +356,7 @@ export class ExecutionSimulator {
           }
 
           currentOrders = Array.from(this.orders.values()).filter(
-            (o) => o.tradeId === tradeId && o.status === 'PENDING',
+            (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED') && !filledThisBar.has(o.orderId),
           );
         }
 
@@ -384,7 +404,7 @@ export class ExecutionSimulator {
 
   cancelOrder(orderId: string): boolean {
     const order = this.orders.get(orderId);
-    if (order && order.status === 'PENDING') {
+    if (order && (order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED')) {
       order.status = 'CANCELLED';
       return true;
     }
@@ -394,7 +414,7 @@ export class ExecutionSimulator {
   cancelTradeOrders(tradeId: string): number {
     let count = 0;
     for (const order of this.orders.values()) {
-      if (order.tradeId === tradeId && order.status === 'PENDING') {
+      if (order.tradeId === tradeId && (order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED')) {
         order.status = 'CANCELLED';
         count++;
       }
@@ -408,7 +428,7 @@ export class ExecutionSimulator {
       if (
         order.ocoGroupId === ocoGroupId &&
         order.orderId !== exceptOrderId &&
-        order.status === 'PENDING'
+        (order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED')
       ) {
         order.status = 'CANCELLED';
         count++;
@@ -420,7 +440,7 @@ export class ExecutionSimulator {
   cancelAllOrders(): number {
     let count = 0;
     for (const order of this.orders.values()) {
-      if (order.status === 'PENDING') {
+      if (order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED') {
         order.status = 'CANCELLED';
         count++;
       }
@@ -457,7 +477,7 @@ export class ExecutionSimulator {
 
   getTradeOrders(tradeId: string): IOrder[] {
     return Array.from(this.orders.values()).filter(
-      (o) => o.tradeId === tradeId && o.status === 'PENDING',
+      (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED'),
     );
   }
 
