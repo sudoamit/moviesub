@@ -128,10 +128,10 @@ export class ProductionTradingPipeline {
   /**
    * Authoritative entrypoint called by the production system upon receipt of market event / candles.
    */
-  public processMarketEvent(
+  public async processMarketEvent(
     event: LiveMarketEvent,
     portfolioState: LivePortfolioAccountState
-  ): { championDecision: TradingDecision; pairPromise: Promise<ChampionChallengerDecisionPair> } {
+  ): Promise<{ championDecision: TradingDecision; pairPromise: Promise<ChampionChallengerDecisionPair> }> {
     if (!event || !event.candles || event.candles.length === 0) {
       throw new Error('INVALID_MARKET_EVENT: candles are required');
     }
@@ -226,6 +226,12 @@ export class ProductionTradingPipeline {
       }
       throw new Error(`CONCURRENT_EXECUTION_LOCK_ACQUIRED: Snapshot ${marketSnapshot.snapshotId} is already executing in another worker`);
     }
+
+    this.config.store.updateReservationStatus(
+      marketSnapshot.snapshotId,
+      this.config.championModel.modelId,
+      'EXECUTING'
+    );
 
     // 7. Base strategy & feature signal generation
     const champSignal = SignalGenerator.generateSignal({
@@ -339,94 +345,119 @@ export class ProductionTradingPipeline {
 
     let champConfidence = champSignal.score / 100;
 
-    if (this.config.championModelEvaluator) {
-      const pred = this.config.championModelEvaluator(tradeFeatures, champSignal);
-      if (pred && !(pred instanceof Promise)) {
-        if (pred.action) champAction = pred.action;
-        if (typeof pred.confidence === 'number') champConfidence = pred.confidence;
+    let championDecision: TradingDecision;
+
+    try {
+      if (this.config.championModelEvaluator) {
+        const pred = await Promise.resolve(this.config.championModelEvaluator(tradeFeatures, champSignal));
+        if (pred) {
+          if (pred.action) champAction = pred.action;
+          if (typeof pred.confidence === 'number') champConfidence = pred.confidence;
+        }
       }
-    }
-    const mChampEnd = performance.now();
-    const champModelLatencyMs = Math.max(0.01, Number((mChampEnd - mChampStart).toFixed(3)));
+      const mChampEnd = performance.now();
+      const champModelLatencyMs = Math.max(0.01, Number((mChampEnd - mChampStart).toFixed(3)));
 
-    let champPositionSize = 0;
-    let champRiskAmount = 0;
+      let champPositionSize = 0;
+      let champRiskAmount = 0;
 
-    if (champAction === 'BUY' || champAction === 'SELL') {
-      const sizing = PositionSizer.calculatePosition({
-        accountBalance: portfolioSnapshot.equity,
-        riskPercentage: this.config.riskConfig?.riskPercentage ?? 1.0,
-        entryPrice: champSignal.entryZone?.optimal ?? lastCandle.close,
-        stopLoss: champSignal.stopLoss,
-        lotSize: this.config.riskConfig?.lotSize ?? 1,
-        maxRiskPercentage: this.config.riskConfig?.maxRiskPercentage ?? 2.5,
-        maxLeverage: this.config.riskConfig?.maxLeverage ?? 10,
+      if (champAction === 'BUY' || champAction === 'SELL') {
+        const sizing = PositionSizer.calculatePosition({
+          accountBalance: portfolioSnapshot.equity,
+          riskPercentage: this.config.riskConfig?.riskPercentage ?? 1.0,
+          entryPrice: champSignal.entryZone?.optimal ?? lastCandle.close,
+          stopLoss: champSignal.stopLoss,
+          lotSize: this.config.riskConfig?.lotSize ?? 1,
+          maxRiskPercentage: this.config.riskConfig?.maxRiskPercentage ?? 2.5,
+          maxLeverage: this.config.riskConfig?.maxLeverage ?? 10,
+        });
+
+        if (sizing.isValid) {
+          champPositionSize = sizing.roundedUnits;
+          champRiskAmount = sizing.riskAmount;
+        }
+      }
+
+      const champReason = (champSignal.reasons || [champSignal.reasoning?.summary || 'SMC signal']).join('; ');
+      const champEntry = champSignal.entryZone?.optimal ?? lastCandle.close;
+      const champStop = champSignal.stopLoss;
+      const champTP = champSignal.takeProfits?.tp1 ?? 0;
+
+      const champFingerprint = computeDecisionFingerprint({
+        modelIdentity: this.config.championModel,
+        snapshotId: marketSnapshot.snapshotId,
+        snapshotHash: marketSnapshot.snapshotHash,
+        portfolioStateHash: portfolioSnapshot.portfolioStateHash,
+        featureVersion,
+        featureSchemaHash,
+        featureInputHash,
+        featureDataCutoff: marketSnapshot.timestamp,
+        strategyConfigHash,
+        executionConfigHash,
+        riskConfigHash,
+        costConfigHash,
+        action: champAction,
+        signal: champSignal.state,
+        entryPrice: champEntry,
+        stopLoss: champStop,
+        takeProfit: champTP,
+        positionSize: champPositionSize,
+        riskAmount: champRiskAmount,
       });
 
-      if (sizing.isValid) {
-        champPositionSize = sizing.roundedUnits;
-        champRiskAmount = sizing.riskAmount;
+      championDecision = deepFreeze({
+        decisionId: champContext.decisionId,
+        action: champAction,
+        confidence: champConfidence,
+        signal: champSignal.state,
+        entryPrice: champEntry,
+        stopLoss: champStop,
+        takeProfit: champTP,
+        positionSize: champPositionSize,
+        riskAmount: champRiskAmount,
+        reason: champReason,
+        decisionFingerprint: champFingerprint,
+        latencies: {
+          marketTimestamp: marketSnapshot.timestamp,
+          featureStartTimestamp: decisionTimestamp,
+          featureEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+          modelStartTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+          modelEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs + champModelLatencyMs),
+          decisionTimestamp,
+          dataToDecisionLatencyMs: Math.max(1, Math.round(performance.now() - tStart)),
+          featureLatencyMs,
+          modelLatencyMs: champModelLatencyMs,
+          totalDecisionLatencyMs: Math.max(1, Math.round(featureLatencyMs + champModelLatencyMs)),
+        },
+        context: champContext,
+      });
+
+      // 13. Champion Live Execution (if action is BUY/SELL and live port configured)
+      if (this.config.liveExecutionPort && (champAction === 'BUY' || champAction === 'SELL')) {
+        assertLiveExecution(champContext, this.config.liveExecutionPort);
+        this.config.store.updateReservationStatus(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId,
+          'LIVE_SUBMITTED'
+        );
+        await Promise.resolve(this.config.liveExecutionPort.submitLiveOrder(championDecision));
+        this.config.store.commitExecution(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId
+        );
+      } else {
+        this.config.store.commitExecution(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId
+        );
       }
-    }
-
-    const champReason = (champSignal.reasons || [champSignal.reasoning?.summary || 'SMC signal']).join('; ');
-    const champEntry = champSignal.entryZone?.optimal ?? lastCandle.close;
-    const champStop = champSignal.stopLoss;
-    const champTP = champSignal.takeProfits?.tp1 ?? 0;
-
-    const champFingerprint = computeDecisionFingerprint({
-      modelIdentity: this.config.championModel,
-      snapshotId: marketSnapshot.snapshotId,
-      snapshotHash: marketSnapshot.snapshotHash,
-      portfolioStateHash: portfolioSnapshot.portfolioStateHash,
-      featureVersion,
-      featureSchemaHash,
-      featureInputHash,
-      featureDataCutoff: marketSnapshot.timestamp,
-      strategyConfigHash,
-      executionConfigHash,
-      riskConfigHash,
-      costConfigHash,
-      action: champAction,
-      signal: champSignal.state,
-      entryPrice: champEntry,
-      stopLoss: champStop,
-      takeProfit: champTP,
-      positionSize: champPositionSize,
-      riskAmount: champRiskAmount,
-    });
-
-    const championDecision: TradingDecision = deepFreeze({
-      decisionId: champContext.decisionId,
-      action: champAction,
-      confidence: champConfidence,
-      signal: champSignal.state,
-      entryPrice: champEntry,
-      stopLoss: champStop,
-      takeProfit: champTP,
-      positionSize: champPositionSize,
-      riskAmount: champRiskAmount,
-      reason: champReason,
-      decisionFingerprint: champFingerprint,
-      latencies: {
-        marketTimestamp: marketSnapshot.timestamp,
-        featureStartTimestamp: decisionTimestamp,
-        featureEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
-        modelStartTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
-        modelEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs + champModelLatencyMs),
-        decisionTimestamp,
-        dataToDecisionLatencyMs: Math.max(1, Math.round(performance.now() - tStart)),
-        featureLatencyMs,
-        modelLatencyMs: champModelLatencyMs,
-        totalDecisionLatencyMs: Math.max(1, Math.round(featureLatencyMs + champModelLatencyMs)),
-      },
-      context: champContext,
-    });
-
-    // 13. Champion Live Execution (if action is BUY/SELL and live port configured)
-    if (this.config.liveExecutionPort && (champAction === 'BUY' || champAction === 'SELL')) {
-      assertLiveExecution(champContext, this.config.liveExecutionPort);
-      this.config.liveExecutionPort.submitLiveOrder(championDecision);
+    } catch (err) {
+      this.config.store.releaseExecution(
+        marketSnapshot.snapshotId,
+        this.config.championModel.modelId,
+        'FAILED_RETRYABLE'
+      );
+      throw err;
     }
 
     // 14. ASYNC ISOLATED PATH: Challenger Evaluation (runs in background with Shadow port only)

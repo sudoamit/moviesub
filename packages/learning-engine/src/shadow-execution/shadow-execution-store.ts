@@ -11,6 +11,21 @@ import {
 } from './types';
 import { deepFreeze } from '../champion-challenger/evaluation-identity';
 
+export type ExecutionReservationStatus =
+  | 'RESERVED'
+  | 'EXECUTING'
+  | 'LIVE_SUBMITTED'
+  | 'COMMITTED'
+  | 'FAILED_RETRYABLE';
+
+export interface ExecutionReservation {
+  readonly snapshotId: string;
+  readonly modelId: string;
+  readonly status: ExecutionReservationStatus;
+  readonly reservedAt: number;
+  readonly lastUpdatedAt: number;
+}
+
 export interface IShadowExecutionStore {
   saveSnapshot(snapshot: MarketSnapshot): void;
   getSnapshot(snapshotId: string): MarketSnapshot | undefined;
@@ -30,7 +45,10 @@ export interface IShadowExecutionStore {
   getShadowOutcome(outcomeId: string): ShadowOutcome | undefined;
   getAllOutcomes(): ShadowOutcome[];
   reserveExecution(snapshotId: string, modelId: string): boolean;
-  releaseExecution(snapshotId: string, modelId: string): void;
+  updateReservationStatus(snapshotId: string, modelId: string, status: ExecutionReservationStatus): void;
+  getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined;
+  commitExecution(snapshotId: string, modelId: string): void;
+  releaseExecution(snapshotId: string, modelId: string, status?: ExecutionReservationStatus): void;
   clear(): void;
   executeTransaction<T>(operation: () => T): T;
 }
@@ -47,7 +65,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   private readonly orders = new Map<string, ShadowOrder>();
   private readonly positions = new Map<string, ShadowPosition>();
   private readonly outcomes = new Map<string, ShadowOutcome>();
-  private readonly activeReservations = new Set<string>();
+  private readonly reservations = new Map<string, ExecutionReservation>();
   private inTransaction = false;
 
   public saveSnapshot(snapshot: MarketSnapshot): void {
@@ -159,19 +177,65 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   public reserveExecution(snapshotId: string, modelId: string): boolean {
     if (!snapshotId || !modelId) return false;
     const compositeKey = `${snapshotId}:${modelId}`;
-    if (this.activeReservations.has(compositeKey)) {
+    const existing = this.reservations.get(compositeKey);
+    if (existing && existing.status !== 'FAILED_RETRYABLE') {
       return false;
     }
     if (this.snapshotModelToPairId.has(compositeKey) || this.snapshotToPairId.has(snapshotId)) {
       return false;
     }
-    this.activeReservations.add(compositeKey);
+    const res: ExecutionReservation = {
+      snapshotId,
+      modelId,
+      status: 'RESERVED',
+      reservedAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+    };
+    this.reservations.set(compositeKey, res);
     return true;
   }
 
-  public releaseExecution(snapshotId: string, modelId: string): void {
+  public updateReservationStatus(snapshotId: string, modelId: string, status: ExecutionReservationStatus): void {
     const compositeKey = `${snapshotId}:${modelId}`;
-    this.activeReservations.delete(compositeKey);
+    const existing = this.reservations.get(compositeKey);
+    if (existing) {
+      this.reservations.set(compositeKey, {
+        ...existing,
+        status,
+        lastUpdatedAt: Date.now(),
+      });
+    }
+  }
+
+  public getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined {
+    return this.reservations.get(`${snapshotId}:${modelId}`);
+  }
+
+  public commitExecution(snapshotId: string, modelId: string): void {
+    const compositeKey = `${snapshotId}:${modelId}`;
+    const existing = this.reservations.get(compositeKey);
+    if (existing) {
+      this.reservations.set(compositeKey, {
+        ...existing,
+        status: 'COMMITTED',
+        lastUpdatedAt: Date.now(),
+      });
+    }
+  }
+
+  public releaseExecution(snapshotId: string, modelId: string, status?: ExecutionReservationStatus): void {
+    const compositeKey = `${snapshotId}:${modelId}`;
+    if (status) {
+      const existing = this.reservations.get(compositeKey);
+      if (existing) {
+        this.reservations.set(compositeKey, {
+          ...existing,
+          status,
+          lastUpdatedAt: Date.now(),
+        });
+      }
+    }
+    this.reservations.delete(compositeKey);
   }
 
   public clear(): void {
@@ -183,7 +247,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     this.orders.clear();
     this.positions.clear();
     this.outcomes.clear();
-    this.activeReservations.clear();
+    this.reservations.clear();
   }
 
   public executeTransaction<T>(operation: () => T): T {
@@ -198,6 +262,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     const snapOrders = new Map(this.orders);
     const snapPositions = new Map(this.positions);
     const snapOutcomes = new Map(this.outcomes);
+    const snapReservations = new Map(this.reservations);
 
     try {
       return operation();
@@ -216,6 +281,8 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
       for (const [k, v] of snapPositions) this.positions.set(k, v);
       this.outcomes.clear();
       for (const [k, v] of snapOutcomes) this.outcomes.set(k, v);
+      this.reservations.clear();
+      for (const [k, v] of snapReservations) this.reservations.set(k, v);
       throw err;
     } finally {
       this.inTransaction = false;
@@ -257,6 +324,7 @@ interface PersistedShadowData {
 /**
  * File-based Shadow Execution Store
  * Atomically persists shadow decisions, pairs, orders, and outcomes.
+ * Provides durable cross-process file-level locking.
  */
 export class FileShadowExecutionStore implements IShadowExecutionStore {
   private readonly memoryStore = new InMemoryShadowExecutionStore();
@@ -276,6 +344,11 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
 
   public getPersistencePath(): string {
     return this.filePath;
+  }
+
+  private getLockFilePath(snapshotId: string, modelId: string): string {
+    const dir = path.dirname(this.filePath);
+    return path.join(dir, `.lock.${snapshotId}.${modelId}`);
   }
 
   private saveToFile(): void {
@@ -422,11 +495,93 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   }
 
   public reserveExecution(snapshotId: string, modelId: string): boolean {
-    return this.memoryStore.reserveExecution(snapshotId, modelId);
+    if (!snapshotId || !modelId) return false;
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+
+    // If pair already exists in persistent store, reject new execution
+    if (this.getDecisionPairBySnapshotAndModel(snapshotId, modelId) || this.getDecisionPairBySnapshot(snapshotId)) {
+      return false;
+    }
+
+    const dir = path.dirname(this.filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    try {
+      const reservationData: ExecutionReservation = {
+        snapshotId,
+        modelId,
+        status: 'RESERVED',
+        reservedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+      };
+      fs.writeFileSync(lockFile, JSON.stringify(reservationData), { flag: 'wx' });
+      this.memoryStore.reserveExecution(snapshotId, modelId);
+      return true;
+    } catch (err: any) {
+      if (err.code === 'EEXIST') {
+        try {
+          const content = fs.readFileSync(lockFile, 'utf-8');
+          const existing = JSON.parse(content) as ExecutionReservation;
+          // Stale lock recovery (60s)
+          if (Date.now() - existing.lastUpdatedAt > 60000) {
+            fs.unlinkSync(lockFile);
+            return this.reserveExecution(snapshotId, modelId);
+          }
+        } catch {}
+        return false;
+      }
+      throw err;
+    }
   }
 
-  public releaseExecution(snapshotId: string, modelId: string): void {
-    this.memoryStore.releaseExecution(snapshotId, modelId);
+  public updateReservationStatus(snapshotId: string, modelId: string, status: ExecutionReservationStatus): void {
+    this.memoryStore.updateReservationStatus(snapshotId, modelId, status);
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    if (fs.existsSync(lockFile)) {
+      try {
+        const data: ExecutionReservation = {
+          snapshotId,
+          modelId,
+          status,
+          reservedAt: Date.now(),
+          lastUpdatedAt: Date.now(),
+        };
+        fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
+      } catch {}
+    }
+  }
+
+  public getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined {
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    if (fs.existsSync(lockFile)) {
+      try {
+        const content = fs.readFileSync(lockFile, 'utf-8');
+        return JSON.parse(content) as ExecutionReservation;
+      } catch {}
+    }
+    return this.memoryStore.getReservation(snapshotId, modelId);
+  }
+
+  public commitExecution(snapshotId: string, modelId: string): void {
+    this.memoryStore.commitExecution(snapshotId, modelId);
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    if (fs.existsSync(lockFile)) {
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {}
+    }
+  }
+
+  public releaseExecution(snapshotId: string, modelId: string, status?: ExecutionReservationStatus): void {
+    this.memoryStore.releaseExecution(snapshotId, modelId, status);
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    if (fs.existsSync(lockFile)) {
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {}
+    }
   }
 
   public clear(): void {
