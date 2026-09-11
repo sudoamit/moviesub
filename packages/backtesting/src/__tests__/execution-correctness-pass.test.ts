@@ -2831,8 +2831,8 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(order.lastFilledAt).toBe(t2);
     expect(order.completedAt).toBeUndefined();
 
-    // Set remaining 25 to fill completely on next bar
-    (execSim as any).partialFillRatio = 1.0;
+    // Set remaining 25 to fill completely on next bar via public API
+    execSim.setPartialFillRatio(1.0);
     const t3 = t0 + 180000;
     const c3: ICandle = { timestamp: new Date(t3), open: 102, high: 107, low: 101, close: 105, volume: 100 };
     execSim.processCandle(c3);
@@ -2841,6 +2841,162 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(order.firstFilledAt).toBe(t1);
     expect(order.lastFilledAt).toBe(t3);
     expect(order.completedAt).toBe(t3);
+  });
+
+  // 61. Public Execution Model Configuration API & Bounds Validation
+  test('61. ExecutionSimulator updateExecutionModel and setPartialFillRatio enforce strict bounds validation', () => {
+    const execSim = new ExecutionSimulator();
+
+    // Default is undefined (full fills)
+    expect(execSim.getPartialFillRatio()).toBeUndefined();
+
+    // Set valid partial fill ratio
+    execSim.setPartialFillRatio(0.75);
+    expect(execSim.getPartialFillRatio()).toBe(0.75);
+
+    // Invalid bounds check
+    expect(() => execSim.setPartialFillRatio(0)).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.setPartialFillRatio(-0.5)).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.setPartialFillRatio(1.5)).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.setPartialFillRatio(NaN)).toThrow('INVALID_PARTIAL_FILL_RATIO');
+    expect(() => execSim.setPartialFillRatio(Infinity)).toThrow('INVALID_PARTIAL_FILL_RATIO');
+
+    // Update entire execution model cleanly
+    execSim.updateExecutionModel({
+      fillModel: FillModel.OHLC_PATH,
+      partialFillRatio: 0.25,
+      spreadConfig: { baseSpreadBps: 0.5, illiquidMultiplier: 1.0 },
+    });
+    expect(execSim.getPartialFillRatio()).toBe(0.25);
+  });
+
+  // 62. Strict Finite & Non-Negative Validation on Fill Parameters (P1)
+  test('62. ExecutionSimulator rejects NaN, Infinity, zero, and negative values on fill quantity, price, fee, and slippage', () => {
+    const execSim = new ExecutionSimulator();
+    const timestamp = 1700000000000;
+    const order = execSim.submitOrder({
+      tradeId: 't_finite_val',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10.0,
+      timestamp,
+    });
+    const candle: ICandle = { timestamp: new Date(timestamp + 60000), open: 100, high: 105, low: 99, close: 102, volume: 100 };
+
+    // 1. Zero quantity
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_zero',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: 0,
+        fee: 0,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_QUANTITY');
+
+    // 2. Negative quantity
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_neg_qty',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: -5.0,
+        fee: 0,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_QUANTITY');
+
+    // 3. NaN quantity
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_nan_qty',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: NaN,
+        fee: 0,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_QUANTITY');
+
+    // 4. Invalid price (NaN / <= 0)
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_nan_price',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 0,
+        quantity: 5.0,
+        fee: 0,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_PRICE');
+
+    // 5. Invalid negative fee
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_neg_fee',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: 5.0,
+        fee: -10,
+        slippage: 0,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_FEE');
+
+    // 6. Invalid negative slippage
+    jest.spyOn(FillModelEngine, 'evaluateSegmentFill').mockReturnValueOnce({
+      isFilled: true,
+      fill: {
+        fillId: 'f_neg_slip',
+        orderId: order.orderId,
+        tradeId: order.tradeId,
+        symbol: order.symbol,
+        side: order.side,
+        price: 100.0,
+        quantity: 5.0,
+        fee: 0,
+        slippage: -1,
+        timestamp: timestamp + 60000,
+        isPartial: false,
+      },
+    });
+    expect(() => execSim.processCandle(candle)).toThrow('INVALID_FILL_SLIPPAGE');
   });
 });
 

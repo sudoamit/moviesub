@@ -40,7 +40,46 @@ export class ExecutionSimulator {
     this.feeConfig = feeConfig;
     this.spreadConfig = spreadConfig;
     this.costStressConfig = costStressConfig;
-    this.partialFillRatio = partialFillRatio;
+    if (partialFillRatio !== undefined) {
+      this.setPartialFillRatio(partialFillRatio);
+    }
+  }
+
+  setPartialFillRatio(ratio?: number): void {
+    if (ratio !== undefined) {
+      if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
+        throw new Error(
+          `INVALID_PARTIAL_FILL_RATIO: partialFillRatio must be a finite number between 0 and 1, got ${ratio}`,
+        );
+      }
+    }
+    this.partialFillRatio = ratio;
+  }
+
+  getPartialFillRatio(): number | undefined {
+    return this.partialFillRatio;
+  }
+
+  updateExecutionModel(config: {
+    fillModel?: FillModel;
+    ambiguityMode?: SameCandleAmbiguityMode;
+    latencyConfig?: ILatencyConfig;
+    slippageConfig?: ISlippageConfig;
+    feeConfig?: IFeeConfig;
+    spreadConfig?: ISpreadConfig;
+    costStressConfig?: ExecutionCostStressConfig;
+    partialFillRatio?: number;
+  }): void {
+    if (config.fillModel !== undefined) this.fillModel = config.fillModel;
+    if (config.ambiguityMode !== undefined) this.ambiguityMode = config.ambiguityMode;
+    if (config.latencyConfig !== undefined) this.latencyConfig = config.latencyConfig;
+    if (config.slippageConfig !== undefined) this.slippageConfig = config.slippageConfig;
+    if (config.feeConfig !== undefined) this.feeConfig = config.feeConfig;
+    if (config.spreadConfig !== undefined) this.spreadConfig = config.spreadConfig;
+    if (config.costStressConfig !== undefined) this.costStressConfig = config.costStressConfig;
+    if (config.partialFillRatio !== undefined) {
+      this.setPartialFillRatio(config.partialFillRatio);
+    }
   }
 
   submitOrder(params: {
@@ -249,9 +288,33 @@ export class ExecutionSimulator {
 
           filledThisBar.add(order.orderId);
 
-          // P0: Explicit protection against fill overshoot / overfill
+          // 1. Strict finite & positive quantity validation
+          if (!Number.isFinite(fill.quantity) || fill.quantity <= 0) {
+            throw new Error(
+              `INVALID_FILL_QUANTITY: Fill quantity must be a positive finite number, got ${fill.quantity}`,
+            );
+          }
+
+          // 2. Strict finite & non-negative price, fee, slippage validation
+          if (!Number.isFinite(fill.price) || fill.price <= 0) {
+            throw new Error(
+              `INVALID_FILL_PRICE: Fill price must be a positive finite number, got ${fill.price}`,
+            );
+          }
+          if (!Number.isFinite(fill.fee) || fill.fee < 0) {
+            throw new Error(
+              `INVALID_FILL_FEE: Fill fee must be a non-negative finite number, got ${fill.fee}`,
+            );
+          }
+          if (!Number.isFinite(fill.slippage) || fill.slippage < 0) {
+            throw new Error(
+              `INVALID_FILL_SLIPPAGE: Fill slippage must be a non-negative finite number, got ${fill.slippage}`,
+            );
+          }
+
+          // 3. P0: Explicit protection against fill overshoot / overfill
           const remainingBefore = order.remainingQuantity;
-          if (fill.quantity <= 0 || fill.quantity > remainingBefore + 1e-6) {
+          if (fill.quantity > remainingBefore + 1e-6) {
             throw new Error(
               `FILL_EXCEEDS_REMAINING_QUANTITY: Fill quantity (${fill.quantity}) exceeds order remaining quantity (${remainingBefore})`,
             );
