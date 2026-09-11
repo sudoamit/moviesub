@@ -166,53 +166,56 @@ export class ModelRegistryService {
     if (!slotId || typeof slotId !== 'string' || slotId.trim() === '') {
       throw new Error('INVALID_SLOT_ID: slotId is required');
     }
-    const model = this.store.getModel(modelId);
-    if (!model) {
-      throw new Error(`MODEL_NOT_FOUND: Cannot assign non-existent model "${modelId}" as Champion`);
-    }
 
-    // Update model status to CHAMPION if not already
-    if (model.status !== 'CHAMPION') {
-      this.updateModelStatus(modelId, 'CHAMPION');
-    }
-
-    // 1. If previous Champion was assigned to this slot, retire previous champion model
-    const previousChampion = this.store.getChampion(slotId);
-    if (previousChampion && previousChampion.modelId !== modelId) {
-      const prevModel = this.store.getModel(previousChampion.modelId);
-      if (prevModel && prevModel.status === 'CHAMPION') {
-        this.updateModelStatus(prevModel.modelId, 'RETIRED');
+    return this.store.executeTransaction(() => {
+      const model = this.store.getModel(modelId);
+      if (!model) {
+        throw new Error(`MODEL_NOT_FOUND: Cannot assign non-existent model "${modelId}" as Champion`);
       }
-    }
 
-    // 2. If this model had an active Challenger record in this slot, retire it
-    const existingChallengers = this.store.getChallengers(slotId);
-    const existingChallenger = existingChallengers.find((c) => c.modelId === modelId);
-    if (existingChallenger && existingChallenger.status === 'ACTIVE_CHALLENGER') {
-      const retiredChallenger: ChallengerRecord = {
-        ...existingChallenger,
-        status: 'RETIRED',
-        statusReason: options?.reason || 'PROMOTED_TO_CHAMPION',
+      // Update model status to CHAMPION if not already
+      if (model.status !== 'CHAMPION') {
+        this.updateModelStatus(modelId, 'CHAMPION');
+      }
+
+      // 1. If previous Champion was assigned to this slot, retire previous champion model
+      const previousChampion = this.store.getChampion(slotId);
+      if (previousChampion && previousChampion.modelId !== modelId) {
+        const prevModel = this.store.getModel(previousChampion.modelId);
+        if (prevModel && prevModel.status === 'CHAMPION') {
+          this.updateModelStatus(prevModel.modelId, 'RETIRED');
+        }
+      }
+
+      // 2. If this model had an active Challenger record in this slot, retire it
+      const existingChallengers = this.store.getChallengers(slotId);
+      const existingChallenger = existingChallengers.find((c) => c.modelId === modelId);
+      if (existingChallenger && existingChallenger.status === 'ACTIVE_CHALLENGER') {
+        const retiredChallenger: ChallengerRecord = {
+          ...existingChallenger,
+          status: 'RETIRED',
+          statusReason: options?.reason || 'PROMOTED_TO_CHAMPION',
+        };
+        this.store.saveChallenger(deepFreeze(retiredChallenger));
+      }
+
+      this.registryVersion++;
+      const championRecord: ChampionRecord = {
+        slotId,
+        modelId: model.modelId,
+        modelVersion: model.modelVersion,
+        artifactHash: model.artifactHash,
+        assignedAt: Date.now(),
+        registryVersion: this.registryVersion,
+        assignmentReason: options?.reason,
+        promotionDecisionId: options?.promotionDecisionId,
+        evaluationId: options?.evaluationId,
       };
-      this.store.saveChallenger(deepFreeze(retiredChallenger));
-    }
 
-    this.registryVersion++;
-    const championRecord: ChampionRecord = {
-      slotId,
-      modelId: model.modelId,
-      modelVersion: model.modelVersion,
-      artifactHash: model.artifactHash,
-      assignedAt: Date.now(),
-      registryVersion: this.registryVersion,
-      assignmentReason: options?.reason,
-      promotionDecisionId: options?.promotionDecisionId,
-      evaluationId: options?.evaluationId,
-    };
-
-    const frozen = deepFreeze(championRecord);
-    this.store.saveChampion(frozen);
-    return frozen;
+      const frozen = deepFreeze(championRecord);
+      this.store.saveChampion(frozen);
+      return frozen;
+    });
   }
 
   /**

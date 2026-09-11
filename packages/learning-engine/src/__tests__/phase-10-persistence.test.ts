@@ -5,7 +5,7 @@ import {
   ModelRegistryService
 } from '../champion-challenger/index';
 
-describe('Phase 10 — Model Registry Persistence (FileModelRegistryStore)', () => {
+describe('Phase 10 — Model Registry Persistence & Atomicity (FileModelRegistryStore)', () => {
   const testDir = path.join(__dirname, 'temp_phase10_registry_test');
   const testFile = path.join(testDir, 'model-registry.json');
 
@@ -67,6 +67,44 @@ describe('Phase 10 — Model Registry Persistence (FileModelRegistryStore)', () 
     expect(service2.getActiveChampion(slotId)?.modelId).toBe('m-persist-1');
     expect(service2.getChallengers(slotId).length).toBe(1);
     expect(service2.getChallengers(slotId)[0].modelId).toBe('m-persist-2');
+  });
+
+  it('guarantees atomic Champion replacement rollback on error at the registry-store boundary', () => {
+    const store = new FileModelRegistryStore(testFile);
+    const service = new ModelRegistryService(store);
+    const slotId = 'slot-atomic-test';
+
+    // 1. Initial champion
+    const modelA = service.registerModel({
+      modelId: 'model-atomic-a',
+      modelVersion: '1.0.0',
+      modelType: 'xgboost',
+      artifactLocation: '/models/a.bin',
+      artifactData: 'weights-a',
+      trainingRunId: 'run-a',
+      datasetVersion: 'ds-1',
+      featureVersion: 'feat-1',
+      labelVersion: 'lbl-1'
+    });
+    service.assignChampion(slotId, modelA.modelId, { reason: 'INITIAL_CHAMPION' });
+
+    // Verify initial champion in store and on disk
+    expect(service.getActiveChampion(slotId)?.modelId).toBe('model-atomic-a');
+    expect(service.getModel('model-atomic-a')?.status).toBe('CHAMPION');
+
+    // 2. Attempt assigning non-existent model (must fail closed atomically)
+    expect(() => {
+      service.assignChampion(slotId, 'non-existent-model-id');
+    }).toThrow(/MODEL_NOT_FOUND/);
+
+    // Verify Model A is still active champion in memory
+    expect(service.getActiveChampion(slotId)?.modelId).toBe('model-atomic-a');
+    expect(service.getModel('model-atomic-a')?.status).toBe('CHAMPION');
+
+    // Verify on disk by reloading store
+    const reloadedStore = new FileModelRegistryStore(testFile);
+    expect(reloadedStore.getChampion(slotId)?.modelId).toBe('model-atomic-a');
+    expect(reloadedStore.getModel('model-atomic-a')?.status).toBe('CHAMPION');
   });
 
   it('fails closed when persisted file is corrupt or invalid schema', () => {

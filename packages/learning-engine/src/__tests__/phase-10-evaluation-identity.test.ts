@@ -100,6 +100,23 @@ describe('Phase 10 — Evaluation Identity, Deterministic Fingerprint & Bundle I
     expect(fp1).toBe(fp2);
   });
 
+  it('changes fingerprint when artifactHash changes (model artifact sensitivity)', () => {
+    const idA = createEvaluationIdentity({
+      ...baseEnvParams,
+      artifactHash: 'HASH_MODEL_A'
+    });
+
+    const idB = createEvaluationIdentity({
+      ...baseEnvParams,
+      artifactHash: 'HASH_MODEL_B'
+    });
+
+    const fpA = computeEvaluationFingerprint(idA);
+    const fpB = computeEvaluationFingerprint(idB);
+
+    expect(fpA).not.toBe(fpB);
+  });
+
   it('changes fingerprint when any evaluation parameter changes', () => {
     const baseFp = computeEvaluationFingerprint(createEvaluationIdentity(baseEnvParams));
 
@@ -123,6 +140,41 @@ describe('Phase 10 — Evaluation Identity, Deterministic Fingerprint & Bundle I
       randomSeed: 999
     }));
     expect(fpSeed).not.toBe(baseFp);
+  });
+
+  it('alters resultHash and bundleHash whenever any evaluation metric changes (mutation sensitivity)', () => {
+    const identity = createEvaluationIdentity(baseEnvParams);
+
+    const originalBundle = createEvaluationBundle({
+      evaluationIdentity: identity,
+      metrics: baseMetrics,
+      tradeStatistics: baseTradeStats,
+      riskStatistics: baseRiskStats,
+      costStatistics: baseCostStats
+    });
+
+    // Mutate netPnL by 1 unit: 15000 -> 15001
+    const modifiedMetrics: EvaluationMetrics = {
+      ...baseMetrics,
+      netPnL: 15001
+    };
+
+    const modifiedBundle = createEvaluationBundle({
+      evaluationIdentity: identity,
+      metrics: modifiedMetrics,
+      tradeStatistics: baseTradeStats,
+      riskStatistics: baseRiskStats,
+      costStatistics: baseCostStats
+    });
+
+    // Fingerprint should be identical (same identity)
+    expect(originalBundle.evaluationFingerprint).toBe(modifiedBundle.evaluationFingerprint);
+
+    // Result hash must differ
+    expect(originalBundle.resultHash).not.toBe(modifiedBundle.resultHash);
+
+    // Bundle hash must differ
+    expect(originalBundle.bundleHash).not.toBe(modifiedBundle.bundleHash);
   });
 
   it('computes resultHash and bundleHash for complete auditability', () => {
@@ -149,6 +201,23 @@ describe('Phase 10 — Evaluation Identity, Deterministic Fingerprint & Bundle I
 
     const expectedBundleHash = computeBundleHash(bundle.evaluationFingerprint, bundle.resultHash);
     expect(bundle.bundleHash).toBe(expectedBundleHash);
+  });
+
+  it('fails closed when required evaluation identity fields are missing or invalid', () => {
+    expect(() => {
+      createEvaluationIdentity({
+        ...baseEnvParams,
+        codeCommit: ''
+      });
+    }).toThrow(/INVALID_EVALUATION_IDENTITY: Missing or invalid required field 'codeCommit'/);
+
+    expect(() => {
+      createEvaluationIdentity({
+        ...baseEnvParams,
+        evaluationWindowStart: 2000,
+        evaluationWindowEnd: 1000 // Inverted window
+      });
+    }).toThrow(/INVALID_EVALUATION_IDENTITY: evaluationWindowStart must be strictly less than evaluationWindowEnd/);
   });
 
   it('deep-freezes evaluation identity and bundle against runtime mutation', () => {

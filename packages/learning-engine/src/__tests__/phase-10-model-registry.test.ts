@@ -124,36 +124,75 @@ describe('Phase 10 — Model Registry Service & Lifecycle Invariants', () => {
     });
   });
 
-  describe('Invariant: CHALLENGER_LIFECYCLE_CONSISTENCY', () => {
-    it('retires ChallengerRecord when the challenger is assigned as Champion', () => {
-      const slotId = 'slot-btcusdt';
-      const chall = registryService.registerModel({
-        modelId: 'chall-btc-1',
+  describe('Invariant: CHAMPION_AND_CHALLENGER_LIFECYCLE_COHERENCE', () => {
+    it('ensures no model is simultaneously Champion and Active Challenger, and exactly 1 Champion exists', () => {
+      const slotId = 'slot-ethusdt';
+
+      // 1. Register Model A and assign as active Champion
+      const modelA = registryService.registerModel({
+        modelId: 'model-a',
         modelVersion: '1.0.0',
-        modelType: 'lightgbm',
-        artifactLocation: '/models/btc.bin',
-        artifactData: 'btc-weights',
-        trainingRunId: 'run-btc-1',
+        modelType: 'catboost',
+        artifactLocation: '/models/a.bin',
+        artifactData: 'weights-a',
+        trainingRunId: 'run-a',
         datasetVersion: 'ds-1',
         featureVersion: 'feat-1',
         labelVersion: 'lbl-1'
       });
+      registryService.assignChampion(slotId, modelA.modelId, { reason: 'INITIAL_CHAMPION' });
 
-      const challengerRecord = registryService.registerChallenger(slotId, chall.modelId, 'run-btc-1');
-      expect(challengerRecord.status).toBe('ACTIVE_CHALLENGER');
+      // 2. Register Model B and register as active Challenger
+      const modelB = registryService.registerModel({
+        modelId: 'model-b',
+        modelVersion: '2.0.0',
+        modelType: 'catboost',
+        artifactLocation: '/models/b.bin',
+        artifactData: 'weights-b',
+        trainingRunId: 'run-b',
+        datasetVersion: 'ds-1',
+        featureVersion: 'feat-1',
+        labelVersion: 'lbl-1'
+      });
+      registryService.registerChallenger(slotId, modelB.modelId, 'run-b');
 
-      // Now assign this model as Champion
-      registryService.assignChampion(slotId, chall.modelId, {
-        reason: 'PROMOTED_VIA_EVALUATION',
-        promotionDecisionId: 'decision-101',
-        evaluationId: 'eval-101'
+      // Check pre-promotion state
+      expect(registryService.getActiveChampion(slotId)?.modelId).toBe(modelA.modelId);
+      expect(registryService.getModel(modelA.modelId)?.status).toBe('CHAMPION');
+      expect(registryService.getModel(modelB.modelId)?.status).toBe('CHALLENGER');
+      expect(registryService.getChallengers(slotId).find(c => c.modelId === modelB.modelId)?.status).toBe('ACTIVE_CHALLENGER');
+
+      // 3. Assign Model B as Champion (promotion/assignment)
+      registryService.assignChampion(slotId, modelB.modelId, {
+        reason: 'PROMOTED_FROM_CHALLENGER',
+        promotionDecisionId: 'decision-eth-01'
       });
 
-      expect(registryService.getModel(chall.modelId)?.status).toBe('CHAMPION');
-      const updatedChallengers = registryService.getChallengers(slotId);
-      const matchingChallenger = updatedChallengers.find(c => c.modelId === chall.modelId);
-      expect(matchingChallenger?.status).toBe('RETIRED');
-      expect(matchingChallenger?.statusReason).toBe('PROMOTED_VIA_EVALUATION');
+      // Assert post-promotion invariants:
+      // Invariant A: Model B is now the active Champion
+      expect(registryService.getActiveChampion(slotId)?.modelId).toBe(modelB.modelId);
+      expect(registryService.getModel(modelB.modelId)?.status).toBe('CHAMPION');
+
+      // Invariant B: Model B is no longer an ACTIVE_CHALLENGER (status is RETIRED)
+      const challengerB = registryService.getChallengers(slotId).find(c => c.modelId === modelB.modelId);
+      expect(challengerB?.status).toBe('RETIRED');
+      expect(challengerB?.statusReason).toBe('PROMOTED_FROM_CHALLENGER');
+
+      // Invariant C: Model A is no longer an active Champion (status is RETIRED)
+      expect(registryService.getModel(modelA.modelId)?.status).toBe('RETIRED');
+
+      // Invariant D: Exactly one Champion exists for the slot
+      const championsForSlot = registryService.listActiveChampions().filter(c => c.slotId === slotId);
+      expect(championsForSlot.length).toBe(1);
+      expect(championsForSlot[0].modelId).toBe(modelB.modelId);
+
+      // Invariant E: No model is simultaneously CHAMPION and ACTIVE_CHALLENGER
+      for (const champ of registryService.listActiveChampions()) {
+        const activeChallenger = registryService.getChallengers(champ.slotId).find(
+          c => c.modelId === champ.modelId && c.status === 'ACTIVE_CHALLENGER'
+        );
+        expect(activeChallenger).toBeUndefined();
+      }
     });
   });
 });

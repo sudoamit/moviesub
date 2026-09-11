@@ -17,6 +17,7 @@ export class InMemoryModelRegistryStore implements IModelRegistryStore {
   private readonly models = new Map<string, ModelRecord>();
   private readonly champions = new Map<string, ChampionRecord>(); // slotId -> ChampionRecord
   private readonly challengers = new Map<string, Map<string, ChallengerRecord>>(); // slotId -> modelId -> ChallengerRecord
+  private inTransaction = false;
 
   public saveModel(model: ModelRecord): void {
     if (!model || !model.modelId) {
@@ -73,10 +74,45 @@ export class InMemoryModelRegistryStore implements IModelRegistryStore {
     return all;
   }
 
+  public getAllChallengerSlots(): Array<[string, ChallengerRecord[]]> {
+    const result: Array<[string, ChallengerRecord[]]> = [];
+    for (const [slotId, slotMap] of this.challengers.entries()) {
+      result.push([slotId, Array.from(slotMap.values())]);
+    }
+    return result;
+  }
+
   public clear(): void {
     this.models.clear();
     this.champions.clear();
     this.challengers.clear();
+  }
+
+  public executeTransaction<T>(operation: () => T): T {
+    if (this.inTransaction) {
+      return operation();
+    }
+    this.inTransaction = true;
+    const snapshotModels = new Map(this.models);
+    const snapshotChampions = new Map(this.champions);
+    const snapshotChallengers = new Map<string, Map<string, ChallengerRecord>>();
+    for (const [slotId, slotMap] of this.challengers.entries()) {
+      snapshotChallengers.set(slotId, new Map(slotMap));
+    }
+
+    try {
+      return operation();
+    } catch (err) {
+      this.models.clear();
+      for (const [k, v] of snapshotModels) this.models.set(k, v);
+      this.champions.clear();
+      for (const [k, v] of snapshotChampions) this.champions.set(k, v);
+      this.challengers.clear();
+      for (const [k, v] of snapshotChallengers) this.challengers.set(k, v);
+      throw err;
+    } finally {
+      this.inTransaction = false;
+    }
   }
 }
 
@@ -95,6 +131,7 @@ interface PersistedRegistryData {
 export class FileModelRegistryStore implements IModelRegistryStore {
   private readonly memoryStore = new InMemoryModelRegistryStore();
   private readonly filePath: string;
+  private inTransaction = false;
   public static readonly SCHEMA_VERSION = '1.0';
 
   constructor(filePath: string) {
@@ -116,9 +153,9 @@ export class FileModelRegistryStore implements IModelRegistryStore {
       version: FileModelRegistryStore.SCHEMA_VERSION,
       models: this.memoryStore.getAllModels().map((m) => [m.modelId, m]),
       champions: this.memoryStore.getAllChampions().map((c) => [c.slotId, c]),
-      challengers: this.memoryStore.getAllChampions().map((c) => [
-        c.slotId,
-        this.memoryStore.getChallengers(c.slotId).map((ch) => [ch.modelId, ch]),
+      challengers: this.memoryStore.getAllChallengerSlots().map(([slotId, records]) => [
+        slotId,
+        records.map((ch) => [ch.modelId, ch]),
       ]),
       savedAt: Date.now(),
     };
@@ -181,7 +218,9 @@ export class FileModelRegistryStore implements IModelRegistryStore {
 
   public saveModel(model: ModelRecord): void {
     this.memoryStore.saveModel(model);
-    this.saveToFile();
+    if (!this.inTransaction) {
+      this.saveToFile();
+    }
   }
 
   public getModel(modelId: string): ModelRecord | undefined {
@@ -190,7 +229,9 @@ export class FileModelRegistryStore implements IModelRegistryStore {
 
   public saveChampion(champion: ChampionRecord): void {
     this.memoryStore.saveChampion(champion);
-    this.saveToFile();
+    if (!this.inTransaction) {
+      this.saveToFile();
+    }
   }
 
   public getChampion(slotId: string): ChampionRecord | undefined {
@@ -199,7 +240,9 @@ export class FileModelRegistryStore implements IModelRegistryStore {
 
   public saveChallenger(challenger: ChallengerRecord): void {
     this.memoryStore.saveChallenger(challenger);
-    this.saveToFile();
+    if (!this.inTransaction) {
+      this.saveToFile();
+    }
   }
 
   public getChallengers(slotId: string): ChallengerRecord[] {
@@ -220,6 +263,24 @@ export class FileModelRegistryStore implements IModelRegistryStore {
 
   public clear(): void {
     this.memoryStore.clear();
-    this.saveToFile();
+    if (!this.inTransaction) {
+      this.saveToFile();
+    }
+  }
+
+  public executeTransaction<T>(operation: () => T): T {
+    if (this.inTransaction) {
+      return operation();
+    }
+    this.inTransaction = true;
+    try {
+      const result = this.memoryStore.executeTransaction(operation);
+      this.saveToFile();
+      return result;
+    } catch (err) {
+      throw err;
+    } finally {
+      this.inTransaction = false;
+    }
   }
 }

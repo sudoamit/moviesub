@@ -193,4 +193,5 @@ export interface IModelRegistryStore {
   getAllChampions(): ChampionRecord[];
   getAllChallengers(): ChallengerRecord[];
   clear(): void;
+  executeTransaction<T>(operation: () => T): T;
 }
