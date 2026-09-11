@@ -641,4 +641,120 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     // Final cash and equity must reconcile with realized net PnL exactly
     expect(res.finalEquity).toBeCloseTo(res.initialCapital + res.netPnL, 2);
   });
+
+  // -------------------------------------------------------------------------
+  // Test 6: Strict Order State Monotonicity & Pre-Fill Protection Invariant Test
+  // -------------------------------------------------------------------------
+  test('T06: Strict Order State Monotonicity & Pre-Fill Protection Invariant Test (AI Fix 78)', () => {
+    // 1. Direct ExecutionSimulator unit test for gap-through-stop rejection
+    const execSim = new ExecutionSimulator(
+      FillModel.NEXT_BAR_MARKET,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'test_mono_1',
+    );
+
+    const entryOrder = execSim.submitOrder({
+      tradeId: 'trade_mono_1',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10,
+      timestamp: t0,
+      referencePrice: 100,
+      stopLoss: 95,
+      exitTarget: 'ENTRY',
+    });
+
+    expect(entryOrder.status).toBe('PENDING');
+
+    // Gap candle opening at 90 (below stopLoss of 95)
+    const gapCandle = createCandle(1, 90, 91, 89, 90);
+    const result = execSim.processSingleExecutionBar(gapCandle);
+
+    // Assert: Order status monotonically transitioned PENDING -> REJECTED (never FILLED)
+    expect(entryOrder.status).toBe('REJECTED');
+    expect(entryOrder.rejectionReason).toContain('REJECTED_GAP_THROUGH_STOP');
+    expect(result.fills.length).toBe(0);
+    expect(result.events.length).toBe(1);
+    expect(result.events[0].eventType).toBe('ORDER_REJECTED');
+    expect(entryOrder.filledQuantity).toBe(0);
+
+    // 2. Direct ExecutionSimulator unit test for excessive risk drift rejection
+    const execSimDrift = new ExecutionSimulator(
+      FillModel.NEXT_BAR_MARKET,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'test_drift_1',
+    );
+
+    const driftOrder = execSimDrift.submitOrder({
+      tradeId: 'trade_drift_1',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10,
+      timestamp: t0,
+      referencePrice: 100,
+      stopLoss: 90, // initial risk = 10
+      maxRiskDrift: 0.25, // max drift = 2.5
+      exitTarget: 'ENTRY',
+    });
+
+    // Gap candle opening at 105 (drift = 5 > 2.5)
+    const driftCandle = createCandle(1, 105, 106, 104, 105);
+    const driftResult = execSimDrift.processSingleExecutionBar(driftCandle);
+
+    expect(driftOrder.status).toBe('REJECTED');
+    expect(driftOrder.rejectionReason).toContain('REJECTED_EXCESSIVE_RISK_DRIFT');
+    expect(driftResult.fills.length).toBe(0);
+    expect(driftResult.events.length).toBe(1);
+    expect(driftResult.events[0].eventType).toBe('ORDER_REJECTED');
+
+    // 3. Full-Stack BacktestSimulator integration test with gap through stop
+    const baseCandles: ICandle[] = [];
+    for (let i = 0; i < 30; i++) {
+      baseCandles.push(createCandle(i, 100.0, 100.5, 99.5, 100.0));
+    }
+    // Bar 30: Signal generated at 100 with stopLoss 95
+    baseCandles.push(createCandle(30, 100.0, 100.5, 99.5, 100.0));
+    // Bar 31: Market gaps down to 90 (below stopLoss 95)
+    baseCandles.push(createCandle(31, 90.0, 91.0, 89.0, 90.0));
+    baseCandles.push(createCandle(32, 90.0, 92.0, 88.0, 91.0));
+
+    const btRes = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      initialCapital: 100000,
+      candles: baseCandles,
+      warmupBars: 30,
+      minimumCandles: 30,
+      strategyMode: 'SMC',
+      strategyConfig: {
+        deterministicSignals: [
+          {
+            id: 'sig_gap_test',
+            direction: 'BULLISH',
+            score: 85,
+            entryPrice: 100.0,
+            stopLoss: 95.0,
+            tp1: 110.0,
+          },
+        ],
+      },
+      fillModel: FillModel.NEXT_BAR_MARKET,
+      slippageBps: 0,
+      feeRate: 0.0004,
+    });
+
+    // Zero orphaned fills or trades
+    expect(btRes.trades.length).toBe(0);
+    expect(btRes.positionLots?.length).toBe(0);
+    // Capital remains pristine, no fees deducted for rejected entry
+    expect(btRes.finalEquity).toBe(100000);
+    // Rejection event recorded in executionEvents
+    const rejectEv = btRes.executionEvents?.find((e) => e.eventType === 'ORDER_REJECTED');
+    expect(rejectEv).toBeDefined();
+    expect(rejectEv?.reason).toContain('REJECTED_GAP_THROUGH_STOP');
+  });
 });

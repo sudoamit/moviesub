@@ -14,6 +14,7 @@ import {
   IExecutionSimulatorCheckpoint,
   validateExecutionModelConfig,
   EXECUTION_PRECISION,
+  ISubmitOrderParams,
 } from './types';
 import { ICandle } from '@quant/shared';
 import { FillModelEngine } from './fill-model';
@@ -145,23 +146,7 @@ export class ExecutionSimulator {
     this.partialFillRatio = candidate.partialFillRatio;
   }
 
-  submitOrder(params: {
-    clientOrderId?: string;
-    tradeId: string;
-    symbol: string;
-    side: OrderSide;
-    orderType: OrderType;
-    price?: number;
-    stopPrice?: number;
-    quantity: number;
-    timestamp: number;
-    referencePrice?: number;
-    maxRiskDrift?: number;
-    signalTimestamp?: number;
-    ambiguityMode?: SameCandleAmbiguityMode;
-    exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
-    ocoGroupId?: string;
-  }): IOrder {
+  submitOrder(params: ISubmitOrderParams): IOrder {
     // 1. Quantity & timestamp validation
     if (typeof params.quantity !== 'number' || !Number.isFinite(params.quantity) || params.quantity <= 0) {
       throw new Error('INVALID_ORDER_QUANTITY: Quantity must be a positive finite number');
@@ -170,12 +155,15 @@ export class ExecutionSimulator {
       throw new Error('INVALID_ORDER_TIMESTAMP: Timestamp must be a positive finite number');
     }
 
-    // 2. Price / stopPrice validation
+    // 2. Price / stopPrice / stopLoss validation
     if (params.price !== undefined && (typeof params.price !== 'number' || !Number.isFinite(params.price) || params.price <= 0)) {
       throw new Error('INVALID_ORDER_PRICE: Price must be a positive finite number');
     }
     if (params.stopPrice !== undefined && (typeof params.stopPrice !== 'number' || !Number.isFinite(params.stopPrice) || params.stopPrice <= 0)) {
       throw new Error('INVALID_ORDER_STOP_PRICE: Stop price must be a positive finite number');
+    }
+    if (params.stopLoss !== undefined && (typeof params.stopLoss !== 'number' || !Number.isFinite(params.stopLoss) || params.stopLoss <= 0)) {
+      throw new Error('INVALID_ORDER_STOP_LOSS: Stop loss must be a positive finite number');
     }
     if (params.referencePrice !== undefined && (typeof params.referencePrice !== 'number' || !Number.isFinite(params.referencePrice) || params.referencePrice <= 0)) {
       throw new Error('INVALID_ORDER_REFERENCE_PRICE: Reference price must be a positive finite number');
@@ -248,6 +236,7 @@ export class ExecutionSimulator {
       orderType: params.orderType,
       price: params.price,
       stopPrice: params.stopPrice,
+      stopLoss: params.stopLoss,
       quantity: params.quantity,
       initialQuantity: params.quantity,
       filledQuantity: 0,
@@ -411,6 +400,95 @@ export class ExecutionSimulator {
 
           const trigPrice = order.orderType === 'STOP' ? (order.stopPrice ?? fill.price) : (order.price ?? fill.price);
           currentSegStart = trigPrice;
+
+          // Pre-Execution Invariant Gates for Entry Orders
+          if (order.exitTarget === 'ENTRY') {
+            // 1. Protective Stop Invariant (gap/slippage through stop)
+            if (
+              order.stopLoss !== undefined &&
+              (order.side === 'BUY' ? fill.price <= order.stopLoss : fill.price >= order.stopLoss)
+            ) {
+              order.status = 'REJECTED';
+              order.rejectionReason = `REJECTED_GAP_THROUGH_STOP: Candidate fill price ${fill.price} violates protective stop loss ${order.stopLoss}`;
+              this.eventCounter++;
+              const rejectEvent: IExecutionEvent = {
+                eventId: `${this.runId}_evt_reject_${this.eventCounter}`,
+                tradeId: order.tradeId,
+                orderId: order.orderId,
+                symbol: order.symbol,
+                eventType: 'ORDER_REJECTED',
+                timestamp: fill.timestamp,
+                price: fill.price,
+                quantity: fill.quantity,
+                remainingQuantity: 0,
+                fees: 0,
+                slippage: 0,
+                reason: order.rejectionReason,
+                exitTarget: 'ENTRY',
+                triggerPrice: order.stopPrice || order.price,
+                executedPrice: fill.price,
+                exitOrderCreatedAt: order.createdAt,
+                exitOrderSubmittedAt: order.submittedAt,
+                exitTriggerTimestamp: fill.timestamp,
+                exitFillTimestamp: fill.timestamp,
+                segmentIndex: cursor.segmentIndex,
+                segmentType: seg.type,
+              };
+              this.events.push(rejectEvent);
+              newEvents.push(rejectEvent);
+
+              currentOrders = Array.from(this.orders.values()).filter(
+                (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED') && !filledThisBar.has(o.orderId),
+              );
+              continue;
+            }
+
+            // 2. Pre-fill Non-Lookahead Risk Drift Gate
+            if (
+              order.maxRiskDrift !== undefined &&
+              order.referencePrice !== undefined &&
+              order.stopLoss !== undefined
+            ) {
+              const initialRiskDist = Math.abs(order.referencePrice - order.stopLoss);
+              const priceDrift = Math.abs(fill.price - order.referencePrice);
+              const riskDriftRatio = initialRiskDist > 0 ? priceDrift / initialRiskDist : 0;
+              if (initialRiskDist > 0 && riskDriftRatio > order.maxRiskDrift) {
+                order.status = 'REJECTED';
+                order.rejectionReason = `REJECTED_EXCESSIVE_RISK_DRIFT: Risk drift ratio ${(riskDriftRatio * 100).toFixed(1)}% exceeds max permitted ${(order.maxRiskDrift * 100).toFixed(1)}%`;
+                this.eventCounter++;
+                const rejectEvent: IExecutionEvent = {
+                  eventId: `${this.runId}_evt_reject_${this.eventCounter}`,
+                  tradeId: order.tradeId,
+                  orderId: order.orderId,
+                  symbol: order.symbol,
+                  eventType: 'ORDER_REJECTED',
+                  timestamp: fill.timestamp,
+                  price: fill.price,
+                  quantity: fill.quantity,
+                  remainingQuantity: 0,
+                  fees: 0,
+                  slippage: 0,
+                  reason: order.rejectionReason,
+                  exitTarget: 'ENTRY',
+                  triggerPrice: order.stopPrice || order.price,
+                  executedPrice: fill.price,
+                  exitOrderCreatedAt: order.createdAt,
+                  exitOrderSubmittedAt: order.submittedAt,
+                  exitTriggerTimestamp: fill.timestamp,
+                  exitFillTimestamp: fill.timestamp,
+                  segmentIndex: cursor.segmentIndex,
+                  segmentType: seg.type,
+                };
+                this.events.push(rejectEvent);
+                newEvents.push(rejectEvent);
+
+                currentOrders = Array.from(this.orders.values()).filter(
+                  (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED') && !filledThisBar.has(o.orderId),
+                );
+                continue;
+              }
+            }
+          }
 
           this.fillCounter++;
           fill.fillId = `${this.runId}_fill_${this.fillCounter}`;
@@ -1038,6 +1116,9 @@ export class ExecutionSimulator {
       }
       if (ord.stopPrice !== undefined && (!Number.isFinite(ord.stopPrice) || ord.stopPrice <= 0)) {
         throw new Error(`CORRUPT_EXECUTION_ORDER: stopPrice must be a positive finite number, got ${ord.stopPrice}`);
+      }
+      if (ord.stopLoss !== undefined && (!Number.isFinite(ord.stopLoss) || ord.stopLoss <= 0)) {
+        throw new Error(`CORRUPT_EXECUTION_ORDER: stopLoss must be a positive finite number, got ${ord.stopLoss}`);
       }
 
       const candidateOrder: IOrder = {

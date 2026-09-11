@@ -295,77 +295,35 @@ export class BacktestSimulator {
       executionEvents.push(...simResult.events);
 
       // 2. Handle Entry Order Fill
-
       if (pendingEntryOrder && pendingEntryOrder.status === 'FILLED') {
         const fill = simResult.fills.find((f) => f.orderId === pendingEntryOrder!.orderId);
         if (fill && pendingEntrySignal) {
-          const isLong = pendingEntrySignal.direction === Direction.BULLISH;
-          const refPrice = pendingEntryOrder.referencePrice || pendingEntrySignal.entryZone.optimal;
-          const initialRiskDist = Math.abs(refPrice - pendingEntrySignal.stopLoss);
-          const priceDrift = Math.abs(fill.price - refPrice);
-          const riskDriftRatio = initialRiskDist > 0 ? priceDrift / initialRiskDist : 0;
+          // Create Position Lot strictly from actual IFill result, preserving entry fee & slippage
+          activeLot = TradeLifecycleManager.createPositionLot(
+            pendingEntrySignal,
+            fill.price,
+            fill.quantity,
+            fill.timestamp,
+            pendingEntryOrder.orderId,
+            fill.fee,
+            fill.slippage,
+            partialPolicy,
+          );
+          cumulativeFees += fill.fee;
+          cumulativeSlippage += fill.slippage;
 
-          // Fail Closed on Excessive Risk Drift (> 25% of risk distance)
-          if (riskDriftRatio > 0.25) {
-            executionEvents.push({
-              eventId: `${runId}_evt_reject_${candleTime}`,
-              tradeId: pendingEntrySignal.id || `trade_${candleTime}`,
-              orderId: pendingEntryOrder.orderId,
-              symbol,
-              eventType: 'ORDER_REJECTED',
-              timestamp: candleTime,
-              price: fill.price,
-              quantity: fill.quantity,
-              remainingQuantity: 0,
-              fees: fill.fee,
-              slippage: fill.slippage,
-              reason: `Rejected: Excessive risk drift (${(riskDriftRatio * 100).toFixed(1)}% > 25%)`,
-            });
-            pendingEntryOrder = null;
-            pendingEntrySignal = null;
-          } else {
-            // Create Position Lot strictly from actual IFill result, preserving entry fee & slippage
-            try {
-              activeLot = TradeLifecycleManager.createPositionLot(
-                pendingEntrySignal,
-                fill.price,
-                fill.quantity,
-                fill.timestamp,
-                pendingEntryOrder.orderId,
-                fill.fee,
-                fill.slippage,
-                partialPolicy,
-              );
-              cumulativeFees += fill.fee;
-              cumulativeSlippage += fill.slippage;
+          // Immediately create RESTING exit orders for the position before next candle is processed
+          this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
 
-              // Immediately create RESTING exit orders for the position before next candle is processed
-              this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
-            } catch (err: any) {
-              if (err.message && err.message.includes('INVALID_POSITION_PROTECTION')) {
-                executionEvents.push({
-                  eventId: `evt_reject_${candleTime}_${pendingEntryOrder.orderId}`,
-                  tradeId: pendingEntrySignal.id || `trade_${symbol}_${candleTime}`,
-                  orderId: pendingEntryOrder.orderId,
-                  symbol,
-                  eventType: 'ORDER_REJECTED',
-                  timestamp: candleTime,
-                  price: fill.price,
-                  quantity: fill.quantity,
-                  remainingQuantity: 0,
-                  fees: fill.fee,
-                  slippage: fill.slippage,
-                  reason: `Rejected: Invalidation on gap through stop (${err.message})`,
-                });
-              } else {
-                throw err;
-              }
-            }
-
-            pendingEntryOrder = null;
-            pendingEntrySignal = null;
-          }
+          pendingEntryOrder = null;
+          pendingEntrySignal = null;
         }
+      } else if (
+        pendingEntryOrder &&
+        (pendingEntryOrder.status === 'REJECTED' || pendingEntryOrder.status === 'CANCELLED')
+      ) {
+        pendingEntryOrder = null;
+        pendingEntrySignal = null;
       }
 
       // 3. Handle Active Position Lot Exits & Fills
@@ -772,6 +730,7 @@ export class BacktestSimulator {
                 quantity: finalQuantity,
                 timestamp: candleTime,
                 referencePrice: decisionPrice,
+                stopLoss: signal.stopLoss,
                 maxRiskDrift: 0.25,
                 signalTimestamp: candleTime,
                 ambiguityMode,

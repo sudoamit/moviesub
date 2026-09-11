@@ -56,6 +56,26 @@ export interface IOrder {
   slippage: number;
   rejectionReason?: string;
   referencePrice?: number;
+  stopLoss?: number;
+  maxRiskDrift?: number;
+  signalTimestamp?: number;
+  ambiguityMode?: SameCandleAmbiguityMode;
+  exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
+  ocoGroupId?: string;
+}
+
+export interface ISubmitOrderParams {
+  clientOrderId?: string;
+  tradeId: string;
+  symbol: string;
+  side: OrderSide;
+  orderType: OrderType;
+  price?: number;
+  stopPrice?: number;
+  stopLoss?: number;
+  quantity: number;
+  timestamp: number;
+  referencePrice?: number;
   maxRiskDrift?: number;
   signalTimestamp?: number;
   ambiguityMode?: SameCandleAmbiguityMode;
