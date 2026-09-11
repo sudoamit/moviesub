@@ -1405,12 +1405,12 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     }).toThrow('FILL_EXCEEDS_REMAINING_QUANTITY');
   });
 
-  it('55. Exact residual flat fee allocation across 4 partial fills (4 x 25%) avoids penny drift', () => {
+  it('55. Exact residual flat fee allocation across 4 partial fills (4 x 0.25) avoids penny drift', () => {
     const { options } = setupEvaluation(5);
     const adapter = new ShadowExecutionAdapter(
       'PAPER',
       options.champion.executionContext as any,
-      { ...executionConfig, feePerTrade: 20, slippageBps: 0, partialFillRatio: 0.25 },
+      { ...executionConfig, feePerTrade: 20, slippageBps: 0 },
       'run-55',
     );
     const candle = options.candles[1];
@@ -1458,43 +1458,74 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     let pending: readonly ShadowPendingOrder[] = [order];
     const allExecutions: ShadowExecutionResult[] = [];
 
-    // 1st partial fill (25% -> 0.25 qty, ₹5.00 fee)
+    // Helper: mock simulator producing 0.25 fill each step
+    const mockStep = (qty: number) => {
+      jest.spyOn(adapter, 'createSimulator').mockReturnValueOnce({
+        submitOrder: () => ({ orderId: 'mock-sim' } as any),
+        processSingleExecutionBar: () => ({
+          fills: [{
+            orderId: 'mock-sim',
+            tradeId: 't-flat-4',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            price: 50000,
+            quantity: qty,
+            fee: 0,
+            slippage: 0,
+            timestamp: 1700000000015,
+            isPartial: qty < 1.0,
+            fillId: `f-${qty}`,
+          }],
+          events: [],
+        }),
+      } as any);
+    };
+
+    // Fill 1: 0.25 qty
+    mockStep(0.25);
     const res1 = adapter.processMarketEvent(candle, pending, state, snapshot);
     expect(res1.executions.length).toBe(1);
+    expect(res1.executions[0].quantity).toBe(0.25);
     expect(res1.executions[0].fees).toBe(5.0);
     expect(res1.updatedPendingOrders[0].remainingQuantity).toBe(0.75);
     allExecutions.push(...res1.executions);
     state = res1.newState;
     pending = res1.updatedPendingOrders;
 
-    // 2nd partial fill (25% of remaining 0.75 -> 0.1875 qty, ₹3.75 fee)
+    // Fill 2: 0.25 qty
+    mockStep(0.25);
     const res2 = adapter.processMarketEvent(candle, pending, state, snapshot);
     expect(res2.executions.length).toBe(1);
-    expect(res2.executions[0].fees).toBe(3.75);
+    expect(res2.executions[0].quantity).toBe(0.25);
+    expect(res2.executions[0].fees).toBe(5.0);
+    expect(res2.updatedPendingOrders[0].remainingQuantity).toBe(0.50);
     allExecutions.push(...res2.executions);
     state = res2.newState;
     pending = res2.updatedPendingOrders;
 
-    // 3rd partial fill
+    // Fill 3: 0.25 qty
+    mockStep(0.25);
     const res3 = adapter.processMarketEvent(candle, pending, state, snapshot);
     expect(res3.executions.length).toBe(1);
+    expect(res3.executions[0].quantity).toBe(0.25);
+    expect(res3.executions[0].fees).toBe(5.0);
+    expect(res3.updatedPendingOrders[0].remainingQuantity).toBe(0.25);
     allExecutions.push(...res3.executions);
     state = res3.newState;
     pending = res3.updatedPendingOrders;
 
-    // 4th fill - final full execution of remaining
-    const adapterFinal = new ShadowExecutionAdapter(
-      'PAPER',
-      options.champion.executionContext as any,
-      { ...executionConfig, feePerTrade: 20, slippageBps: 0 },
-      'run-55-final',
-    );
-    const res4 = adapterFinal.processMarketEvent(candle, pending, state, snapshot);
+    // Fill 4: 0.25 qty (final fill)
+    mockStep(0.25);
+    const res4 = adapter.processMarketEvent(candle, pending, state, snapshot);
     expect(res4.executions.length).toBe(1);
+    expect(res4.executions[0].quantity).toBe(0.25);
+    expect(res4.executions[0].fees).toBe(5.0);
     expect(res4.updatedPendingOrders.length).toBe(0);
     allExecutions.push(...res4.executions);
 
+    const totalQty = allExecutions.reduce((sum, e) => sum + e.quantity, 0);
     const totalFees = allExecutions.reduce((sum, e) => sum + e.fees, 0);
+    expect(Number(totalQty.toFixed(6))).toBe(1.0);
     expect(Number(totalFees.toFixed(6))).toBe(20.0);
   });
 
@@ -1577,5 +1608,85 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     expect(res.executions[0].orderId).toBe('ord-unrelated-exit');
     expect(res.executions[1].orderId).toBe('ord-rev-enter');
     expect(res.executions[1].executionType).toBe('REVERSAL_ENTRY');
+  });
+
+  it('57. Simulator fill quantity is authoritative and is never overridden by shadow adapter', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, partialFillRatio: 0.25 },
+      'run-57',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order: ShadowPendingOrder = {
+      orderId: 'ord-authoritative-qty',
+      tradeId: 't-auth',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      positionEffect: 'OPEN',
+      requestedQuantity: 1.0,
+      filledQuantity: 0,
+      remainingQuantity: 1.0,
+      status: 'PENDING',
+      submissionTimestamp: 1700000000000,
+      arrivalTimestamp: 1700000000015,
+      createdAtMarketTimestamp: 1700000000000,
+      allocatedFlatFee: 0,
+      allocatedFlatSlippage: 0,
+    };
+
+    const state: ShadowBranchState = {
+      capital: 100000,
+      position: 'FLAT',
+      quantity: 0,
+      initialQuantity: 0,
+      entryPrice: 0,
+      rawEntryPrice: 0,
+      averageEntryPrice: 0,
+      entryFees: 0,
+      remainingEntryFees: 0,
+      entrySlippage: 0,
+      remainingEntrySlippage: 0,
+      realizedPnL: 0,
+      unrealizedPnL: 0,
+      pendingOrders: [order],
+      openOrders: [order.orderId],
+      closedTrades: [],
+      riskState: {},
+      portfolioState: {},
+    };
+
+    // Simulator returns fill with quantity 0.73
+    jest.spyOn(adapter, 'createSimulator').mockReturnValueOnce({
+      submitOrder: () => ({ orderId: 'mock-sim-57' } as any),
+      processSingleExecutionBar: () => ({
+        fills: [{
+          orderId: 'mock-sim-57',
+          tradeId: 't-auth',
+          symbol: 'BTCUSDT',
+          side: 'BUY',
+          price: 50000,
+          quantity: 0.73,
+          fee: 0,
+          slippage: 0,
+          timestamp: 1700000000015,
+          isPartial: true,
+          fillId: 'f-57',
+        }],
+        events: [],
+      }),
+    } as any);
+
+    const res = adapter.processMarketEvent(candle, [order], state, snapshot);
+
+    expect(res.executions.length).toBe(1);
+    // Must be exactly 0.73 as returned by simulator, NOT 0.25
+    expect(res.executions[0].quantity).toBe(0.73);
+    expect(res.newState.quantity).toBe(0.73);
+    expect(res.updatedPendingOrders[0].remainingQuantity).toBe(0.27);
   });
 });

@@ -296,8 +296,16 @@ export class FillModelEngine {
     feeConfig?: IFeeConfig,
     spreadConfig?: ISpreadConfig,
     costStressConfig?: ExecutionCostStressConfig,
+    partialFillRatio?: number,
   ): IFill {
-    const fillQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
+    const rawQty = order.remainingQuantity > 0 ? order.remainingQuantity : order.quantity;
+    let fillQty = rawQty;
+    let isPartial = false;
+    if (partialFillRatio !== undefined && partialFillRatio > 0 && partialFillRatio < 1) {
+      fillQty = Math.min(rawQty, Number((rawQty * partialFillRatio).toFixed(8)));
+      isPartial = fillQty < rawQty - 1e-6;
+    }
+
     if (model === FillModel.LIMIT_TOUCH) {
       const fee = FeeModel.calculateFees(symbol, basePrice, fillQty, order.side, false, feeConfig, costStressConfig);
       return {
@@ -311,7 +319,7 @@ export class FillModelEngine {
         fee,
         slippage: 0,
         timestamp: candleTime,
-        isPartial: false,
+        isPartial,
         exitTarget: order.exitTarget,
       };
     }
@@ -348,7 +356,7 @@ export class FillModelEngine {
       fee,
       slippage: slip.slippageAmount,
       timestamp: candleTime,
-      isPartial: false,
+      isPartial,
       exitTarget: order.exitTarget,
     };
   }
@@ -367,6 +375,7 @@ export class FillModelEngine {
     feeConfig?: IFeeConfig,
     spreadConfig?: ISpreadConfig,
     costStressConfig?: ExecutionCostStressConfig,
+    partialFillRatio?: number,
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
     if (order.status !== 'PENDING') return { isFilled: false, reason: `ORDER_${order.status}` };
 
@@ -382,7 +391,7 @@ export class FillModelEngine {
       if (!isTriggered) return { isFilled: false };
 
       const basePrice = this.calculateStopBasePrice(order.side, stopPrice, segStart);
-      const fill = this.buildFill(order, basePrice, candleTime, symbol, 'STOP', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, basePrice, candleTime, symbol, 'STOP', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
@@ -395,13 +404,13 @@ export class FillModelEngine {
       if (!isTouch) return { isFilled: false };
 
       const rawPrice = this.calculateLimitBasePrice(order.side, targetPrice, segStart);
-      const fill = this.buildFill(order, rawPrice, candleTime, symbol, 'LIMIT', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, rawPrice, candleTime, symbol, 'LIMIT', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
     // 3. MARKET Order
     if (order.orderType === 'MARKET') {
-      const fill = this.buildFill(order, segStart, candleTime, symbol, 'MARKET', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, segStart, candleTime, symbol, 'MARKET', undefined, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
@@ -422,6 +431,7 @@ export class FillModelEngine {
     feeConfig?: IFeeConfig,
     spreadConfig?: ISpreadConfig,
     costStressConfig?: ExecutionCostStressConfig,
+    partialFillRatio?: number,
   ): { isFilled: boolean; fill?: IFill; reason?: string } {
     if (order.status === 'FILLED' || order.status === 'CANCELLED' || order.status === 'REJECTED') {
       return { isFilled: false, reason: `ORDER_${order.status}` };
@@ -449,7 +459,7 @@ export class FillModelEngine {
       if (!isTriggered) return { isFilled: false };
 
       const basePrice = this.calculateStopBasePrice(order.side, stopPrice, currentCandle.open);
-      const fill = this.buildFill(order, basePrice, candleTime, order.symbol, 'STOP', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, basePrice, candleTime, order.symbol, 'STOP', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
@@ -462,7 +472,7 @@ export class FillModelEngine {
       if (!isTouch) return { isFilled: false };
 
       const rawPrice = this.calculateLimitBasePrice(order.side, targetPrice, currentCandle.open);
-      const fill = this.buildFill(order, rawPrice, candleTime, order.symbol, 'LIMIT', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, rawPrice, candleTime, order.symbol, 'LIMIT', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
@@ -471,14 +481,14 @@ export class FillModelEngine {
       if (!nextCandle) return { isFilled: false, reason: 'AWAITING_NEXT_BAR' };
       const rawPrice = nextCandle.open;
       const fillTime = this.requireCandleTimestamp(nextCandle);
-      const fill = this.buildFill(order, rawPrice, fillTime, order.symbol, 'MARKET', nextCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, rawPrice, fillTime, order.symbol, 'MARKET', nextCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 
     // 4. Default Market Order Model (Current Bar Open)
     if (order.orderType === 'MARKET') {
       const rawPrice = currentCandle.open;
-      const fill = this.buildFill(order, rawPrice, candleTime, order.symbol, 'MARKET', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig);
+      const fill = this.buildFill(order, rawPrice, candleTime, order.symbol, 'MARKET', currentCandle, model, slippageConfig, feeConfig, spreadConfig, costStressConfig, partialFillRatio);
       return { isFilled: true, fill };
     }
 

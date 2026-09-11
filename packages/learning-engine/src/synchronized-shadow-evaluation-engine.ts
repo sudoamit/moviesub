@@ -505,6 +505,9 @@ export class ShadowExecutionAdapter {
 
   /**
    * Factory creating a canonical ExecutionSimulator instance configured with authoritative settings.
+   * ExecutionSimulator is the sole fill calculation engine (fill/no-fill, fill price, fill quantity,
+   * spread, slippage, fees). ShadowExecutionAdapter maintains order lifecycle, temporal rules,
+   * causal timestamps, and state transitions.
    */
   public createSimulator(customRunId?: string): ExecutionSimulator {
     return new ExecutionSimulator(
@@ -516,6 +519,7 @@ export class ShadowExecutionAdapter {
       this.feeConfig,
       this.spreadConfig,
       this.costStressConfig,
+      this.config.partialFillRatio,
     );
   }
 
@@ -808,10 +812,8 @@ export class ShadowExecutionAdapter {
           throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
         }
 
-        let fillQty = fill.quantity;
-        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
-          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
-        }
+        // Simulator is the authoritative source for fill quantity
+        const fillQty = fill.quantity;
 
         let executionType: ShadowExecutionType;
         if (order.positionEffect === 'REVERSE_EXIT') {
@@ -926,6 +928,19 @@ export class ShadowExecutionAdapter {
       }
 
       for (const order of entriesToEvaluate) {
+        // Invariant: Block opposing entry or reversal entry when state is not FLAT
+        if (order.positionEffect === 'REVERSE_ENTRY' && state.position !== 'FLAT') {
+          pendingAfterEntries.push(order);
+          continue;
+        }
+        if (
+          state.position !== 'FLAT' &&
+          ((state.position === 'LONG' && order.side === 'SELL') || (state.position === 'SHORT' && order.side === 'BUY'))
+        ) {
+          pendingAfterEntries.push(order);
+          continue;
+        }
+
         const fillList = fillsByOrderId.get(order.orderId);
 
         if (!fillList || fillList.length === 0) {
@@ -949,10 +964,8 @@ export class ShadowExecutionAdapter {
           throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
         }
 
-        let fillQty = fill.quantity;
-        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
-          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
-        }
+        // Simulator is the authoritative source for fill quantity
+        const fillQty = fill.quantity;
 
         const executionType: ShadowExecutionType =
           order.positionEffect === 'REVERSE_ENTRY' ? 'REVERSAL_ENTRY' : 'ENTRY';

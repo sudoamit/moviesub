@@ -15,6 +15,7 @@ export class ExecutionSimulator {
   private feeConfig?: IFeeConfig;
   private spreadConfig?: ISpreadConfig;
   private costStressConfig?: ExecutionCostStressConfig;
+  private partialFillRatio?: number;
   private orderCounter = 0;
   private fillCounter = 0;
   private eventCounter = 0;
@@ -29,6 +30,7 @@ export class ExecutionSimulator {
     feeConfig?: IFeeConfig,
     spreadConfig?: ISpreadConfig,
     costStressConfig?: ExecutionCostStressConfig,
+    partialFillRatio?: number,
   ) {
     this.fillModel = fillModel;
     this.ambiguityMode = ambiguityMode;
@@ -38,6 +40,7 @@ export class ExecutionSimulator {
     this.feeConfig = feeConfig;
     this.spreadConfig = spreadConfig;
     this.costStressConfig = costStressConfig;
+    this.partialFillRatio = partialFillRatio;
   }
 
   submitOrder(params: {
@@ -167,6 +170,7 @@ export class ExecutionSimulator {
                   this.feeConfig,
                   this.spreadConfig,
                   this.costStressConfig,
+                  this.partialFillRatio,
                 );
               } else {
                 res = FillModelEngine.evaluateFill(
@@ -180,6 +184,7 @@ export class ExecutionSimulator {
                   this.feeConfig,
                   this.spreadConfig,
                   this.costStressConfig,
+                  this.partialFillRatio,
                 );
               }
             } else {
@@ -194,6 +199,7 @@ export class ExecutionSimulator {
                 this.feeConfig,
                 this.spreadConfig,
                 this.costStressConfig,
+                this.partialFillRatio,
               );
             }
 
@@ -239,12 +245,14 @@ export class ExecutionSimulator {
           fill.segmentIndex = cursor.segmentIndex;
           fill.segmentType = seg.type;
 
-          order.status = 'FILLED';
+          const newRemaining = Math.max(0, Number((order.remainingQuantity - fill.quantity).toFixed(8)));
+          const isComplete = newRemaining <= 1e-6;
+          order.status = isComplete ? 'FILLED' : 'PARTIALLY_FILLED';
           order.filledAt = fill.timestamp;
           order.avgFillPrice = fill.price;
           order.fees = fill.fee;
           order.slippage = fill.slippage;
-          order.remainingQuantity = 0;
+          order.remainingQuantity = newRemaining;
 
           this.fills.push(fill);
           newFills.push(fill);
