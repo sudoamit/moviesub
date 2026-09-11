@@ -842,7 +842,7 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     expect(result.champion.state.quantity).toBe(2);
   });
 
-  it('33. Reversal P&L and turnover', () => {
+  it('33. Reversal P&L and turnover under Policy B', () => {
     const decisionProvider = ({ snapshot }: any) => {
       const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
       if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
@@ -854,8 +854,8 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
     const closedLong = result.champion.executions[1];
     expect(closedLong.realizedPnL).toBe(17);
-    // Entry at 50020 + Exit at 50040 + Short entry at 50040 = 150100 turnover
-    expect(result.champion.metrics.turnover).toBe(150100);
+    // Entry at 50020 + Exit at 50040 + Policy B Short entry on next candle at 50060 = 150120 turnover
+    expect(result.champion.metrics.turnover).toBe(150120);
   });
 
   // ==========================================
@@ -1173,5 +1173,77 @@ describe('AI Fix 62 — Event-Driven, Latency-Correct, and Deterministic Shadow 
     expect(exec.fees).toBe(0.4);
     expect(exec.slippage).toBe(0.4);
     expect(finalized.finalState.position).toBe('FLAT');
+  });
+
+  it('50. Strict fill matching: unfilled limit orders remain pending without fill generation', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter('PAPER', options.champion.executionContext as any, executionConfig, 'test-strict-match');
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const unfillableLimitOrder = {
+      orderId: 'ord-unmatched', tradeId: 'trade-other', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'LIMIT' as const,
+      limitPrice: 1000, // Market is at 50,000 -> will not fill
+      positionEffect: 'OPEN' as const, requestedQuantity: 1, filledQuantity: 0, remainingQuantity: 1, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const res = adapter.processMarketEvent(candle, [unfillableLimitOrder], {
+      capital: 100000, position: 'FLAT', quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [unfillableLimitOrder], openOrders: [unfillableLimitOrder.orderId], closedTrades: [], riskState: {}, portfolioState: {},
+    }, snapshot);
+
+    expect(res.executions.length).toBe(0);
+    expect(res.updatedPendingOrders.length).toBe(1);
+    expect(res.updatedPendingOrders[0].orderId).toBe('ord-unmatched');
+    expect(res.updatedPendingOrders[0].status).toBe('PENDING');
+  });
+
+  it('51. Proportional flat fee allocation divides flat per-trade fee across partial fills', () => {
+    const { options } = setupEvaluation(5);
+    const adapter = new ShadowExecutionAdapter(
+      'PAPER',
+      options.champion.executionContext as any,
+      { ...executionConfig, feePerTrade: 20, partialFillRatio: 0.5 },
+      'test-prop-flat-fee',
+    );
+    const candle = options.candles[1];
+    const snapshot = { snapshotId: 'snap-1', marketDataCutoffTimestamp: 1700000000000, executionContextHash: 'ech' } as any;
+
+    const order = {
+      orderId: 'ord-flat-fee', tradeId: 'trade-ff', symbol: 'BTCUSDT', side: 'BUY' as const, orderType: 'MARKET' as const,
+      positionEffect: 'OPEN' as const, requestedQuantity: 4, filledQuantity: 0, remainingQuantity: 4, status: 'PENDING' as const,
+      submissionTimestamp: 1700000000000, arrivalTimestamp: 1700000000015, createdAtMarketTimestamp: 1700000000000,
+    };
+
+    const res = adapter.processMarketEvent(candle, [order], {
+      capital: 100000, position: 'FLAT', quantity: 0, initialQuantity: 0, entryPrice: 0, rawEntryPrice: 0,
+      averageEntryPrice: 0, entryFees: 0, remainingEntryFees: 0, entrySlippage: 0, remainingEntrySlippage: 0,
+      realizedPnL: 0, unrealizedPnL: 0, pendingOrders: [order], openOrders: [order.orderId], closedTrades: [], riskState: {}, portfolioState: {},
+    }, snapshot);
+
+    expect(res.executions.length).toBe(1);
+    expect(res.executions[0].quantity).toBe(2);
+    // 2 out of 4 filled -> 50% of ₹20 = ₹10 fee charged on this partial fill
+    expect(res.executions[0].fees).toBe(10);
+    expect(res.newState.entryFees).toBe(10);
+  });
+
+  it('52. Explicit Policy A allows same-candle reversal execution when enabled', () => {
+    const decisionProvider = ({ snapshot }: any) => {
+      const idx = parseInt(snapshot.snapshotId.split('-')[2], 10);
+      if (idx === 0) return { action: 'ENTER_LONG' as const, positionTarget: 'LONG' as const, quantity: 1, riskState: {} };
+      if (idx === 1) return { action: 'ENTER_SHORT' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
+      return { action: 'HOLD' as const, positionTarget: 'SHORT' as const, quantity: 1, riskState: {} };
+    };
+
+    const { options } = setupEvaluation(5, 0, { ...executionConfig, allowSameCandleReversal: true });
+    const result = SynchronizedShadowEvaluationEngine.evaluate({ ...options, decisionProvider });
+    expect(result.champion.executions.length).toBe(3);
+    expect(result.champion.executions[1].executionType).toBe('REVERSAL_EXIT');
+    expect(result.champion.executions[2].executionType).toBe('REVERSAL_ENTRY');
+    // Under Policy A, short entry executed on the same candle at 50040
+    expect(result.champion.executions[2].executionTimestamp).toBe(result.champion.executions[1].executionTimestamp);
   });
 });

@@ -243,6 +243,7 @@ export interface ShadowExecutionConfig {
   readonly latencyMs?: number;
   readonly backtestEndPolicy?: BacktestEndPolicy;
   readonly partialFillRatio?: number;
+  readonly allowSameCandleReversal?: boolean;
 }
 
 export interface SynchronizedShadowEvaluationOptions {
@@ -429,6 +430,51 @@ export class ShadowExecutionAdapter {
     this.slippageModelHash = hash(slippageConfig ?? { type: 'zero-slippage' });
 
     this.simulator = this.createSimulator();
+  }
+
+  /**
+   * Resolves execution fees using authoritative hierarchy and proportional allocation on partial fills.
+   */
+  public resolveExecutionFee(notional: number, fillQty: number, requestedQty: number): number {
+    if (this.config.feePerTrade !== undefined) {
+      const fraction = requestedQty > 0 ? Math.min(1, fillQty / requestedQty) : 1;
+      return Number((this.config.feePerTrade * fraction).toFixed(8));
+    }
+    if (this.config.feeRate !== undefined) {
+      return Number((notional * this.config.feeRate).toFixed(8));
+    }
+    if (this.config.feeBps !== undefined) {
+      return Number((notional * (this.config.feeBps / 10000)).toFixed(8));
+    }
+    if (this.feeConfig) {
+      if (this.feeConfig.brokerageFlat !== undefined) {
+        const fraction = requestedQty > 0 ? Math.min(1, fillQty / requestedQty) : 1;
+        return Number((this.feeConfig.brokerageFlat * fraction).toFixed(8));
+      }
+      if (this.feeConfig.brokerageRateBps !== undefined) {
+        return Number((notional * (this.feeConfig.brokerageRateBps / 10000)).toFixed(8));
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Resolves execution slippage using authoritative hierarchy and proportional allocation on partial fills.
+   */
+  public resolveExecutionSlippage(notional: number, fillQty: number, requestedQty: number): number {
+    if (this.config.slippagePerTrade !== undefined) {
+      const fraction = requestedQty > 0 ? Math.min(1, fillQty / requestedQty) : 1;
+      return Number((this.config.slippagePerTrade * fraction).toFixed(8));
+    }
+    if (this.config.slippageBps !== undefined) {
+      return Number((notional * (this.config.slippageBps / 10000)).toFixed(8));
+    }
+    if (this.slippageConfig) {
+      if (this.slippageConfig.baseSlippageBps !== undefined) {
+        return Number((notional * (this.slippageConfig.baseSlippageBps / 10000)).toFixed(8));
+      }
+    }
+    return 0;
   }
 
   /**
@@ -627,7 +673,7 @@ export class ShadowExecutionAdapter {
    * Processes active pending orders against the current market candle event.
    * - Only orders that have arrived (arrivalTimestamp <= candleTime) are evaluated.
    * - Exits are evaluated first, then entries if position conditions permit.
-   * - Blocked reversal entries remain pending until prior position is fully FLAT.
+   * - Policy B is default for reversals: REVERSE_ENTRY executes earliest on the next candle after REVERSE_EXIT.
    * - Unfilled or partially filled orders persist in pending state.
    */
   public processMarketEvent(
@@ -675,6 +721,11 @@ export class ShadowExecutionAdapter {
     if (eligibleExits.length > 0) {
       const exitSim = this.createSimulator(`exit-${candleTime}`);
       for (const order of eligibleExits) {
+        const simQty =
+          this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1
+            ? Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)))
+            : order.remainingQuantity;
+
         exitSim.submitOrder({
           clientOrderId: order.clientOrderId || order.orderId,
           tradeId: order.tradeId,
@@ -683,7 +734,7 @@ export class ShadowExecutionAdapter {
           orderType: order.orderType,
           price: order.limitPrice,
           stopPrice: order.stopPrice,
-          quantity: order.remainingQuantity,
+          quantity: simQty,
           timestamp: order.submissionTimestamp,
           signalTimestamp: order.submissionTimestamp,
           exitTarget: order.exitTarget,
@@ -692,35 +743,27 @@ export class ShadowExecutionAdapter {
 
       const simResult = exitSim.processSingleExecutionBar(candle);
       const fills = simResult.fills;
-      let fillIdx = 0;
 
       for (const order of eligibleExits) {
-        const fill =
-          fills.find(
-            (f, idx) =>
-              idx >= fillIdx &&
-              f.side === order.side &&
-              f.symbol === order.symbol &&
-              (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
-          ) || fills[fillIdx];
+        // Strict unambiguous fill matching (NO index fallback)
+        const fill = fills.find(
+          (f) =>
+            f.side === order.side &&
+            f.symbol === order.symbol &&
+            (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
+        );
 
         if (!fill) {
           pendingAfterExits.push(order);
           continue;
         }
-        fillIdx++;
 
         const executionTimestamp = fill.timestamp;
         if (executionTimestamp < order.arrivalTimestamp) {
           throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
         }
 
-        let fillQty = fill.quantity;
-        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
-          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
-        } else {
-          fillQty = Math.min(order.remainingQuantity, fillQty);
-        }
+        const fillQty = fill.quantity;
 
         let executionType: ShadowExecutionType;
         if (order.positionEffect === 'REVERSE_EXIT') {
@@ -733,8 +776,9 @@ export class ShadowExecutionAdapter {
           executionType = 'EXIT';
         }
 
-        const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
-        const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+        const notional = Number((fill.price * fillQty).toFixed(8));
+        const fillFee = this.resolveExecutionFee(notional, fillQty, order.requestedQuantity);
+        const fillSlippage = this.resolveExecutionSlippage(notional, fillQty, order.requestedQuantity);
 
         const { updatedState, executionResult } = this.reduceStateOnFill(
           state,
@@ -768,27 +812,44 @@ export class ShadowExecutionAdapter {
       }
     }
 
-    // PASS 2: Evaluate Eligible Entries (Only block opposite-direction entries when position is non-FLAT)
+    // PASS 2: Evaluate Eligible Entries
+    // Policy B: If a reversal exit filled on this candle, the reversal entry executes earliest on the NEXT candle
+    const allowSameCandleReversal = this.config.allowSameCandleReversal === true;
+    const hadExitThisCandle = executions.some(
+      (e) => e.executionType === 'EXIT' || e.executionType === 'PARTIAL_EXIT' || e.executionType === 'REVERSAL_EXIT',
+    );
+
     const pendingAfterEntries: ShadowPendingOrder[] = [];
     const entriesToEvaluate: ShadowPendingOrder[] = [];
     const blockedEntries: ShadowPendingOrder[] = [];
 
     for (const order of eligibleEntries) {
-      const isOppositeDirection =
-        (state.position === 'LONG' && order.side === 'SELL') ||
-        (state.position === 'SHORT' && order.side === 'BUY');
-
-      if (!isOppositeDirection) {
-        entriesToEvaluate.push(order);
-      } else {
-        // Blocked because existing opposite position is not yet closed (e.g. reversal exit partially filled or pending)
+      if (order.positionEffect === 'REVERSE_ENTRY') {
+        if (state.position !== 'FLAT' || (!allowSameCandleReversal && hadExitThisCandle)) {
+          // Blocked: either position not yet flat or Policy B delays entry to next candle
+          blockedEntries.push(order);
+          continue;
+        }
+      } else if (
+        state.position !== 'FLAT' &&
+        ((state.position === 'LONG' && order.side === 'SELL') || (state.position === 'SHORT' && order.side === 'BUY'))
+      ) {
+        // Block opposing entry when position is not flat
         blockedEntries.push(order);
+        continue;
       }
+
+      entriesToEvaluate.push(order);
     }
 
     if (entriesToEvaluate.length > 0) {
       const entrySim = this.createSimulator(`entry-${candleTime}`);
       for (const order of entriesToEvaluate) {
+        const simQty =
+          this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1
+            ? Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)))
+            : order.remainingQuantity;
+
         entrySim.submitOrder({
           clientOrderId: order.clientOrderId || order.orderId,
           tradeId: order.tradeId,
@@ -797,7 +858,7 @@ export class ShadowExecutionAdapter {
           orderType: order.orderType,
           price: order.limitPrice,
           stopPrice: order.stopPrice,
-          quantity: order.remainingQuantity,
+          quantity: simQty,
           timestamp: order.submissionTimestamp,
           signalTimestamp: order.submissionTimestamp,
           exitTarget: order.exitTarget,
@@ -806,41 +867,33 @@ export class ShadowExecutionAdapter {
 
       const simResult = entrySim.processSingleExecutionBar(candle);
       const fills = simResult.fills;
-      let fillIdx = 0;
 
       for (const order of entriesToEvaluate) {
-        const fill =
-          fills.find(
-            (f, idx) =>
-              idx >= fillIdx &&
-              f.side === order.side &&
-              f.symbol === order.symbol &&
-              (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
-          ) || fills[fillIdx];
+        // Strict unambiguous fill matching (NO index fallback)
+        const fill = fills.find(
+          (f) =>
+            f.side === order.side &&
+            f.symbol === order.symbol &&
+            (f.tradeId === order.tradeId || (order.clientOrderId && (f as any).clientOrderId === order.clientOrderId) || f.orderId === order.orderId),
+        );
 
         if (!fill) {
           pendingAfterEntries.push(order);
           continue;
         }
-        fillIdx++;
 
         const executionTimestamp = fill.timestamp;
         if (executionTimestamp < order.arrivalTimestamp) {
           throw new Error('EXECUTION_BEFORE_ORDER_ARRIVAL: Execution timestamp cannot precede order arrival timestamp');
         }
 
-        let fillQty = fill.quantity;
-        if (this.config.partialFillRatio !== undefined && this.config.partialFillRatio > 0 && this.config.partialFillRatio < 1) {
-          fillQty = Math.min(order.remainingQuantity, Number((order.remainingQuantity * this.config.partialFillRatio).toFixed(8)));
-        } else {
-          fillQty = Math.min(order.remainingQuantity, fillQty);
-        }
-
+        const fillQty = fill.quantity;
         const executionType: ShadowExecutionType =
           order.positionEffect === 'REVERSE_ENTRY' ? 'REVERSAL_ENTRY' : 'ENTRY';
 
-        const fillFee = this.config.feePerTrade !== undefined ? this.config.feePerTrade : (fill.fee ?? 0);
-        const fillSlippage = this.config.slippagePerTrade !== undefined ? this.config.slippagePerTrade : (fill.slippage ?? 0);
+        const notional = Number((fill.price * fillQty).toFixed(8));
+        const fillFee = this.resolveExecutionFee(notional, fillQty, order.requestedQuantity);
+        const fillSlippage = this.resolveExecutionSlippage(notional, fillQty, order.requestedQuantity);
 
         const { updatedState, executionResult } = this.reduceStateOnFill(
           state,
@@ -1071,12 +1124,8 @@ export class ShadowExecutionAdapter {
       const isLong = currentState.position === 'LONG';
       const grossPnL = Number(((isLong ? exitPrice - currentState.entryPrice : currentState.entryPrice - exitPrice) * exitQty).toFixed(8));
 
-      const exitFee = this.config.feePerTrade !== undefined
-        ? this.config.feePerTrade
-        : Number((notional * (this.config.feeRate ?? (this.config.feeBps ? this.config.feeBps / 10000 : 0.001))).toFixed(8));
-      const exitSlippage = this.config.slippagePerTrade !== undefined
-        ? this.config.slippagePerTrade
-        : Number((notional * (this.config.slippageBps ? this.config.slippageBps / 10000 : 0.0005)).toFixed(8));
+      const exitFee = this.resolveExecutionFee(notional, exitQty, exitQty);
+      const exitSlippage = this.resolveExecutionSlippage(notional, exitQty, exitQty);
 
       const totalFees = Number((currentState.remainingEntryFees + exitFee).toFixed(8));
       const totalSlippage = Number((currentState.remainingEntrySlippage + exitSlippage).toFixed(8));
