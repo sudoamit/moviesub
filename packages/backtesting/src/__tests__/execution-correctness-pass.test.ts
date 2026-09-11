@@ -9,9 +9,11 @@ import {
   validateExecutionModelConfig,
   ExecutionModelConfig,
   IExecutionSimulatorCheckpoint,
+  IOrder,
+  IFill,
 } from '../execution/types';
 import { OHLCPathCursor } from '../execution/ohlc-path-cursor';
-import { TradeLifecycleManager } from '@quant/risk-engine';
+import { TradeLifecycleManager, IExecutionEvent } from '@quant/risk-engine';
 import { Direction, ICandle, MockMarketDataProvider, SignalState } from '@quant/shared';
 import { BacktestSimulator } from '../backtest-simulator';
 
@@ -3546,62 +3548,62 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, fillCounter: 1.5 })).toThrow('CORRUPT_EXECUTION_CHECKPOINT');
 
     // 4. Corrupted order: filledQuantity > quantity
-    const corruptOrder1: any = {
+    const corruptOrder1 = {
       orderId: 'ord_bad1',
       clientOrderId: 'cl_bad1',
       tradeId: 't_bad',
       symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderType: 'LIMIT',
+      side: 'BUY' as const,
+      orderType: 'LIMIT' as const,
       quantity: 10.0,
       filledQuantity: 15.0,
       remainingQuantity: 0,
-      status: 'FILLED',
+      status: 'FILLED' as const,
       createdAt: 1000,
       submittedAt: 1010,
       fees: 0,
       slippage: 0,
-    };
+    } as unknown as IOrder;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder1] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 5. Corrupted order: balance invariant violated (10 != 4 + 4)
-    const corruptOrder2: any = {
+    const corruptOrder2 = {
       ...corruptOrder1,
       filledQuantity: 4.0,
       remainingQuantity: 4.0,
-      status: 'PARTIALLY_FILLED',
-    };
+      status: 'PARTIALLY_FILLED' as const,
+    } as unknown as IOrder;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder2] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 6. Corrupted order: FILLED with remainingQuantity > 0
-    const corruptOrder3: any = {
+    const corruptOrder3 = {
       ...corruptOrder1,
       filledQuantity: 8.0,
       remainingQuantity: 2.0,
-      status: 'FILLED',
-    };
+      status: 'FILLED' as const,
+    } as unknown as IOrder;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder3] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 7. Corrupted order: PARTIALLY_FILLED with filledQuantity = 0
-    const corruptOrder4: any = {
+    const corruptOrder4 = {
       ...corruptOrder1,
       filledQuantity: 0,
       remainingQuantity: 10.0,
-      status: 'PARTIALLY_FILLED',
-    };
+      status: 'PARTIALLY_FILLED' as const,
+    } as unknown as IOrder;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder4] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 8. Corrupted order: PENDING with filledQuantity > 0
-    const corruptOrder5: any = {
+    const corruptOrder5 = {
       ...corruptOrder1,
       filledQuantity: 2.0,
       remainingQuantity: 8.0,
-      status: 'PENDING',
-    };
+      status: 'PENDING' as const,
+    } as unknown as IOrder;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [corruptOrder5] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 9. Corrupted fill: cumulative fill exceeds order quantity
-    const goodOrder: any = {
+    const goodOrder: IOrder = {
       orderId: 'ord_good',
       clientOrderId: 'cl_good',
       tradeId: 't_good',
@@ -3618,23 +3620,23 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       fees: 0,
       slippage: 0,
     };
-    const corruptFill: any = {
+    const corruptFill = {
       fillId: 'f_over',
       orderId: 'ord_good',
       tradeId: 't_good',
       symbol: 'BTCUSDT',
-      side: 'BUY',
+      side: 'BUY' as const,
       price: 100,
       quantity: 10.0, // > 5.0
       fee: 0,
       slippage: 0,
       timestamp: 1020,
       isPartial: false,
-    };
+    } as unknown as IFill;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [corruptFill] })).toThrow('CORRUPT_EXECUTION_FILL');
 
     // 10. Corrupted order: Duplicate orderId
-    const duplicateOrder: any = { ...goodOrder, clientOrderId: 'cl_dup' };
+    const duplicateOrder: IOrder = { ...goodOrder, clientOrderId: 'cl_dup' };
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder, duplicateOrder] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 11. Corrupted order: invalid initialQuantity (<= 0 or non-finite)
@@ -3649,39 +3651,39 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [{ ...goodOrder, initialQuantity: 4.0 }] })).toThrow('CORRUPT_EXECUTION_ORDER');
 
     // 14. Corrupted fill: Orphan fill referencing unknown orderId
-    const orphanFill: any = {
+    const orphanFill = {
       fillId: 'f_orphan',
       orderId: 'ord_unknown',
       tradeId: 't_good',
       symbol: 'BTCUSDT',
-      side: 'BUY',
+      side: 'BUY' as const,
       price: 100,
       quantity: 5.0,
       fee: 0,
       slippage: 0,
       timestamp: 1020,
       isPartial: false,
-    };
+    } as unknown as IFill;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [orphanFill] })).toThrow('CORRUPT_EXECUTION_FILL');
 
     // 15. Corrupted fill: tradeId mismatch with order
-    const mismatchFill: any = {
+    const mismatchFill = {
       fillId: 'f_mismatch',
       orderId: 'ord_good',
       tradeId: 't_different_trade',
       symbol: 'BTCUSDT',
-      side: 'BUY',
+      side: 'BUY' as const,
       price: 100,
       quantity: 5.0,
       fee: 0,
       slippage: 0,
       timestamp: 1020,
       isPartial: false,
-    };
+    } as unknown as IFill;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [mismatchFill] })).toThrow('CORRUPT_EXECUTION_FILL');
 
     // 16. Corrupted fill: Duplicate fillId
-    const validFill1: any = {
+    const validFill1: IFill = {
       fillId: 'f_dup_1',
       orderId: 'ord_good',
       tradeId: 't_good',
@@ -3694,7 +3696,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       timestamp: 1020,
       isPartial: true,
     };
-    const duplicateFill: any = {
+    const duplicateFill: IFill = {
       fillId: 'f_dup_1', // Duplicate fillId
       orderId: 'ord_good',
       tradeId: 't_good',
@@ -3710,36 +3712,36 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], fills: [validFill1, duplicateFill] })).toThrow('CORRUPT_EXECUTION_FILL');
 
     // 17. Corrupted event: Orphan event referencing unknown orderId
-    const orphanEvent: any = {
+    const orphanEvent = {
       eventId: 'ev_orphan',
       tradeId: 't_good',
       orderId: 'ord_unknown',
       timestamp: 1020,
-    };
+    } as unknown as IExecutionEvent;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [orphanEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
 
     // 18. Corrupted event: tradeId mismatch with order
-    const mismatchEvent: any = {
+    const mismatchEvent = {
       eventId: 'ev_mismatch',
       tradeId: 't_different_trade',
       orderId: 'ord_good',
       timestamp: 1020,
-    };
+    } as unknown as IExecutionEvent;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [mismatchEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
 
     // 19. Corrupted event: Duplicate eventId
-    const validEvent1: any = {
+    const validEvent1 = {
       eventId: 'ev_dup',
       tradeId: 't_good',
       orderId: 'ord_good',
       timestamp: 1020,
-    };
-    const duplicateEvent: any = {
+    } as unknown as IExecutionEvent;
+    const duplicateEvent = {
       eventId: 'ev_dup', // Duplicate eventId
       tradeId: 't_good',
       orderId: 'ord_good',
       timestamp: 1030,
-    };
+    } as unknown as IExecutionEvent;
     expect(() => sim.restoreCheckpoint({ ...validCheckpoint, orders: [goodOrder], events: [validEvent1, duplicateEvent] })).toThrow('CORRUPT_EXECUTION_EVENT');
   });
 
@@ -3774,7 +3776,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     };
 
     // Attempt restoring deliberately corrupted checkpoint
-    const corruptedCheckpoint: any = {
+    const corruptedCheckpoint: IExecutionSimulatorCheckpoint = {
       version: 1,
       runId: 'corrupted_run',
       orderCounter: 100,
@@ -3784,6 +3786,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       orders: [
         {
           orderId: 'bad_ord',
+          clientOrderId: 'bad_cl',
           tradeId: 'bad_t',
           symbol: 'BTCUSDT',
           side: 'BUY',
@@ -3796,7 +3799,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
           submittedAt: 1010,
           fees: 0,
           slippage: 0,
-        },
+        } as unknown as IOrder,
       ],
       fills: [],
       events: [],
@@ -3892,6 +3895,75 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       expect(execSim.getAllFills()).toHaveLength(0);
       expect(execSim.getAllEvents()).toHaveLength(0);
     }
+  });
+
+  // 72. Dedicated NEXT_BAR_OPEN Execution Semantics & Temporal Invariants
+  test('72. NEXT_BAR_OPEN executes strictly at next candle open, enforces temporal arrival boundaries, and returns AWAITING_NEXT_BAR if next bar unavailable', () => {
+    const execSim = new ExecutionSimulator(
+      FillModel.NEXT_BAR_OPEN,
+      SameCandleAmbiguityMode.OPTIMISTIC,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'test_nbo',
+      { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 },
+      undefined,
+      { baseSpreadBps: 0, illiquidMultiplier: 0 },
+    );
+    const t0 = 1700000000000;
+    const c0: ICandle = { timestamp: new Date(t0), open: 100, high: 105, low: 95, close: 102, volume: 1000 };
+    const c1: ICandle = { timestamp: new Date(t0 + 60000), open: 103, high: 110, low: 101, close: 108, volume: 1200 };
+
+    // 1. Order submitted prior to c0 start time
+    const o0 = execSim.submitOrder({
+      tradeId: 't_nbo_1',
+      symbol: 'CUSTOM',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 2.0,
+      timestamp: t0 - 1000,
+    });
+
+    // When c0 is processed, o0 submitted before c0 executes at c0 open (100)
+    const res0 = execSim.processCandle(c0);
+    expect(res0.fills).toHaveLength(1);
+    expect(res0.fills[0].price).toBe(100);
+    expect(o0.status).toBe('FILLED');
+
+    // 2. Order submitted during c0 (at t0 + 15000), strictly after c0 start time
+    const o1 = execSim.submitOrder({
+      tradeId: 't_nbo_2',
+      symbol: 'CUSTOM',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 1.5,
+      timestamp: t0 + 15000,
+    });
+
+    // Processing c0 with nextCandle=c1: o1 must NOT fill on c0, but fills on c1 open (103)
+    const resMid = execSim.processCandle(c0, c1);
+    expect(resMid.fills).toHaveLength(1);
+    expect(resMid.fills[0].price).toBe(103);
+    expect(resMid.fills[0].timestamp).toBe(t0 + 60000);
+    expect(o1.status).toBe('FILLED');
+
+    // 3. Direct FillModelEngine test when nextCandle is undefined
+    const oPending: IOrder = {
+      orderId: 'ord_awaiting',
+      clientOrderId: 'cl_awaiting',
+      tradeId: 't_awaiting',
+      symbol: 'CUSTOM',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 1.0,
+      remainingQuantity: 1.0,
+      status: 'PENDING',
+      createdAt: t0 + 15000,
+      submittedAt: t0 + 15000,
+      fees: 0,
+      slippage: 0,
+    };
+    const evalRes = FillModelEngine.evaluateFill(oPending, c0, undefined, FillModel.NEXT_BAR_OPEN);
+    expect(evalRes.isFilled).toBe(false);
+    expect(evalRes.reason).toBe('AWAITING_NEXT_BAR');
   });
 });
 

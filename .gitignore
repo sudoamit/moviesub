@@ -57,3 +57,10 @@ prisma/*.db-journal
 **/src/**/*.d.ts
 **/src/**/*.d.ts.map
 **/src/**/*.tsbuildinfo
+
+# Binary archives and dumps
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
