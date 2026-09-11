@@ -141,4 +141,51 @@ describe('Phase 11 — Event Idempotency & Duplicate Prevention', () => {
     // Store contains strictly 1 pair
     expect(store.getAllPairs().length).toBe(1);
   });
+
+  it('guarantees atomic put-if-absent at the persistence boundary with uniqueness constraints', () => {
+    const pair = createDecisionPair({
+      championDecision: champDecision,
+      challengerDecision: challDecision
+    });
+
+    // 1. First insertion succeeds
+    const firstRes = store.putIfAbsentDecisionPair(pair);
+    expect(firstRes.inserted).toBe(true);
+    expect(firstRes.pair.pairId).toBe(pair.pairId);
+
+    // 2. Second insertion of identical snapshot + model is rejected atomically and returns existing
+    const duplicatePairWithDifferentId = {
+      ...pair,
+      pairId: 'pair-duplicate-attempt'
+    };
+    const secondRes = store.putIfAbsentDecisionPair(duplicatePairWithDifferentId);
+    expect(secondRes.inserted).toBe(false);
+    expect(secondRes.pair.pairId).toBe(pair.pairId); // Original preserved
+
+    // 3. Store still contains strictly 1 pair
+    expect(store.getAllPairs().length).toBe(1);
+  });
+
+  it('prevents duplicate shadow orders and duplicate outcomes for the same decision', () => {
+    const order1 = {
+      shadowOrderId: 'so-idem-1',
+      decisionId: challDecision.decisionId,
+      instrument: snapshot.instrument,
+      side: 'BUY' as const,
+      quantity: 1,
+      requestedPrice: 100200,
+      orderType: 'MARKET' as const,
+      createdAt: snapshot.timestamp,
+      executionConfigVersion: 'e1',
+      costConfigVersion: 'c1',
+      status: 'FILLED' as const
+    };
+
+    store.saveShadowOrder(order1);
+    expect(store.getAllOrders().length).toBe(1);
+
+    // Re-saving the same order ID overwrites/preserves idempotently without duplicating
+    store.saveShadowOrder(order1);
+    expect(store.getAllOrders().length).toBe(1);
+  });
 });

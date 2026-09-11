@@ -218,17 +218,123 @@ describe('Phase 11 — Real Pipeline Integration & Golden Regression', () => {
       sharedConfigs,
     });
 
-    // GOLDEN REGRESSION ASSERTIONS:
+    // GOLDEN REGRESSION & EXECUTION BOUNDARY ASSERTIONS:
     expect(championDecision.confidence).toBe(standaloneSignal.score / 100);
     expect(championDecision.entryPrice).toBe(standaloneSignal.entryZone?.optimal ?? 100000);
     expect(championDecision.stopLoss).toBe(standaloneSignal.stopLoss);
     expect(championDecision.takeProfit).toBe(standaloneSignal.takeProfits?.tp1 ?? 0);
+
+    if (championDecision.action === 'BUY' || championDecision.action === 'SELL') {
+      expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+      expect(mockLivePort.submitLiveOrder).toHaveBeenCalledWith(championDecision);
+    }
 
     return pairPromise.then((pair) => {
       expect(pair.divergence).toBeDefined();
       expect(pair.snapshotId).toBe(marketSnapshot.snapshotId);
       expect(pair.snapshotHash).toBe(marketSnapshot.snapshotHash);
     });
+  });
+
+  it('Issue 1 & 3: proves strict execution boundary — Champion calls Live, Challenger calls Shadow only, Never Live', async () => {
+    const mockLivePort: ILiveExecutionPort = {
+      isLiveBroker: true,
+      submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'order-boundary-1', status: 'PLACED' }),
+      cancelLiveOrder: jest.fn().mockResolvedValue(true),
+    };
+
+    const store = new InMemoryShadowExecutionStore();
+    const shadowSimulator = new ShadowExecutionSimulator();
+    const shadowSubmitSpy = jest.spyOn(shadowSimulator, 'submitShadowOrder');
+
+    const orchestrator = new SynchronizedShadowOrchestrator({
+      store,
+      livePort: mockLivePort,
+      shadowPort: shadowSimulator,
+    });
+
+    const { championDecision, pairPromise } = orchestrator.executeDecisionFlow({
+      snapshot: marketSnapshot,
+      portfolioSnapshot,
+      featureExtractor: () => ({ features: {}, featureHash: 'fhash', featureLatencyMs: 1 }),
+      championEvaluator: (ctx) => deepFreeze({
+        decisionId: ctx.decisionId,
+        action: 'BUY',
+        confidence: 0.90,
+        signal: 'CHAMP_BUY',
+        entryPrice: 100000,
+        stopLoss: 98000,
+        takeProfit: 105000,
+        positionSize: 1.0,
+        riskAmount: 2000,
+        reason: 'Champion buy signal',
+        decisionFingerprint: 'dp-champ-live',
+        latencies: {
+          marketTimestamp: 0,
+          featureStartTimestamp: 0,
+          featureEndTimestamp: 0,
+          modelStartTimestamp: 0,
+          modelEndTimestamp: 0,
+          decisionTimestamp: 0,
+          dataToDecisionLatencyMs: 0,
+          featureLatencyMs: 0,
+          modelLatencyMs: 0,
+          totalDecisionLatencyMs: 0,
+        },
+        context: ctx,
+      }),
+      challengerEvaluator: (ctx) => deepFreeze({
+        decisionId: ctx.decisionId,
+        action: 'BUY',
+        confidence: 0.95,
+        signal: 'CHALL_BUY',
+        entryPrice: 100000,
+        stopLoss: 98000,
+        takeProfit: 105000,
+        positionSize: 2.0,
+        riskAmount: 4000,
+        reason: 'Challenger buy signal',
+        decisionFingerprint: 'dp-chall-shadow',
+        latencies: {
+          marketTimestamp: 0,
+          featureStartTimestamp: 0,
+          featureEndTimestamp: 0,
+          modelStartTimestamp: 0,
+          modelEndTimestamp: 0,
+          decisionTimestamp: 0,
+          dataToDecisionLatencyMs: 0,
+          featureLatencyMs: 0,
+          modelLatencyMs: 0,
+          totalDecisionLatencyMs: 0,
+        },
+        context: ctx,
+      }),
+      championIdentity,
+      challengerIdentity,
+      sharedConfigs,
+    });
+
+    // 1. Champion immediately submitted live order
+    expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+    expect(mockLivePort.submitLiveOrder).toHaveBeenCalledWith(championDecision);
+
+    // 2. Wait for Challenger shadow execution
+    const pair = await pairPromise;
+    expect(pair.pairId).toBeDefined();
+
+    // 3. Challenger submitted shadow order via ShadowExecutionPort
+    expect(shadowSubmitSpy).toHaveBeenCalledTimes(1);
+    expect(shadowSubmitSpy).toHaveBeenCalledWith(expect.objectContaining({
+      side: 'BUY',
+      quantity: 2.0,
+      requestedPrice: 100000,
+    }));
+
+    // 4. CRITICAL: Challenger NEVER touched Live Execution Port (still exactly 1 call from Champion)
+    expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+
+    // 5. Shadow simulator recorded open position, while live broker received live order
+    expect(shadowSimulator.getShadowPortfolioState().openPositions.length).toBe(1);
   });
 
   it('Issue 10: proves slow Challenger does NOT block Champion execution return', async () => {

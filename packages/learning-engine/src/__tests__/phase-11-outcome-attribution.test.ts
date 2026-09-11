@@ -172,8 +172,12 @@ describe('Phase 11 — Shadow Outcome Attribution & Future Isolation', () => {
     expect(outcome.outcomeHash.length).toBe(64);
     expect(Object.isFrozen(outcome)).toBe(true);
 
-    // Verify ZERO mutation of original decision or pair
+    // Verify ZERO mutation of original decision, pair, context, and snapshots
     expect(challDecision.decisionFingerprint).toBe(originalDecisionFingerprint);
     expect(pair.decisionPairFingerprint).toBe(originalPairFingerprint);
+    expect(Object.isFrozen(challDecision)).toBe(true);
+    expect(Object.isFrozen(challDecision.context)).toBe(true);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(baseShared.portfolioSnapshot)).toBe(true);
   });
 });

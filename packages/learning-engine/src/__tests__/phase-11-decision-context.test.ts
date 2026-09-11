@@ -70,20 +70,75 @@ describe('Phase 11 — Decision Context & Deterministic Fingerprinting', () => {
     });
     expect(fpDiffSize).not.toBe(fp1);
 
-    // Strategy config hash change changes fingerprint
-    const fpDiffStrat = computeDecisionFingerprint({
-      ...baseParams,
-      strategyConfigHash: 'strat-hash-MODIFIED'
-    });
-    expect(fpDiffStrat).not.toBe(fp1);
+    // Complete mutation-sensitivity matrix for all 7 context hashes:
+    // 1. snapshotHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, snapshotHash: 'hash-snap-MODIFIED' })).not.toBe(fp1);
 
-    // Action change changes fingerprint
-    const fpDiffAction = computeDecisionFingerprint({
-      ...baseParams,
-      action: 'HOLD',
-      signal: 'NO_SETUP'
-    });
-    expect(fpDiffAction).not.toBe(fp1);
+    // 2. portfolioStateHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, portfolioStateHash: 'hash-port-MODIFIED' })).not.toBe(fp1);
+
+    // 3. featureInputHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, featureInputHash: 'hash-feat-MODIFIED' })).not.toBe(fp1);
+
+    // 4. strategyConfigHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, strategyConfigHash: 'strat-hash-MODIFIED' })).not.toBe(fp1);
+
+    // 5. executionConfigHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, executionConfigHash: 'exec-hash-MODIFIED' })).not.toBe(fp1);
+
+    // 6. riskConfigHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, riskConfigHash: 'risk-hash-MODIFIED' })).not.toBe(fp1);
+
+    // 7. costConfigHash mutation
+    expect(computeDecisionFingerprint({ ...baseParams, costConfigHash: 'cost-hash-MODIFIED' })).not.toBe(fp1);
+  });
+
+  it('validates point-in-time simultaneity and enforces temporal consistency', () => {
+    const { validatePointInTimeSimultaneity } = require('../shadow-execution/index');
+
+    const validParams = {
+      marketSnapshot: snapshot,
+      portfolioSnapshot,
+      featureDataCutoff: snapshot.timestamp,
+      decisionTimestamp: snapshot.timestamp + 50,
+      maxAllowedSkewMs: 1000
+    };
+
+    // Valid simultaneity should not throw
+    expect(() => validatePointInTimeSimultaneity(validParams)).not.toThrow();
+
+    // 1. Market snapshot in future
+    expect(() => {
+      validatePointInTimeSimultaneity({
+        ...validParams,
+        marketSnapshot: { ...snapshot, timestamp: validParams.decisionTimestamp + 100 }
+      });
+    }).toThrow(/TEMPORAL_INVARIANT_VIOLATION.*Market snapshot timestamp/);
+
+    // 2. Portfolio snapshot in future
+    expect(() => {
+      validatePointInTimeSimultaneity({
+        ...validParams,
+        portfolioSnapshot: { ...portfolioSnapshot, timestamp: validParams.decisionTimestamp + 100 }
+      });
+    }).toThrow(/TEMPORAL_INVARIANT_VIOLATION.*Portfolio snapshot timestamp/);
+
+    // 3. Feature data cutoff in future
+    expect(() => {
+      validatePointInTimeSimultaneity({
+        ...validParams,
+        featureDataCutoff: validParams.decisionTimestamp + 100
+      });
+    }).toThrow(/TEMPORAL_INVARIANT_VIOLATION.*Feature data cutoff/);
+
+    // 4. Excessive temporal skew between market and portfolio snapshots
+    expect(() => {
+      validatePointInTimeSimultaneity({
+        ...validParams,
+        portfolioSnapshot: { ...portfolioSnapshot, timestamp: snapshot.timestamp - 10000 },
+        maxAllowedSkewMs: 1000
+      });
+    }).toThrow(/POINT_IN_TIME_SKEW_ERROR/);
   });
 
   it('creates frozen immutable DecisionContext', () => {

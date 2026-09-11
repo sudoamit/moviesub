@@ -17,8 +17,10 @@ export interface IShadowExecutionStore {
   saveDecision(decision: TradingDecision): void;
   getDecision(decisionId: string): TradingDecision | undefined;
   saveDecisionPair(pair: ChampionChallengerDecisionPair): void;
+  putIfAbsentDecisionPair(pair: ChampionChallengerDecisionPair): { inserted: boolean; pair: ChampionChallengerDecisionPair };
   getDecisionPair(pairId: string): ChampionChallengerDecisionPair | undefined;
   getDecisionPairBySnapshot(snapshotId: string): ChampionChallengerDecisionPair | undefined;
+  getDecisionPairBySnapshotAndModel(snapshotId: string, challengerModelId: string): ChampionChallengerDecisionPair | undefined;
   saveShadowOrder(order: ShadowOrder): void;
   getShadowOrder(orderId: string): ShadowOrder | undefined;
   saveShadowPosition(position: ShadowPosition): void;
@@ -39,6 +41,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   private readonly decisions = new Map<string, TradingDecision>();
   private readonly pairs = new Map<string, ChampionChallengerDecisionPair>();
   private readonly snapshotToPairId = new Map<string, string>();
+  private readonly snapshotModelToPairId = new Map<string, string>();
   private readonly orders = new Map<string, ShadowOrder>();
   private readonly positions = new Map<string, ShadowPosition>();
   private readonly outcomes = new Map<string, ShadowOutcome>();
@@ -70,8 +73,28 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     if (!pair || !pair.pairId || !pair.snapshotId) {
       throw new Error('INVALID_STORE_OPERATION: pair is required');
     }
+    const challengerModelId = pair.challengerDecision?.context?.modelIdentity?.modelId || 'default';
+    const compositeKey = `${pair.snapshotId}:${challengerModelId}`;
     this.pairs.set(pair.pairId, deepFreeze<ChampionChallengerDecisionPair>(JSON.parse(JSON.stringify(pair))));
     this.snapshotToPairId.set(pair.snapshotId, pair.pairId);
+    this.snapshotModelToPairId.set(compositeKey, pair.pairId);
+  }
+
+  public putIfAbsentDecisionPair(pair: ChampionChallengerDecisionPair): { inserted: boolean; pair: ChampionChallengerDecisionPair } {
+    if (!pair || !pair.pairId || !pair.snapshotId) {
+      throw new Error('INVALID_STORE_OPERATION: pair is required');
+    }
+    const challengerModelId = pair.challengerDecision?.context?.modelIdentity?.modelId || 'default';
+    const compositeKey = `${pair.snapshotId}:${challengerModelId}`;
+    const existingPairId = this.snapshotModelToPairId.get(compositeKey) || this.snapshotToPairId.get(pair.snapshotId);
+    if (existingPairId) {
+      const existing = this.pairs.get(existingPairId);
+      if (existing) {
+        return { inserted: false, pair: existing };
+      }
+    }
+    this.saveDecisionPair(pair);
+    return { inserted: true, pair: this.pairs.get(pair.pairId)! };
   }
 
   public getDecisionPair(pairId: string): ChampionChallengerDecisionPair | undefined {
@@ -80,6 +103,12 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
 
   public getDecisionPairBySnapshot(snapshotId: string): ChampionChallengerDecisionPair | undefined {
     const pairId = this.snapshotToPairId.get(snapshotId);
+    return pairId ? this.pairs.get(pairId) : undefined;
+  }
+
+  public getDecisionPairBySnapshotAndModel(snapshotId: string, challengerModelId: string): ChampionChallengerDecisionPair | undefined {
+    const compositeKey = `${snapshotId}:${challengerModelId}`;
+    const pairId = this.snapshotModelToPairId.get(compositeKey) || this.snapshotToPairId.get(snapshotId);
     return pairId ? this.pairs.get(pairId) : undefined;
   }
 
@@ -314,12 +343,24 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     if (!this.inTransaction) this.saveToFile();
   }
 
+  public putIfAbsentDecisionPair(pair: ChampionChallengerDecisionPair): { inserted: boolean; pair: ChampionChallengerDecisionPair } {
+    const result = this.memoryStore.putIfAbsentDecisionPair(pair);
+    if (result.inserted && !this.inTransaction) {
+      this.saveToFile();
+    }
+    return result;
+  }
+
   public getDecisionPair(pairId: string): ChampionChallengerDecisionPair | undefined {
     return this.memoryStore.getDecisionPair(pairId);
   }
 
   public getDecisionPairBySnapshot(snapshotId: string): ChampionChallengerDecisionPair | undefined {
     return this.memoryStore.getDecisionPairBySnapshot(snapshotId);
+  }
+
+  public getDecisionPairBySnapshotAndModel(snapshotId: string, challengerModelId: string): ChampionChallengerDecisionPair | undefined {
+    return this.memoryStore.getDecisionPairBySnapshotAndModel(snapshotId, challengerModelId);
   }
 
   public saveShadowOrder(order: ShadowOrder): void {

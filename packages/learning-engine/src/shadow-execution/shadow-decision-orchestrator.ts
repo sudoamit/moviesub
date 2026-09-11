@@ -138,6 +138,41 @@ export function createPortfolioSnapshot(params: {
 }
 
 /**
+ * Validates point-in-time simultaneity and prevents temporal skew between market snapshot,
+ * portfolio snapshot, and feature cutoff.
+ */
+export function validatePointInTimeSimultaneity(params: {
+  marketSnapshot: MarketSnapshot;
+  portfolioSnapshot: PortfolioSnapshot;
+  featureDataCutoff: number;
+  decisionTimestamp: number;
+  maxAllowedSkewMs?: number;
+}): void {
+  if (params.marketSnapshot.timestamp > params.decisionTimestamp) {
+    throw new Error(
+      `TEMPORAL_INVARIANT_VIOLATION: Market snapshot timestamp (${params.marketSnapshot.timestamp}) is in future relative to decision timestamp (${params.decisionTimestamp})`
+    );
+  }
+  if (params.portfolioSnapshot.timestamp > params.decisionTimestamp) {
+    throw new Error(
+      `TEMPORAL_INVARIANT_VIOLATION: Portfolio snapshot timestamp (${params.portfolioSnapshot.timestamp}) is in future relative to decision timestamp (${params.decisionTimestamp})`
+    );
+  }
+  if (params.featureDataCutoff > params.decisionTimestamp) {
+    throw new Error(
+      `TEMPORAL_INVARIANT_VIOLATION: Feature data cutoff (${params.featureDataCutoff}) is in future relative to decision timestamp (${params.decisionTimestamp})`
+    );
+  }
+  const maxSkew = params.maxAllowedSkewMs !== undefined ? params.maxAllowedSkewMs : 5000;
+  const skew = Math.abs(params.marketSnapshot.timestamp - params.portfolioSnapshot.timestamp);
+  if (skew > maxSkew) {
+    throw new Error(
+      `POINT_IN_TIME_SKEW_ERROR: Skew between market snapshot (${params.marketSnapshot.timestamp}) and portfolio snapshot (${params.portfolioSnapshot.timestamp}) is ${skew}ms, exceeding allowed maximum (${maxSkew}ms)`
+    );
+  }
+}
+
+/**
  * Computes a comprehensive decision fingerprint covering all Point-In-Time input contexts and decision parameters.
  */
 export function computeDecisionFingerprint(params: {
@@ -403,9 +438,17 @@ export class SynchronizedShadowOrchestrator {
       };
     }
 
-    // 2. Extract PIT features once for both models
-    const featureRes = params.featureExtractor();
+    // 2. Enforce Point-In-Time Simultaneity & Prevent Temporal Skew
     const decisionTimestamp = Date.now();
+    validatePointInTimeSimultaneity({
+      marketSnapshot: params.snapshot,
+      portfolioSnapshot: params.portfolioSnapshot,
+      featureDataCutoff: params.snapshot.timestamp,
+      decisionTimestamp,
+    });
+
+    // 3. Extract PIT features once for both models
+    const featureRes = params.featureExtractor();
 
     // 3. Build immutable shared contexts
     const champContext: DecisionContext = deepFreeze({
