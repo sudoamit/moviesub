@@ -45,3 +45,4 @@ export * from './pit-experience-dataset-builder';
 export * from './candidate-hypothesis-generator';
 export * from './self-improving-retraining-pipeline';
 export * from './retraining-run-store';
+export * from './synchronized-shadow-evaluation-engine';
