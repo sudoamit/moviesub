@@ -38,24 +38,28 @@ export enum PositionSide {
   SHORT = 'SHORT',
 }
 
-export function normalizeDirection(dir: Direction | string | undefined | null): PositionSide | 'NEUTRAL' {
+export function normalizeDirection(dir: Direction | PositionSide | string | undefined | null): PositionSide | 'NEUTRAL' {
   if (!dir) return 'NEUTRAL';
   const upper = String(dir).toUpperCase();
-  if (upper === 'BULLISH' || upper === 'LONG' || upper === 'BUY') return PositionSide.LONG;
-  if (upper === 'BEARISH' || upper === 'SHORT' || upper === 'SELL') return PositionSide.SHORT;
+  if (upper === 'BULLISH' || upper === 'LONG') return PositionSide.LONG;
+  if (upper === 'BEARISH' || upper === 'SHORT') return PositionSide.SHORT;
   return 'NEUTRAL';
 }
 
-export function isLongPosition(dir: Direction | string | undefined | null): boolean {
+export function isLongPosition(dir: Direction | PositionSide | string | undefined | null): boolean {
   return normalizeDirection(dir) === PositionSide.LONG;
 }
 
-export function isShortPosition(dir: Direction | string | undefined | null): boolean {
+export function isShortPosition(dir: Direction | PositionSide | string | undefined | null): boolean {
   return normalizeDirection(dir) === PositionSide.SHORT;
 }
 
-export function toOrderSide(dir: Direction | string | undefined | null, isExit = false): 'BUY' | 'SELL' {
+export function toOrderSide(
+  dir: Direction | PositionSide | string | undefined | null,
+  action: 'ENTRY' | 'EXIT' | boolean = 'ENTRY',
+): 'BUY' | 'SELL' {
   const isLong = isLongPosition(dir);
+  const isExit = action === 'EXIT' || action === true;
   if (isExit) {
     return isLong ? 'SELL' : 'BUY';
   }

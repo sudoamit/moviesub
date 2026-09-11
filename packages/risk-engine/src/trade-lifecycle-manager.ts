@@ -16,6 +16,8 @@ export const DEFAULT_PARTIAL_EXIT_POLICY: IPartialExitPolicy = {
   moveStopToBreakevenOnTp1: true,
   trailStopOnTp2: true,
   trailStopOffsetR: 1.0,
+  autoDeriveTargets: true,
+  defaultRMultiples: { r1: 1.5, r2: 2.5, r3: 4.0 },
 };
 
 export class TradeLifecycleManager {
@@ -47,6 +49,7 @@ export class TradeLifecycleManager {
     orderId?: string,
     entryFee = 0,
     entrySlippage = 0,
+    policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
     const isLong = isLongPosition(signal.direction);
@@ -56,47 +59,61 @@ export class TradeLifecycleManager {
       throw new Error(`INVALID_SIGNAL_STOP_LOSS: Signal for trade '${tradeId}' must provide a valid positive stopLoss, got ${signal.stopLoss}`);
     }
 
-    const signalEntry = signal.entryZone?.optimal ?? signal.entryZone?.min ?? executionPrice;
-    const signalRisk = Math.abs(signalEntry - signal.stopLoss) || Math.abs(executionPrice - signal.stopLoss);
-
-    const initialStopLoss =
-      (isLong ? signal.stopLoss < executionPrice : signal.stopLoss > executionPrice)
-        ? signal.stopLoss
-        : isLong
-          ? Number((executionPrice - signalRisk).toFixed(2))
-          : Number((executionPrice + signalRisk).toFixed(2));
+    const initialStopLoss = signal.stopLoss;
+    if (isLong && initialStopLoss >= executionPrice) {
+      throw new Error(
+        `INVALID_POSITION_PROTECTION: Stop loss (${initialStopLoss}) for LONG position must be strictly below execution price (${executionPrice})`,
+      );
+    }
+    if (!isLong && initialStopLoss <= executionPrice) {
+      throw new Error(
+        `INVALID_POSITION_PROTECTION: Stop loss (${initialStopLoss}) for SHORT position must be strictly above execution price (${executionPrice})`,
+      );
+    }
 
     const riskDistance = Math.abs(executionPrice - initialStopLoss);
     const rawTp1 = signal.takeProfits?.tp1;
     const rawTp2 = signal.takeProfits?.tp2;
     const rawTp3 = signal.takeProfits?.tp3;
 
-    const tp1 =
-      typeof rawTp1 === 'number' &&
-      Number.isFinite(rawTp1) &&
-      (isLong ? rawTp1 > executionPrice : rawTp1 < executionPrice)
-        ? rawTp1
-        : isLong
-          ? Number((executionPrice + riskDistance * 1.5).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - riskDistance * 1.5).toFixed(2));
+    const r1Mult = policy.defaultRMultiples?.r1 ?? 1.5;
+    const r2Mult = policy.defaultRMultiples?.r2 ?? 2.5;
+    const r3Mult = policy.defaultRMultiples?.r3 ?? 4.0;
 
-    const tp2 =
-      typeof rawTp2 === 'number' &&
-      Number.isFinite(rawTp2) &&
-      (isLong ? rawTp2 > executionPrice : rawTp2 < executionPrice)
-        ? rawTp2
-        : isLong
-          ? Number((executionPrice + riskDistance * 2.5).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - riskDistance * 2.5).toFixed(2));
+    let tp1: number;
+    if (typeof rawTp1 === 'number' && Number.isFinite(rawTp1) && (isLong ? rawTp1 > executionPrice : rawTp1 < executionPrice)) {
+      tp1 = rawTp1;
+    } else if (policy.autoDeriveTargets) {
+      tp1 = isLong
+        ? Number((executionPrice + riskDistance * r1Mult).toFixed(2))
+        : Number(Math.max(0.01, executionPrice - riskDistance * r1Mult).toFixed(2));
+    } else {
+      throw new Error(
+        `INVALID_SIGNAL_TAKE_PROFIT: Signal for trade '${tradeId}' has missing/invalid TP1 and autoDeriveTargets is disabled`,
+      );
+    }
 
-    const tp3 =
-      typeof rawTp3 === 'number' &&
-      Number.isFinite(rawTp3) &&
-      (isLong ? rawTp3 > executionPrice : rawTp3 < executionPrice)
-        ? rawTp3
-        : isLong
-          ? Number((executionPrice + riskDistance * 4.0).toFixed(2))
-          : Number(Math.max(0.01, executionPrice - riskDistance * 4.0).toFixed(2));
+    let tp2: number;
+    if (typeof rawTp2 === 'number' && Number.isFinite(rawTp2) && (isLong ? rawTp2 > executionPrice : rawTp2 < executionPrice)) {
+      tp2 = rawTp2;
+    } else if (policy.autoDeriveTargets) {
+      tp2 = isLong
+        ? Number((executionPrice + riskDistance * r2Mult).toFixed(2))
+        : Number(Math.max(0.01, executionPrice - riskDistance * r2Mult).toFixed(2));
+    } else {
+      tp2 = tp1;
+    }
+
+    let tp3: number;
+    if (typeof rawTp3 === 'number' && Number.isFinite(rawTp3) && (isLong ? rawTp3 > executionPrice : rawTp3 < executionPrice)) {
+      tp3 = rawTp3;
+    } else if (policy.autoDeriveTargets) {
+      tp3 = isLong
+        ? Number((executionPrice + riskDistance * r3Mult).toFixed(2))
+        : Number(Math.max(0.01, executionPrice - riskDistance * r3Mult).toFixed(2));
+    } else {
+      tp3 = tp2;
+    }
 
     if (isLong) {
       if (tp1 <= executionPrice) {

@@ -651,11 +651,7 @@ export class ShadowOrchestrator {
           ctx.activeLot = exitResult.lot;
 
           if (exitResult.isBreakevenStopTriggered) {
-            const slOrder = ctx.execSim.getTradeOrders(ctx.activeLot.tradeId).find((o) => o.orderType === 'STOP');
-            if (slOrder) {
-              slOrder.stopPrice = ctx.activeLot.entryPrice;
-              slOrder.exitTarget = 'TRAILING_STOP';
-            }
+            ctx.execSim.updateStopPrice(ctx.activeLot.tradeId, ctx.activeLot.entryPrice, 'TRAILING_STOP');
           }
 
           if (exitResult.isClosed) {

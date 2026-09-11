@@ -652,6 +652,27 @@ export class ExecutionSimulator {
     return count;
   }
 
+  updateStopPrice(tradeId: string, newStopPrice: number, exitTarget?: string): boolean {
+    if (typeof newStopPrice !== 'number' || !Number.isFinite(newStopPrice) || newStopPrice <= 0) {
+      throw new Error(`INVALID_ORDER_STOP_PRICE: Stop price must be a positive finite number, got ${newStopPrice}`);
+    }
+    let updated = false;
+    for (const order of this.orders.values()) {
+      if (
+        order.tradeId === tradeId &&
+        order.orderType === 'STOP' &&
+        (order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED')
+      ) {
+        order.stopPrice = newStopPrice;
+        if (exitTarget) {
+          order.exitTarget = exitTarget;
+        }
+        updated = true;
+      }
+    }
+    return updated;
+  }
+
   cancelOcoGroup(ocoGroupId: string, exceptOrderId?: string): number {
     let count = 0;
     for (const order of this.orders.values()) {

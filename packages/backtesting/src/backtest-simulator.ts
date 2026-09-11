@@ -325,20 +325,42 @@ export class BacktestSimulator {
             pendingEntrySignal = null;
           } else {
             // Create Position Lot strictly from actual IFill result, preserving entry fee & slippage
-            activeLot = TradeLifecycleManager.createPositionLot(
-              pendingEntrySignal,
-              fill.price,
-              fill.quantity,
-              fill.timestamp,
-              pendingEntryOrder.orderId,
-              fill.fee,
-              fill.slippage,
-            );
-            cumulativeFees += fill.fee;
-            cumulativeSlippage += fill.slippage;
+            try {
+              activeLot = TradeLifecycleManager.createPositionLot(
+                pendingEntrySignal,
+                fill.price,
+                fill.quantity,
+                fill.timestamp,
+                pendingEntryOrder.orderId,
+                fill.fee,
+                fill.slippage,
+                partialPolicy,
+              );
+              cumulativeFees += fill.fee;
+              cumulativeSlippage += fill.slippage;
 
-            // Immediately create RESTING exit orders for the position before next candle is processed
-            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
+              // Immediately create RESTING exit orders for the position before next candle is processed
+              this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
+            } catch (err: any) {
+              if (err.message && err.message.includes('INVALID_POSITION_PROTECTION')) {
+                executionEvents.push({
+                  eventId: `evt_reject_${candleTime}_${pendingEntryOrder.orderId}`,
+                  tradeId: pendingEntrySignal.id || `trade_${symbol}_${candleTime}`,
+                  orderId: pendingEntryOrder.orderId,
+                  symbol,
+                  eventType: 'ORDER_REJECTED',
+                  timestamp: candleTime,
+                  price: fill.price,
+                  quantity: fill.quantity,
+                  remainingQuantity: 0,
+                  fees: fill.fee,
+                  slippage: fill.slippage,
+                  reason: `Rejected: Invalidation on gap through stop (${err.message})`,
+                });
+              } else {
+                throw err;
+              }
+            }
 
             pendingEntryOrder = null;
             pendingEntrySignal = null;
@@ -398,6 +420,10 @@ export class BacktestSimulator {
           );
 
           activeLot = exitResult.lot;
+
+          if (exitResult.isBreakevenStopTriggered) {
+            execSim.updateStopPrice(activeLot.tradeId, activeLot.entryPrice, 'TRAILING_STOP');
+          }
 
           if (exitResult.isClosed) {
             execSim.cancelTradeOrders(activeLot.tradeId);
@@ -868,8 +894,10 @@ export class BacktestSimulator {
         exitTriggerTimestamp: new Date(finalTime),
         exitFillTimestamp: new Date(finalTime),
         exitFillPrice: finalClose,
-        exitFees: 0,
-        exitSlippage: 0,
+        exitFees: totalFees - (firstFill?.fee || 0),
+        exitSlippage:
+          activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) -
+          (firstFill?.slippage || 0),
         grossPnL: activeLot.realizedPnl,
         netPnL: netPnl,
         realizedR: Number(

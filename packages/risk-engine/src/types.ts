@@ -88,6 +88,8 @@ export interface IPartialExitPolicy {
   moveStopToBreakevenOnTp1: boolean;
   trailStopOnTp2: boolean;
   trailStopOffsetR?: number;
+  autoDeriveTargets?: boolean;
+  defaultRMultiples?: { r1: number; r2: number; r3: number };
 }
 
 export type PositionStatus = 'PENDING' | 'OPEN' | 'PARTIALLY_CLOSED' | 'CLOSED' | 'CANCELLED';

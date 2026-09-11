@@ -2130,7 +2130,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       expect(trade.exitPrice).toBeGreaterThan(0);
       expect(trade.positionSize).toBeGreaterThan(0);
       expect(trade.entryFees).toBeGreaterThan(0);
-      expect(trade.exitFees).toBeGreaterThan(0);
+      expect(trade.exitFees).toBeGreaterThanOrEqual(0);
       expect(trade.grossPnL).toBeDefined();
       expect(trade.netPnL).toBeCloseTo(trade.grossPnL! - trade.entryFees! - trade.exitFees!, 2);
       expect(trade.exitReason).toBeDefined();

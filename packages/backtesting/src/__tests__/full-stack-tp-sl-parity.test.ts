@@ -8,6 +8,8 @@ import {
   PositionSide,
   normalizeDirection,
   isLongPosition,
+  isShortPosition,
+  toOrderSide,
 } from '@quant/shared';
 import {
   TradeLifecycleManager,
@@ -24,7 +26,7 @@ import {
   IFill,
 } from '../execution';
 
-describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity', () => {
+describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP Policy & Invariants', () => {
   const t0 = 1700000000000;
   const interval = 15 * 60 * 1000; // 15m
 
@@ -40,22 +42,34 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
   }
 
   // -------------------------------------------------------------------------
-  // Test 1: Full-Stack vs Direct Execution Parity
+  // Test 1: Full-Stack vs Direct Execution Parity with Independent Sizing
   // -------------------------------------------------------------------------
-  test('T01: Full-Stack BacktestSimulator vs Direct ExecutionSimulator + Lifecycle Parity', () => {
-    // 30 warmup candles around 100
+  test('T01: Full-Stack BacktestSimulator vs Direct ExecutionSimulator + Lifecycle Parity (Independent Sizing)', () => {
+    // Generate 35 deterministic candles
+    // Bars 0..29: Warmup flat candles at 100
+    // Bar 30: Signal generated at close (100.0)
+    // Bar 31: Entry bar opens at 100.0, fills market order at 100.0
+    // Bar 32: Candle rallies to 106.0 -> triggers TP1 at 105.0 -> Breakeven stop moved to 100.0
+    // Bar 33: Candle drops to 99.0 -> triggers Trailing Stop at 100.0 -> Position closed
+    // Bar 34: Cooldown bar
     const candles: ICandle[] = [];
     for (let i = 0; i < 30; i++) {
-      candles.push(createCandle(i, 100, 101, 99, 100));
+      candles.push(createCandle(i, 100.0, 100.5, 99.5, 100.0));
     }
-    // Bar 30: Signal generation bar (close 100)
-    candles.push(createCandle(30, 100, 101, 99, 100));
-    // Bar 31: Entry execution bar (open 100)
-    candles.push(createCandle(31, 100, 102, 99, 101));
-    // Bar 32: TP1 target bar (high reaches 106 >= 105 TP1)
-    candles.push(createCandle(32, 101, 106, 100, 105));
-    // Bar 33: Pullback to breakeven stop (low drops to 99 <= 100 BE stop)
-    candles.push(createCandle(33, 105, 105, 98, 99));
+    candles.push(createCandle(30, 100.0, 100.5, 99.5, 100.0)); // Signal bar (close: 100.0)
+    candles.push(createCandle(31, 100.0, 100.8, 99.8, 100.2)); // Entry bar (open: 100.0)
+    candles.push(createCandle(32, 100.2, 106.0, 100.0, 105.5)); // TP1 bar (high: 106.0 >= 105.0)
+    candles.push(createCandle(33, 105.5, 105.5, 99.0, 99.2));   // Breakeven bar (low: 99.0 <= 100.0)
+    candles.push(createCandle(34, 99.2, 100.0, 99.0, 99.5));
+
+    // Independent Sizing Calculation
+    const initialCapital = 100000;
+    const riskPercent = 0.01; // 1%
+    const riskAmount = initialCapital * riskPercent; // $1,000
+    const entryPrice = 100.0;
+    const stopLoss = 95.0;
+    const riskDistance = entryPrice - stopLoss; // 5.0
+    const expectedQuantity = Math.floor(riskAmount / riskDistance); // Exactly 200 units
 
     const deterministicSignal: ISignalSetup = {
       id: 'sig_parity_1',
@@ -98,7 +112,7 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
     const fullStackResult = BacktestSimulator.runSimulation({
       symbol: 'BTCUSDT',
       timeframe: '15m',
-      initialCapital: 100000,
+      initialCapital,
       candles,
       warmupBars: 30,
       minimumCandles: 30,
@@ -123,6 +137,7 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
         tp3Ratio: 0.0,
         moveStopToBreakevenOnTp1: true,
         trailStopOnTp2: false,
+        autoDeriveTargets: true,
       },
       fillModel: FillModel.OHLC_PATH,
       ambiguityMode: SameCandleAmbiguityMode.CONSERVATIVE,
@@ -132,8 +147,9 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
 
     expect(fullStackResult.trades.length).toBe(1);
     const fsTrade = fullStackResult.trades[0];
+    expect(fsTrade.positionSize).toBe(expectedQuantity);
 
-    // 2. Run Direct ExecutionSimulator Pipeline with matching execution configs
+    // 2. Run Direct ExecutionSimulator Pipeline using strictly independent quantity
     const directSim = new ExecutionSimulator(
       FillModel.OHLC_PATH,
       SameCandleAmbiguityMode.CONSERVATIVE,
@@ -148,14 +164,14 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
       { brokerageRateBps: 4.0 },
     );
 
-    // Submit entry order at Bar 30 close using the identical position size calculated by BacktestSimulator
+    // Submit entry order at Bar 30 close using independent expectedQuantity
     const entryOrder = directSim.submitOrder({
       tradeId: 't_direct_1',
       symbol: 'BTCUSDT',
       side: 'BUY',
       orderType: 'MARKET',
       price: 100.0,
-      quantity: fsTrade.positionSize,
+      quantity: expectedQuantity,
       timestamp: t0 + 30 * interval,
       exitTarget: 'ENTRY',
     });
@@ -214,6 +230,9 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
     expect(exit1.isClosed).toBe(false);
     expect(exit1.isBreakevenStopTriggered).toBe(true);
 
+    // Update resting stop to breakeven via first-class API
+    directSim.updateStopPrice(directLot.tradeId, directLot.entryPrice, 'TRAILING_STOP');
+
     // Bar 33: Breakeven Stop triggers
     const bar33Res = directSim.processCandle(candles[33]);
     expect(bar33Res.fills.length).toBe(1);
@@ -230,6 +249,7 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
     const directTrade = exit2.completedTrade!;
 
     // 3. Assert Exact Bit-For-Bit Equivalence
+    expect(directTrade.positionSize).toBe(expectedQuantity);
     expect(fsTrade.entryPrice).toBe(directTrade.entryPrice);
     expect(fsTrade.exitPrice).toBe(directTrade.exitPrice);
     expect(fsTrade.exitReason).toBe(directTrade.exitReason);
@@ -240,9 +260,9 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
   });
 
   // -------------------------------------------------------------------------
-  // Test 2: Same-Candle Ambiguity & OHLC Path Trajectory Full-Stack Resolution
+  // Test 2: Same-Candle Ambiguity & OHLC Path Trajectory (Bullish & Bearish)
   // -------------------------------------------------------------------------
-  test('T02: Same-Candle Ambiguity Full-Stack Resolution matches ExecutionSimulator strictly', () => {
+  test('T02: Same-Candle Ambiguity Full-Stack Resolution for both LONG and SHORT positions', () => {
     // 30 warmup candles
     const baseCandles: ICandle[] = [];
     for (let i = 0; i < 30; i++) {
@@ -251,24 +271,21 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
     baseCandles.push(createCandle(30, 100, 101, 99, 100)); // Signal bar
     baseCandles.push(createCandle(31, 100, 101, 99, 100)); // Entry bar
 
-    // 1. Bullish Ambiguous Candle 32: Open 100, High 112, Low 88, Close 101
-    // OHLC Path: Open (100) -> Low (88) -> High (112) -> Close (101)
-    // Low leg is visited first -> SL at 90 triggers first
-    const bullishAmbiguousCandle = createCandle(32, 100, 112, 88, 101);
-    const runCandlesBullish = [...baseCandles, bullishAmbiguousCandle];
-
-    const resBullish = BacktestSimulator.runSimulation({
+    // 1. Bullish Position - Conservative Ambiguous Candle (Open -> Low -> High -> Close)
+    // Low leg visited first -> SL at 90 hits first
+    const bullishConservativeCandle = createCandle(32, 100, 112, 88, 101);
+    const resBullCons = BacktestSimulator.runSimulation({
       symbol: 'BTCUSDT',
       timeframe: '15m',
       initialCapital: 100000,
-      candles: runCandlesBullish,
+      candles: [...baseCandles, bullishConservativeCandle],
       warmupBars: 30,
       minimumCandles: 30,
       strategyMode: 'SMC',
       strategyConfig: {
         deterministicSignals: [
           {
-            id: 'sig_ambig_bull',
+            id: 'sig_long_cons',
             direction: 'BULLISH',
             score: 85,
             entryPrice: 100.0,
@@ -281,28 +298,25 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
       fillModel: FillModel.OHLC_PATH,
       slippageBps: 0,
     });
-    expect(resBullish.trades.length).toBe(1);
-    expect(resBullish.trades[0].exitReason).toBe(SignalState.SL_HIT);
-    expect(resBullish.trades[0].exitPrice).toBeCloseTo(90.0, 1);
+    expect(resBullCons.trades.length).toBe(1);
+    expect(resBullCons.trades[0].exitReason).toBe(SignalState.SL_HIT);
+    expect(resBullCons.trades[0].exitPrice).toBeCloseTo(90.0, 1);
 
-    // 2. Bearish Ambiguous Candle 32: Open 100, High 112, Low 88, Close 99
-    // OHLC Path: Open (100) -> High (112) -> Low (88) -> Close (99)
-    // High leg is visited first -> TP at 110 triggers first
-    const bearishAmbiguousCandle = createCandle(32, 100, 112, 88, 99);
-    const runCandlesBearish = [...baseCandles, bearishAmbiguousCandle];
-
-    const resBearish = BacktestSimulator.runSimulation({
+    // 2. Bullish Position - Optimistic Ambiguous Candle (Open -> High -> Low -> Close)
+    // High leg visited first -> TP1 at 110 hits first
+    const bullishOptimisticCandle = createCandle(32, 100, 112, 88, 99);
+    const resBullOpt = BacktestSimulator.runSimulation({
       symbol: 'BTCUSDT',
       timeframe: '15m',
       initialCapital: 100000,
-      candles: runCandlesBearish,
+      candles: [...baseCandles, bullishOptimisticCandle],
       warmupBars: 30,
       minimumCandles: 30,
       strategyMode: 'SMC',
       strategyConfig: {
         deterministicSignals: [
           {
-            id: 'sig_ambig_bear',
+            id: 'sig_long_opt',
             direction: 'BULLISH',
             score: 85,
             entryPrice: 100.0,
@@ -322,11 +336,80 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
         trailStopOnTp2: false,
       },
     });
-    expect(resBearish.trades.length).toBe(1);
-    expect(resBearish.trades[0].exitReason).toBe(SignalState.TP1_HIT);
-    expect(resBearish.trades[0].exitPrice).toBeCloseTo(110.0, 1);
+    expect(resBullOpt.trades.length).toBe(1);
+    expect(resBullOpt.trades[0].exitReason).toBe(SignalState.TP1_HIT);
+    expect(resBullOpt.trades[0].exitPrice).toBeCloseTo(110.0, 1);
 
-    // 3. Direct Segment Ambiguity Resolution (CONSERVATIVE vs OPTIMISTIC)
+    // 3. Short Position - Conservative Ambiguous Candle (Open -> High -> Low -> Close)
+    // High leg visited first -> SL at 110 hits first for short
+    const shortConservativeCandle = createCandle(32, 100, 112, 88, 99);
+    const resShortCons = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      initialCapital: 100000,
+      candles: [...baseCandles, shortConservativeCandle],
+      warmupBars: 30,
+      minimumCandles: 30,
+      strategyMode: 'SMC',
+      strategyConfig: {
+        deterministicSignals: [
+          {
+            id: 'sig_short_cons',
+            direction: 'BEARISH',
+            score: 85,
+            entryPrice: 100.0,
+            stopLoss: 110.0,
+            tp1: 90.0,
+          },
+        ],
+      },
+      ambiguityMode: SameCandleAmbiguityMode.CONSERVATIVE,
+      fillModel: FillModel.OHLC_PATH,
+      slippageBps: 0,
+    });
+    expect(resShortCons.trades.length).toBe(1);
+    expect(resShortCons.trades[0].exitReason).toBe(SignalState.SL_HIT);
+    expect(resShortCons.trades[0].exitPrice).toBeCloseTo(110.0, 1);
+
+    // 4. Short Position - Optimistic Ambiguous Candle (Open -> Low -> High -> Close)
+    // Low leg visited first -> TP1 at 90 hits first for short
+    const shortOptimisticCandle = createCandle(32, 100, 112, 88, 101);
+    const resShortOpt = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      initialCapital: 100000,
+      candles: [...baseCandles, shortOptimisticCandle],
+      warmupBars: 30,
+      minimumCandles: 30,
+      strategyMode: 'SMC',
+      strategyConfig: {
+        deterministicSignals: [
+          {
+            id: 'sig_short_opt',
+            direction: 'BEARISH',
+            score: 85,
+            entryPrice: 100.0,
+            stopLoss: 110.0,
+            tp1: 90.0,
+          },
+        ],
+      },
+      ambiguityMode: SameCandleAmbiguityMode.OPTIMISTIC,
+      fillModel: FillModel.OHLC_PATH,
+      slippageBps: 0,
+      partialExitPolicy: {
+        tp1Ratio: 1.0,
+        tp2Ratio: 0.0,
+        tp3Ratio: 0.0,
+        moveStopToBreakevenOnTp1: false,
+        trailStopOnTp2: false,
+      },
+    });
+    expect(resShortOpt.trades.length).toBe(1);
+    expect(resShortOpt.trades[0].exitReason).toBe(SignalState.TP1_HIT);
+    expect(resShortOpt.trades[0].exitPrice).toBeCloseTo(90.0, 1);
+
+    // 5. Direct Segment Conflict Tie-Breaker
     const slOrder: IOrder = {
       orderId: 'ord_sl_ambig',
       clientOrderId: 'c_sl',
@@ -367,7 +450,6 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
       { order: tpOrder, fill: { fillId: 'f2', orderId: 'ord_tp_ambig', tradeId: 't_ambig', symbol: 'BTCUSDT', side: 'SELL' as const, price: 110, quantity: 10, fee: 0, slippage: 0, timestamp: t0, isPartial: false } },
     ];
 
-    // Equidistant from segStart = 100:
     const consResolution = FillModelEngine.resolveSegmentConflict(triggeredOrders, 100, 120, SameCandleAmbiguityMode.CONSERVATIVE);
     expect(consResolution.winningOrder?.orderType).toBe('STOP');
     expect(consResolution.reason).toBe('CONSERVATIVE_STOP_FIRST');
@@ -378,9 +460,9 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
   });
 
   // -------------------------------------------------------------------------
-  // Test 3: Fail-Closed Invalid Risk Configuration
+  // Test 3: Fail-Closed Invalid Risk Configuration & Explicit TP Policy
   // -------------------------------------------------------------------------
-  test('T03: Fail-Closed Invalid Risk Configuration throws without manufacturing synthetic stops', () => {
+  test('T03: Fail-Closed Invalid Risk Configuration & Explicit TP Policy', () => {
     const validSignal: ISignalSetup = {
       id: 'sig_invalid_sl',
       symbol: 'BTCUSDT',
@@ -432,37 +514,131 @@ describe('AI Fix 76 — Full-Stack TP/SL Integration & Single-Authority Parity',
       TradeLifecycleManager.createPositionLot({ ...validSignal, stopLoss: undefined as any }, 100, 10, t0),
     ).toThrow('INVALID_SIGNAL_STOP_LOSS');
 
-    // 4. NaN stopLoss throws INVALID_SIGNAL_STOP_LOSS
+    // 4. Inverted Stop Loss relative to execution price throws INVALID_POSITION_PROTECTION
+    expect(() =>
+      TradeLifecycleManager.createPositionLot({ ...validSignal, stopLoss: 105 }, 100, 10, t0),
+    ).toThrow('INVALID_POSITION_PROTECTION');
+
     expect(() =>
       TradeLifecycleManager.createPositionLot(
-        { ...validSignal, direction: Direction.BEARISH, stopLoss: NaN },
+        { ...validSignal, direction: Direction.BEARISH, stopLoss: 95 },
         100,
         10,
         t0,
       ),
-    ).toThrow('INVALID_SIGNAL_STOP_LOSS');
+    ).toThrow('INVALID_POSITION_PROTECTION');
+
+    // 5. Missing Take-Profit with autoDeriveTargets = false throws INVALID_SIGNAL_TAKE_PROFIT
+    const policyNoDerive = { ...DEFAULT_PARTIAL_EXIT_POLICY, autoDeriveTargets: false };
+    expect(() =>
+      TradeLifecycleManager.createPositionLot(
+        { ...validSignal, stopLoss: 95, takeProfits: undefined as any },
+        100,
+        10,
+        t0,
+        undefined,
+        0,
+        0,
+        policyNoDerive,
+      ),
+    ).toThrow('INVALID_SIGNAL_TAKE_PROFIT');
+
+    // 6. Missing Take-Profit with autoDeriveTargets = true succeeds cleanly
+    const policyWithDerive = { ...DEFAULT_PARTIAL_EXIT_POLICY, autoDeriveTargets: true };
+    const derivedLot = TradeLifecycleManager.createPositionLot(
+      { ...validSignal, stopLoss: 95, takeProfits: undefined as any },
+      100,
+      10,
+      t0,
+      undefined,
+      0,
+      0,
+      policyWithDerive,
+    );
+    expect(derivedLot.tp1).toBe(107.5); // 100 + 5 * 1.5
+    expect(derivedLot.tp2).toBe(112.5); // 100 + 5 * 2.5
+    expect(derivedLot.tp3).toBe(120.0); // 100 + 5 * 4.0
   });
 
   // -------------------------------------------------------------------------
   // Test 4: Direction Normalization & PositionSide Domain Typing
   // -------------------------------------------------------------------------
-  test('T04: Direction Normalization & PositionSide Domain Typing works seamlessly without as any', () => {
+  test('T04: Direction Normalization & PositionSide Domain Typing', () => {
     expect(normalizeDirection(Direction.BULLISH)).toBe(PositionSide.LONG);
     expect(normalizeDirection('LONG')).toBe(PositionSide.LONG);
-    expect(normalizeDirection('BUY')).toBe(PositionSide.LONG);
     expect(normalizeDirection('bullish')).toBe(PositionSide.LONG);
 
     expect(normalizeDirection(Direction.BEARISH)).toBe(PositionSide.SHORT);
     expect(normalizeDirection('SHORT')).toBe(PositionSide.SHORT);
-    expect(normalizeDirection('SELL')).toBe(PositionSide.SHORT);
     expect(normalizeDirection('bearish')).toBe(PositionSide.SHORT);
 
+    // BUY and SELL are order actions, not position directions
+    expect(normalizeDirection('BUY')).toBe('NEUTRAL');
+    expect(normalizeDirection('SELL')).toBe('NEUTRAL');
     expect(normalizeDirection(Direction.NEUTRAL)).toBe('NEUTRAL');
     expect(normalizeDirection(undefined)).toBe('NEUTRAL');
+
+    // toOrderSide mapping
+    expect(toOrderSide(PositionSide.LONG, 'ENTRY')).toBe('BUY');
+    expect(toOrderSide(PositionSide.LONG, 'EXIT')).toBe('SELL');
+    expect(toOrderSide(PositionSide.SHORT, 'ENTRY')).toBe('SELL');
+    expect(toOrderSide(PositionSide.SHORT, 'EXIT')).toBe('BUY');
 
     expect(isLongPosition(Direction.BULLISH)).toBe(true);
     expect(isLongPosition('LONG')).toBe(true);
     expect(isLongPosition('SHORT')).toBe(false);
     expect(isLongPosition(Direction.BEARISH)).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 5: Cash vs Equity Accounting Invariants
+  // -------------------------------------------------------------------------
+  test('T05: Cash vs Equity Accounting Invariants during active position lifecycle', () => {
+    const candles: ICandle[] = [];
+    for (let i = 0; i < 30; i++) {
+      candles.push(createCandle(i, 100.0, 100.5, 99.5, 100.0));
+    }
+    candles.push(createCandle(30, 100.0, 100.5, 99.5, 100.0)); // Bar 30 Signal
+    candles.push(createCandle(31, 100.0, 102.0, 99.5, 102.0)); // Bar 31 Entry fills at 100.0, close at 102.0 (unrealized profit)
+    candles.push(createCandle(32, 102.0, 104.0, 101.0, 104.0)); // Bar 32 Position remains open, close at 104.0
+    candles.push(createCandle(33, 104.0, 112.0, 103.0, 111.0)); // Bar 33 Hits full TP at 110.0 -> Closes
+
+    const res = BacktestSimulator.runSimulation({
+      symbol: 'BTCUSDT',
+      timeframe: '15m',
+      initialCapital: 100000,
+      candles,
+      warmupBars: 30,
+      minimumCandles: 30,
+      strategyMode: 'SMC',
+      strategyConfig: {
+        deterministicSignals: [
+          {
+            id: 'sig_equity_inv',
+            direction: 'BULLISH',
+            score: 85,
+            entryPrice: 100.0,
+            stopLoss: 95.0,
+            tp1: 110.0,
+          },
+        ],
+      },
+      partialExitPolicy: {
+        tp1Ratio: 1.0,
+        tp2Ratio: 0.0,
+        tp3Ratio: 0.0,
+        moveStopToBreakevenOnTp1: false,
+        trailStopOnTp2: false,
+      },
+      fillModel: FillModel.OHLC_PATH,
+      slippageBps: 0,
+      feeRate: 0.0004,
+    });
+
+    expect(res.trades.length).toBe(1);
+    const trade = res.trades[0];
+
+    // Final cash and equity must reconcile with realized net PnL exactly
+    expect(res.finalEquity).toBeCloseTo(res.initialCapital + res.netPnL, 2);
   });
 });
