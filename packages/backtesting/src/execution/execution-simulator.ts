@@ -216,6 +216,26 @@ export class ExecutionSimulator {
   }
 
   /**
+   * Calculates the authoritative arrival timestamp when an order completes both
+   * submission and exchange processing latencies and is actively participating in matching.
+   */
+  getEffectiveArrivalTime(order: IOrder, latencyConfig: ILatencyConfig = this.latencyConfig): number {
+    const baseSubmitted = order.submittedAt ?? (order.createdAt + latencyConfig.submissionLatencyMs);
+    return baseSubmitted + (latencyConfig.processingLatencyMs || 0);
+  }
+
+  /**
+   * Evaluates if an order arrived strictly before the bar opening timestamp.
+   *
+   * Temporal Non-Lookahead Invariant:
+   *   effectiveArrivalTime < candleTime  => Eligible for execution on bar open print / initial segment
+   *   effectiveArrivalTime >= candleTime => Not eligible for current bar open; evaluated on subsequent bar/candle
+   */
+  isOrderEligibleForBar(order: IOrder, candleTime: number, latencyConfig: ILatencyConfig = this.latencyConfig): boolean {
+    return this.getEffectiveArrivalTime(order, latencyConfig) < candleTime;
+  }
+
+  /**
    * Processes execution logic against a single candle/bar (non-recursive primitive).
    */
   processSingleExecutionBar(
@@ -262,8 +282,7 @@ export class ExecutionSimulator {
 
             let res: { isFilled: boolean; fill?: IFill };
             if ((configSnapshot.fillModel === FillModel.NEXT_BAR_MARKET || configSnapshot.fillModel === FillModel.NEXT_BAR_OPEN) && order.orderType === 'MARKET') {
-              const orderSubTime = order.submittedAt || order.createdAt;
-              if (orderSubTime < candleTime) {
+              if (this.isOrderEligibleForBar(order, candleTime, configSnapshot.latencyConfig)) {
                 res = FillModelEngine.evaluateFill(
                   order,
                   bar,

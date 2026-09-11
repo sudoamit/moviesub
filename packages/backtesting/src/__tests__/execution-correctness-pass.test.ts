@@ -3965,6 +3965,85 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(evalRes.isFilled).toBe(false);
     expect(evalRes.reason).toBe('AWAITING_NEXT_BAR');
   });
+
+  // 73. Exact Candle-Boundary & Multi-Component Latency Invariants
+  test('73. Strict temporal non-lookahead invariant: effectiveArrivalTime === candleTime is ineligible for current candle and latency deterministically determines boundary arrival', () => {
+    const t0 = 1700000000000;
+    const c0: ICandle = { timestamp: new Date(t0), open: 100, high: 105, low: 95, close: 102, volume: 1000 };
+    const c1: ICandle = { timestamp: new Date(t0 + 60000), open: 104, high: 110, low: 101, close: 108, volume: 1200 };
+
+    // Scenario A: Exact candle boundary (order arrival exactly at candle timestamp t0)
+    // Invariant: effectiveArrivalTime === candleTime => NOT eligible for c0 open, must execute on c1 open
+    const simBoundary = new ExecutionSimulator(
+      FillModel.NEXT_BAR_OPEN,
+      SameCandleAmbiguityMode.OPTIMISTIC,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_boundary',
+      { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 },
+      undefined,
+      { baseSpreadBps: 0, illiquidMultiplier: 0 },
+    );
+
+    const oExact = simBoundary.submitOrder({
+      tradeId: 't_exact_boundary',
+      symbol: 'CUSTOM',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 1.0,
+      timestamp: t0, // Exact candle timestamp
+    });
+
+    expect(simBoundary.isOrderEligibleForBar(oExact, t0)).toBe(false);
+    expect(simBoundary.getEffectiveArrivalTime(oExact)).toBe(t0);
+
+    // Process c0: oExact submitted at t0 cannot access c0 open
+    const resExact0 = simBoundary.processCandle(c0);
+    expect(resExact0.fills).toHaveLength(0);
+    expect(oExact.status).toBe('PENDING');
+
+    // Process c1: oExact is now eligible (t0 < t0 + 60000) and fills on c1 open (104)
+    const resExact1 = simBoundary.processCandle(c1);
+    expect(resExact1.fills).toHaveLength(1);
+    expect(resExact1.fills[0].price).toBe(104);
+    expect(oExact.status).toBe('FILLED');
+
+    // Scenario B: Combined submission + processing latency crossing candle boundary
+    // Order submitted 10 seconds before c0 (t0 - 10000) with 15s submission + 5s processing latency = 20s total latency
+    // effectiveArrivalTime = (t0 - 10000) + 20000 = t0 + 10000 (10s AFTER c0 open)
+    const simLatency = new ExecutionSimulator(
+      FillModel.NEXT_BAR_OPEN,
+      SameCandleAmbiguityMode.OPTIMISTIC,
+      { submissionLatencyMs: 15000, processingLatencyMs: 5000 },
+      'sim_latency',
+      { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 },
+      undefined,
+      { baseSpreadBps: 0, illiquidMultiplier: 0 },
+    );
+
+    const oLatent = simLatency.submitOrder({
+      tradeId: 't_latent_order',
+      symbol: 'CUSTOM',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 2.0,
+      timestamp: t0 - 10000, // 10s before c0
+    });
+
+    expect(oLatent.submittedAt).toBe(t0 + 5000);
+    expect(simLatency.getEffectiveArrivalTime(oLatent)).toBe(t0 + 10000);
+    expect(simLatency.isOrderEligibleForBar(oLatent, t0)).toBe(false); // Arrives after c0 start
+
+    // Process c0: oLatent has not yet arrived on exchange before c0 start
+    const resLatent0 = simLatency.processCandle(c0);
+    expect(resLatent0.fills).toHaveLength(0);
+    expect(oLatent.status).toBe('PENDING');
+
+    // Process c1: oLatent arrived at t0 + 10000 < t0 + 60000, so it executes on c1 open (104)
+    const resLatent1 = simLatency.processCandle(c1);
+    expect(resLatent1.fills).toHaveLength(1);
+    expect(resLatent1.fills[0].price).toBe(104);
+    expect(oLatent.status).toBe('FILLED');
+  });
 });
 
 
