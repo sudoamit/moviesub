@@ -34,6 +34,7 @@ export * from './candidate-artifact-validator';
 export * from './candidate-artifact-builder';
 export * from './execution-context';
 export * from './champion-challenger';
+export * from './champion-challenger/index';
 export * from './deterministic-test-adapter';
 export * from './market-dataset-validator';
 export * from './shadow-evaluator';
