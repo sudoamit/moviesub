@@ -5,6 +5,7 @@ import {
   createExecutionContext,
 } from '../execution-context';
 import { ModelRegistry } from '../model-registry';
+import { CandidateBacktestRunner } from '../candidate-backtest-runner';
 import { StrategyCandidate } from '../types';
 
 const riskConfig = {
@@ -91,6 +92,7 @@ describe('Production execution context', () => {
   it('marks experimental artifacts ineligible and rejects registration', () => {
     const experimental = CandidateArtifactBuilder.build(candidate, {
       datasetHash: 'context-dataset',
+      timeframe: '1h',
       executionContext: 'EXPERIMENTAL',
       productionExecutionContext: context(),
     });
@@ -102,10 +104,38 @@ describe('Production execution context', () => {
     );
   });
 
+  it('rejects a supplied context that does not match candidate identity', () => {
+    expect(() => CandidateArtifactBuilder.build(candidate, {
+      datasetHash: 'context-dataset',
+      timeframe: '1h',
+      productionExecutionContext: context({ symbol: 'NIFTY' }),
+    })).toThrow('EXECUTION_CONTEXT_SYMBOL_MISMATCH');
+  });
+
+  it('rejects unhashed fee and slippage overrides in production replay', () => {
+    const artifact = CandidateArtifactBuilder.build(candidate, {
+      datasetHash: 'context-dataset',
+      timeframe: '1h',
+      productionExecutionContext: context(),
+    });
+    const candles = [{ timestamp: new Date(0), open: 100, high: 101, low: 99, close: 100, volume: 10 }];
+
+    expect(() => CandidateBacktestRunner.runCandidateBacktest(artifact, { candles, feeRate: 0.01 })).toThrow(
+      'UNHASHED_EXECUTION_OVERRIDE',
+    );
+  });
+
   it('fails closed when champion and challenger contexts differ', () => {
     expect(() => assertCompatibleExecutionContexts(context(), context({ timeframe: '15m' }))).toThrow(
       'INCOMPATIBLE_EXECUTION_CONTEXT',
     );
     expect(() => assertCompatibleExecutionContexts(context(), context({ timeframe: '15m' }), true)).not.toThrow();
+  });
+
+  it('checks execution-context version before comparing hashes', () => {
+    const challenger = { ...context(), executionContextVersion: '2.0' } as ReturnType<typeof context>;
+    expect(() => assertCompatibleExecutionContexts(context(), challenger)).toThrow(
+      'INCOMPATIBLE_EXECUTION_CONTEXT_VERSION',
+    );
   });
 });

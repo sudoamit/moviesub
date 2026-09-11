@@ -37,7 +37,7 @@ import { ModelRegistry } from './model-registry';
 import { DatasetManager } from './dataset-manager';
 import { canonicalJsonStringify } from './canonical-serializer';
 import { RetrainingRunStore } from './retraining-run-store';
-import { createExecutionContext } from './execution-context';
+import { createExecutionContext, EXECUTION_ENGINE_VERSION } from './execution-context';
 
 export interface PipelineExecutionResult {
   readonly runRecord: RetrainingRunRecord;
@@ -222,6 +222,15 @@ export class SelfImprovingRetrainingPipeline {
     const expHash = PITExperienceDatasetBuilder.computeDatasetHash(rawExamples);
     const strategyVersion = config.baseStrategyVersion;
     const symbol = config.symbol;
+    if (config.productionExecutionContext && (
+      config.productionExecutionContext.executionContext !== 'PRODUCTION' ||
+      config.productionExecutionContext.productionEligible !== true ||
+      config.productionExecutionContext.symbol !== symbol ||
+      config.productionExecutionContext.timeframe !== config.timeframe ||
+      config.productionExecutionContext.strategyVersion !== strategyVersion
+    )) {
+      throw new Error('INVALID_PRODUCTION_EXECUTION_CONTEXT: Supplied context is not authoritative for this retraining run');
+    }
     const productionExecutionContext = config.productionExecutionContext || createExecutionContext({
       symbol,
       timeframe: config.timeframe,
@@ -245,7 +254,7 @@ export class SelfImprovingRetrainingPipeline {
         highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
       },
       strategyVersion,
-      executionVersion: config.executionConfig.strategyVersion || strategyVersion,
+      executionVersion: EXECUTION_ENGINE_VERSION,
     });
 
     const runId = this.computeRunId(strategyVersion, symbol, mktHash, expHash, configHash);
@@ -712,6 +721,7 @@ export class SelfImprovingRetrainingPipeline {
             oosExperienceDatasetHash: splits.oos.datasetHash,
             createdBy: 'SelfImprovingRetrainingPipeline',
             productionExecutionContext,
+            timeframe: config.timeframe,
           },
         );
 

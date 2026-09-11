@@ -10,6 +10,7 @@ import { CandidateRiskConfig } from './types';
 import { canonicalJsonStringify } from './canonical-serializer';
 
 export const EXECUTION_CONTEXT_VERSION = '1.0';
+export const EXECUTION_ENGINE_VERSION = 'backtesting-execution-v3.0.0';
 
 export interface ProductionExecutionContextInput {
   readonly symbol: string;
@@ -114,6 +115,11 @@ export function assertCompatibleExecutionContexts(
   challenger: ProductionExecutionContext,
   experimental = false,
 ): void {
+  if (!experimental && champion.executionContextVersion !== challenger.executionContextVersion) {
+    throw new Error(
+      `INCOMPATIBLE_EXECUTION_CONTEXT_VERSION: Champion version ${champion.executionContextVersion} does not match challenger version ${challenger.executionContextVersion}`,
+    );
+  }
   if (!experimental && champion.executionContextHash !== challenger.executionContextHash) {
     throw new Error(
       `INCOMPATIBLE_EXECUTION_CONTEXT: Champion hash ${champion.executionContextHash} does not match challenger hash ${challenger.executionContextHash}`,

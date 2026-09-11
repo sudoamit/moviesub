@@ -418,39 +418,49 @@ export class CandidateArtifactBuilder {
     const artifactVersion = 'v2.0';
 
     const candidateChangeConfig = candidateChange || {};
+    const contextMode = options?.executionContext || options?.productionExecutionContext?.executionContext || 'PRODUCTION';
+    const timeframe = options?.timeframe || options?.productionExecutionContext?.timeframe || (candidateChangeConfig.timeframe as string) || 'UNSPECIFIED';
     const suppliedExecutionContext = options?.productionExecutionContext;
-    const productionExecutionContext = suppliedExecutionContext
-      ? suppliedExecutionContext.executionContext === (options?.executionContext || suppliedExecutionContext.executionContext)
-        ? suppliedExecutionContext
-        : createExecutionContext(suppliedExecutionContext, options?.executionContext)
-      : createExecutionContext(
+    const productionExecutionContext = createExecutionContext(
       {
-        symbol: config.symbol,
-        timeframe: options?.timeframe || (candidateChangeConfig.timeframe as string) || 'UNSPECIFIED',
-        minimumCandles: Number(options?.minimumCandles ?? candidateChangeConfig.minimumCandles ?? 50),
-        warmupBars: Number(options?.warmupBars ?? candidateChangeConfig.warmupBars ?? 40),
-        fillModel: config.fillModel,
-        ambiguityMode: config.ambiguityMode,
-        latencyConfig: {
-          submissionLatencyMs: options?.latencyConfig?.submissionLatencyMs ?? config.latencyMs,
+        symbol: suppliedExecutionContext?.symbol || config.symbol,
+        timeframe: suppliedExecutionContext?.timeframe || timeframe,
+        minimumCandles: suppliedExecutionContext?.minimumCandles ?? Number(options?.minimumCandles ?? candidateChangeConfig.minimumCandles ?? 50),
+        warmupBars: suppliedExecutionContext?.warmupBars ?? Number(options?.warmupBars ?? candidateChangeConfig.warmupBars ?? 40),
+        fillModel: suppliedExecutionContext?.fillModel || config.fillModel,
+        ambiguityMode: suppliedExecutionContext?.ambiguityMode || config.ambiguityMode,
+        latencyConfig: suppliedExecutionContext?.latencyConfig || options?.latencyConfig || {
+          submissionLatencyMs: config.latencyMs,
           processingLatencyMs: Number(candidateChangeConfig.processingLatencyMs ?? 0),
         },
-        feeConfig: options?.feeConfig || candidateChangeConfig.feeConfig as any,
-        slippageConfig: options?.slippageConfig || candidateChangeConfig.slippageConfig as any,
-        spreadConfig: options?.spreadConfig || candidateChangeConfig.spreadConfig as any,
-        costStressConfig: options?.costStressConfig || candidateChangeConfig.costStressConfig as any,
-        riskConfig: resolvedRiskConfig,
-        sizingConfig: {
+        feeConfig: suppliedExecutionContext?.feeConfig || options?.feeConfig || candidateChangeConfig.feeConfig as any,
+        slippageConfig: suppliedExecutionContext?.slippageConfig || options?.slippageConfig || candidateChangeConfig.slippageConfig as any,
+        spreadConfig: suppliedExecutionContext?.spreadConfig || options?.spreadConfig || candidateChangeConfig.spreadConfig as any,
+        costStressConfig: suppliedExecutionContext?.costStressConfig || options?.costStressConfig || candidateChangeConfig.costStressConfig as any,
+        riskConfig: suppliedExecutionContext?.riskConfig || resolvedRiskConfig,
+        sizingConfig: suppliedExecutionContext?.sizingConfig || {
           lotSize: resolvedRiskConfig.lotSize,
           contractSize: resolvedRiskConfig.contractSize,
           sizingMultiplier: config.sizingMultiplier,
           highVolatilitySizingMultiplier: config.highVolatilitySizingMultiplier,
         },
-        strategyVersion,
-        executionVersion: artifactVersion,
+        strategyVersion: suppliedExecutionContext?.strategyVersion || strategyVersion,
+        executionVersion: suppliedExecutionContext?.executionVersion || artifactVersion,
       },
-      options?.executionContext || 'PRODUCTION',
-      );
+      contextMode,
+    );
+    if (productionExecutionContext.symbol !== config.symbol) {
+      throw new Error(`EXECUTION_CONTEXT_SYMBOL_MISMATCH: Candidate '${candidate.id}' context symbol does not match artifact symbol`);
+    }
+    if (productionExecutionContext.timeframe !== timeframe) {
+      throw new Error(`EXECUTION_CONTEXT_TIMEFRAME_MISMATCH: Candidate '${candidate.id}' context timeframe does not match artifact timeframe`);
+    }
+    if (productionExecutionContext.strategyVersion !== strategyVersion) {
+      throw new Error(`EXECUTION_CONTEXT_STRATEGY_VERSION_MISMATCH: Candidate '${candidate.id}' context strategy version does not match artifact strategy version`);
+    }
+    if (productionExecutionContext.executionContext !== contextMode || productionExecutionContext.productionEligible !== (contextMode === 'PRODUCTION')) {
+      throw new Error(`EXECUTION_CONTEXT_MODE_MISMATCH: Candidate '${candidate.id}' context mode is not authoritative`);
+    }
 
     const modelArtifact = candidateChange?.modelArtifact as ModelArtifact | undefined;
     const scalerArtifact =
@@ -585,6 +595,7 @@ export class CandidateArtifactBuilder {
       ...(validationExperienceDatasetHash ? { validationExperienceDatasetHash } : {}),
       ...(oosExperienceDatasetHash ? { oosExperienceDatasetHash } : {}),
       datasetHash: resolvedDatasetHash,
+      timeframe: productionExecutionContext.timeframe,
       configHash: config.configHash,
       trainingSeed,
       riskConfig: resolvedRiskConfig,
@@ -642,6 +653,7 @@ export class CandidateArtifactBuilder {
       configHash: config.configHash,
       artifactHash,
       symbol: config.symbol,
+      timeframe: productionExecutionContext.timeframe,
       ...(candidate.evidence ? { evidence: candidate.evidence } : {}),
     };
 

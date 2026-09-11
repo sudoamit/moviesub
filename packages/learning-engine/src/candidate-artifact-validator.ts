@@ -66,6 +66,9 @@ export class CandidateArtifactValidator {
     if (typeof symbol !== 'string' || symbol.trim() === '') {
       throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidateId}' is missing authoritative symbol`);
     }
+    if (typeof art.timeframe !== 'string' || art.timeframe.trim() === '') {
+      throw new Error(`CANDIDATE_TIMEFRAME_MISSING: Candidate '${candidateId}' is missing authoritative timeframe`);
+    }
 
     // 3. Risk Configuration Validation (Strict Fail-Closed)
     const riskConfig = art.riskConfig as Record<string, unknown> | undefined;
@@ -353,6 +356,7 @@ export class CandidateArtifactValidator {
       ...(art.validationExperienceDatasetHash ? { validationExperienceDatasetHash: art.validationExperienceDatasetHash } : {}),
       ...(art.oosExperienceDatasetHash ? { oosExperienceDatasetHash: art.oosExperienceDatasetHash } : {}),
       datasetHash,
+      timeframe: art.timeframe,
       configHash: execConfig.configHash,
       trainingSeed,
       riskConfig,
@@ -374,6 +378,9 @@ export class CandidateArtifactValidator {
       throw new Error(
         `ARTIFACT_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedArtifactHash}, got ${art.artifactHash}`,
       );
+    }
+    if (art.symbol !== executionContext.symbol || art.timeframe !== executionContext.timeframe || art.strategyVersion !== executionContext.strategyVersion) {
+      throw new Error(`EXECUTION_CONTEXT_BINDING_MISMATCH: Candidate '${candidateId}' identity does not match execution context`);
     }
 
     const validated: ValidatedCandidateArtifact = Object.freeze({

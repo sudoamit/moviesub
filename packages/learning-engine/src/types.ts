@@ -437,6 +437,7 @@ export interface CandidateArtifact {
   readonly executionContextHash: string;
   readonly executionContextVersion: string;
   readonly symbol?: string;
+  readonly timeframe: string;
   readonly evidence?: {
     readonly sampleSize: number;
     readonly expectancyBefore: number;

@@ -109,6 +109,7 @@ export class CandidateBacktestRunner {
       createdBy?: string;
       symbol?: string;
       riskConfig?: CandidateRiskConfig | Record<string, unknown>;
+      timeframe?: string;
       productionExecutionContext?: ProductionExecutionContext;
       executionContext?: 'PRODUCTION' | 'EXPERIMENTAL';
     },
@@ -119,6 +120,7 @@ export class CandidateBacktestRunner {
       provenance,
       symbol: provenance?.symbol || candidate.symbol,
       riskConfig: provenance?.riskConfig || candidate.riskConfig || (candidate.change as any)?.riskConfig,
+      timeframe: provenance?.timeframe || provenance?.productionExecutionContext?.timeframe,
       productionExecutionContext: provenance?.productionExecutionContext,
       executionContext: provenance?.executionContext,
     };
@@ -281,6 +283,9 @@ export class CandidateBacktestRunner {
     if (options?.executionContext === 'PRODUCTION' && productionContext.executionContext !== 'PRODUCTION') {
       throw new Error(`EXPERIMENTAL_ARTIFACT_NOT_PRODUCTION_ELIGIBLE: Candidate '${candidateId}' cannot run in production context`);
     }
+    if (productionContext.executionContext === 'PRODUCTION' && (options?.feeRate !== undefined || options?.slippageBps !== undefined)) {
+      throw new Error(`UNHASHED_EXECUTION_OVERRIDE: feeRate and slippageBps are not allowed with a production execution context`);
+    }
 
     // Production replay owns execution geometry; experiments must opt in explicitly.
     const minimumCandles =
@@ -307,7 +312,7 @@ export class CandidateBacktestRunner {
     const backtestOptions: IBacktestOptions = {
       runId: `cand_bt_${candidateId}`,
       symbol: sym,
-      timeframe: dataset?.timeframe || options?.timeframe || '15m',
+      timeframe: productionContext.executionContext === 'PRODUCTION' ? productionContext.timeframe : dataset?.timeframe || options?.timeframe || '15m',
       candles,
       initialCapital: options?.initialCapital ?? riskConfig.initialCapital,
       minimumCandles,
@@ -316,8 +321,8 @@ export class CandidateBacktestRunner {
       slippageConfig,
       spreadConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.spreadConfig : options?.spreadConfig,
       latencyConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.latencyConfig : options?.latencyConfig,
-      feeRate: options?.feeRate,
-      slippageBps: options?.slippageBps,
+      feeRate: productionContext.executionContext === 'EXPERIMENTAL' ? options?.feeRate : undefined,
+      slippageBps: productionContext.executionContext === 'EXPERIMENTAL' ? options?.slippageBps : undefined,
       costStressConfig: productionContext.executionContext === 'PRODUCTION' ? productionContext.costStressConfig : options?.costStressConfig,
       ...(productionContext.executionContext === 'PRODUCTION'
         ? {
