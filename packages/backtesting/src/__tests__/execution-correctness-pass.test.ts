@@ -4044,6 +4044,733 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     expect(resLatent1.fills[0].price).toBe(104);
     expect(oLatent.status).toBe('FILLED');
   });
+
+  // =========================================================================
+  // AI FIX 75 — 30-Item Critical TP/SL Execution Correctness Test Matrix
+  // =========================================================================
+
+  // 74. Basic Protective SL and TP Target Trigger Detection (Long & Short)
+  test('74. Items 1-5: Basic Protective SL and TP Target Trigger Detection (Long & Short)', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(
+      FillModel.LIMIT_TOUCH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_tpsl_74',
+    );
+
+    // Item 1: Long SL Trigger (SELL STOP when Low <= stopPrice)
+    const longSl = sim.submitOrder({
+      tradeId: 't_long_sl',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 10.0,
+      timestamp: t0 - 1000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+    const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 102, low: 94, close: 96, volume: 100 };
+    const res1 = sim.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].orderId).toBe(longSl.orderId);
+    expect(res1.fills[0].price).toBe(95.0);
+    expect(longSl.status).toBe('FILLED');
+
+    // Item 2: Long TP Trigger (SELL LIMIT when High >= price)
+    const longTp = sim.submitOrder({
+      tradeId: 't_long_tp',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 10.0,
+      timestamp: t0 + 59000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+    const c2: ICandle = { timestamp: new Date(t0 + 60000), open: 100, high: 112, low: 99, close: 108, volume: 100 };
+    const res2 = sim.processCandle(c2);
+    expect(res2.fills).toHaveLength(1);
+    expect(res2.fills[0].orderId).toBe(longTp.orderId);
+    expect(res2.fills[0].price).toBe(110.0);
+    expect(longTp.status).toBe('FILLED');
+
+    // Item 3: Short SL Trigger (BUY STOP when High >= stopPrice)
+    const shortSl = sim.submitOrder({
+      tradeId: 't_short_sl',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 10.0,
+      timestamp: t0 + 119000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+    const c3: ICandle = { timestamp: new Date(t0 + 120000), open: 100, high: 107, low: 98, close: 106, volume: 100 };
+    const res3 = sim.processCandle(c3);
+    expect(res3.fills).toHaveLength(1);
+    expect(res3.fills[0].orderId).toBe(shortSl.orderId);
+    expect(res3.fills[0].price).toBe(105.0);
+    expect(shortSl.status).toBe('FILLED');
+
+    // Item 4: Short TP Trigger (BUY LIMIT when Low <= price)
+    const shortTp = sim.submitOrder({
+      tradeId: 't_short_tp',
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 90.0,
+      quantity: 10.0,
+      timestamp: t0 + 179000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+    const c4: ICandle = { timestamp: new Date(t0 + 180000), open: 100, high: 101, low: 88, close: 92, volume: 100 };
+    const res4 = sim.processCandle(c4);
+    expect(res4.fills).toHaveLength(1);
+    expect(res4.fills[0].orderId).toBe(shortTp.orderId);
+    expect(res4.fills[0].price).toBe(90.0);
+    expect(shortTp.status).toBe('FILLED');
+
+    // Item 5: No trigger when price is strictly within bounds
+    const slNoTrigger = sim.submitOrder({
+      tradeId: 't_no_trig',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 85.0,
+      quantity: 5.0,
+      timestamp: t0 + 239000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+    const tpNoTrigger = sim.submitOrder({
+      tradeId: 't_no_trig',
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 115.0,
+      quantity: 5.0,
+      timestamp: t0 + 239000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+    const c5: ICandle = { timestamp: new Date(t0 + 240000), open: 98, high: 105, low: 92, close: 101, volume: 100 };
+    const res5 = sim.processCandle(c5);
+    expect(res5.fills).toHaveLength(0);
+    expect(slNoTrigger.status).toBe('PENDING');
+    expect(tpNoTrigger.status).toBe('PENDING');
+  });
+
+  // 75. Same-Candle SL + TP Ambiguity Resolution (CONSERVATIVE, OPTIMISTIC, OHLC_PATH)
+  test('75. Items 6-13: Same-Candle SL + TP Ambiguity Resolution (CONSERVATIVE, OPTIMISTIC, OHLC_PATH)', () => {
+    const t0 = 1700000000000;
+    // Direct conflict resolution where SL and TP share identical distance along segment vector (e.g. 5 points away from 100)
+    const slOrder: IOrder = {
+      orderId: 'sl_tie',
+      clientOrderId: 'cl_sl',
+      tradeId: 't_tie',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 10,
+      remainingQuantity: 10,
+      status: 'PENDING',
+      createdAt: t0,
+      submittedAt: t0,
+      fees: 0,
+      slippage: 0,
+    };
+    const slFill: IFill = {
+      fillId: 'f_sl',
+      orderId: 'sl_tie',
+      tradeId: 't_tie',
+      symbol: 'BTC',
+      side: 'SELL',
+      price: 95.0,
+      quantity: 10,
+      timestamp: t0,
+      fee: 0,
+      slippage: 0,
+      isPartial: false,
+    };
+
+    const tpOrder: IOrder = {
+      orderId: 'tp_tie',
+      clientOrderId: 'cl_tp',
+      tradeId: 't_tie',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 105.0,
+      quantity: 10,
+      remainingQuantity: 10,
+      status: 'PENDING',
+      createdAt: t0,
+      submittedAt: t0,
+      fees: 0,
+      slippage: 0,
+    };
+    const tpFill: IFill = {
+      fillId: 'f_tp',
+      orderId: 'tp_tie',
+      tradeId: 't_tie',
+      symbol: 'BTC',
+      side: 'SELL',
+      price: 105.0,
+      quantity: 10,
+      timestamp: t0,
+      fee: 0,
+      slippage: 0,
+      isPartial: false,
+    };
+
+    // Item 6: Long SL+TP tie under CONSERVATIVE -> SL executes first
+    const resCons = FillModelEngine.resolveSegmentConflict(
+      [{ order: slOrder, fill: slFill }, { order: tpOrder, fill: tpFill }],
+      100.0,
+      90.0,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+    );
+    expect(resCons.winningOrder?.orderId).toBe(slOrder.orderId);
+    expect(resCons.reason).toBe('CONSERVATIVE_STOP_FIRST');
+
+    // Item 7: Long SL+TP tie under OPTIMISTIC -> TP executes first
+    const resOpt = FillModelEngine.resolveSegmentConflict(
+      [{ order: slOrder, fill: slFill }, { order: tpOrder, fill: tpFill }],
+      100.0,
+      90.0,
+      SameCandleAmbiguityMode.OPTIMISTIC,
+    );
+    expect(resOpt.winningOrder?.orderId).toBe(tpOrder.orderId);
+    expect(resOpt.reason).toBe('OPTIMISTIC_TARGET_FIRST');
+
+    // Item 8: Short SL+TP tie under CONSERVATIVE -> SL executes first
+    const shortSlOrder: IOrder = { ...slOrder, orderId: 's_sl_tie', side: 'BUY', orderType: 'STOP', stopPrice: 105.0 };
+    const shortSlFill: IFill = { ...slFill, orderId: 's_sl_tie', side: 'BUY', price: 105.0 };
+    const shortTpOrder: IOrder = { ...tpOrder, orderId: 's_tp_tie', side: 'BUY', orderType: 'LIMIT', price: 95.0 };
+    const shortTpFill: IFill = { ...tpFill, orderId: 's_tp_tie', side: 'BUY', price: 95.0 };
+
+    const resShortCons = FillModelEngine.resolveSegmentConflict(
+      [{ order: shortSlOrder, fill: shortSlFill }, { order: shortTpOrder, fill: shortTpFill }],
+      100.0,
+      110.0,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+    );
+    expect(resShortCons.winningOrder?.orderId).toBe(shortSlOrder.orderId);
+    expect(resShortCons.reason).toBe('CONSERVATIVE_STOP_FIRST');
+
+    // Item 9: Short SL+TP tie under OPTIMISTIC -> TP executes first
+    const resShortOpt = FillModelEngine.resolveSegmentConflict(
+      [{ order: shortSlOrder, fill: shortSlFill }, { order: shortTpOrder, fill: shortTpFill }],
+      100.0,
+      110.0,
+      SameCandleAmbiguityMode.OPTIMISTIC,
+    );
+    expect(resShortOpt.winningOrder?.orderId).toBe(shortTpOrder.orderId);
+    expect(resShortOpt.reason).toBe('OPTIMISTIC_TARGET_FIRST');
+
+    // Item 10: Bullish candle (O=100 -> L=90 -> H=115 -> C=105) with Long SL=95, TP=110
+    // Segment 1 (100 -> 90) reaches SL at 95 before Segment 2 reaches TP at 110
+    const cAmbiguous: ICandle = { timestamp: new Date(t0), open: 100, high: 115, low: 90, close: 105, volume: 100 };
+    const simPath1 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_p1');
+    const slP1 = simPath1.submitOrder({ tradeId: 't_p1', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'SL' });
+    const tpP1 = simPath1.submitOrder({ tradeId: 't_p1', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'TP1' });
+    const resP1 = simPath1.processCandle(cAmbiguous);
+    expect(resP1.fills).toHaveLength(1);
+    expect(resP1.fills[0].orderId).toBe(slP1.orderId);
+    expect(resP1.fills[0].segmentIndex).toBe(0); // Segment 0 (Open -> Low)
+
+    // Item 11: Bullish candle where Low (97) misses SL (95), Segment 2 (97 -> 115) reaches TP (110)
+    const cBullMissSL: ICandle = { timestamp: new Date(t0), open: 100, high: 115, low: 97, close: 105, volume: 100 };
+    const simPath2 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_p2');
+    const slP2 = simPath2.submitOrder({ tradeId: 't_p2', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'SL' });
+    const tpP2 = simPath2.submitOrder({ tradeId: 't_p2', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'TP1' });
+    const resP2 = simPath2.processCandle(cBullMissSL);
+    expect(resP2.fills).toHaveLength(1);
+    expect(resP2.fills[0].orderId).toBe(tpP2.orderId);
+    expect(resP2.fills[0].segmentIndex).toBe(1); // Segment 1 (Low -> High)
+
+    // Item 12: Bearish candle (O=100 -> H=115 -> L=90 -> C=95) with Short SL=110, TP=92
+    // Segment 1 (100 -> 115) reaches Short SL at 110 first
+    const cBearish: ICandle = { timestamp: new Date(t0), open: 100, high: 115, low: 90, close: 95, volume: 100 };
+    const simPath3 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_p3');
+    const slP3 = simPath3.submitOrder({ tradeId: 't_p3', symbol: 'BTC', side: 'BUY', orderType: 'STOP', stopPrice: 110, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'SL' });
+    const tpP3 = simPath3.submitOrder({ tradeId: 't_p3', symbol: 'BTC', side: 'BUY', orderType: 'LIMIT', price: 92, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'TP1' });
+    const resP3 = simPath3.processCandle(cBearish);
+    expect(resP3.fills).toHaveLength(1);
+    expect(resP3.fills[0].orderId).toBe(slP3.orderId);
+    expect(resP3.fills[0].segmentIndex).toBe(0); // Segment 0 (Open -> High)
+
+    // Item 13: Bearish candle where High (108) misses SL (110), Segment 2 (108 -> 90) reaches TP (92)
+    const cBearMissSL: ICandle = { timestamp: new Date(t0), open: 100, high: 108, low: 90, close: 95, volume: 100 };
+    const simPath4 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.OHLC_PATH, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_p4');
+    const slP4 = simPath4.submitOrder({ tradeId: 't_p4', symbol: 'BTC', side: 'BUY', orderType: 'STOP', stopPrice: 110, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'SL' });
+    const tpP4 = simPath4.submitOrder({ tradeId: 't_p4', symbol: 'BTC', side: 'BUY', orderType: 'LIMIT', price: 92, quantity: 10, timestamp: t0 - 100, referencePrice: 100, exitTarget: 'TP1' });
+    const resP4 = simPath4.processCandle(cBearMissSL);
+    expect(resP4.fills).toHaveLength(1);
+    expect(resP4.fills[0].orderId).toBe(tpP4.orderId);
+    expect(resP4.fills[0].segmentIndex).toBe(1); // Segment 1 (High -> Low)
+  });
+
+  // 76. Gap-Through Execution & Slippage/Spread Accounting
+  test('76. Items 14-18: Gap-Through Execution & Slippage/Spread Accounting', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_gap_76',
+      { baseSlippageBps: 10, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 50 },
+      { brokerageRateBps: 5, exchangeTurnoverBps: 2 },
+      { baseSpreadBps: 4, illiquidMultiplier: 0 },
+    );
+
+    // Item 14: Long gap-down SL: SL stopPrice = 95, Open = 90 (< 95)
+    // Base price MUST be 90 (gap down open), adjusted for half-spread and slippage
+    const longSl = sim.submitOrder({
+      tradeId: 't_gap_long_sl',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 10.0,
+      timestamp: t0 - 1000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+    const cGapDown: ICandle = { timestamp: new Date(t0), open: 90, high: 91, low: 88, close: 89, volume: 100 };
+    const res14 = sim.processCandle(cGapDown);
+    expect(res14.fills).toHaveLength(1);
+    expect(res14.fills[0].price).toBeLessThan(90.0); // Base price 90 minus spread & slippage
+    expect(res14.fills[0].price).toBeGreaterThan(89.0);
+    expect(res14.fills[0].fee).toBeGreaterThan(0);
+    expect(res14.fills[0].slippage).toBeGreaterThan(0);
+
+    // Item 15: Long gap-up TP: TP price = 110, Open = 115 (> 110)
+    // Base price MUST be 115 (gap up open for limit sell)
+    const longTp = sim.submitOrder({
+      tradeId: 't_gap_long_tp',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 10.0,
+      timestamp: t0 + 59000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+    const cGapUp: ICandle = { timestamp: new Date(t0 + 60000), open: 115, high: 118, low: 114, close: 117, volume: 100 };
+    const res15 = sim.processCandle(cGapUp);
+    expect(res15.fills).toHaveLength(1);
+    expect(res15.fills[0].price).toBeGreaterThan(114.5); // Fills near 115, not 110!
+    expect(res15.fills[0].price).toBeLessThanOrEqual(115.0);
+
+    // Item 16: Short gap-up SL: SL stopPrice = 105, Open = 110 (> 105)
+    // Base price MUST be 110 (gap up open for buy stop), adjusted upwards for spread and slippage
+    const shortSl = sim.submitOrder({
+      tradeId: 't_gap_short_sl',
+      symbol: 'BTC',
+      side: 'BUY',
+      orderType: 'STOP',
+      stopPrice: 105.0,
+      quantity: 10.0,
+      timestamp: t0 + 119000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+    const cGapUpShort: ICandle = { timestamp: new Date(t0 + 120000), open: 110, high: 112, low: 109, close: 111, volume: 100 };
+    const res16 = sim.processCandle(cGapUpShort);
+    expect(res16.fills).toHaveLength(1);
+    expect(res16.fills[0].price).toBeGreaterThan(110.0); // Above 110 due to spread & slippage
+
+    // Item 17: Short gap-down TP: TP price = 95, Open = 90 (< 95)
+    // Base price MUST be 90 (gap down open for buy limit)
+    const shortTp = sim.submitOrder({
+      tradeId: 't_gap_short_tp',
+      symbol: 'BTC',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: 95.0,
+      quantity: 10.0,
+      timestamp: t0 + 179000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+    const cGapDownShort: ICandle = { timestamp: new Date(t0 + 180000), open: 90, high: 91, low: 88, close: 89, volume: 100 };
+    const res17 = sim.processCandle(cGapDownShort);
+    expect(res17.fills).toHaveLength(1);
+    expect(res17.fills[0].price).toBeLessThan(90.5); // Fills near 90, not 95!
+
+    // Item 18: Zero intrabar lookahead: orders trigger from Open onwards along continuous vector path
+    expect(res14.fills[0].segmentIndex).toBe(0);
+    expect(res15.fills[0].segmentIndex).toBe(0);
+  });
+
+  // 77. Entry Candle Timing & Temporal Non-Lookahead
+  test('77. Items 19-21: Entry Candle Timing & Temporal Non-Lookahead', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 500, processingLatencyMs: 500 }, // 1s total latency
+      'sim_time_77',
+    );
+
+    // Candle 0: [t0, t0 + 60000)
+    // Entry order arrives at t0 - 100 (eligible for c0) and fills on c0 open @ 100
+    const entryOrder = sim.submitOrder({
+      tradeId: 't_timing',
+      symbol: 'BTC',
+      side: 'BUY',
+      orderType: 'MARKET',
+      quantity: 10.0,
+      timestamp: t0 - 2000,
+    });
+    const c0: ICandle = { timestamp: new Date(t0), open: 100, high: 105, low: 90, close: 102, volume: 100 };
+    const res0 = sim.processCandle(c0);
+    expect(res0.fills).toHaveLength(1);
+    expect(res0.fills[0].orderId).toBe(entryOrder.orderId);
+
+    // Item 19 & 20: Protection orders submitted at T_entry = t0 cannot trigger on c0's Low (90)
+    // submittedAt = t0 + 500, arrival = t0 + 1000 >= t0 (ineligible for c0)
+    const sl = sim.submitOrder({
+      tradeId: 't_timing',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: 10.0,
+      timestamp: t0,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+
+    expect(sim.isOrderEligibleForBar(sl, t0)).toBe(false);
+    // sl remains pending and did not trigger on c0's low of 90!
+    expect(sl.status).toBe('PENDING');
+
+    // Item 21: On Candle 1: [t0 + 60000, t0 + 120000), sl is now eligible and triggers when Low reaches 94
+    expect(sim.isOrderEligibleForBar(sl, t0 + 60000)).toBe(true);
+    const c1: ICandle = { timestamp: new Date(t0 + 60000), open: 102, high: 103, low: 94, close: 95, volume: 100 };
+    const res1 = sim.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].orderId).toBe(sl.orderId);
+    expect(sl.status).toBe('FILLED');
+  });
+
+  // 78. Partial TP & Protective SL Accounting & Invariants
+  test('78. Items 22-25: Partial TP & Protective SL Accounting & Invariants', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_ptp_78',
+    );
+
+    const initialQuantity = 100.0;
+    // SL protecting full position
+    const sl = sim.submitOrder({
+      tradeId: 't_partial_inv',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'STOP',
+      stopPrice: 95.0,
+      quantity: initialQuantity,
+      timestamp: t0 - 1000,
+      referencePrice: 100.0,
+      exitTarget: 'SL',
+    });
+
+    // TP1 for 30 units (30%)
+    const tp1 = sim.submitOrder({
+      tradeId: 't_partial_inv',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 110.0,
+      quantity: 30.0,
+      timestamp: t0 - 1000,
+      referencePrice: 100.0,
+      exitTarget: 'TP1',
+    });
+
+    // TP2 for 30 units (30%)
+    const tp2 = sim.submitOrder({
+      tradeId: 't_partial_inv',
+      symbol: 'BTC',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: 120.0,
+      quantity: 30.0,
+      timestamp: t0 - 1000,
+      referencePrice: 100.0,
+      exitTarget: 'TP2',
+    });
+
+    // Candle 1: Hits TP1 @ 110
+    const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 112, low: 99, close: 111, volume: 100 };
+    const res1 = sim.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].orderId).toBe(tp1.orderId);
+    expect(tp1.status).toBe('FILLED');
+
+    // Item 22: Invariant Check: SL quantity reduced to 70
+    expect(sl.remainingQuantity).toBe(70.0);
+    expect(tp1.filledQuantity! + sl.remainingQuantity).toBe(initialQuantity);
+
+    // Candle 2: Hits TP2 @ 120
+    const c2: ICandle = { timestamp: new Date(t0 + 60000), open: 111, high: 122, low: 110, close: 121, volume: 100 };
+    const res2 = sim.processCandle(c2);
+    expect(res2.fills).toHaveLength(1);
+    expect(res2.fills[0].orderId).toBe(tp2.orderId);
+    expect(tp2.status).toBe('FILLED');
+
+    // Item 23: Sum Invariant: alreadyExited (30 + 30) + remainingProtected (40) = initialQuantity (100)
+    const alreadyExited = tp1.filledQuantity! + tp2.filledQuantity!;
+    expect(alreadyExited).toBe(60.0);
+    expect(sl.remainingQuantity).toBe(40.0);
+    expect(alreadyExited + sl.remainingQuantity).toBe(initialQuantity);
+
+    // Item 24 & 25: Partial fill ratio validation on protective SL (cannot exceed remainingQuantity)
+    sim.setPartialFillRatio(0.5);
+    const c3: ICandle = { timestamp: new Date(t0 + 120000), open: 115, high: 115, low: 94, close: 94.5, volume: 100 };
+    const res3 = sim.processCandle(c3);
+    expect(res3.fills).toHaveLength(1);
+    expect(res3.fills[0].orderId).toBe(sl.orderId);
+    expect(res3.fills[0].quantity).toBe(20.0); // 50% of 40 remaining = 20
+    expect(sl.remainingQuantity).toBe(20.0);
+    expect(sl.status).toBe('PARTIALLY_FILLED');
+  });
+
+  // 79. Position Closure & Protection Cancellation Lifecycle
+  test('79. Items 26-28: Position Closure & Protection Cancellation Lifecycle', () => {
+    const t0 = 1700000000000;
+
+    // Item 26: Full SL execution cancels remaining TP orders
+    const sim1 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_close_1');
+    const sl1 = sim1.submitOrder({ tradeId: 't_close_1', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    const tp1 = sim1.submitOrder({ tradeId: 't_close_1', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 50, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+    const tp2 = sim1.submitOrder({ tradeId: 't_close_1', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 120, quantity: 50, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP2' });
+
+    // Hits SL on Candle 1
+    const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 101, low: 94, close: 95, volume: 100 };
+    const res1 = sim1.processCandle(c1);
+    expect(res1.fills).toHaveLength(1);
+    expect(res1.fills[0].orderId).toBe(sl1.orderId);
+    expect(sl1.status).toBe('FILLED');
+    expect(tp1.status).toBe('CANCELLED');
+    expect(tp2.status).toBe('CANCELLED');
+
+    // Subsequent candle rises to 125 (no further fills)
+    const c2: ICandle = { timestamp: new Date(t0 + 60000), open: 96, high: 125, low: 95, close: 120, volume: 100 };
+    const res2 = sim1.processCandle(c2);
+    expect(res2.fills).toHaveLength(0);
+
+    // Item 27: Full TP execution cancels remaining SL order
+    const sim2 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_close_2');
+    const sl2 = sim2.submitOrder({ tradeId: 't_close_2', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    const tpFull = sim2.submitOrder({ tradeId: 't_close_2', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+
+    const c3: ICandle = { timestamp: new Date(t0), open: 100, high: 112, low: 99, close: 111, volume: 100 };
+    const res3 = sim2.processCandle(c3);
+    expect(res3.fills).toHaveLength(1);
+    expect(res3.fills[0].orderId).toBe(tpFull.orderId);
+    expect(tpFull.status).toBe('FILLED');
+    expect(sl2.status).toBe('CANCELLED');
+
+    // Subsequent candle crashes to 90 (no further fills)
+    const c4: ICandle = { timestamp: new Date(t0 + 60000), open: 110, high: 110, low: 88, close: 89, volume: 100 };
+    const res4 = sim2.processCandle(c4);
+    expect(res4.fills).toHaveLength(0);
+
+    // Item 28: Manual position close / trade cancellation cancels all resting orders
+    const sim3 = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_close_3');
+    const sl3 = sim3.submitOrder({ tradeId: 't_cancel_all', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    const tp3 = sim3.submitOrder({ tradeId: 't_cancel_all', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+    sim3.cancelTradeOrders('t_cancel_all');
+    expect(sl3.status).toBe('CANCELLED');
+    expect(tp3.status).toBe('CANCELLED');
+  });
+
+  // 80. Fail-Closed Validation & Invalid Configuration Rejection
+  test('80. Items 29-30: Fail-Closed Validation & Invalid Configuration Rejection', () => {
+    const sim = new ExecutionSimulator();
+    const t0 = 1700000000000;
+
+    // Item 29: Inverted TP/SL rejection
+    // Long SL above referencePrice
+    expect(() =>
+      sim.submitOrder({
+        tradeId: 't_inv_1',
+        symbol: 'BTC',
+        side: 'SELL',
+        orderType: 'STOP',
+        stopPrice: 105.0, // Invalid: SL >= ref (100)
+        quantity: 10,
+        timestamp: t0,
+        referencePrice: 100.0,
+        exitTarget: 'SL',
+      }),
+    ).toThrow('INVALID_TP_SL_CONFIGURATION: Stop loss price for LONG position must be below entry reference price');
+
+    // Long TP below referencePrice
+    expect(() =>
+      sim.submitOrder({
+        tradeId: 't_inv_2',
+        symbol: 'BTC',
+        side: 'SELL',
+        orderType: 'LIMIT',
+        price: 95.0, // Invalid: TP <= ref (100)
+        quantity: 10,
+        timestamp: t0,
+        referencePrice: 100.0,
+        exitTarget: 'TP1',
+      }),
+    ).toThrow('INVALID_TP_SL_CONFIGURATION: Take profit price for LONG position must be above entry reference price');
+
+    // Short SL below referencePrice
+    expect(() =>
+      sim.submitOrder({
+        tradeId: 't_inv_3',
+        symbol: 'BTC',
+        side: 'BUY',
+        orderType: 'STOP',
+        stopPrice: 95.0, // Invalid: SL <= ref (100)
+        quantity: 10,
+        timestamp: t0,
+        referencePrice: 100.0,
+        exitTarget: 'SL',
+      }),
+    ).toThrow('INVALID_TP_SL_CONFIGURATION: Stop loss price for SHORT position must be above entry reference price');
+
+    // Short TP above referencePrice
+    expect(() =>
+      sim.submitOrder({
+        tradeId: 't_inv_4',
+        symbol: 'BTC',
+        side: 'BUY',
+        orderType: 'LIMIT',
+        price: 105.0, // Invalid: TP >= ref (100)
+        quantity: 10,
+        timestamp: t0,
+        referencePrice: 100.0,
+        exitTarget: 'TP1',
+      }),
+    ).toThrow('INVALID_TP_SL_CONFIGURATION: Take profit price for SHORT position must be below entry reference price');
+
+    // Item 30: Rejection of non-finite, zero, and negative values
+    expect(() => sim.submitOrder({ tradeId: 't_inv_5', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: -50, quantity: 10, timestamp: t0 })).toThrow('INVALID_ORDER_STOP_PRICE');
+    expect(() => sim.submitOrder({ tradeId: 't_inv_6', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: NaN, quantity: 10, timestamp: t0 })).toThrow('INVALID_ORDER_STOP_PRICE');
+    expect(() => sim.submitOrder({ tradeId: 't_inv_7', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: Infinity, quantity: 10, timestamp: t0 })).toThrow('INVALID_ORDER_STOP_PRICE');
+    expect(() => sim.submitOrder({ tradeId: 't_inv_8', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 0, quantity: 10, timestamp: t0 })).toThrow('INVALID_ORDER_PRICE');
+    expect(() => sim.submitOrder({ tradeId: 't_inv_9', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 100, quantity: -10, timestamp: t0 })).toThrow('INVALID_ORDER_QUANTITY');
+    expect(() => sim.submitOrder({ tradeId: 't_inv_10', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 100, quantity: 10, timestamp: -5 })).toThrow('INVALID_ORDER_TIMESTAMP');
+
+    // State check: zero orders stored from rejected submissions
+    expect(sim.getTradeOrders('t_inv_1')).toHaveLength(0);
+    expect(sim.getTradeOrders('t_inv_5')).toHaveLength(0);
+  });
+
+  // 81. Multi-Position Independence Across Distinct Trade IDs
+  test('81. Multi-Position Independence Across Distinct Trade IDs', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_multi');
+
+    // Trade 1 (Long BTC, Entry 100, SL 95, TP 110)
+    const sl1 = sim.submitOrder({ tradeId: 'trade_1', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 10, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    const tp1 = sim.submitOrder({ tradeId: 'trade_1', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 10, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+
+    // Trade 2 (Long BTC, Entry 100, SL 90, TP 120)
+    const sl2 = sim.submitOrder({ tradeId: 'trade_2', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 90, quantity: 5, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    const tp2 = sim.submitOrder({ tradeId: 'trade_2', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 120, quantity: 5, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+
+    // Process candle for BTC that hits Trade 1 TP (110) but does NOT reach Trade 2 TP (120)
+    const cBtc: ICandle = { timestamp: new Date(t0), open: 100, high: 112, low: 99, close: 111, volume: 100 };
+    const resBtc = sim.processCandle(cBtc);
+    expect(resBtc.fills).toHaveLength(1);
+    expect(resBtc.fills[0].orderId).toBe(tp1.orderId);
+    expect(tp1.status).toBe('FILLED');
+    expect(sl1.status).toBe('CANCELLED');
+
+    // Verify Trade 2 orders are completely unaffected
+    expect(sl2.status).toBe('PENDING');
+    expect(tp2.status).toBe('PENDING');
+    expect(sl2.remainingQuantity).toBe(5);
+    expect(tp2.remainingQuantity).toBe(5);
+  });
+
+  // 82. Checkpoint Determinism with Active TP/SL Orders
+  test('82. Checkpoint Determinism with Active TP/SL Orders', () => {
+    const t0 = 1700000000000;
+    const simA = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_chk_a');
+    const simB = new ExecutionSimulator(FillModel.OHLC_PATH, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 }, 'sim_chk_b');
+
+    // Submit resting orders to both
+    simA.submitOrder({ tradeId: 't_chk', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    simA.submitOrder({ tradeId: 't_chk', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 50, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+    simA.submitOrder({ tradeId: 't_chk', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 120, quantity: 50, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP2' });
+
+    // Process Candle 1 in Sim A (TP1 hits)
+    const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 112, low: 99, close: 111, volume: 100 };
+    simA.processCandle(c1);
+
+    // Checkpoint Sim A and restore into Sim B
+    const checkpoint = simA.createCheckpoint();
+    const serialized = JSON.stringify(checkpoint);
+    const restored = JSON.parse(serialized);
+    simB.restoreCheckpoint(restored);
+
+    // Process Candle 2 in both Sim A and Sim B (SL hits remaining 50 units)
+    const c2: ICandle = { timestamp: new Date(t0 + 60000), open: 105, high: 105, low: 93, close: 94, volume: 100 };
+    const resA = simA.processCandle(c2);
+    const resB = simB.processCandle(c2);
+
+    expect(resA.fills).toHaveLength(1);
+    expect(resB.fills).toHaveLength(1);
+    expect(resB.fills[0].price).toBe(resA.fills[0].price);
+    expect(resB.fills[0].quantity).toBe(resA.fills[0].quantity);
+    expect(resB.fills[0].fee).toBe(resA.fills[0].fee);
+    expect(resB.fills[0].slippage).toBe(resA.fills[0].slippage);
+    expect(simB.getAllFills()).toHaveLength(simA.getAllFills().length);
+  });
+
+  // 83. Journal and Execution Event Metadata Integrity
+  test('83. Journal and Execution Event Metadata Integrity', () => {
+    const t0 = 1700000000000;
+    const sim = new ExecutionSimulator(
+      FillModel.OHLC_PATH,
+      SameCandleAmbiguityMode.CONSERVATIVE,
+      { submissionLatencyMs: 0, processingLatencyMs: 0 },
+      'sim_journal',
+      { baseSlippageBps: 0, volatilityMultiplier: 0, impactMultiplier: 0, maxSlippageBps: 0 },
+      undefined,
+      { baseSpreadBps: 0, illiquidMultiplier: 0 },
+    );
+
+    sim.submitOrder({ tradeId: 't_j', symbol: 'BTC', side: 'SELL', orderType: 'STOP', stopPrice: 95, quantity: 100, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'SL' });
+    sim.submitOrder({ tradeId: 't_j', symbol: 'BTC', side: 'SELL', orderType: 'LIMIT', price: 110, quantity: 50, timestamp: t0 - 1000, referencePrice: 100, exitTarget: 'TP1' });
+
+    // Process candle hitting TP1
+    const c1: ICandle = { timestamp: new Date(t0), open: 100, high: 112, low: 99, close: 111, volume: 100 };
+    const res = sim.processCandle(c1);
+
+    expect(res.events).toHaveLength(1);
+    const evt = res.events[0];
+    expect(evt.eventType).toBe('TP_FILLED');
+    expect(evt.tradeId).toBe('t_j');
+    expect(evt.price).toBe(110);
+    expect(evt.quantity).toBe(50);
+    expect(evt.remainingQuantity).toBe(0);
+    expect(evt.segmentIndex).toBe(1); // Reached on segment 1 (Low -> High)
+    expect(evt.segmentType).toBeDefined();
+    expect(evt.timestamp).toBe(t0);
+  });
 });
 
 

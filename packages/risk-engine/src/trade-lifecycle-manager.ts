@@ -49,19 +49,40 @@ export class TradeLifecycleManager {
     entrySlippage = 0,
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
-    const riskDistance = Math.abs(executionPrice - signal.stopLoss);
+    const isBull =
+      signal.direction === Direction.BULLISH ||
+      (signal.direction as any) === 'LONG' ||
+      (signal.direction as any) === 'BUY';
+    const rawRisk = signal.stopLoss > 0 ? Math.abs(executionPrice - signal.stopLoss) : 0;
+    const effectiveRisk = rawRisk > 0 ? rawRisk : Math.max(0.1, executionPrice * 0.01);
+
+    const initialStopLoss =
+      signal.stopLoss && (isBull ? signal.stopLoss < executionPrice : signal.stopLoss > executionPrice)
+        ? signal.stopLoss
+        : isBull
+          ? Number((executionPrice - effectiveRisk).toFixed(2))
+          : Number((executionPrice + effectiveRisk).toFixed(2));
+
     const tp1 =
-      signal.takeProfits?.tp1 ??
-      executionPrice +
-        (signal.direction === Direction.BULLISH ? riskDistance * 1.5 : -riskDistance * 1.5);
+      signal.takeProfits?.tp1 && (isBull ? signal.takeProfits.tp1 > executionPrice : signal.takeProfits.tp1 < executionPrice)
+        ? signal.takeProfits.tp1
+        : isBull
+          ? Number((executionPrice + effectiveRisk * 1.5).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - effectiveRisk * 1.5).toFixed(2));
+
     const tp2 =
-      signal.takeProfits?.tp2 ??
-      executionPrice +
-        (signal.direction === Direction.BULLISH ? riskDistance * 2.5 : -riskDistance * 2.5);
+      signal.takeProfits?.tp2 && (isBull ? signal.takeProfits.tp2 > executionPrice : signal.takeProfits.tp2 < executionPrice)
+        ? signal.takeProfits.tp2
+        : isBull
+          ? Number((executionPrice + effectiveRisk * 2.5).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - effectiveRisk * 2.5).toFixed(2));
+
     const tp3 =
-      signal.takeProfits?.tp3 ??
-      executionPrice +
-        (signal.direction === Direction.BULLISH ? riskDistance * 4.0 : -riskDistance * 4.0);
+      signal.takeProfits?.tp3 && (isBull ? signal.takeProfits.tp3 > executionPrice : signal.takeProfits.tp3 < executionPrice)
+        ? signal.takeProfits.tp3
+        : isBull
+          ? Number((executionPrice + effectiveRisk * 4.0).toFixed(2))
+          : Number(Math.max(0.01, executionPrice - effectiveRisk * 4.0).toFixed(2));
 
     const entryEvent: IExecutionEvent = {
       eventId: `evt_entry_${executionTime}_${tradeId}`,
@@ -107,8 +128,8 @@ export class TradeLifecycleManager {
       signalTimestamp,
       executionTimestamp: executionTime,
       orderId,
-      side: signal.direction === Direction.BULLISH ? 'BUY' : 'SELL',
-      initialStopLoss: signal.stopLoss,
+      side: isBull ? 'BUY' : 'SELL',
+      initialStopLoss: initialStopLoss,
       tp1,
       tp2,
       tp3,
@@ -123,8 +144,8 @@ export class TradeLifecycleManager {
       remainingQuantity: quantity,
       entryPrice: executionPrice,
       entryTime: executionTime,
-      initialStopLoss: signal.stopLoss,
-      currentStopLoss: signal.stopLoss,
+      initialStopLoss: initialStopLoss,
+      currentStopLoss: initialStopLoss,
       tp1,
       tp2,
       tp3,
@@ -226,7 +247,12 @@ export class TradeLifecycleManager {
     isClosed: boolean;
     isBreakevenStopTriggered: boolean;
   } {
-    const isLong = lot.direction === Direction.BULLISH;
+    const isLong =
+      lot.direction === Direction.BULLISH ||
+      (lot.direction as any) === 'LONG' ||
+      (lot.direction as any) === 'BUY' ||
+      (lot as any).side === 'BUY' ||
+      lot.entrySnapshot?.side === 'BUY';
     const fillQty = fill.quantity;
     const chunkDiff = isLong
       ? fill.price - lot.entryPrice
@@ -338,7 +364,12 @@ export class TradeLifecycleManager {
         'Synthetic lifecycle evaluation (evaluateLotTick) is deprecated and disabled for backtesting. Backtests must use ExecutionSimulator.',
       );
     }
-    const isLong = lot.direction === Direction.BULLISH;
+    const isLong =
+      lot.direction === Direction.BULLISH ||
+      (lot.direction as any) === 'LONG' ||
+      (lot.direction as any) === 'BUY' ||
+      (lot as any).side === 'BUY' ||
+      lot.entrySnapshot?.side === 'BUY';
     const high = candle.high;
     const low = candle.low;
     const close = candle.close;
@@ -704,7 +735,10 @@ export class TradeLifecycleManager {
    */
   static evaluateTick(signal: ISignalSetup, candle: ICandle): ITradeStateUpdate {
     const { direction, state, entryZone, stopLoss, takeProfits, riskRewardRatios, symbol } = signal;
-    const isLong = direction === Direction.BULLISH;
+    const isLong =
+      direction === Direction.BULLISH ||
+      (direction as any) === 'LONG' ||
+      (direction as any) === 'BUY';
     const currentPrice = candle.close;
     const high = candle.high;
     const low = candle.low;

@@ -275,6 +275,16 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       for (const c of marketCandles) {
         orchestrator.processCandle(candidate.id, c);
       }
+      const last = marketCandles[marketCandles.length - 1];
+      const lastTime = last.timestamp instanceof Date ? last.timestamp.getTime() : new Date(last.timestamp).getTime();
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(lastTime + 900000),
+        open: 89000,
+        high: 89500,
+        low: 88500,
+        close: 89000,
+        volume: 1000,
+      });
 
       const ledger = orchestrator.getCandidateLedger(candidate.id);
       const trades = ledger?.getTrades() || [];
@@ -794,12 +804,24 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       ModelRegistry.registerCandidateArtifact(art1);
       ModelRegistry.registerCandidateArtifact(art2);
 
+      const last = marketCandles[marketCandles.length - 1];
+      const lastTime = last.timestamp instanceof Date ? last.timestamp.getTime() : new Date(last.timestamp).getTime();
+      const exitCandle: ICandle = {
+        timestamp: new Date(lastTime + 900000),
+        open: 89000,
+        high: 89500,
+        low: 88500,
+        close: 89000,
+        volume: 1000,
+      };
+
       // 1. Uninterrupted Execution
       const orchUninterrupted = new ShadowOrchestrator();
       orchUninterrupted.startCandidate(candidate1.id);
       for (const c of marketCandles) {
         orchUninterrupted.processCandle(candidate1.id, c);
       }
+      orchUninterrupted.processCandle(candidate1.id, exitCandle);
       const uninterruptedTrades = orchUninterrupted.getCandidateLedger(candidate1.id)?.getTrades() || [];
       expect(uninterruptedTrades.length).toBeGreaterThanOrEqual(1);
 
@@ -817,6 +839,7 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       for (let i = 35; i < marketCandles.length; i++) {
         orchInterrupted2.processCandle(candidate2.id, marketCandles[i]);
       }
+      orchInterrupted2.processCandle(candidate2.id, exitCandle);
       const interruptedTrades = orchInterrupted2.getCandidateLedger(candidate2.id)?.getTrades() || [];
       expect(interruptedTrades.length).toBe(uninterruptedTrades.length);
 
@@ -858,6 +881,16 @@ describe('AI Fix 25 — Continuous Shadow Orchestrator + Drift Detection', () =>
       for (const c of marketCandles) {
         orchestrator.processCandle(candidate.id, c);
       }
+      const last = marketCandles[marketCandles.length - 1];
+      const lastTime = last.timestamp instanceof Date ? last.timestamp.getTime() : new Date(last.timestamp).getTime();
+      orchestrator.processCandle(candidate.id, {
+        timestamp: new Date(lastTime + 900000),
+        open: 89000,
+        high: 89500,
+        low: 88500,
+        close: 89000,
+        volume: 1000,
+      });
 
       const ledger = orchestrator.getCandidateLedger(candidate.id);
       const fills = ledger?.getFills() || [];

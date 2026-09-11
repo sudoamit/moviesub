@@ -55,7 +55,10 @@ export class BacktestSimulator {
     policy = DEFAULT_PARTIAL_EXIT_POLICY,
     timestamp: number,
   ) {
-    const isLong = lot.direction === Direction.BULLISH;
+    const isLong =
+      lot.direction === Direction.BULLISH ||
+      (lot.direction as any) === 'LONG' ||
+      (lot.direction as any) === 'BUY';
     const exitSide = isLong ? 'SELL' : 'BUY';
     const remainingQty = lot.remainingQuantity;
 
@@ -91,7 +94,7 @@ export class BacktestSimulator {
         : lot.initialQuantity - tp1Qty;
     const tp3Qty = policy.tp3Ratio > 0 ? lot.initialQuantity - (tp1Qty + tp2Qty) : 0;
 
-    if (!hasAlreadyTp1 && tp1Qty > 0) {
+    if (!hasAlreadyTp1 && tp1Qty > 0 && lot.tp1 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -105,7 +108,7 @@ export class BacktestSimulator {
       });
     }
 
-    if (!hasAlreadyTp2 && tp2Qty > 0) {
+    if (!hasAlreadyTp2 && tp2Qty > 0 && lot.tp2 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -115,10 +118,11 @@ export class BacktestSimulator {
         quantity: Math.min(remainingQty, tp2Qty),
         timestamp,
         exitTarget: 'TP2',
+        referencePrice: lot.entryPrice,
       });
     }
 
-    if (!hasAlreadyTp3 && tp3Qty > 0) {
+    if (!hasAlreadyTp3 && tp3Qty > 0 && lot.tp3 > 0) {
       execSim.submitOrder({
         tradeId: lot.tradeId,
         symbol,
@@ -128,6 +132,7 @@ export class BacktestSimulator {
         quantity: Math.min(remainingQty, tp3Qty),
         timestamp,
         exitTarget: 'TP3',
+        referencePrice: lot.entryPrice,
       });
     }
   }
@@ -345,7 +350,10 @@ export class BacktestSimulator {
 
       // 3. Handle Active Position Lot Exits & Fills
       if (activeLot && activeLot.status !== 'CLOSED') {
-        const isLong = activeLot.direction === Direction.BULLISH;
+        const isLong =
+          activeLot.direction === Direction.BULLISH ||
+          (activeLot.direction as any) === 'LONG' ||
+          (activeLot.direction as any) === 'BUY';
         const low = currentCandle.low;
         const high = currentCandle.high;
         const close = currentCandle.close;
@@ -808,7 +816,10 @@ export class BacktestSimulator {
             }
 
             pendingEntrySignal = signal;
-            const isLong = signal.direction === Direction.BULLISH;
+            const isLong =
+              signal.direction === Direction.BULLISH ||
+              (signal.direction as any) === 'LONG' ||
+              (signal.direction as any) === 'BUY';
             const decisionPrice =
               fillModel === FillModel.NEXT_BAR_MARKET
                 ? currentCandle.close
@@ -892,7 +903,10 @@ export class BacktestSimulator {
         finalCandle.timestamp instanceof Date
           ? finalCandle.timestamp.getTime()
           : new Date(finalCandle.timestamp).getTime();
-      const isLong = activeLot.direction === Direction.BULLISH;
+      const isLong =
+        activeLot.direction === Direction.BULLISH ||
+        (activeLot.direction as any) === 'LONG' ||
+        (activeLot.direction as any) === 'BUY';
       const chunkDiff = isLong
         ? finalClose - activeLot.entryPrice
         : activeLot.entryPrice - finalClose;
@@ -980,6 +994,16 @@ export class BacktestSimulator {
       };
       trades.push(tradeRecord);
       positionLots.push(activeLot);
+
+      currentCash = Number((currentCash + netPnl).toFixed(2));
+      currentEquity = currentCash;
+      if (equityCurve.length > 0) {
+        equityCurve[equityCurve.length - 1].equity = currentEquity;
+      }
+      if (equitySnapshots.length > 0) {
+        equitySnapshots[equitySnapshots.length - 1].equity = currentEquity;
+        equitySnapshots[equitySnapshots.length - 1].cash = currentCash;
+      }
     }
 
     const metrics = MetricsCalculator.calculateMetrics(

@@ -162,6 +162,60 @@ export class ExecutionSimulator {
     exitTarget?: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TRAILING_STOP' | 'ENTRY' | string;
     ocoGroupId?: string;
   }): IOrder {
+    // 1. Quantity & timestamp validation
+    if (typeof params.quantity !== 'number' || !Number.isFinite(params.quantity) || params.quantity <= 0) {
+      throw new Error('INVALID_ORDER_QUANTITY: Quantity must be a positive finite number');
+    }
+    if (typeof params.timestamp !== 'number' || !Number.isFinite(params.timestamp) || params.timestamp <= 0) {
+      throw new Error('INVALID_ORDER_TIMESTAMP: Timestamp must be a positive finite number');
+    }
+
+    // 2. Price / stopPrice validation
+    if (params.price !== undefined && (typeof params.price !== 'number' || !Number.isFinite(params.price) || params.price <= 0)) {
+      throw new Error('INVALID_ORDER_PRICE: Price must be a positive finite number');
+    }
+    if (params.stopPrice !== undefined && (typeof params.stopPrice !== 'number' || !Number.isFinite(params.stopPrice) || params.stopPrice <= 0)) {
+      throw new Error('INVALID_ORDER_STOP_PRICE: Stop price must be a positive finite number');
+    }
+    if (params.referencePrice !== undefined && (typeof params.referencePrice !== 'number' || !Number.isFinite(params.referencePrice) || params.referencePrice <= 0)) {
+      throw new Error('INVALID_ORDER_REFERENCE_PRICE: Reference price must be a positive finite number');
+    }
+
+    if (params.orderType === 'LIMIT' && (params.price === undefined || params.price <= 0)) {
+      throw new Error('INVALID_ORDER_PRICE: Limit orders require a positive price');
+    }
+    if (params.orderType === 'STOP' && (params.stopPrice === undefined || params.stopPrice <= 0)) {
+      throw new Error('INVALID_ORDER_STOP_PRICE: Stop orders require a positive stopPrice');
+    }
+    if (params.orderType === 'STOP_LIMIT') {
+      if (params.price === undefined || params.price <= 0) {
+        throw new Error('INVALID_ORDER_PRICE: Stop-limit orders require a positive price');
+      }
+      if (params.stopPrice === undefined || params.stopPrice <= 0) {
+        throw new Error('INVALID_ORDER_STOP_PRICE: Stop-limit orders require a positive stopPrice');
+      }
+    }
+
+    // 3. Inverted TP/SL relative to reference price
+    if (params.referencePrice !== undefined && Number.isFinite(params.referencePrice) && params.referencePrice > 0) {
+      const ref = params.referencePrice;
+      if (params.side === 'SELL') {
+        if (params.exitTarget === 'SL' && params.stopPrice !== undefined && params.stopPrice >= ref) {
+          throw new Error('INVALID_TP_SL_CONFIGURATION: Stop loss price for LONG position must be below entry reference price');
+        }
+        if (params.exitTarget?.startsWith('TP') && params.price !== undefined && params.price <= ref) {
+          throw new Error('INVALID_TP_SL_CONFIGURATION: Take profit price for LONG position must be above entry reference price');
+        }
+      } else if (params.side === 'BUY') {
+        if (params.exitTarget === 'SL' && params.stopPrice !== undefined && params.stopPrice <= ref) {
+          throw new Error('INVALID_TP_SL_CONFIGURATION: Stop loss price for SHORT position must be above entry reference price');
+        }
+        if (params.exitTarget?.startsWith('TP') && params.price !== undefined && params.price >= ref) {
+          throw new Error('INVALID_TP_SL_CONFIGURATION: Take profit price for SHORT position must be below entry reference price');
+        }
+      }
+    }
+
     if (params.signalTimestamp && params.timestamp < params.signalTimestamp) {
       throw new Error(
         `Order creation timestamp (${params.timestamp}) cannot precede signal timestamp (${params.signalTimestamp})`,
@@ -489,13 +543,15 @@ export class ExecutionSimulator {
           newEvents.push(fillEvent);
 
           if (order.orderType === 'STOP') {
-            // Protective stop triggered -> Full exit, cancel all remaining orders for trade
-            this.cancelTradeOrders(order.tradeId);
+            // Protective stop triggered -> If fully filled, cancel all remaining orders for trade
+            if (order.status === 'FILLED') {
+              this.cancelTradeOrders(order.tradeId);
+            }
             break;
           } else {
             // Target limit order triggered -> Update protective stop order quantity to remaining open position size
             const remainingOrders = Array.from(this.orders.values()).filter(
-              (o) => o.tradeId === tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED'),
+              (o) => o.tradeId === order.tradeId && (o.status === 'PENDING' || o.status === 'PARTIALLY_FILLED'),
             );
             if (remainingOrders.length === 0) break;
 
@@ -503,7 +559,7 @@ export class ExecutionSimulator {
             if (slOrder) {
               const initialQty = slOrder.initialQuantity ?? slOrder.quantity;
               const totalExitFilledQty = this.fills
-                .filter((f) => f.tradeId === tradeId && f.exitTarget !== 'ENTRY')
+                .filter((f) => f.tradeId === order.tradeId && f.exitTarget !== 'ENTRY')
                 .reduce((sum, f) => sum + f.quantity, 0);
               const remainingPosQty = Math.max(0, initialQty - totalExitFilledQty);
 
@@ -513,7 +569,7 @@ export class ExecutionSimulator {
 
                 if (order.exitTarget === 'TP1') {
                   const entryFill = this.fills.find(
-                    (f) => f.tradeId === tradeId && f.exitTarget === 'ENTRY',
+                    (f) => f.tradeId === order.tradeId && f.exitTarget === 'ENTRY',
                   );
                   const bePrice =
                     entryFill?.price ?? (order.referencePrice ?? slOrder.price);
@@ -523,7 +579,7 @@ export class ExecutionSimulator {
                   }
                 }
               } else {
-                this.cancelTradeOrders(tradeId);
+                this.cancelTradeOrders(order.tradeId);
                 break;
               }
             }

@@ -135,18 +135,24 @@ export class ShadowOrchestrator {
     policy: IPartialExitPolicy,
     timestamp: number,
   ): IOrder[] {
-    const isLong = lot.direction === Direction.BULLISH;
+    const createdOrders: IOrder[] = [];
+    const isLong =
+      (lot as any).side === 'BUY' ||
+      (lot.direction as any) === 'LONG' ||
+      (lot.direction as any) === Direction.BULLISH ||
+      (lot.direction as any) === 'BUY' ||
+      lot.entrySnapshot?.side === 'BUY';
     const exitSide = isLong ? 'SELL' : 'BUY';
     const remainingQty = lot.remainingQuantity;
     if (remainingQty <= 0) return [];
+    const existingOrders = execSim.getTradeOrders(lot.tradeId);
 
     const val = TradeLifecycleManager.validatePartialExitPolicy(policy);
     if (!val.isValid) {
       throw new Error(`Invalid partial exit policy: ${val.reason}`);
     }
 
-    const createdOrders: IOrder[] = [];
-    const existingOrders = execSim.getTradeOrders(lot.tradeId);
+
     const hasStop = existingOrders.some((o: IOrder) => o.orderType === 'STOP');
     const hasAlreadyTp1 = existingOrders.some((o: any) => o.exitTarget === 'TP1');
     const hasAlreadyTp2 = existingOrders.some((o: any) => o.exitTarget === 'TP2');
