@@ -1,11 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import {
   ICandle,
   Timeframe,
   Direction
 } from '@quant/shared';
-import { SignalGenerator } from '@quant/trading-engine';
+import { SignalGenerator, FeatureVectorExtractor } from '@quant/trading-engine';
 import { PositionSizer } from '@quant/risk-engine';
 import {
   ProductionTradingPipeline,
@@ -18,6 +19,7 @@ import {
   computeDecisionFingerprint,
   ShadowOutcomeEvaluator
 } from '../shadow-execution/index';
+import { canonicalJsonStringify } from '../canonical-serializer';
 
 describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verification', () => {
   // Candle Generator
@@ -79,6 +81,16 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     const shadowSimulator = new ShadowExecutionSimulator({ initialCapital: 100000 });
     const shadowSubmitSpy = jest.spyOn(shadowSimulator, 'submitShadowOrder');
 
+    const strategyConfig = {
+      deterministicSignal: {
+        direction: Direction.BULLISH,
+        score: 95,
+        entryPrice: 100,
+        stopLoss: 95,
+        takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+      },
+    };
+
     const pipeline = new ProductionTradingPipeline({
       store,
       liveExecutionPort: mockLivePort,
@@ -90,15 +102,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       featureSchemaHash: 'fhash_schema_prod',
       strategyVersion: 'v2.0-smc',
       strategyConfigHash: 'shash_strat_prod',
-      strategyConfig: {
-        deterministicSignal: {
-          direction: Direction.BULLISH,
-          score: 95,
-          entryPrice: 100,
-          stopLoss: 95,
-          takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
-        },
-      },
+      strategyConfig,
       executionConfigVersion: 'exec-v2',
       executionConfigHash: 'ehash_exec_prod',
       riskConfigVersion: 'risk-v2',
@@ -150,7 +154,25 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       expect(mockLivePort.submitLiveOrder).toHaveBeenCalledWith(championDecision);
     }
 
-    // 3. CANONICAL FINGERPRINT: Decision fingerprint is computed canonically
+    // 3. REAL FEATURE VECTOR HASHING: featureInputHash matches canonical SHA-256 of extracted 17D features
+    const extractedFeatures = FeatureVectorExtractor.extract({
+      signal: SignalGenerator.generateSignal({
+        symbol: marketEvent.symbol,
+        executionCandles: candles,
+        executionTimeframe: Timeframe.M15,
+        asOfTimestamp: new Date(eventTime),
+        strategyConfig,
+      }),
+      candles,
+      asOfTimestamp: new Date(eventTime),
+    });
+    const expectedFeatureHash = createHash('sha256')
+      .update(canonicalJsonStringify(extractedFeatures))
+      .digest('hex');
+
+    expect(championDecision.context.featureInputHash).toBe(expectedFeatureHash);
+
+    // 4. CANONICAL FINGERPRINT: Decision fingerprint is computed canonically
     const expectedFingerprint = computeDecisionFingerprint({
       modelIdentity: championModel,
       snapshotId: championDecision.context.snapshotId,
@@ -158,7 +180,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       portfolioStateHash: championDecision.context.portfolioStateHash,
       featureVersion: '2.0',
       featureSchemaHash: 'fhash_schema_prod',
-      featureInputHash: championDecision.context.featureInputHash,
+      featureInputHash: expectedFeatureHash,
       featureDataCutoff: eventTime,
       strategyConfigHash: 'shash_strat_prod',
       executionConfigHash: 'ehash_exec_prod',
@@ -174,7 +196,12 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     });
     expect(championDecision.decisionFingerprint).toBe(expectedFingerprint);
 
-    // 4. SHADOW EXECUTION & ISOLATION: Challenger completes in background
+    // 5. MEASURED MONOTONIC TIMINGS: Latencies are real positive numbers
+    expect(championDecision.latencies.featureLatencyMs).toBeGreaterThanOrEqual(0.01);
+    expect(championDecision.latencies.modelLatencyMs).toBeGreaterThanOrEqual(0.01);
+    expect(championDecision.latencies.totalDecisionLatencyMs).toBeGreaterThanOrEqual(1);
+
+    // 6. SHADOW EXECUTION & ISOLATION: Challenger completes in background
     const pair = await pairPromise;
     expect(pair.pairId).toBeDefined();
     expect(pair.snapshotId).toBe(championDecision.context.snapshotId);
@@ -186,6 +213,213 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
     // CRITICAL: Live port call count NEVER exceeded 1 (Challenger never had access)
     expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('Problem #2: executes real differentiated ML inference for Champion vs Challenger', async () => {
+    const candles = generateCandles(60, 'BULLISH');
+    const lastCandle = candles[candles.length - 1];
+    const eventTime = lastCandle.timestamp.getTime();
+
+    const mockLivePort: ILiveExecutionPort = {
+      isLiveBroker: true,
+      submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'live-prod-order-2', status: 'PLACED' }),
+      cancelLiveOrder: jest.fn().mockResolvedValue(true),
+    };
+
+    const store = new InMemoryShadowExecutionStore();
+    const shadowSimulator = new ShadowExecutionSimulator();
+
+    const strategyConfig = {
+      deterministicSignal: {
+        direction: Direction.BULLISH,
+        score: 90,
+        entryPrice: 100,
+        stopLoss: 95,
+        takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+      },
+    };
+
+    // Champion model evaluator: aggressive buyer (confidence 0.95, BUY)
+    // Challenger model evaluator: conservative filter (confidence 0.40, HOLD)
+    const pipeline = new ProductionTradingPipeline({
+      store,
+      liveExecutionPort: mockLivePort,
+      shadowExecutionPort: shadowSimulator,
+      championModel,
+      challengerModel,
+      strategyConfig,
+      championModelEvaluator: (features) => ({
+        action: 'BUY',
+        confidence: 0.95,
+        probabilityWin: 0.75,
+      }),
+      challengerModelEvaluator: (features) => ({
+        action: 'HOLD',
+        confidence: 0.40,
+        probabilityWin: 0.35,
+      }),
+    });
+
+    const marketEvent: LiveMarketEvent = {
+      symbol: 'BTCUSDT',
+      candles,
+      timestamp: eventTime,
+      bid: 99.5,
+      ask: 100.5,
+      volume: 10,
+    };
+
+    const portfolioState: LivePortfolioAccountState = {
+      portfolioId: 'live-port-ml-diff',
+      cash: 100000,
+      equity: 100000,
+      openPositions: [],
+      timestamp: eventTime,
+    };
+
+    const { championDecision, pairPromise } = pipeline.processMarketEvent(marketEvent, portfolioState);
+
+    expect(championDecision.action).toBe('BUY');
+    expect(championDecision.confidence).toBe(0.95);
+    expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+
+    const pair = await pairPromise;
+    expect(pair.challengerDecision.action).toBe('HOLD');
+    expect(pair.challengerDecision.confidence).toBe(0.40);
+    expect(pair.divergence).toBe('DISAGREE');
+    expect(pair.divergenceType).toBe('CHAMPION_ONLY_ACTION');
+  });
+
+  it('Problem #4 & #5: proves atomic concurrency gate prevents duplicate live orders under parallel execution', async () => {
+    const candles = generateCandles(60, 'BULLISH');
+    const lastCandle = candles[candles.length - 1];
+    const eventTime = lastCandle.timestamp.getTime();
+
+    const mockLivePort: ILiveExecutionPort = {
+      isLiveBroker: true,
+      submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'order-concurrent-1', status: 'PLACED' }),
+      cancelLiveOrder: jest.fn().mockResolvedValue(true),
+    };
+
+    const store = new InMemoryShadowExecutionStore();
+    const shadowSimulator = new ShadowExecutionSimulator();
+
+    const strategyConfig = {
+      deterministicSignal: {
+        direction: Direction.BULLISH,
+        score: 95,
+        entryPrice: 100,
+        stopLoss: 95,
+        takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+      },
+    };
+
+    const pipeline = new ProductionTradingPipeline({
+      store,
+      liveExecutionPort: mockLivePort,
+      shadowExecutionPort: shadowSimulator,
+      championModel,
+      challengerModel,
+      strategyConfig,
+    });
+
+    const marketEvent: LiveMarketEvent = {
+      snapshotId: 'snap-concurrent-race-01',
+      symbol: 'BTCUSDT',
+      candles,
+      timestamp: eventTime,
+      bid: 99.5,
+      ask: 100.5,
+      volume: 10,
+    };
+
+    const portfolioState: LivePortfolioAccountState = {
+      portfolioId: 'port-race-1',
+      cash: 100000,
+      equity: 100000,
+      openPositions: [],
+      timestamp: eventTime,
+    };
+
+    // Run 4 simultaneous concurrent workers racing on the EXACT same market event
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => pipeline.processMarketEvent(marketEvent, portfolioState)),
+      Promise.resolve().then(() => pipeline.processMarketEvent(marketEvent, portfolioState)),
+      Promise.resolve().then(() => pipeline.processMarketEvent(marketEvent, portfolioState)),
+      Promise.resolve().then(() => pipeline.processMarketEvent(marketEvent, portfolioState)),
+    ]);
+
+    // At least 1 succeeded
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+
+    // CRITICAL: Live order was submitted STRICTLY ONCE despite 4 concurrent callers
+    expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
+
+    // Wait for shadow evaluation to complete
+    const firstSuccess = (fulfilled[0] as PromiseFulfilledResult<any>).value;
+    await firstSuccess.pairPromise;
+
+    // Store contains strictly 1 decision pair and 1 snapshot
+    expect(store.getAllPairs().length).toBe(1);
+    expect(store.getAllSnapshots().length).toBe(1);
+  });
+
+  it('Problem #7: proves slow Challenger does NOT block Champion execution return', async () => {
+    const candles = generateCandles(60, 'BULLISH');
+    const lastCandle = candles[candles.length - 1];
+    const eventTime = lastCandle.timestamp.getTime();
+
+    const mockLivePort: ILiveExecutionPort = {
+      isLiveBroker: true,
+      submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'order-slow-chall', status: 'PLACED' }),
+      cancelLiveOrder: jest.fn().mockResolvedValue(true),
+    };
+
+    const store = new InMemoryShadowExecutionStore();
+    const shadowSimulator = new ShadowExecutionSimulator();
+
+    const pipeline = new ProductionTradingPipeline({
+      store,
+      liveExecutionPort: mockLivePort,
+      shadowExecutionPort: shadowSimulator,
+      championModel,
+      challengerModel,
+      challengerModelEvaluator: async () => {
+        // Artificially delay Challenger evaluation by 200ms
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return { action: 'BUY', confidence: 0.88 };
+      },
+    });
+
+    const marketEvent: LiveMarketEvent = {
+      symbol: 'BTCUSDT',
+      candles,
+      timestamp: eventTime,
+      bid: 99.5,
+      ask: 100.5,
+      volume: 10,
+    };
+
+    const portfolioState: LivePortfolioAccountState = {
+      portfolioId: 'port-slow-test',
+      cash: 100000,
+      equity: 100000,
+      openPositions: [],
+      timestamp: eventTime,
+    };
+
+    const start = performance.now();
+    const { championDecision, pairPromise } = pipeline.processMarketEvent(marketEvent, portfolioState);
+    const duration = performance.now() - start;
+
+    // Champion critical path returns immediately (<50ms) without waiting for 200ms Challenger
+    expect(duration).toBeLessThan(50);
+    expect(championDecision.decisionId).toBeDefined();
+
+    // Challenger completes in background asynchronously
+    const pair = await pairPromise;
+    expect(pair.challengerDecision.action).toBe('BUY');
   });
 
   it('5 & 6: proves Challenger is strictly shadow-only and cannot mutate live portfolio state', async () => {

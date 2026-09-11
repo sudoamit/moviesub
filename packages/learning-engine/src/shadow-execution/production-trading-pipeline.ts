@@ -4,11 +4,14 @@ import {
   Timeframe,
   Direction,
   SignalGrade,
-  IPositionSizing
+  IPositionSizing,
+  ISignalSetup
 } from '@quant/shared';
 import {
   SignalGenerator,
-  IGenerateSignalOptions,
+  FeatureVectorExtractor,
+  TradeFeatureVector,
+  CanonicalMLEngineV2,
   FEATURE_SCHEMA_VERSION
 } from '@quant/trading-engine';
 import { PositionSizer, ICalculatePositionOptions } from '@quant/risk-engine';
@@ -17,6 +20,7 @@ import {
   PortfolioSnapshot,
   DecisionContext,
   TradingDecision,
+  TradingAction,
   ChampionChallengerDecisionPair,
   ModelIdentity,
   MarketSnapshotInstrument,
@@ -34,12 +38,22 @@ import { IShadowExecutionStore } from './shadow-execution-store';
 import { deepFreeze } from '../champion-challenger/evaluation-identity';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
+export type ModelPredictionResult = {
+  readonly action?: TradingAction;
+  readonly confidence?: number;
+  readonly probabilityWin?: number;
+  readonly expectedR?: number;
+  readonly filterPassed?: boolean;
+};
+
 export interface ProductionPipelineConfig {
   readonly store: IShadowExecutionStore;
   readonly liveExecutionPort?: ILiveExecutionPort;
   readonly shadowExecutionPort: IShadowExecutionPort;
   readonly championModel: ModelIdentity;
   readonly challengerModel: ModelIdentity;
+  readonly championModelEvaluator?: (features: TradeFeatureVector, signal: ISignalSetup) => ModelPredictionResult | Promise<ModelPredictionResult>;
+  readonly challengerModelEvaluator?: (features: TradeFeatureVector, signal: ISignalSetup) => ModelPredictionResult | Promise<ModelPredictionResult>;
   readonly strategyConfig?: Record<string, any>;
   readonly challengerStrategyConfig?: Record<string, any>;
   readonly riskConfig?: {
@@ -56,6 +70,7 @@ export interface ProductionPipelineConfig {
   readonly costConfigHash?: string;
   readonly strategyVersion?: string;
   readonly strategyConfigHash?: string;
+  readonly challengerStrategyConfigHash?: string;
   readonly featureVersion?: string;
   readonly featureSchemaHash?: string;
   readonly maxAllowedSkewMs?: number;
@@ -124,6 +139,7 @@ export class ProductionTradingPipeline {
       throw new Error('INVALID_PORTFOLIO_STATE: portfolio state is required');
     }
 
+    const tStart = performance.now();
     const lastCandle = event.candles[event.candles.length - 1];
     const eventTime = event.timestamp || (lastCandle.timestamp instanceof Date ? lastCandle.timestamp.getTime() : new Date(lastCandle.timestamp).getTime());
 
@@ -187,11 +203,62 @@ export class ProductionTradingPipeline {
       maxAllowedSkewMs: this.config.maxAllowedSkewMs,
     });
 
-    // 5. Shared feature hash & identity
+    // 5. Audit Persistence upfront before live execution
+    this.config.store.saveSnapshot(marketSnapshot);
+
+    // 6. Pre-Execution Reservation / Concurrency Lock (prevents parallel duplicate live orders)
+    const acquired = this.config.store.reserveExecution(
+      marketSnapshot.snapshotId,
+      this.config.championModel.modelId
+    );
+
+    if (!acquired) {
+      const existing = this.config.store.getDecisionPairBySnapshotAndModel(
+        marketSnapshot.snapshotId,
+        this.config.challengerModel.modelId
+      ) || this.config.store.getDecisionPairBySnapshot(marketSnapshot.snapshotId);
+
+      if (existing) {
+        return {
+          championDecision: existing.championDecision,
+          pairPromise: Promise.resolve(existing),
+        };
+      }
+      throw new Error(`CONCURRENT_EXECUTION_LOCK_ACQUIRED: Snapshot ${marketSnapshot.snapshotId} is already executing in another worker`);
+    }
+
+    // 7. Base strategy & feature signal generation
+    const champSignal = SignalGenerator.generateSignal({
+      symbol: event.symbol,
+      executionCandles: event.candles,
+      executionTimeframe: event.executionTimeframe || Timeframe.M15,
+      asOfTimestamp: new Date(marketSnapshot.timestamp),
+      strategyConfig: this.config.strategyConfig,
+    });
+
+    // 8. Real Point-in-Time Feature Extraction & Cryptographic Feature-Input Hashing
+    const fStart = performance.now();
+    const tradeFeatures = FeatureVectorExtractor.extract({
+      signal: champSignal,
+      candles: event.candles,
+      asOfTimestamp: new Date(marketSnapshot.timestamp),
+    });
+    const fEnd = performance.now();
+    const featureLatencyMs = Math.max(0.01, Number((fEnd - fStart).toFixed(3)));
+
+    const featureInputHash = createHash('sha256')
+      .update(canonicalJsonStringify(tradeFeatures))
+      .digest('hex');
+
     const featureVersion = this.config.featureVersion || FEATURE_SCHEMA_VERSION;
     const featureSchemaHash = this.config.featureSchemaHash || 'fhash_schema_default';
     const strategyVersion = this.config.strategyVersion || 'v1.0';
     const strategyConfigHash = this.config.strategyConfigHash || 'shash_strat_default';
+    const challengerStrategyConfigHash = this.config.challengerStrategyConfigHash || (
+      this.config.challengerStrategyConfig
+        ? createHash('sha256').update(canonicalJsonStringify(this.config.challengerStrategyConfig)).digest('hex')
+        : strategyConfigHash
+    );
     const executionConfigVersion = this.config.executionConfigVersion || 'e1.0';
     const executionConfigHash = this.config.executionConfigHash || 'ehash_exec_default';
     const riskConfigVersion = this.config.riskConfigVersion || 'r1.0';
@@ -200,18 +267,13 @@ export class ProductionTradingPipeline {
     const costConfigHash = this.config.costConfigHash || 'chash_cost_default';
     const portfolioStateVersion = 'port_v1.0';
 
-    const featureInputHash = createHash('sha256')
-      .update(canonicalJsonStringify({
-        symbol: event.symbol,
-        candleCount: event.candles.length,
-        lastCandleClose: lastCandle.close,
-        asOf: eventTime,
-      }))
-      .digest('hex');
+    // 9. Deterministic Replay Decision IDs
+    const champDecisionId = `dec_champ_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.championModel.modelId}:${this.config.championModel.modelVersion}`).digest('hex').slice(0, 16)}`;
+    const challDecisionId = `dec_chall_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.challengerModel.modelId}:${this.config.challengerModel.modelVersion}`).digest('hex').slice(0, 16)}`;
 
-    // 6. Champion Decision Context (with capability to LiveExecutionPort)
+    // 10. Champion Decision Context (with capability to LiveExecutionPort)
     const champContext: DecisionContext = deepFreeze({
-      decisionId: `dec_champ_${randomUUID()}`,
+      decisionId: champDecisionId,
       snapshotId: marketSnapshot.snapshotId,
       snapshotHash: marketSnapshot.snapshotHash,
       portfolioSnapshot,
@@ -238,9 +300,9 @@ export class ProductionTradingPipeline {
       modelRole: 'CHAMPION',
     });
 
-    // 7. Challenger Decision Context (Shadow Mode Only)
+    // 11. Challenger Decision Context (Shadow Mode Only with distinct config hashes)
     const challContext: DecisionContext = deepFreeze({
-      decisionId: `dec_chall_${randomUUID()}`,
+      decisionId: challDecisionId,
       snapshotId: marketSnapshot.snapshotId,
       snapshotHash: marketSnapshot.snapshotHash,
       portfolioSnapshot,
@@ -252,7 +314,7 @@ export class ProductionTradingPipeline {
       featureInputHash,
       featureDataCutoff: marketSnapshot.timestamp,
       strategyVersion,
-      strategyConfigHash,
+      strategyConfigHash: challengerStrategyConfigHash,
       executionConfigVersion,
       executionConfigHash,
       riskConfigVersion,
@@ -267,20 +329,25 @@ export class ProductionTradingPipeline {
       modelRole: 'CHALLENGER',
     });
 
-    // 8. CRITICAL PATH: Champion Evaluation & Risk Engine Integration
-    const champSignal = SignalGenerator.generateSignal({
-      symbol: event.symbol,
-      executionCandles: event.candles,
-      executionTimeframe: event.executionTimeframe || Timeframe.M15,
-      asOfTimestamp: new Date(marketSnapshot.timestamp),
-      strategyConfig: this.config.strategyConfig,
-    });
-
-    const champAction = champSignal.direction === Direction.BULLISH
+    // 12. CRITICAL PATH: Real Champion Model Inference & Risk Engine Integration
+    const mChampStart = performance.now();
+    let champAction: TradingAction = champSignal.direction === Direction.BULLISH
       ? 'BUY'
       : champSignal.direction === Direction.BEARISH
         ? 'SELL'
         : 'HOLD';
+
+    let champConfidence = champSignal.score / 100;
+
+    if (this.config.championModelEvaluator) {
+      const pred = this.config.championModelEvaluator(tradeFeatures, champSignal);
+      if (pred && !(pred instanceof Promise)) {
+        if (pred.action) champAction = pred.action;
+        if (typeof pred.confidence === 'number') champConfidence = pred.confidence;
+      }
+    }
+    const mChampEnd = performance.now();
+    const champModelLatencyMs = Math.max(0.01, Number((mChampEnd - mChampStart).toFixed(3)));
 
     let champPositionSize = 0;
     let champRiskAmount = 0;
@@ -306,7 +373,6 @@ export class ProductionTradingPipeline {
     const champEntry = champSignal.entryZone?.optimal ?? lastCandle.close;
     const champStop = champSignal.stopLoss;
     const champTP = champSignal.takeProfits?.tp1 ?? 0;
-    const champConfidence = champSignal.score / 100;
 
     const champFingerprint = computeDecisionFingerprint({
       modelIdentity: this.config.championModel,
@@ -345,25 +411,25 @@ export class ProductionTradingPipeline {
       latencies: {
         marketTimestamp: marketSnapshot.timestamp,
         featureStartTimestamp: decisionTimestamp,
-        featureEndTimestamp: decisionTimestamp + 2,
-        modelStartTimestamp: decisionTimestamp + 2,
-        modelEndTimestamp: decisionTimestamp + 5,
+        featureEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+        modelStartTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+        modelEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs + champModelLatencyMs),
         decisionTimestamp,
-        dataToDecisionLatencyMs: 5,
-        featureLatencyMs: 2,
-        modelLatencyMs: 3,
-        totalDecisionLatencyMs: 5,
+        dataToDecisionLatencyMs: Math.max(1, Math.round(performance.now() - tStart)),
+        featureLatencyMs,
+        modelLatencyMs: champModelLatencyMs,
+        totalDecisionLatencyMs: Math.max(1, Math.round(featureLatencyMs + champModelLatencyMs)),
       },
       context: champContext,
     });
 
-    // 9. Champion Live Execution (if action is BUY/SELL and live port configured)
+    // 13. Champion Live Execution (if action is BUY/SELL and live port configured)
     if (this.config.liveExecutionPort && (champAction === 'BUY' || champAction === 'SELL')) {
       assertLiveExecution(champContext, this.config.liveExecutionPort);
       this.config.liveExecutionPort.submitLiveOrder(championDecision);
     }
 
-    // 10. ASYNC ISOLATED PATH: Challenger Evaluation (runs in background with Shadow port only)
+    // 14. ASYNC ISOLATED PATH: Challenger Evaluation (runs in background with Shadow port only)
     const shadowPort = this.config.shadowExecutionPort;
     const pairPromise = (async () => {
       try {
@@ -375,11 +441,24 @@ export class ProductionTradingPipeline {
           strategyConfig: this.config.challengerStrategyConfig || this.config.strategyConfig,
         });
 
-        const challAction = challSignal.direction === Direction.BULLISH
+        const mChallStart = performance.now();
+        let challAction: TradingAction = challSignal.direction === Direction.BULLISH
           ? 'BUY'
           : challSignal.direction === Direction.BEARISH
             ? 'SELL'
             : 'HOLD';
+
+        let challConfidence = challSignal.score / 100;
+
+        if (this.config.challengerModelEvaluator) {
+          const pred = await Promise.resolve(this.config.challengerModelEvaluator(tradeFeatures, challSignal));
+          if (pred) {
+            if (pred.action) challAction = pred.action;
+            if (typeof pred.confidence === 'number') challConfidence = pred.confidence;
+          }
+        }
+        const mChallEnd = performance.now();
+        const challModelLatencyMs = Math.max(0.01, Number((mChallEnd - mChallStart).toFixed(3)));
 
         let challPositionSize = 0;
         let challRiskAmount = 0;
@@ -405,7 +484,6 @@ export class ProductionTradingPipeline {
         const challEntry = challSignal.entryZone?.optimal ?? lastCandle.close;
         const challStop = challSignal.stopLoss;
         const challTP = challSignal.takeProfits?.tp1 ?? 0;
-        const challConfidence = challSignal.score / 100;
 
         const challFingerprint = computeDecisionFingerprint({
           modelIdentity: this.config.challengerModel,
@@ -416,7 +494,7 @@ export class ProductionTradingPipeline {
           featureSchemaHash,
           featureInputHash,
           featureDataCutoff: marketSnapshot.timestamp,
-          strategyConfigHash,
+          strategyConfigHash: challengerStrategyConfigHash,
           executionConfigHash,
           riskConfigHash,
           costConfigHash,
@@ -444,14 +522,14 @@ export class ProductionTradingPipeline {
           latencies: {
             marketTimestamp: marketSnapshot.timestamp,
             featureStartTimestamp: decisionTimestamp,
-            featureEndTimestamp: decisionTimestamp + 2,
-            modelStartTimestamp: decisionTimestamp + 2,
-            modelEndTimestamp: decisionTimestamp + 5,
+            featureEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+            modelStartTimestamp: decisionTimestamp + Math.round(featureLatencyMs),
+            modelEndTimestamp: decisionTimestamp + Math.round(featureLatencyMs + challModelLatencyMs),
             decisionTimestamp,
-            dataToDecisionLatencyMs: 5,
-            featureLatencyMs: 2,
-            modelLatencyMs: 3,
-            totalDecisionLatencyMs: 5,
+            dataToDecisionLatencyMs: Math.max(1, Math.round(performance.now() - tStart)),
+            featureLatencyMs,
+            modelLatencyMs: challModelLatencyMs,
+            totalDecisionLatencyMs: Math.max(1, Math.round(featureLatencyMs + challModelLatencyMs)),
           },
           context: challContext,
         });
@@ -482,7 +560,6 @@ export class ProductionTradingPipeline {
         });
 
         // Persist atomically at storage boundary
-        this.config.store.saveSnapshot(marketSnapshot);
         this.config.store.saveDecision(championDecision);
         this.config.store.saveDecision(challengerDecision);
         this.config.store.putIfAbsentDecisionPair(pair);

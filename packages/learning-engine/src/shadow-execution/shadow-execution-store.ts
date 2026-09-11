@@ -29,6 +29,8 @@ export interface IShadowExecutionStore {
   saveShadowOutcome(outcome: ShadowOutcome): void;
   getShadowOutcome(outcomeId: string): ShadowOutcome | undefined;
   getAllOutcomes(): ShadowOutcome[];
+  reserveExecution(snapshotId: string, modelId: string): boolean;
+  releaseExecution(snapshotId: string, modelId: string): void;
   clear(): void;
   executeTransaction<T>(operation: () => T): T;
 }
@@ -45,6 +47,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   private readonly orders = new Map<string, ShadowOrder>();
   private readonly positions = new Map<string, ShadowPosition>();
   private readonly outcomes = new Map<string, ShadowOutcome>();
+  private readonly activeReservations = new Set<string>();
   private inTransaction = false;
 
   public saveSnapshot(snapshot: MarketSnapshot): void {
@@ -153,14 +156,34 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     return Array.from(this.outcomes.values());
   }
 
+  public reserveExecution(snapshotId: string, modelId: string): boolean {
+    if (!snapshotId || !modelId) return false;
+    const compositeKey = `${snapshotId}:${modelId}`;
+    if (this.activeReservations.has(compositeKey)) {
+      return false;
+    }
+    if (this.snapshotModelToPairId.has(compositeKey) || this.snapshotToPairId.has(snapshotId)) {
+      return false;
+    }
+    this.activeReservations.add(compositeKey);
+    return true;
+  }
+
+  public releaseExecution(snapshotId: string, modelId: string): void {
+    const compositeKey = `${snapshotId}:${modelId}`;
+    this.activeReservations.delete(compositeKey);
+  }
+
   public clear(): void {
     this.snapshots.clear();
     this.decisions.clear();
     this.pairs.clear();
     this.snapshotToPairId.clear();
+    this.snapshotModelToPairId.clear();
     this.orders.clear();
     this.positions.clear();
     this.outcomes.clear();
+    this.activeReservations.clear();
   }
 
   public executeTransaction<T>(operation: () => T): T {
@@ -396,6 +419,14 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
 
   public getAllOutcomes(): ShadowOutcome[] {
     return this.memoryStore.getAllOutcomes();
+  }
+
+  public reserveExecution(snapshotId: string, modelId: string): boolean {
+    return this.memoryStore.reserveExecution(snapshotId, modelId);
+  }
+
+  public releaseExecution(snapshotId: string, modelId: string): void {
+    this.memoryStore.releaseExecution(snapshotId, modelId);
   }
 
   public clear(): void {
