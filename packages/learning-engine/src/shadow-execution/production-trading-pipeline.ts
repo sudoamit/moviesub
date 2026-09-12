@@ -437,7 +437,7 @@ export class ProductionTradingPipeline {
         context: champContext,
       });
 
-      // 13. Champion Live Execution (Sequencing: EXECUTING -> submitLiveOrder -> LIVE_SUBMITTED -> COMMITTED)
+      // 13. Champion Live Execution (Sequencing: EXECUTING -> submitLiveOrder -> LIVE_SUBMITTED)
       if (this.config.liveExecutionPort && (champAction === 'BUY' || champAction === 'SELL')) {
         assertLiveExecution(champContext, this.config.liveExecutionPort);
         attemptedBrokerSubmission = true;
@@ -447,15 +447,10 @@ export class ProductionTradingPipeline {
           this.config.championModel.modelId,
           'LIVE_SUBMITTED'
         );
-        this.config.store.commitExecution(
-          marketSnapshot.snapshotId,
-          this.config.championModel.modelId
-        );
+        // Persist champion decision durably immediately upon live broker acceptance
+        this.config.store.saveDecision(championDecision);
       } else {
-        this.config.store.commitExecution(
-          marketSnapshot.snapshotId,
-          this.config.championModel.modelId
-        );
+        this.config.store.saveDecision(championDecision);
       }
     } catch (err) {
       if (attemptedBrokerSubmission) {
@@ -611,6 +606,12 @@ export class ProductionTradingPipeline {
         this.config.store.saveDecision(challengerDecision);
         this.config.store.putIfAbsentDecisionPair(pair);
 
+        // Durable commit: reservation transition to COMMITTED occurs only after DecisionPair is persisted
+        this.config.store.commitExecution(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId
+        );
+
         return pair;
       } catch (err) {
         throw err;
@@ -621,5 +622,21 @@ export class ProductionTradingPipeline {
       championDecision,
       pairPromise,
     };
+  }
+
+  /**
+   * Reconcile unknown live execution with broker response (operational recovery).
+   */
+  public reconcileUnknownExecution(
+    snapshotId: string,
+    brokerStatus: 'FOUND' | 'NOT_FOUND',
+    liveOrder?: any
+  ) {
+    return this.config.store.reconcileUnknownExecution(
+      snapshotId,
+      this.config.championModel.modelId,
+      brokerStatus,
+      liveOrder
+    );
   }
 }

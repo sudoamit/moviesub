@@ -51,6 +51,12 @@ export interface IShadowExecutionStore {
   getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined;
   commitExecution(snapshotId: string, modelId: string): void;
   releaseExecution(snapshotId: string, modelId: string, status?: ExecutionReservationStatus): void;
+  reconcileUnknownExecution(
+    snapshotId: string,
+    modelId: string,
+    brokerStatus: 'FOUND' | 'NOT_FOUND',
+    liveOrder?: any
+  ): { reconciled: boolean; newStatus: ExecutionReservationStatus };
   clear(): void;
   executeTransaction<T>(operation: () => T): T;
 }
@@ -227,7 +233,7 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
 
   public releaseExecution(snapshotId: string, modelId: string, status?: ExecutionReservationStatus): void {
     const compositeKey = `${snapshotId}:${modelId}`;
-    if (status) {
+    if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL' || status === 'FAILED_RETRYABLE')) {
       const existing = this.reservations.get(compositeKey);
       if (existing) {
         this.reservations.set(compositeKey, {
@@ -235,9 +241,38 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
           status,
           lastUpdatedAt: Date.now(),
         });
+      } else {
+        this.reservations.set(compositeKey, {
+          snapshotId,
+          modelId,
+          status,
+          reservedAt: Date.now(),
+          lastUpdatedAt: Date.now(),
+        });
       }
+    } else {
+      this.reservations.delete(compositeKey);
     }
-    this.reservations.delete(compositeKey);
+  }
+
+  public reconcileUnknownExecution(
+    snapshotId: string,
+    modelId: string,
+    brokerStatus: 'FOUND' | 'NOT_FOUND',
+    liveOrder?: any
+  ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
+    const compositeKey = `${snapshotId}:${modelId}`;
+    const res = this.reservations.get(compositeKey);
+    if (!res || res.status !== 'EXECUTION_UNKNOWN') {
+      return { reconciled: false, newStatus: res?.status || 'FAILED_FINAL' };
+    }
+    const newStatus: ExecutionReservationStatus = brokerStatus === 'FOUND' ? 'COMMITTED' : 'FAILED_RETRYABLE';
+    this.reservations.set(compositeKey, {
+      ...res,
+      status: newStatus,
+      lastUpdatedAt: Date.now(),
+    });
+    return { reconciled: true, newStatus };
   }
 
   public clear(): void {
@@ -526,18 +561,32 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
         try {
           const content = fs.readFileSync(lockFile, 'utf-8');
           const existing = JSON.parse(content) as ExecutionReservation;
-          // If previous execution was explicitly marked FAILED_RETRYABLE, allow atomic overwrite
+          // If previous execution was explicitly marked FAILED_RETRYABLE, claim retry atomically via wx claim file
           if (existing && existing.status === 'FAILED_RETRYABLE') {
-            const reservationData: ExecutionReservation = {
-              snapshotId,
-              modelId,
-              status: 'RESERVED',
-              reservedAt: Date.now(),
-              lastUpdatedAt: Date.now(),
-            };
-            fs.writeFileSync(lockFile, JSON.stringify(reservationData), 'utf-8');
-            this.memoryStore.reserveExecution(snapshotId, modelId);
-            return true;
+            const claimFile = path.join(dir, `.claim.${snapshotId}.${modelId}.${existing.reservedAt}`);
+            try {
+              const claimToken = { claimantId: randomUUID(), claimedAt: Date.now() };
+              fs.writeFileSync(claimFile, JSON.stringify(claimToken), { flag: 'wx' });
+              
+              // We won the atomic retry claim
+              const reservationData: ExecutionReservation = {
+                snapshotId,
+                modelId,
+                status: 'RESERVED',
+                reservedAt: Date.now(),
+                lastUpdatedAt: Date.now(),
+              };
+              fs.writeFileSync(lockFile, JSON.stringify(reservationData), 'utf-8');
+              try { fs.unlinkSync(claimFile); } catch {}
+              this.memoryStore.reserveExecution(snapshotId, modelId);
+              return true;
+            } catch (claimErr: any) {
+              if (claimErr.code === 'EEXIST') {
+                // Lost atomic claim race to another worker
+                return false;
+              }
+              throw claimErr;
+            }
           }
         } catch {}
         // Fail closed for all active and unknown states (RESERVED, EXECUTING, LIVE_SUBMITTED, COMMITTED, EXECUTION_UNKNOWN, FAILED_FINAL)
@@ -589,8 +638,8 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     this.memoryStore.releaseExecution(snapshotId, modelId, status);
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     if (fs.existsSync(lockFile)) {
-      if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL')) {
-        // Keep lock file on disk with error status to prevent any worker from duplicate execution
+      if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL' || status === 'FAILED_RETRYABLE')) {
+        // Keep lock file on disk with error status to allow atomic retry protocol or prevent double executions
         try {
           const data: ExecutionReservation = {
             snapshotId,
@@ -607,6 +656,43 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
         } catch {}
       }
     }
+  }
+
+  public reconcileUnknownExecution(
+    snapshotId: string,
+    modelId: string,
+    brokerStatus: 'FOUND' | 'NOT_FOUND',
+    liveOrder?: any
+  ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    if (!this.memoryStore.getReservation(snapshotId, modelId) && fs.existsSync(lockFile)) {
+      try {
+        const content = fs.readFileSync(lockFile, 'utf-8');
+        const existing = JSON.parse(content) as ExecutionReservation;
+        this.memoryStore.updateReservationStatus(snapshotId, modelId, existing.status);
+      } catch {}
+    }
+    const result = this.memoryStore.reconcileUnknownExecution(snapshotId, modelId, brokerStatus, liveOrder);
+    if (result.reconciled) {
+      if (result.newStatus === 'COMMITTED') {
+        if (fs.existsSync(lockFile)) {
+          try { fs.unlinkSync(lockFile); } catch {}
+        }
+      } else {
+        // FAILED_RETRYABLE -> write updated status to lock file
+        const data: ExecutionReservation = {
+          snapshotId,
+          modelId,
+          status: result.newStatus,
+          reservedAt: Date.now(),
+          lastUpdatedAt: Date.now(),
+        };
+        try {
+          fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
+        } catch {}
+      }
+    }
+    return result;
   }
 
   public clear(): void {

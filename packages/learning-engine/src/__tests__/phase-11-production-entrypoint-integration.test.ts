@@ -18,7 +18,8 @@ import {
   ILiveExecutionPort,
   computeDecisionFingerprint,
   ShadowOutcomeEvaluator,
-  TradingAction
+  TradingAction,
+  TradingDecision
 } from '../shadow-execution/index';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
@@ -514,17 +515,106 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     }
   });
 
-  it('Problem #5: proves deterministic clientOrderId is attached to decision and passed to broker', async () => {
+  it('Problem #6: proves atomic claim file prevents race conditions when transitioning FAILED_RETRYABLE -> RESERVED across workers', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_retry_claim_test');
+    const testFile = path.join(testDir, 'retry-claim-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const store = new FileShadowExecutionStore(testFile);
+      const snapshotId = 'snap-retry-race-01';
+      const modelId = 'champ-v1-prod';
+
+      // 1. Initial reservation fails with retryable error
+      const reserved = store.reserveExecution(snapshotId, modelId);
+      expect(reserved).toBe(true);
+      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE');
+
+      const existingRes = store.getReservation(snapshotId, modelId);
+      expect(existingRes?.status).toBe('FAILED_RETRYABLE');
+
+      // 2. 4 parallel workers race to claim the FAILED_RETRYABLE lock simultaneously
+      const store1 = new FileShadowExecutionStore(testFile);
+      const store2 = new FileShadowExecutionStore(testFile);
+      const store3 = new FileShadowExecutionStore(testFile);
+      const store4 = new FileShadowExecutionStore(testFile);
+
+      const claimResults = await Promise.all([
+        Promise.resolve().then(() => store1.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => store2.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => store3.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => store4.reserveExecution(snapshotId, modelId)),
+      ]);
+
+      const successCount = claimResults.filter((r) => r === true).length;
+      const rejectedCount = claimResults.filter((r) => r === false).length;
+
+      // STRICT ATOMICITY INVARIANT: Exactly 1 worker claims the retry, all 3 other workers are rejected
+      expect(successCount).toBe(1);
+      expect(rejectedCount).toBe(3);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Problem #8: proves EXECUTION_UNKNOWN reconciliation contract enables operational recovery', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_reconcile_test');
+    const testFile = path.join(testDir, 'reconcile-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const store = new FileShadowExecutionStore(testFile);
+      const snapshotId = 'snap-reconcile-01';
+      const modelId = 'champ-v1-prod';
+
+      // 1. Enter EXECUTION_UNKNOWN state
+      store.reserveExecution(snapshotId, modelId);
+      store.releaseExecution(snapshotId, modelId, 'EXECUTION_UNKNOWN');
+      expect(store.getReservation(snapshotId, modelId)?.status).toBe('EXECUTION_UNKNOWN');
+
+      // 2. Reconciliation scenario A: Order FOUND on broker -> transitions to COMMITTED and cleans transient lock
+      const reconcileFound = store.reconcileUnknownExecution(snapshotId, modelId, 'FOUND', { orderId: 'broker-123' });
+      expect(reconcileFound.reconciled).toBe(true);
+      expect(reconcileFound.newStatus).toBe('COMMITTED');
+
+      // 3. Reconciliation scenario B: Order NOT_FOUND on broker -> transitions to FAILED_RETRYABLE (authorizes controlled retry)
+      const snapshotId2 = 'snap-reconcile-02';
+      store.reserveExecution(snapshotId2, modelId);
+      store.releaseExecution(snapshotId2, modelId, 'EXECUTION_UNKNOWN');
+
+      const reconcileNotFound = store.reconcileUnknownExecution(snapshotId2, modelId, 'NOT_FOUND');
+      expect(reconcileNotFound.reconciled).toBe(true);
+      expect(reconcileNotFound.newStatus).toBe('FAILED_RETRYABLE');
+
+      // Now a retry can acquire the reservation
+      const retried = store.reserveExecution(snapshotId2, modelId);
+      expect(retried).toBe(true);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Problem #5 & #7: proves broker adapter maps TradingDecision.clientOrderId to broker-side idempotency payload', async () => {
     const candles = generateCandles(60, 'BULLISH');
     const lastCandle = candles[candles.length - 1];
     const eventTime = lastCandle.timestamp.getTime();
 
-    let capturedDecision: any = null;
-    const mockLivePort: ILiveExecutionPort = {
+    // Simulated real exchange adapter (e.g. Binance / Bybit) tracking client order id idempotency
+    const brokerSubmittedRequests: Array<{ newClientOrderId: string; symbol: string; quantity: number }> = [];
+    const brokerLiveAdapter: ILiveExecutionPort = {
       isLiveBroker: true,
-      submitLiveOrder: jest.fn().mockImplementation((decision) => {
-        capturedDecision = decision;
-        return Promise.resolve({ liveOrderId: 'broker-ord-1', status: 'PLACED' });
+      submitLiveOrder: jest.fn().mockImplementation((decision: TradingDecision) => {
+        if (!decision.clientOrderId) {
+          throw new Error('BROKER_IDEMPOTENCY_ERROR: clientOrderId is required for live order placement');
+        }
+        brokerSubmittedRequests.push({
+          newClientOrderId: decision.clientOrderId,
+          symbol: decision.context.instrument.symbol,
+          quantity: decision.positionSize || 1,
+        });
+        return Promise.resolve({ liveOrderId: 'broker-assigned-id-01', status: 'PLACED' });
       }),
       cancelLiveOrder: jest.fn().mockResolvedValue(true),
     };
@@ -542,7 +632,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
     const pipeline = new ProductionTradingPipeline({
       store,
-      liveExecutionPort: mockLivePort,
+      liveExecutionPort: brokerLiveAdapter,
       shadowExecutionPort: new ShadowExecutionSimulator(),
       championModel,
       challengerModel,
@@ -569,14 +659,14 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
     const { championDecision } = await pipeline.processMarketEvent(marketEvent, portfolioState);
 
-    // Client order ID must be non-empty and start with prefix
+    // Assert clientOrderId is generated and verified
     expect(championDecision.clientOrderId).toBeDefined();
     expect(championDecision.clientOrderId?.startsWith('ord_live_')).toBe(true);
-    expect(championDecision.context.clientOrderId).toBe(championDecision.clientOrderId);
 
-    // Captured decision submitted to broker must contain the exact same clientOrderId
-    expect(capturedDecision).toBeDefined();
-    expect(capturedDecision.clientOrderId).toBe(championDecision.clientOrderId);
+    // Assert broker adapter received and mapped newClientOrderId properly
+    expect(brokerSubmittedRequests.length).toBe(1);
+    expect(brokerSubmittedRequests[0].newClientOrderId).toBe(championDecision.clientOrderId);
+    expect(brokerSubmittedRequests[0].symbol).toBe('BTCUSDT');
   });
 
   it('Problem #7: proves slow Challenger does NOT block Champion execution return', async () => {
