@@ -1,4 +1,10 @@
-import { Direction, isLongPosition, LiquidationModel, MarginMode } from '@quant/shared';
+import {
+  Direction,
+  isLongPosition,
+  IResolvedMarginModel,
+  LiquidationModel,
+  MarginMode,
+} from '@quant/shared';
 
 export interface ITradeMarginCalculation {
   positionNotionalQuote: number;
@@ -26,6 +32,7 @@ export interface ILiquidationCalculationParams {
   initialMarginRate?: number;
   maintenanceMarginRate?: number;
   liquidationModel?: LiquidationModel;
+  marginModel?: IResolvedMarginModel;
 }
 
 export interface ITradePnlParams {
@@ -44,6 +51,7 @@ export interface ITradePnlParams {
 export class TradeAccountingEngine {
   /**
    * Calculates notional values in both quote currency and INR account currency.
+   * STRICT FAIL-CLOSED: Rejects zero or negative quantity, price, contractSize, or fxRate.
    */
   static calculateNotional(
     quantity: number,
@@ -51,7 +59,7 @@ export class TradeAccountingEngine {
     contractSize = 1,
     fxRate = 1.0,
   ): { notionalQuote: number; notionalAccount: number } {
-    if (quantity < 0 || price < 0 || contractSize <= 0 || fxRate <= 0) {
+    if (quantity <= 0 || price <= 0 || contractSize <= 0 || fxRate <= 0) {
       throw new Error(
         `INVALID_NOTIONAL_INPUTS: quantity (${quantity}), price (${price}), contractSize (${contractSize}), fxRate (${fxRate}) must be valid positive values`,
       );
@@ -64,13 +72,14 @@ export class TradeAccountingEngine {
   /**
    * Authoritatively calculates Initial and Maintenance Margin in INR.
    * Priority:
-   * 1. SPOT: 100% notional
-   * 2. Explicit initialMarginRate if provided (> 0)
-   * 3. Leverage-based: notional / leverage
+   * 1. Consumes IResolvedMarginModel if provided
+   * 2. SPOT: 100% notional
+   * 3. Explicit initialMarginRate if provided (> 0)
+   * 4. Leverage-based: notional / leverage
    */
   static calculateMargin(
     notionalAccount: number,
-    leverage = 1,
+    leverageOrModel?: number | IResolvedMarginModel,
     marginMode: MarginMode = 'ISOLATED',
     initialMarginRate?: number,
     maintenanceMarginRate = 0.05,
@@ -79,18 +88,35 @@ export class TradeAccountingEngine {
       return { initialMarginRequired: 0, maintenanceMarginRequired: 0 };
     }
 
+    let lev: number;
+    let mMode: MarginMode;
+    let imr: number | undefined;
+    let mmr: number;
+
+    if (typeof leverageOrModel === 'object' && leverageOrModel !== null) {
+      lev = leverageOrModel.effectiveLeverage;
+      mMode = leverageOrModel.marginMode;
+      imr = leverageOrModel.initialMarginRate;
+      mmr = leverageOrModel.maintenanceMarginRate;
+    } else {
+      lev = leverageOrModel ?? 1;
+      mMode = marginMode;
+      imr = initialMarginRate;
+      mmr = maintenanceMarginRate;
+    }
+
     let initialMarginRequired: number;
 
-    if (marginMode === 'SPOT') {
+    if (mMode === 'SPOT') {
       initialMarginRequired = notionalAccount;
-    } else if (initialMarginRate !== undefined && initialMarginRate > 0) {
-      initialMarginRequired = notionalAccount * initialMarginRate;
+    } else if (imr !== undefined && imr > 0) {
+      initialMarginRequired = notionalAccount * imr;
     } else {
-      const effLeverage = Math.max(1, leverage);
+      const effLeverage = Math.max(1, lev);
       initialMarginRequired = notionalAccount / effLeverage;
     }
 
-    const maintenanceMarginRequired = notionalAccount * Math.max(0, maintenanceMarginRate);
+    const maintenanceMarginRequired = notionalAccount * Math.max(0, mmr);
 
     return {
       initialMarginRequired: Number(initialMarginRequired.toFixed(2)),
@@ -100,7 +126,7 @@ export class TradeAccountingEngine {
 
   /**
    * Calculates model-driven liquidation threshold price.
-   * Returns undefined / 0 for SPOT or unsupported models.
+   * Returns undefined for SPOT or unsupported models.
    */
   static calculateLiquidationPrice(
     paramsOrEntryPrice: ILiquidationCalculationParams | number,
@@ -121,11 +147,12 @@ export class TradeAccountingEngine {
     if (typeof paramsOrEntryPrice === 'object') {
       entryPrice = paramsOrEntryPrice.entryPrice;
       dir = paramsOrEntryPrice.direction;
-      lev = paramsOrEntryPrice.leverage ?? 1;
-      mmr = paramsOrEntryPrice.maintenanceMarginRate ?? 0.025;
-      imr = paramsOrEntryPrice.initialMarginRate;
-      model = paramsOrEntryPrice.liquidationModel;
-      marginMode = paramsOrEntryPrice.marginMode;
+      const mm = paramsOrEntryPrice.marginModel;
+      lev = mm?.effectiveLeverage ?? paramsOrEntryPrice.leverage ?? 1;
+      mmr = mm?.maintenanceMarginRate ?? paramsOrEntryPrice.maintenanceMarginRate ?? 0.025;
+      imr = mm?.initialMarginRate ?? paramsOrEntryPrice.initialMarginRate;
+      model = mm?.liquidationModel ?? paramsOrEntryPrice.liquidationModel;
+      marginMode = mm?.marginMode ?? paramsOrEntryPrice.marginMode;
     } else {
       entryPrice = paramsOrEntryPrice;
       dir = direction || 'LONG';

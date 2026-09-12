@@ -35,6 +35,14 @@ export interface IVenueProfile {
   takerFeeBps?: number;
 }
 
+export interface IResolvedMarginModel {
+  marginMode: MarginMode;
+  effectiveLeverage: number;
+  initialMarginRate: number;
+  maintenanceMarginRate: number;
+  liquidationModel: LiquidationModel;
+}
+
 export interface IFxConversionResult {
   convertedAmount: number;
   originalAmount: number;

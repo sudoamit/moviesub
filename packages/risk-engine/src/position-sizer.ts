@@ -5,8 +5,10 @@ import {
   IFxConversionResult,
   IInstrument,
   IPositionSizing,
+  IResolvedMarginModel,
   MarginMode,
   PointInTimeCurrencyConverter,
+  resolveMarginModel,
 } from '@quant/shared';
 import { TradeAccountingEngine } from './trade-accounting-engine';
 
@@ -32,6 +34,7 @@ export interface ICalculatePositionOptions {
   volatilityPercentile?: number;
   expectedR?: number;
   mlProbability?: number;
+  allowUnregisteredSymbols?: boolean;
 }
 
 export class PositionSizer {
@@ -65,6 +68,7 @@ export class PositionSizer {
       volatilityPercentile,
       expectedR,
       mlProbability,
+      allowUnregisteredSymbols = false,
     } = options;
 
     if (accountBalance <= 0) {
@@ -104,6 +108,11 @@ export class PositionSizer {
     } else if (symbol) {
       if (hasInstrument(symbol)) {
         resolvedInstrument = getAuthoritativeInstrument(symbol);
+      } else if (!allowUnregisteredSymbols) {
+        return this.createInvalid(
+          options,
+          `UNKNOWN_UNSUPPORTED_INSTRUMENT: Symbol '${symbol}' is not registered in the authoritative instrument registry. Production systems fail closed on unconfigured instruments.`,
+        );
       }
     }
 
@@ -158,32 +167,49 @@ export class PositionSizer {
     // 8. Calculate Risk-Based Quantity
     const unitsByRisk = riskAmountINR / riskPerUnitINR;
 
-    // Resolve Leverage & Margin Mode early for margin capacity bounds
-    const instrumentMaxLeverage = resolvedInstrument?.maxLeverage ?? maxLeverage ?? 10;
-    const requestedLev = requestedLeverage ?? customLeverage ?? resolvedInstrument?.defaultLeverage ?? 1;
-
-    if (requestedLev > instrumentMaxLeverage) {
-      return this.createInvalid(
-        options,
-        `Requested leverage (${requestedLev}x) exceeds instrument maximum allowable leverage (${instrumentMaxLeverage}x)`,
-      );
+    // Resolve Unified Authoritative Margin Model
+    let resolvedMarginModel: IResolvedMarginModel;
+    try {
+      if (resolvedInstrument) {
+        resolvedMarginModel = resolveMarginModel(resolvedInstrument, {
+          requestedLeverage: requestedLeverage ?? customLeverage,
+          venueOverride: {
+            marginMode,
+            maxLeverage,
+          },
+        });
+      } else {
+        const reqLev = requestedLeverage ?? customLeverage ?? 1;
+        const effMaxLev = maxLeverage ?? Math.max(10, reqLev);
+        if (reqLev > effMaxLev) {
+          return this.createInvalid(
+            options,
+            `Requested leverage (${reqLev}x) exceeds maximum allowable leverage (${effMaxLev}x)`,
+          );
+        }
+        const effMMode: MarginMode = marginMode || (reqLev > 1 ? 'ISOLATED' : 'SPOT');
+        resolvedMarginModel = {
+          marginMode: effMMode,
+          effectiveLeverage: Math.max(1, reqLev),
+          initialMarginRate: effMMode === 'SPOT' ? 1.0 : 1 / Math.max(1, reqLev),
+          maintenanceMarginRate: 0.05,
+          liquidationModel: effMMode === 'SPOT' ? 'SPOT_NONE' : 'ISOLATED_LINEAR',
+        };
+      }
+    } catch (err: any) {
+      return this.createInvalid(options, err.message);
     }
 
-    const effLeverage = Math.max(1, requestedLev);
-    const effMarginMode: MarginMode =
-      marginMode || resolvedInstrument?.marginMode || (effLeverage > 1 ? 'ISOLATED' : 'SPOT');
+    const effLeverage = resolvedMarginModel.effectiveLeverage;
+    const effMarginMode = resolvedMarginModel.marginMode;
+    const initialMarginRate = resolvedMarginModel.initialMarginRate;
+    const maintenanceMarginRate = resolvedMarginModel.maintenanceMarginRate;
 
     const effAvailableMargin = availableMargin !== undefined ? availableMargin : accountBalance;
-    const accountMaxLeverage = maxLeverage ?? instrumentMaxLeverage;
+    const accountMaxLeverage = maxLeverage ?? (resolvedInstrument?.maxLeverage ?? effLeverage);
 
     // Unit value in account currency
     const unitPriceINR = entryPrice * effectiveContractSize * fxRate;
-    const initialMarginRate =
-      requestedLeverage !== undefined || customLeverage !== undefined
-        ? effMarginMode === 'SPOT'
-          ? 1.0
-          : 1 / effLeverage
-        : resolvedInstrument?.initialMarginRate ?? (effMarginMode === 'SPOT' ? 1.0 : 1 / effLeverage);
     const marginPerUnitINR = unitPriceINR * initialMarginRate;
 
     const maxUnitsByMargin = marginPerUnitINR > 0 ? effAvailableMargin / marginPerUnitINR : Infinity;
@@ -196,7 +222,7 @@ export class PositionSizer {
     roundedUnits = Number(roundedUnits.toFixed(qtyPrecision));
 
     if (roundedUnits <= 0 || roundedUnits < minQuantity) {
-      const minLotMargin = (minQuantity * marginPerUnitINR);
+      const minLotMargin = minQuantity * marginPerUnitINR;
       const isMarginFailure = effAvailableMargin < minLotMargin;
       return {
         accountBalance,
@@ -222,7 +248,7 @@ export class PositionSizer {
         leverage: effLeverage,
         marginMode: effMarginMode,
         initialMarginRequired: Number(minLotMargin.toFixed(2)),
-        maintenanceMarginRequired: Number((minLotMargin * (resolvedInstrument?.maintenanceMarginRate ?? 0.05)).toFixed(2)),
+        maintenanceMarginRequired: Number((minLotMargin * maintenanceMarginRate).toFixed(2)),
         isValid: false,
         rejectionReason: isMarginFailure
           ? `Required initial margin (${minLotMargin.toFixed(2)} INR) exceeds available margin (${effAvailableMargin.toFixed(2)} INR)`
@@ -251,10 +277,7 @@ export class PositionSizer {
 
     const marginCalc = TradeAccountingEngine.calculateMargin(
       positionNotionalINR,
-      effLeverage,
-      effMarginMode,
-      initialMarginRate,
-      resolvedInstrument?.maintenanceMarginRate,
+      resolvedMarginModel,
     );
 
     const initialMarginRequired = marginCalc.initialMarginRequired;
@@ -324,15 +347,11 @@ export class PositionSizer {
       };
     }
 
-    // 14. Liquidation Safety Calculation
+    // 14. Liquidation Safety Calculation (consuming identical resolved margin model)
     const liquidationPrice = TradeAccountingEngine.calculateLiquidationPrice({
       entryPrice,
       direction,
-      leverage: effLeverage,
-      marginMode: effMarginMode,
-      initialMarginRate: resolvedInstrument?.initialMarginRate,
-      maintenanceMarginRate: resolvedInstrument?.maintenanceMarginRate ?? 0.025,
-      liquidationModel: resolvedInstrument?.liquidationModel ?? 'ISOLATED_LINEAR',
+      marginModel: resolvedMarginModel,
     });
 
     // 15. Return Complete Institutional Position Sizing

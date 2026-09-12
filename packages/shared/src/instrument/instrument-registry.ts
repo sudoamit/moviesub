@@ -1,5 +1,11 @@
 import { AssetType } from '../enums';
-import { IInstrument, IVenueProfile } from '../interfaces';
+import {
+  IInstrument,
+  IResolvedMarginModel,
+  IVenueProfile,
+  LiquidationModel,
+  MarginMode,
+} from '../interfaces';
 
 export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   NIFTY: {
@@ -378,4 +384,99 @@ export function getAuthoritativeInstrument(
 
 export function resetCustomInstruments(): void {
   customInstruments.clear();
+}
+
+export interface IMarginModelResolutionOptions {
+  requestedLeverage?: number;
+  customLeverage?: number;
+  venueOverride?: Partial<IVenueProfile>;
+}
+
+/**
+ * Resolves the single authoritative margin model for an instrument.
+ * Validates requested leverage against max allowable leverage and determines
+ * the exact initialMarginRate, maintenanceMarginRate, and liquidationModel.
+ */
+export function resolveMarginModel(
+  instrument: IInstrument,
+  options?: IMarginModelResolutionOptions,
+): IResolvedMarginModel {
+  if (!instrument) {
+    throw new Error('INVALID_INSTRUMENT: Cannot resolve margin model for undefined instrument');
+  }
+
+  const venue = options?.venueOverride
+    ? { ...(instrument.venueProfile || {}), ...options.venueOverride }
+    : instrument.venueProfile;
+
+  const marginMode: MarginMode =
+    options?.venueOverride?.marginMode ?? instrument.marginMode ?? venue?.marginMode ?? 'SPOT';
+
+  if (marginMode === 'SPOT') {
+    return {
+      marginMode: 'SPOT',
+      effectiveLeverage: 1,
+      initialMarginRate: 1.0,
+      maintenanceMarginRate: 0.0,
+      liquidationModel: 'SPOT_NONE',
+    };
+  }
+
+  // Margin / Derivative Mode
+  const maxLeverage =
+    options?.venueOverride?.maxLeverage ??
+    venue?.maxLeverage ??
+    instrument.maxLeverage ??
+    (instrument.initialMarginRate && instrument.initialMarginRate > 0
+      ? Math.round(1 / instrument.initialMarginRate)
+      : 1);
+
+  const defaultLeverage =
+    options?.venueOverride?.defaultLeverage ??
+    venue?.defaultLeverage ??
+    instrument.defaultLeverage ??
+    maxLeverage;
+
+  const leverage = options?.requestedLeverage ?? options?.customLeverage ?? defaultLeverage;
+
+  if (leverage <= 0) {
+    throw new Error(`INVALID_LEVERAGE: Leverage must be greater than 0, got ${leverage}`);
+  }
+
+  if (leverage > maxLeverage) {
+    throw new Error(
+      `LEVERAGE_EXCEEDS_MAX: Requested leverage ${leverage}x exceeds maximum allowable leverage of ${maxLeverage}x for instrument ${instrument.symbol}`,
+    );
+  }
+
+  let initialMarginRate: number;
+  if (options?.requestedLeverage !== undefined || options?.customLeverage !== undefined) {
+    initialMarginRate = 1 / leverage;
+  } else {
+    initialMarginRate =
+      options?.venueOverride?.initialMarginRate ??
+      venue?.initialMarginRate ??
+      instrument.initialMarginRate ??
+      1 / leverage;
+  }
+
+  const maintenanceMarginRate =
+    options?.venueOverride?.maintenanceMarginRate ??
+    venue?.maintenanceMarginRate ??
+    instrument.maintenanceMarginRate ??
+    0.05;
+
+  const liquidationModel: LiquidationModel =
+    options?.venueOverride?.liquidationModel ??
+    venue?.liquidationModel ??
+    instrument.liquidationModel ??
+    'ISOLATED_LINEAR';
+
+  return {
+    marginMode,
+    effectiveLeverage: leverage,
+    initialMarginRate,
+    maintenanceMarginRate,
+    liquidationModel,
+  };
 }

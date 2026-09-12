@@ -10,6 +10,8 @@ import {
   getAuthoritativeInstrument,
   PointInTimeCurrencyConverter,
   MarginMode,
+  IResolvedMarginModel,
+  resolveMarginModel,
 } from '@quant/shared';
 import {
   IEntryExecutionSnapshot,
@@ -261,9 +263,29 @@ export class TradeLifecycleManager {
       }
     }
 
-    const leverage = options?.leverage ?? instrument?.defaultLeverage ?? 1;
-    const marginMode = options?.marginMode ?? instrument?.marginMode ?? (leverage > 1 ? 'ISOLATED' : 'SPOT');
-    const initialMarginRate = options?.initialMarginRate ?? (options?.leverage ? (marginMode === 'SPOT' ? 1.0 : 1 / leverage) : instrument?.initialMarginRate);
+    let resolvedMarginModel: IResolvedMarginModel;
+    if (instrument) {
+      resolvedMarginModel = resolveMarginModel(instrument, {
+        requestedLeverage: options?.leverage,
+        venueOverride: {
+          marginMode: options?.marginMode,
+          initialMarginRate: options?.initialMarginRate,
+        },
+      });
+    } else {
+      const lev = options?.leverage ?? 1;
+      const mMode: MarginMode = options?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
+      resolvedMarginModel = {
+        marginMode: mMode,
+        effectiveLeverage: Math.max(1, lev),
+        initialMarginRate: options?.initialMarginRate ?? (mMode === 'SPOT' ? 1.0 : 1 / Math.max(1, lev)),
+        maintenanceMarginRate: 0.05,
+        liquidationModel: mMode === 'SPOT' ? 'SPOT_NONE' : 'ISOLATED_LINEAR',
+      };
+    }
+
+    const leverage = resolvedMarginModel.effectiveLeverage;
+    const marginMode = resolvedMarginModel.marginMode;
 
     const notionalCalc = TradeAccountingEngine.calculateNotional(
       lot.initialQuantity,
@@ -273,10 +295,7 @@ export class TradeLifecycleManager {
     );
     const marginCalc = TradeAccountingEngine.calculateMargin(
       notionalCalc.notionalAccount,
-      leverage,
-      marginMode,
-      initialMarginRate,
-      instrument?.maintenanceMarginRate,
+      resolvedMarginModel,
     );
 
     const initialRisk = TradeAccountingEngine.calculateStopRisk(

@@ -6,6 +6,7 @@ import {
   IPositionSizing,
   PointInTimeCurrencyConverter,
   registerInstrument,
+  resolveMarginModel,
   SignalState,
 } from '@quant/shared';
 import {
@@ -277,7 +278,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       });
 
       expect(sizing25x.isValid).toBe(false);
-      expect(sizing25x.rejectionReason).toContain('exceeds instrument maximum allowable leverage');
+      expect(sizing25x.rejectionReason).toContain('exceeds maximum allowable leverage');
     });
 
     it('Section 17: Liquidation price is distinct from stop-loss', () => {
@@ -765,6 +766,159 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       // Original specification unaffected
       const originalNifty = getAuthoritativeInstrument('NIFTY');
       expect(originalNifty.maxLeverage).toBe(5);
+    });
+  });
+
+  // =========================================================================
+  // 13. UNIFIED MARGIN MODEL RESOLUTION TESTS (AI Fix 99)
+  // =========================================================================
+  describe('13. Unified Margin Model Resolution (resolveMarginModel)', () => {
+    it('SPOT instrument resolves to SPOT_NONE, leverage=1, initialMarginRate=1.0, MMR=0', () => {
+      const spotInst: IInstrument = {
+        id: 'inst_reliance_spot',
+        symbol: 'RELIANCE_CASH',
+        name: 'Reliance Cash',
+        exchange: 'NSE',
+        assetType: 'EQUITY' as any,
+        tickSize: 0.05,
+        lotSize: 1,
+        contractSize: 1,
+        currency: 'INR',
+        marginMode: 'SPOT',
+        isActive: true,
+      };
+
+      const model = resolveMarginModel(spotInst);
+      expect(model.marginMode).toBe('SPOT');
+      expect(model.effectiveLeverage).toBe(1);
+      expect(model.initialMarginRate).toBe(1.0);
+      expect(model.maintenanceMarginRate).toBe(0.0);
+      expect(model.liquidationModel).toBe('SPOT_NONE');
+    });
+
+    it('Resolves DERIVATIVE instrument with default leverage and venue profile', () => {
+      const gold = getAuthoritativeInstrument('GOLD');
+      const model = resolveMarginModel(gold);
+      expect(model.marginMode).toBe('ISOLATED');
+      expect(model.effectiveLeverage).toBe(5);
+      expect(model.initialMarginRate).toBe(0.1);
+      expect(model.maintenanceMarginRate).toBe(0.05);
+      expect(model.liquidationModel).toBe('ISOLATED_LINEAR');
+    });
+
+    it('Rejects requested leverage exceeding instrument maximum leverage', () => {
+      const nifty = getAuthoritativeInstrument('NIFTY'); // maxLeverage: 5
+      expect(() =>
+        resolveMarginModel(nifty, { requestedLeverage: 10 }),
+      ).toThrowError(/LEVERAGE_EXCEEDS_MAX/);
+    });
+
+    it('Dynamically sets initialMarginRate to 1/leverage when requested leverage is within limits', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT'); // maxLeverage: 20
+      const model = resolveMarginModel(btc, { requestedLeverage: 10 });
+      expect(model.effectiveLeverage).toBe(10);
+      expect(model.initialMarginRate).toBe(0.10); // 1 / 10 = 10%
+    });
+  });
+
+  // =========================================================================
+  // 14. MARGIN & LIQUIDATION CONSISTENCY UNDER VARYING LEVERAGE (AI Fix 99)
+  // =========================================================================
+  describe('14. Margin & Liquidation Consistency under Varying Requested Leverage', () => {
+    it('PositionSizer, calculateMargin, and calculateLiquidationPrice share identical initialMarginRate', () => {
+      const accountBalance = 500000;
+      const entryPrice = 90000;
+      const stopLoss = 88000;
+      const requestedLeverage = 4; // 4x leverage -> 25% initial margin rate
+
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance,
+        riskPercentage: 1.0,
+        entryPrice,
+        stopLoss,
+        symbol: 'BTCUSDT',
+        requestedLeverage,
+        timestamp: 1700000000000,
+      });
+
+      expect(sizing.isValid).toBe(true);
+      expect(sizing.leverage).toBe(4);
+
+      // Verify margin is exactly notional * 25% (1 / 4)
+      const notionalAccount = sizing.positionNotionalAccount!;
+      const expectedInitialMargin = notionalAccount * 0.25;
+      expect(sizing.initialMarginRequired).toBeCloseTo(expectedInitialMargin, 1);
+
+      // Verify liquidation price uses the EXACT SAME 25% initial margin rate (not the default instrument 5%)
+      // Long Liq = 90000 * (1 - 0.25 + 0.025) = 90000 * 0.775 = 69750
+      expect(sizing.liquidationPrice).toBe(69750);
+    });
+  });
+
+  // =========================================================================
+  // 15. FAIL-CLOSED UNKNOWN INSTRUMENT RESOLUTION (AI Fix 99)
+  // =========================================================================
+  describe('15. Fail-Closed Unknown Instrument Resolution', () => {
+    it('PositionSizer rejects unknown symbols in production without silent fallback', () => {
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: 100000,
+        riskPercentage: 1.0,
+        entryPrice: 100,
+        stopLoss: 95,
+        symbol: 'UNKNOWN_CRYPTO_TOKEN',
+      });
+
+      expect(sizing.isValid).toBe(false);
+      expect(sizing.rejectionReason).toContain('UNKNOWN_UNSUPPORTED_INSTRUMENT');
+    });
+
+    it('PositionSizer allows unregistered symbols when allowUnregisteredSymbols is explicitly true', () => {
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: 100000,
+        riskPercentage: 1.0,
+        entryPrice: 100,
+        stopLoss: 95,
+        symbol: 'SYNTHETIC_TEST_ASSET',
+        allowUnregisteredSymbols: true,
+      });
+
+      expect(sizing.isValid).toBe(true);
+      expect(sizing.roundedUnits).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // 16. STRICT NOTIONAL INPUT VALIDATION (AI Fix 99)
+  // =========================================================================
+  describe('16. Strict Notional Input Validation (calculateNotional)', () => {
+    it('Rejects zero quantity', () => {
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(0, 100, 1, 1.0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+    });
+
+    it('Rejects negative quantity', () => {
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(-5, 100, 1, 1.0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+    });
+
+    it('Rejects zero or negative price', () => {
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(10, 0, 1, 1.0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(10, -50, 1, 1.0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+    });
+
+    it('Rejects zero or negative contract size or FX rate', () => {
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(10, 100, 0, 1.0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+      expect(() =>
+        TradeAccountingEngine.calculateNotional(10, 100, 1, 0),
+      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
     });
   });
 });
