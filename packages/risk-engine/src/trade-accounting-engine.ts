@@ -1,4 +1,5 @@
 import {
+  CurrencyCode,
   Direction,
   isLongPosition,
   IResolvedMarginModel,
@@ -41,6 +42,8 @@ export interface ITradePnlParams {
   quantity: number;
   direction: Direction | string;
   contractSize?: number;
+  quoteCurrency?: CurrencyCode;
+  accountCurrency?: CurrencyCode;
   fxRate?: number;
   fees?: number;
   slippage?: number;
@@ -51,7 +54,7 @@ export interface ITradePnlParams {
 export class TradeAccountingEngine {
   /**
    * Calculates notional values in both quote currency and INR account currency.
-   * STRICT FAIL-CLOSED: Rejects zero or negative quantity, price, contractSize, or fxRate.
+   * STRICT FAIL-CLOSED: Rejects non-finite, zero, or negative inputs.
    */
   static calculateNotional(
     quantity: number,
@@ -59,9 +62,22 @@ export class TradeAccountingEngine {
     contractSize = 1,
     fxRate = 1.0,
   ): { notionalQuote: number; notionalAccount: number } {
-    if (quantity <= 0 || price <= 0 || contractSize <= 0 || fxRate <= 0) {
+    if (
+      typeof quantity !== 'number' ||
+      !Number.isFinite(quantity) ||
+      quantity <= 0 ||
+      typeof price !== 'number' ||
+      !Number.isFinite(price) ||
+      price <= 0 ||
+      typeof contractSize !== 'number' ||
+      !Number.isFinite(contractSize) ||
+      contractSize <= 0 ||
+      typeof fxRate !== 'number' ||
+      !Number.isFinite(fxRate) ||
+      fxRate <= 0
+    ) {
       throw new Error(
-        `INVALID_NOTIONAL_INPUTS: quantity (${quantity}), price (${price}), contractSize (${contractSize}), fxRate (${fxRate}) must be valid positive values`,
+        `INVALID_NOTIONAL_INPUTS: quantity (${quantity}), price (${price}), contractSize (${contractSize}), fxRate (${fxRate}) must be valid positive finite numbers`,
       );
     }
     const notionalQuote = Number((quantity * price * contractSize).toFixed(4));
@@ -84,6 +100,10 @@ export class TradeAccountingEngine {
     initialMarginRate?: number,
     maintenanceMarginRate = 0.05,
   ): { initialMarginRequired: number; maintenanceMarginRequired: number } {
+    if (typeof notionalAccount !== 'number' || !Number.isFinite(notionalAccount)) {
+      throw new Error(`INVALID_MARGIN_INPUTS: notionalAccount (${notionalAccount}) must be a valid finite number`);
+    }
+
     if (notionalAccount <= 0) {
       return { initialMarginRequired: 0, maintenanceMarginRequired: 0 };
     }
@@ -105,6 +125,18 @@ export class TradeAccountingEngine {
       mmr = maintenanceMarginRate;
     }
 
+    if (!Number.isFinite(lev) || lev <= 0) {
+      throw new Error(`INVALID_MARGIN_INPUTS: leverage (${lev}) must be a positive finite number`);
+    }
+
+    if (imr !== undefined && (!Number.isFinite(imr) || imr < 0)) {
+      throw new Error(`INVALID_MARGIN_INPUTS: initialMarginRate (${imr}) must be a non-negative finite number`);
+    }
+
+    if (mmr !== undefined && (!Number.isFinite(mmr) || mmr < 0)) {
+      throw new Error(`INVALID_MARGIN_INPUTS: maintenanceMarginRate (${mmr}) must be a non-negative finite number`);
+    }
+
     let initialMarginRequired: number;
 
     if (mMode === 'SPOT') {
@@ -116,7 +148,8 @@ export class TradeAccountingEngine {
       initialMarginRequired = notionalAccount / effLeverage;
     }
 
-    const maintenanceMarginRequired = notionalAccount * Math.max(0, mmr);
+    const effectiveMmr = Number.isFinite(mmr) ? Math.max(0, mmr) : 0.05;
+    const maintenanceMarginRequired = notionalAccount * effectiveMmr;
 
     return {
       initialMarginRequired: Number(initialMarginRequired.toFixed(2)),
@@ -162,7 +195,9 @@ export class TradeAccountingEngine {
       model = liquidationModel;
     }
 
-    if (entryPrice <= 0) return undefined;
+    if (typeof entryPrice !== 'number' || !Number.isFinite(entryPrice) || entryPrice <= 0) {
+      return undefined;
+    }
     if (marginMode === 'SPOT' || model === 'SPOT_NONE' || lev <= 1) {
       return undefined; // SPOT / 1x cash positions cannot be liquidated
     }
@@ -174,8 +209,8 @@ export class TradeAccountingEngine {
     }
 
     const isLong = isLongPosition(dir as any);
-    const effectiveMmr = Math.max(0, mmr);
-    const marginRatio = imr !== undefined && imr > 0 ? imr : 1.0 / Math.max(1, lev);
+    const effectiveMmr = Number.isFinite(mmr) ? Math.max(0, mmr) : 0.025;
+    const marginRatio = imr !== undefined && Number.isFinite(imr) && imr > 0 ? imr : 1.0 / Math.max(1, lev);
 
     if (isLong) {
       // Long liquidation occurs when price drops below entry * (1 - initialMarginRate + MMR)
@@ -199,6 +234,25 @@ export class TradeAccountingEngine {
     contractSize = 1,
     fxRate = 1.0,
   ): number {
+    if (
+      typeof entryPrice !== 'number' ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0 ||
+      typeof stopLoss !== 'number' ||
+      !Number.isFinite(stopLoss) ||
+      stopLoss <= 0 ||
+      typeof quantity !== 'number' ||
+      !Number.isFinite(quantity) ||
+      quantity <= 0 ||
+      typeof contractSize !== 'number' ||
+      !Number.isFinite(contractSize) ||
+      contractSize <= 0 ||
+      typeof fxRate !== 'number' ||
+      !Number.isFinite(fxRate) ||
+      fxRate <= 0
+    ) {
+      throw new Error('INVALID_RISK_INPUTS: Inputs to calculateStopRisk must be positive finite numbers');
+    }
     const stopDistance = Math.abs(entryPrice - stopLoss);
     const riskQuote = stopDistance * quantity * contractSize;
     const riskAccount = riskQuote * fxRate;
@@ -209,6 +263,7 @@ export class TradeAccountingEngine {
    * Calculates gross and net P&L with point-in-time FX conversion.
    * INVARIANT: Changing leverage DOES NOT change fixed-position gross P&L.
    * INVARIANT: Net P&L = gross P&L - explicit fees - unpriced slippage.
+   * STRICT FAIL-CLOSED: Cross-currency calculation requires explicit valid fxRate.
    */
   static calculateTradePnl(
     paramsOrEntryPrice: ITradePnlParams | number,
@@ -216,7 +271,7 @@ export class TradeAccountingEngine {
     quantity?: number,
     direction?: Direction | string,
     contractSize = 1,
-    fxRate = 1.0,
+    fxRate?: number,
     fees = 0,
     slippage = 0,
     initialRiskAccount = 0,
@@ -227,11 +282,13 @@ export class TradeAccountingEngine {
     let qty: number;
     let dir: Direction | string;
     let cSize: number;
-    let fx: number;
+    let fx: number | undefined;
     let feeAmount: number;
     let slipAmount: number;
     let riskAcct: number;
     let slipIncluded: boolean;
+    let qCurr: CurrencyCode | undefined;
+    let aCurr: CurrencyCode | undefined;
 
     if (typeof paramsOrEntryPrice === 'object') {
       pEntry = paramsOrEntryPrice.entryPrice;
@@ -239,7 +296,9 @@ export class TradeAccountingEngine {
       qty = paramsOrEntryPrice.quantity;
       dir = paramsOrEntryPrice.direction;
       cSize = paramsOrEntryPrice.contractSize ?? 1;
-      fx = paramsOrEntryPrice.fxRate ?? 1.0;
+      qCurr = paramsOrEntryPrice.quoteCurrency;
+      aCurr = paramsOrEntryPrice.accountCurrency ?? 'INR';
+      fx = paramsOrEntryPrice.fxRate;
       feeAmount = paramsOrEntryPrice.fees ?? 0;
       slipAmount = paramsOrEntryPrice.slippage ?? 0;
       riskAcct = paramsOrEntryPrice.initialRiskAccount ?? 0;
@@ -255,17 +314,51 @@ export class TradeAccountingEngine {
       slipAmount = slippage;
       riskAcct = initialRiskAccount;
       slipIncluded = slippageIncludedInPrices;
+      aCurr = 'INR';
+    }
+
+    if (
+      typeof pEntry !== 'number' ||
+      !Number.isFinite(pEntry) ||
+      typeof pExit !== 'number' ||
+      !Number.isFinite(pExit) ||
+      typeof qty !== 'number' ||
+      !Number.isFinite(qty) ||
+      typeof cSize !== 'number' ||
+      !Number.isFinite(cSize)
+    ) {
+      throw new Error('INVALID_PNL_INPUTS: Prices, quantity, and contractSize must be valid finite numbers');
+    }
+
+    // Determine FX Rate with Strict Cross-Currency Fail-Closed Rule
+    const isCrossCurrency = qCurr && aCurr ? qCurr !== aCurr : false;
+    let effectiveFx: number;
+
+    if (isCrossCurrency) {
+      if (fx === undefined || typeof fx !== 'number' || !Number.isFinite(fx) || fx <= 0) {
+        throw new Error(
+          `MISSING_FX_RATE: Explicit positive FX conversion rate is required for cross-currency P&L calculation (${qCurr}/${aCurr})`,
+        );
+      }
+      effectiveFx = fx;
+    } else {
+      effectiveFx = fx !== undefined ? fx : 1.0;
+      if (!Number.isFinite(effectiveFx) || effectiveFx <= 0) {
+        throw new Error(`INVALID_FX_RATE: FX rate (${effectiveFx}) must be a positive finite number`);
+      }
     }
 
     const isLong = isLongPosition(dir as any);
     const priceDiff = isLong ? pExit - pEntry : pEntry - pExit;
     const grossPnlQuote = Number((priceDiff * qty * cSize).toFixed(4));
-    const grossPnlAccount = Number((grossPnlQuote * fx).toFixed(2));
+    const grossPnlAccount = Number((grossPnlQuote * effectiveFx).toFixed(2));
 
-    const slippageAccountCost = slipIncluded ? 0 : Number((slipAmount * fx).toFixed(2));
-    const netPnlAccount = Number((grossPnlAccount - feeAmount - slippageAccountCost).toFixed(2));
+    const safeFees = Number.isFinite(feeAmount) ? feeAmount : 0;
+    const safeSlippage = Number.isFinite(slipAmount) ? slipAmount : 0;
+    const slippageAccountCost = slipIncluded ? 0 : Number((safeSlippage * effectiveFx).toFixed(2));
+    const netPnlAccount = Number((grossPnlAccount - safeFees - slippageAccountCost).toFixed(2));
 
-    const effRisk = Math.max(1, riskAcct > 0 ? riskAcct : Math.abs(grossPnlAccount));
+    const effRisk = Math.max(1, riskAcct > 0 && Number.isFinite(riskAcct) ? riskAcct : Math.abs(grossPnlAccount));
     const realizedR = Number((netPnlAccount / effRisk).toFixed(2));
 
     return {
@@ -273,8 +366,8 @@ export class TradeAccountingEngine {
       grossPnlAccount,
       netPnlAccount,
       realizedR,
-      fees: feeAmount,
-      slippage: slipAmount,
+      fees: safeFees,
+      slippage: safeSlippage,
     };
   }
 }

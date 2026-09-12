@@ -888,37 +888,325 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   });
 
   // =========================================================================
-  // 16. STRICT NOTIONAL INPUT VALIDATION (AI Fix 99)
+  // 17. NON-FINITE (NaN, Infinity) REJECTION (AI Fix 100)
   // =========================================================================
-  describe('16. Strict Notional Input Validation (calculateNotional)', () => {
-    it('Rejects zero quantity', () => {
-      expect(() =>
-        TradeAccountingEngine.calculateNotional(0, 100, 1, 1.0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+  describe('17. Non-Finite (NaN, Infinity) Number Rejection Across Primitives', () => {
+    it('calculateNotional rejects NaN, Infinity, -Infinity', () => {
+      expect(() => TradeAccountingEngine.calculateNotional(NaN, 100, 1, 1.0)).toThrowError(
+        /INVALID_NOTIONAL_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateNotional(10, Infinity, 1, 1.0)).toThrowError(
+        /INVALID_NOTIONAL_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateNotional(10, 100, -Infinity, 1.0)).toThrowError(
+        /INVALID_NOTIONAL_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateNotional(10, 100, 1, NaN)).toThrowError(
+        /INVALID_NOTIONAL_INPUTS/,
+      );
     });
 
-    it('Rejects negative quantity', () => {
-      expect(() =>
-        TradeAccountingEngine.calculateNotional(-5, 100, 1, 1.0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+    it('calculateMargin rejects NaN and non-finite notional/leverage', () => {
+      expect(() => TradeAccountingEngine.calculateMargin(NaN, 5)).toThrowError(
+        /INVALID_MARGIN_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateMargin(10000, NaN)).toThrowError(
+        /INVALID_MARGIN_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateMargin(10000, 5, 'ISOLATED', NaN)).toThrowError(
+        /INVALID_MARGIN_INPUTS/,
+      );
     });
 
-    it('Rejects zero or negative price', () => {
-      expect(() =>
-        TradeAccountingEngine.calculateNotional(10, 0, 1, 1.0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
-      expect(() =>
-        TradeAccountingEngine.calculateNotional(10, -50, 1, 1.0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+    it('calculateStopRisk rejects non-finite values', () => {
+      expect(() => TradeAccountingEngine.calculateStopRisk(NaN, 100, 1)).toThrowError(
+        /INVALID_RISK_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateStopRisk(100, NaN, 1)).toThrowError(
+        /INVALID_RISK_INPUTS/,
+      );
+      expect(() => TradeAccountingEngine.calculateStopRisk(100, 90, Infinity)).toThrowError(
+        /INVALID_RISK_INPUTS/,
+      );
     });
 
-    it('Rejects zero or negative contract size or FX rate', () => {
+    it('calculateTradePnl rejects non-finite prices and quantities', () => {
       expect(() =>
-        TradeAccountingEngine.calculateNotional(10, 100, 0, 1.0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+        TradeAccountingEngine.calculateTradePnl({
+          entryPrice: NaN,
+          exitPrice: 110,
+          quantity: 1,
+          direction: 'LONG',
+        }),
+      ).toThrowError(/INVALID_PNL_INPUTS/);
       expect(() =>
-        TradeAccountingEngine.calculateNotional(10, 100, 1, 0),
-      ).toThrowError(/INVALID_NOTIONAL_INPUTS/);
+        TradeAccountingEngine.calculateTradePnl({
+          entryPrice: 100,
+          exitPrice: Infinity,
+          quantity: 1,
+          direction: 'LONG',
+        }),
+      ).toThrowError(/INVALID_PNL_INPUTS/);
+    });
+  });
+
+  // =========================================================================
+  // 18. CROSS-CURRENCY PNL FAIL-CLOSED FX CHECKS (AI Fix 100)
+  // =========================================================================
+  describe('18. Cross-Currency P&L Strict Fail-Closed FX Checks', () => {
+    it('calculateTradePnl throws MISSING_FX_RATE when cross-currency FX is not provided or non-positive', () => {
+      expect(() =>
+        TradeAccountingEngine.calculateTradePnl({
+          entryPrice: 90000,
+          exitPrice: 95000,
+          quantity: 0.1,
+          direction: 'LONG',
+          quoteCurrency: 'USDT',
+          accountCurrency: 'INR',
+          // fxRate missing!
+        }),
+      ).toThrowError(/MISSING_FX_RATE/);
+
+      expect(() =>
+        TradeAccountingEngine.calculateTradePnl({
+          entryPrice: 90000,
+          exitPrice: 95000,
+          quantity: 0.1,
+          direction: 'LONG',
+          quoteCurrency: 'USDT',
+          accountCurrency: 'INR',
+          fxRate: 0,
+        }),
+      ).toThrowError(/MISSING_FX_RATE/);
+    });
+
+    it('calculateTradePnl correctly calculates cross-currency INR P&L when explicit FX is provided', () => {
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 90000,
+        exitPrice: 95000,
+        quantity: 0.1,
+        direction: 'LONG',
+        quoteCurrency: 'USDT',
+        accountCurrency: 'INR',
+        fxRate: 92.0,
+      });
+
+      // Gross USDT = (95000 - 90000) * 0.1 = 500 USDT
+      expect(pnl.grossPnlQuote).toBe(500);
+      // Gross INR = 500 * 92.0 = ₹46,000 INR
+      expect(pnl.grossPnlAccount).toBe(46000);
+      expect(pnl.netPnlAccount).toBe(46000);
+    });
+  });
+
+  // =========================================================================
+  // 19. PRODUCTION GUARD ON ALLOWUNREGISTEREDSYMBOLS (AI Fix 100)
+  // =========================================================================
+  describe('19. Production Guard on allowUnregisteredSymbols', () => {
+    const originalEnv = process.env.NODE_ENV;
+
+    afterEach(() => {
+      process.env.NODE_ENV = originalEnv;
+    });
+
+    it('Throws PROD_UNREGISTERED_SYMBOL_FORBIDDEN in production environment', () => {
+      process.env.NODE_ENV = 'production';
+
+      expect(() =>
+        PositionSizer.calculatePosition({
+          accountBalance: 100000,
+          riskPercentage: 1.0,
+          entryPrice: 100,
+          stopLoss: 95,
+          symbol: 'SYNTHETIC_MOCK',
+          allowUnregisteredSymbols: true,
+        }),
+      ).toThrowError(/PROD_UNREGISTERED_SYMBOL_FORBIDDEN/);
+    });
+  });
+
+  // =========================================================================
+  // 20. PERSISTED RESOLVED MARGIN MODEL SNAPSHOT (AI Fix 100)
+  // =========================================================================
+  describe('20. Persisted Resolved Margin Model Snapshot', () => {
+    it('PositionSizer and TradeLifecycleManager attach resolvedMarginModel for auditability', () => {
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: 500000,
+        riskPercentage: 1.0,
+        entryPrice: 90000,
+        stopLoss: 88000,
+        symbol: 'BTCUSDT',
+        requestedLeverage: 10,
+        timestamp: 1700000000000,
+      });
+
+      expect(sizing.isValid).toBe(true);
+      expect(sizing.resolvedMarginModel).toBeDefined();
+      expect(sizing.resolvedMarginModel?.effectiveLeverage).toBe(10);
+      expect(sizing.resolvedMarginModel?.initialMarginRate).toBe(0.10);
+      expect(sizing.resolvedMarginModel?.maintenanceMarginRate).toBe(0.025);
+      expect(sizing.resolvedMarginModel?.liquidationModel).toBe('ISOLATED_LINEAR');
+
+      // Check TradeLifecycleManager attaches it to completed trade
+      const lot: PositionLot = {
+        id: 'lot_btc_snap',
+        tradeId: 'tr_btc_snap',
+        symbol: 'BTCUSDT',
+        direction: Direction.BULLISH,
+        initialQuantity: 0.005,
+        remainingQuantity: 0,
+        entryPrice: 90000,
+        entryTime: 1700000000000,
+        initialStopLoss: 88000,
+        currentStopLoss: 88000,
+        tp1: 93000,
+        tp2: 95000,
+        tp3: 98000,
+        realizedPnl: 25.0,
+        unrealizedPnl: 0,
+        realizedR: 2.5,
+        status: 'CLOSED',
+        openedAt: 1700000000000,
+        closedAt: 1700000050000,
+        mae: 0,
+        mfe: 0,
+        partialFills: [
+          {
+            fillId: 'fill_entry',
+            targetType: 'ENTRY',
+            timestamp: 1700000000000,
+            price: 90000,
+            quantity: 0.005,
+            remainingQuantity: 0.005,
+            realizedPnl: 0,
+            realizedR: 0,
+            fee: 0,
+            slippage: 0,
+          },
+          {
+            fillId: 'fill_exit',
+            targetType: 'TP2',
+            timestamp: 1700000050000,
+            price: 95000,
+            quantity: 0.005,
+            remainingQuantity: 0,
+            realizedPnl: 25.0,
+            realizedR: 2.5,
+            fee: 0,
+            slippage: 0,
+          },
+        ],
+        events: [],
+      };
+
+      const trade = TradeLifecycleManager.createCompletedTrade(
+        lot,
+        SignalState.TP2_HIT,
+        'OHLC_PATH',
+        'CONSERVATIVE',
+        lot.tradeId,
+        { leverage: 10, fxRate: 92.0 },
+      );
+
+      expect(trade.resolvedMarginModel).toBeDefined();
+      expect(trade.resolvedMarginModel?.effectiveLeverage).toBe(10);
+      expect(trade.resolvedMarginModel?.initialMarginRate).toBe(0.10);
+    });
+  });
+
+  // =========================================================================
+  // 21. FULL MATRIX OF ACCOUNTING INVARIANTS (AI Fix 100)
+  // =========================================================================
+  describe('21. Full Matrix of Accounting Invariant Tests', () => {
+    it('Invariant A: Leverage changes margin, NOT fixed-position gross P&L or stop-risk', () => {
+      const entry = 90000;
+      const exit = 95000;
+      const stop = 88000;
+      const qty = 0.01;
+      const fx = 92.0;
+
+      // Stop risk at 1x, 5x, 20x
+      const risk1x = TradeAccountingEngine.calculateStopRisk(entry, stop, qty, 1, fx);
+      const risk5x = TradeAccountingEngine.calculateStopRisk(entry, stop, qty, 1, fx);
+      const risk20x = TradeAccountingEngine.calculateStopRisk(entry, stop, qty, 1, fx);
+      expect(risk1x).toBe(risk5x);
+      expect(risk5x).toBe(risk20x);
+      expect(risk1x).toBe(1840); // (90000 - 88000) * 0.01 * 92 = ₹1,840
+
+      // Gross P&L at 1x, 5x, 20x
+      const pnl1x = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
+        direction: 'LONG',
+        fxRate: fx,
+      });
+      const pnl20x = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
+        direction: 'LONG',
+        fxRate: fx,
+      });
+      expect(pnl1x.grossPnlAccount).toBe(pnl20x.grossPnlAccount);
+      expect(pnl1x.grossPnlAccount).toBe(4600); // (95000 - 90000) * 0.01 * 92 = ₹4,600
+
+      // Margin requirement MUST change with leverage
+      const notionalAccount = 90000 * qty * fx; // ₹82,800
+      const margin1x = TradeAccountingEngine.calculateMargin(notionalAccount, 1, 'ISOLATED');
+      const margin5x = TradeAccountingEngine.calculateMargin(notionalAccount, 5, 'ISOLATED');
+      const margin20x = TradeAccountingEngine.calculateMargin(notionalAccount, 20, 'ISOLATED');
+      expect(margin1x.initialMarginRequired).toBe(82800);
+      expect(margin5x.initialMarginRequired).toBe(16560);
+      expect(margin20x.initialMarginRequired).toBe(4140);
+    });
+
+    it('Invariant B: FX rate changes account notional and P&L strictly proportionally', () => {
+      const entry = 1000;
+      const exit = 1100;
+      const qty = 2;
+
+      const pnlFx1 = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
+        direction: 'LONG',
+        fxRate: 80.0,
+      });
+      const pnlFx2 = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: entry,
+        exitPrice: exit,
+        quantity: qty,
+        direction: 'LONG',
+        fxRate: 90.0,
+      });
+
+      // Gross quote: (1100 - 1000) * 2 = 200 USD
+      expect(pnlFx1.grossPnlQuote).toBe(200);
+      expect(pnlFx2.grossPnlQuote).toBe(200);
+
+      // Account INR strictly proportional to FX
+      expect(pnlFx1.grossPnlAccount).toBe(16000); // 200 * 80
+      expect(pnlFx2.grossPnlAccount).toBe(18000); // 200 * 90
+      expect(pnlFx2.grossPnlAccount / pnlFx1.grossPnlAccount).toBeCloseTo(90.0 / 80.0, 4);
+    });
+
+    it('Invariant C: Identical resolved margin model yields identical margin and liquidation pricing', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+
+      const notionalAccount = 100000;
+      const margin = TradeAccountingEngine.calculateMargin(notionalAccount, marginModel);
+      const liqPrice = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 90000,
+        direction: 'LONG',
+        marginModel,
+      });
+
+      // Margin uses 10% rate -> ₹10,000
+      expect(margin.initialMarginRequired).toBe(10000);
+      // Liq price uses EXACT SAME 10% rate + 2.5% MMR -> 90000 * (1 - 0.10 + 0.025) = 83250
+      expect(liqPrice).toBe(83250);
     });
   });
 });

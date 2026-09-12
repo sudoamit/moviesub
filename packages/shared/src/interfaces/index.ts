@@ -289,6 +289,7 @@ export interface IPositionSizing {
   initialMarginRequired?: number;
   maintenanceMarginRequired?: number;
   liquidationPrice?: number;
+  resolvedMarginModel?: IResolvedMarginModel;
 }
 
 export interface IMarketDataProvider {
@@ -405,6 +406,7 @@ export interface IBacktestTrade {
   marginMode?: MarginMode;
   initialMarginRequired?: number;
   maintenanceMarginRequired?: number;
+  resolvedMarginModel?: IResolvedMarginModel;
 }
 
 /**

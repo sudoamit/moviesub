@@ -357,6 +357,7 @@ export class TradeLifecycleManager {
       fillModel,
       ambiguityMode,
       entrySnapshot: lot.entrySnapshot,
+      resolvedMarginModel,
     };
   }
 

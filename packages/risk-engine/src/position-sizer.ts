@@ -95,6 +95,13 @@ export class PositionSizer {
       return this.createInvalid(options, 'Entry price cannot equal stop loss (risk per unit is 0)');
     }
 
+    // Production Safety Guard: Prohibit synthetic unregistered symbols in production
+    if (allowUnregisteredSymbols && process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'PROD_UNREGISTERED_SYMBOL_FORBIDDEN: allowUnregisteredSymbols bypass is strictly forbidden in production environments',
+      );
+    }
+
     // 1. Resolve Authoritative Instrument Specification
     let resolvedInstrument: IInstrument | undefined;
     if (typeof instrumentInput === 'object' && instrumentInput !== null) {
@@ -381,6 +388,7 @@ export class PositionSizer {
       initialMarginRequired,
       maintenanceMarginRequired,
       liquidationPrice,
+      resolvedMarginModel,
       isValid: true,
     };
   }

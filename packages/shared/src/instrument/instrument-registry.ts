@@ -394,8 +394,15 @@ export interface IMarginModelResolutionOptions {
 
 /**
  * Resolves the single authoritative margin model for an instrument.
- * Validates requested leverage against max allowable leverage and determines
- * the exact initialMarginRate, maintenanceMarginRate, and liquidationModel.
+ *
+ * PRECEDENCE & POLICY:
+ * 1. Margin-Rate-Driven Precedence:
+ *    - The venue/instrument minimum required initialMarginRate (IMR) sets the absolute ceiling on leverage: maxLeverage <= 1 / IMR.
+ *    - Requested leverage cannot exceed maxLeverage (or 1 / IMR).
+ *    - If a caller chooses lower leverage L <= maxLeverage (e.g., 2x on a 10x venue), the required margin rate is 1 / L (e.g. 50%),
+ *      guaranteeing effectiveInitialMarginRate = max(venueIMR, 1 / requestedLeverage).
+ * 2. SPOT Mode:
+ *    - marginMode = 'SPOT', effectiveLeverage = 1, initialMarginRate = 1.0, MMR = 0.0, liquidationModel = 'SPOT_NONE'.
  */
 export function resolveMarginModel(
   instrument: IInstrument,
@@ -422,25 +429,35 @@ export function resolveMarginModel(
     };
   }
 
-  // Margin / Derivative Mode
-  const maxLeverage =
+  // Margin / Derivative Mode: Derive venue authoritative base initial margin rate
+  const venueBaseImr =
+    options?.venueOverride?.initialMarginRate ??
+    venue?.initialMarginRate ??
+    instrument.initialMarginRate;
+
+  const venueMaxLeverageFromImr =
+    venueBaseImr !== undefined && venueBaseImr > 0 ? Math.round(1 / venueBaseImr) : Infinity;
+
+  const declaredMaxLeverage =
     options?.venueOverride?.maxLeverage ??
     venue?.maxLeverage ??
     instrument.maxLeverage ??
-    (instrument.initialMarginRate && instrument.initialMarginRate > 0
-      ? Math.round(1 / instrument.initialMarginRate)
-      : 1);
+    (venueMaxLeverageFromImr !== Infinity ? venueMaxLeverageFromImr : 1);
 
-  const defaultLeverage =
+  const maxLeverage = Math.min(declaredMaxLeverage, venueMaxLeverageFromImr);
+
+  const defaultLeverage = Math.min(
+    maxLeverage,
     options?.venueOverride?.defaultLeverage ??
-    venue?.defaultLeverage ??
-    instrument.defaultLeverage ??
-    maxLeverage;
+      venue?.defaultLeverage ??
+      instrument.defaultLeverage ??
+      maxLeverage,
+  );
 
   const leverage = options?.requestedLeverage ?? options?.customLeverage ?? defaultLeverage;
 
-  if (leverage <= 0) {
-    throw new Error(`INVALID_LEVERAGE: Leverage must be greater than 0, got ${leverage}`);
+  if (typeof leverage !== 'number' || !Number.isFinite(leverage) || leverage <= 0) {
+    throw new Error(`INVALID_LEVERAGE: Leverage must be a positive finite number, got ${leverage}`);
   }
 
   if (leverage > maxLeverage) {
@@ -449,15 +466,13 @@ export function resolveMarginModel(
     );
   }
 
+  // Effective initial margin rate: higher of required venue minimum rate or 1 / leverage
   let initialMarginRate: number;
   if (options?.requestedLeverage !== undefined || options?.customLeverage !== undefined) {
-    initialMarginRate = 1 / leverage;
+    const derivedRate = 1 / leverage;
+    initialMarginRate = venueBaseImr !== undefined ? Math.max(venueBaseImr, derivedRate) : derivedRate;
   } else {
-    initialMarginRate =
-      options?.venueOverride?.initialMarginRate ??
-      venue?.initialMarginRate ??
-      instrument.initialMarginRate ??
-      1 / leverage;
+    initialMarginRate = venueBaseImr !== undefined ? venueBaseImr : 1 / leverage;
   }
 
   const maintenanceMarginRate =
@@ -475,8 +490,8 @@ export function resolveMarginModel(
   return {
     marginMode,
     effectiveLeverage: leverage,
-    initialMarginRate,
-    maintenanceMarginRate,
+    initialMarginRate: Number(initialMarginRate.toFixed(4)),
+    maintenanceMarginRate: Number(maintenanceMarginRate.toFixed(4)),
     liquidationModel,
   };
 }
