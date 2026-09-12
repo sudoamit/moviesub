@@ -508,6 +508,9 @@ export class SignalsService implements OnModuleInit {
                 ? 'TP1_HIT'
                 : 'SL_HIT');
 
+      const isLegacy = outcome.isLegacyExecutionData ?? false;
+      const executionDataComplete = outcome.executionDataComplete ?? (!isLegacy);
+
       return {
         id: t.id,
         tradeId: t.id,
@@ -526,9 +529,13 @@ export class SignalsService implements OnModuleInit {
         score: 90,
         timeframe: '15m',
         quantity: Number(t.quantity),
+        actualEntryPrice: Number(t.entryPrice),
+        actualEntryPriceCurrency: quoteCurrency,
         entryPrice: Number(t.entryPrice),
         entryPriceCurrency: quoteCurrency,
         entryTimeUtc,
+        actualExitPrice: Number(t.exitPrice),
+        actualExitPriceCurrency: quoteCurrency,
         exitPrice: Number(t.exitPrice),
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
@@ -540,6 +547,7 @@ export class SignalsService implements OnModuleInit {
         accountCurrency,
         quotePnl: outcome.quotePnl !== undefined ? Number(outcome.quotePnl) : undefined,
         quoteCurrency,
+        chargesAccount: Number(charges.totalCharges || 0),
         totalChargesAccount: Number(charges.totalCharges || 0),
         pnlRMultiple: Number(t.realizedR || 0),
         realizedR: Number(t.realizedR || 0),
@@ -552,13 +560,16 @@ export class SignalsService implements OnModuleInit {
         exitReason: t.exitReason,
         activatedAt: t.entryTime,
         closedAt: t.exitTime,
+        holdingDurationMs: durationMs,
+        holdingDurationSeconds: Math.floor(durationMs / 1000),
         durationMs,
         durationMinutes,
         executionSource: outcome.executionPriceSource || 'PAPER_FILL',
         entryFillCount: outcome.entryFillCount || 1,
         exitFillCount: outcome.exitFillCount || 1,
         accountingSnapshotHash: outcome.accountingSnapshotHash || snapshot.snapshotHash || undefined,
-        isLegacyExecutionData: outcome.isLegacyExecutionData ?? false,
+        isLegacyExecutionData: isLegacy,
+        executionDataComplete,
       };
     });
 
@@ -626,9 +637,13 @@ export class SignalsService implements OnModuleInit {
           score: s.score,
           timeframe: s.timeframe,
           quantity: reasons.quantity || 1,
+          actualEntryPrice: Number(s.entryPrice),
+          actualEntryPriceCurrency: quoteCurrency,
           entryPrice: Number(s.entryPrice),
           entryPriceCurrency: quoteCurrency,
           entryTimeUtc: s.activatedAt ? new Date(s.activatedAt).toISOString() : '',
+          actualExitPrice: Number(s.exitPrice),
+          actualExitPriceCurrency: quoteCurrency,
           exitPrice: Number(s.exitPrice),
           exitPriceCurrency: quoteCurrency,
           exitTimeUtc: s.closedAt ? new Date(s.closedAt).toISOString() : '',
@@ -640,6 +655,7 @@ export class SignalsService implements OnModuleInit {
           accountCurrency: 'INR',
           quotePnl: undefined,
           quoteCurrency,
+          chargesAccount: 0,
           totalChargesAccount: 0,
           pnlRMultiple: Number(s.pnlRMultiple || 0),
           realizedR: Number(s.pnlRMultiple || 0),
@@ -653,13 +669,16 @@ export class SignalsService implements OnModuleInit {
           exitReason: reasons.exitReason || `${s.state} Hit`,
           activatedAt: s.activatedAt,
           closedAt: s.closedAt,
+          holdingDurationMs: durationMs,
+          holdingDurationSeconds: Math.floor(durationMs / 1000),
           durationMs,
           durationMinutes,
           executionSource: 'LEGACY_SIGNAL',
-          entryFillCount: 1,
-          exitFillCount: 1,
+          entryFillCount: 0,
+          exitFillCount: 0,
           accountingSnapshotHash: undefined,
           isLegacyExecutionData: true,
+          executionDataComplete: false,
         };
       });
     }

@@ -803,6 +803,31 @@ export class PaperTradingService implements IExecutionProvider {
 
     // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
     const entryTime = new Date();
+    const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
+    const openingInst = hasInstrument(symbol) ? getAuthoritativeInstrument(symbol) : null;
+    const openingQuoteCurrency = openingInst?.currency ?? (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
+    const openingConverter = PointInTimeCurrencyConverter.getInstance();
+    const openingFxRes = openingConverter.getRate(openingQuoteCurrency, 'INR', entryTime.getTime());
+    const openingMarginModel = openingInst
+      ? resolveMarginModel(openingInst, { requestedLeverage: effLeverage })
+      : {
+          marginMode: effLeverage > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
+          effectiveLeverage: effLeverage,
+          initialMarginRate: effLeverage > 1 ? 1 / effLeverage : 1.0,
+          maintenanceMarginRate: 0.05,
+          liquidationModel: effLeverage > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
+        };
+
+    const openingAccountingSnapshot = buildAccountingSnapshot({
+      accountCurrency: 'INR',
+      quoteCurrency: openingQuoteCurrency,
+      fxResult: openingFxRes,
+      contractSize: openingInst?.contractSize ?? 1,
+      lotSize: Number(req.quantity),
+      resolvedMarginModel: openingMarginModel,
+      calculatedAt: entryTime.getTime(),
+    });
+
     const result = await this.prisma.$transaction(async (tx) => {
       // Concurrency Lock: Re-read account inside atomic transaction
       const txAccount = await tx.paperAccount.findUnique({
@@ -904,7 +929,10 @@ export class PaperTradingService implements IExecutionProvider {
           maxAdverseExcursion: new Decimal(0.0),
           status: PositionState.OPEN,
           chargesJson: charges,
-          featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
+          featureSnapshotJson: {
+            ...((req.featureSnapshotJson as any) || {}),
+            accountingSnapshot: openingAccountingSnapshot,
+          },
           openedAt: entryTime,
           correlationId,
         },
@@ -931,10 +959,10 @@ export class PaperTradingService implements IExecutionProvider {
             entityId: order.id,
             payloadJson: {
               symbol,
-              direction: req.direction,
               quantity: req.quantity,
-              executionPrice: finalFillPrice,
-              slippage: slippageAmount,
+              fillPrice: finalFillPrice,
+              executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+              sourceTimestamp: sourceTimestamp.toISOString(),
             },
             correlationId,
           },
@@ -944,7 +972,13 @@ export class PaperTradingService implements IExecutionProvider {
             eventType: 'POSITION_OPENED',
             entityType: 'POSITION',
             entityId: position.id,
-            payloadJson: { contractSymbol, entryPrice: finalFillPrice, requiredMargin },
+            payloadJson: {
+              symbol,
+              quantity: req.quantity,
+              entryPrice: finalFillPrice,
+              leverage: effLeverage,
+              usedMargin: requiredMargin,
+            },
             correlationId,
           },
         ],
@@ -1045,6 +1079,7 @@ export class PaperTradingService implements IExecutionProvider {
     const correlationId = correlationIdOverride || correlationIdOpt || pos.correlationId || `corr_${Date.now()}`;
     const symbol = pos.symbol;
     const isCrypto = symbol === 'BTCUSDT';
+    const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
     const config = await this.getSystemConfig();
 
     // Resolve live exit price with strict fail-closed validation & LIVE_TICK provenance
@@ -1180,7 +1215,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 4. Retrieve Entry Fills for Execution Aggregation
+      // 4. Retrieve Entry Fills for Execution Aggregation (Strict: No Fabricated Fills)
       let entryFills: IFillRecord[] = [];
       if (pos.orderId) {
         const rawFills = await tx.paperFill.findMany({ where: { orderId: pos.orderId } });
@@ -1199,20 +1234,6 @@ export class PaperTradingService implements IExecutionProvider {
         }));
       }
 
-      if (entryFills.length === 0) {
-        entryFills = [
-          {
-            fillId: `fill_entry_${pos.id}`,
-            positionId: pos.id,
-            executionRole: 'ENTRY',
-            fillPrice: Number(pos.entryPrice),
-            fillQuantity: Number(pos.quantity),
-            fillTimestamp: pos.entryTime,
-            fee: Number(entryCharges.totalCharges || 0),
-          },
-        ];
-      }
-
       const exitFillRecord: IFillRecord = {
         fillId: exitFill.id,
         orderId: exitOrder.id,
@@ -1227,30 +1248,68 @@ export class PaperTradingService implements IExecutionProvider {
         sourceTimestamp,
       };
 
-      const aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
+      const hasAuthoritativeEntryFills = entryFills.length > 0;
+      let aggregated: any;
+      let isLegacyExecutionData = false;
+      let executionDataComplete = true;
 
-      // 5. Point-in-Time Accounting Snapshot & P&L
+      if (hasAuthoritativeEntryFills) {
+        aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
+      } else {
+        // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
+        isLegacyExecutionData = true;
+        executionDataComplete = false;
+        const posEntryTimeMs = pos.entryTime instanceof Date ? pos.entryTime.getTime() : new Date(pos.entryTime).getTime();
+        aggregated = {
+          entry: {
+            weightedPrice: Number(pos.entryPrice),
+            totalQuantity: Number(pos.quantity),
+            earliestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            earliestFillTimestamp: posEntryTimeMs,
+            latestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            latestFillTimestamp: posEntryTimeMs,
+            fillCount: 0,
+            totalFees: Number(entryCharges.totalCharges || 0),
+            totalSlippage: 0,
+            fills: [],
+          },
+          exit: {
+            weightedPrice: finalExitPrice,
+            totalQuantity: Number(pos.quantity),
+            earliestFillTimeUtc: exitTime.toISOString(),
+            earliestFillTimestamp: exitTime.getTime(),
+            latestFillTimeUtc: exitTime.toISOString(),
+            latestFillTimestamp: exitTime.getTime(),
+            fillCount: 1,
+            totalFees: exitCharges.totalCharges,
+            totalSlippage: exitSlippage.slippageAmount,
+            fills: [exitFillRecord],
+          },
+          durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
+          durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
+        };
+      }
+
+      // 5. Immutable Opening Accounting Snapshot & Canonical P&L
       const inst = hasInstrument(symbol) ? getAuthoritativeInstrument(symbol) : null;
       const quoteCurrency = inst?.currency ?? (symbol === 'BTCUSDT' ? 'USDT' : 'INR');
-      const converter = PointInTimeCurrencyConverter.getInstance();
-      const fxRes = converter.getRate(quoteCurrency, 'INR', exitTime.getTime());
-      const resolvedMargin = inst
-        ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
-        : {
-            marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
-            effectiveLeverage: Number(pos.leverage) || 1,
-            initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
-            maintenanceMarginRate: 0.05,
-            liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
-          };
+      const openingSnapshot = (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
 
-      const snapshot = buildAccountingSnapshot({
+      const snapshot = openingSnapshot ?? buildAccountingSnapshot({
         accountCurrency: 'INR',
         quoteCurrency,
-        fxResult: fxRes,
+        fxResult: PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', exitTime.getTime()),
         contractSize: inst?.contractSize ?? 1,
         lotSize: Number(pos.quantity),
-        resolvedMarginModel: resolvedMargin,
+        resolvedMarginModel: inst
+          ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
+          : {
+              marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
+              effectiveLeverage: Number(pos.leverage) || 1,
+              initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
+              maintenanceMarginRate: 0.05,
+              liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
+            },
         calculatedAt: exitTime.getTime(),
       });
 
@@ -1330,7 +1389,8 @@ export class PaperTradingService implements IExecutionProvider {
             durationMinutes: aggregated.durationMinutes,
             entryFillCount: aggregated.entry.fillCount,
             exitFillCount: aggregated.exit.fillCount,
-            isLegacyExecutionData: false,
+            isLegacyExecutionData,
+            executionDataComplete,
             outcomeClassification,
             exitTime: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             correlationId,
@@ -1340,11 +1400,13 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin
+      // 8. Update PaperAccount Balance & Release Margin with Exact Cash Parity
+      // Lifecycle Cash Delta: (-entryCharges) + (grossPnlAccount - exitCharges) = grossPnlAccount - totalCharges = netPnlAccount
+      const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
-          cashBalance: { increment: grossPnL - exitCharges.totalCharges },
+          cashBalance: { increment: canonicalCashImpact },
           usedMargin: { decrement: Number(pos.usedMargin) },
           realizedPnL: { increment: canonicalRealizedPnL },
           totalChargesPaid: { increment: exitCharges.totalCharges },
@@ -1369,10 +1431,9 @@ export class PaperTradingService implements IExecutionProvider {
             quotePnl: pnlCalc.quotePnl,
             quoteCurrency: snapshot.quoteCurrency,
             accountCurrency: snapshot.accountCurrency,
-            snapshotHash: snapshot.snapshotHash,
-            realizedR: canonicalRealizedR,
-            durationMs: aggregated.durationMs,
-            exitReason,
+            accountingSnapshotHash: snapshot.snapshotHash,
+            isLegacyExecutionData,
+            executionDataComplete,
           },
           correlationId,
         },

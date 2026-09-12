@@ -79,3 +79,41 @@ export function formatPnlWithCurrency(
 ): string {
   return formatCurrencyAmount(pnl, currency, { showSign: true, decimals });
 }
+
+/**
+ * Formats a canonical UTC ISO date string into the specified target timezone (e.g. 'Asia/Kolkata').
+ * Guarantees single-conversion by parsing UTC instant directly into locale string in target timezone.
+ */
+export function formatDateTimeToTimezone(
+  dateStr?: string | Date,
+  timeZone: string = 'Asia/Kolkata',
+): string {
+  if (!dateStr) return 'N/A';
+  const d = dateStr instanceof Date ? dateStr : new Date(dateStr);
+  if (isNaN(d.getTime())) return 'N/A';
+
+  return d.toLocaleString('en-IN', {
+    timeZone,
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+}
+
+/**
+ * Formats duration from milliseconds into human-readable representation.
+ */
+export function formatDurationMs(effectiveMs?: number): string {
+  if (!effectiveMs || effectiveMs <= 0) return '< 1m';
+  const totalSeconds = Math.floor(effectiveMs / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m`;
+}

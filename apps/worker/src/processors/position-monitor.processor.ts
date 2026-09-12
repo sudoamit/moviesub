@@ -525,30 +525,68 @@ export class PositionMonitorProcessor extends WorkerHost {
         sourceTimestamp: tickSourceTime,
       };
 
-      const aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
+      const hasAuthoritativeEntryFills = entryFills.length > 0;
+      let aggregated: any;
+      let isLegacyExecutionData = false;
+      let executionDataComplete = true;
 
-      // 5. Point-in-Time Accounting Snapshot & P&L
+      if (hasAuthoritativeEntryFills) {
+        aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
+      } else {
+        // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
+        isLegacyExecutionData = true;
+        executionDataComplete = false;
+        const posEntryTimeMs = pos.entryTime instanceof Date ? pos.entryTime.getTime() : new Date(pos.entryTime).getTime();
+        aggregated = {
+          entry: {
+            weightedPrice: Number(pos.entryPrice),
+            totalQuantity: Number(pos.quantity),
+            earliestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            earliestFillTimestamp: posEntryTimeMs,
+            latestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            latestFillTimestamp: posEntryTimeMs,
+            fillCount: 0,
+            totalFees: Number(entryCharges.totalCharges || 0),
+            totalSlippage: 0,
+            fills: [],
+          },
+          exit: {
+            weightedPrice: finalExitPrice,
+            totalQuantity: Number(pos.quantity),
+            earliestFillTimeUtc: exitTime.toISOString(),
+            earliestFillTimestamp: exitTime.getTime(),
+            latestFillTimeUtc: exitTime.toISOString(),
+            latestFillTimestamp: exitTime.getTime(),
+            fillCount: 1,
+            totalFees: exitCharges.totalCharges,
+            totalSlippage: slip.slippageAmount,
+            fills: [exitFillRecord],
+          },
+          durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
+          durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
+        };
+      }
+
+      // 5. Immutable Opening Accounting Snapshot & Canonical P&L
       const inst = hasInstrument(pos.symbol) ? getAuthoritativeInstrument(pos.symbol) : null;
       const quoteCurrency = inst?.currency ?? (pos.symbol === 'BTCUSDT' ? 'USDT' : 'INR');
-      const converter = PointInTimeCurrencyConverter.getInstance();
-      const fxRes = converter.getRate(quoteCurrency, 'INR', exitTime.getTime());
-      const resolvedMargin = inst
-        ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
-        : {
-            marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
-            effectiveLeverage: Number(pos.leverage) || 1,
-            initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
-            maintenanceMarginRate: 0.05,
-            liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
-          };
+      const openingSnapshot = (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
 
-      const snapshot = buildAccountingSnapshot({
+      const snapshot = openingSnapshot ?? buildAccountingSnapshot({
         accountCurrency: 'INR',
         quoteCurrency,
-        fxResult: fxRes,
+        fxResult: PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', exitTime.getTime()),
         contractSize: inst?.contractSize ?? 1,
         lotSize: Number(pos.quantity),
-        resolvedMarginModel: resolvedMargin,
+        resolvedMarginModel: inst
+          ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
+          : {
+              marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
+              effectiveLeverage: Number(pos.leverage) || 1,
+              initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
+              maintenanceMarginRate: 0.05,
+              liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
+            },
         calculatedAt: exitTime.getTime(),
       });
 
@@ -628,7 +666,8 @@ export class PositionMonitorProcessor extends WorkerHost {
             durationMinutes: aggregated.durationMinutes,
             entryFillCount: aggregated.entry.fillCount,
             exitFillCount: aggregated.exit.fillCount,
-            isLegacyExecutionData: false,
+            isLegacyExecutionData,
+            executionDataComplete,
             outcomeClassification,
             exitTime: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             correlationId: pos.correlationId || `corr_${Date.now()}`,
@@ -638,11 +677,13 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin
+      // 8. Update PaperAccount Balance & Release Margin with Exact Cash Parity
+      // Lifecycle Cash Delta: (-entryCharges) + (grossPnlAccount - exitCharges) = grossPnlAccount - totalCharges = netPnlAccount
+      const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
-          cashBalance: { increment: grossPnL - exitCharges.totalCharges },
+          cashBalance: { increment: canonicalCashImpact },
           usedMargin: { decrement: Number(pos.usedMargin) },
           realizedPnL: { increment: canonicalRealizedPnL },
           totalChargesPaid: { increment: exitCharges.totalCharges },

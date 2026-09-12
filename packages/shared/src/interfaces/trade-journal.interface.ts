@@ -13,25 +13,30 @@ export interface ITradeJournalRecord {
   readonly direction: 'BULLISH' | 'BEARISH' | 'BUY' | 'SELL';
   readonly side: 'BUY' | 'SELL';
 
-  // Execution Facts (Aggregated from actual fills)
+  // Sizing
   readonly quantity: number;
-  readonly entryPrice: number;
-  readonly entryPriceCurrency: string;
-  readonly entryTimeUtc: string;
 
-  readonly exitPrice: number;
-  readonly exitPriceCurrency: string;
+  // Execution Facts (Aggregated strictly from actual fills)
+  readonly requestedEntryPrice?: number;
+  readonly actualEntryPrice: number;
+  readonly actualEntryPriceCurrency: string;
+
+  readonly actualExitPrice: number;
+  readonly actualExitPriceCurrency: string;
+
+  readonly entryTimeUtc: string;
   readonly exitTimeUtc: string;
 
-  readonly durationMs: number;
-  readonly durationMinutes: number;
+  readonly holdingDurationMs: number;
+  readonly holdingDurationSeconds: number;
 
   // Multi-Asset P&L & Accounting
-  readonly netPnlAccount: number;
-  readonly accountCurrency: string;
   readonly quotePnl?: number;
   readonly quoteCurrency?: string;
-  readonly totalChargesAccount: number;
+
+  readonly netPnlAccount: number;
+  readonly accountCurrency: string;
+  readonly chargesAccount: number;
   readonly realizedR?: number;
   readonly leverage?: number;
 
@@ -50,6 +55,16 @@ export interface ITradeJournalRecord {
   readonly exitFillCount: number;
   readonly accountingSnapshotHash?: string;
   readonly isLegacyExecutionData?: boolean;
+  readonly executionDataComplete?: boolean;
+
+  // Backward-compatible semantic aliases
+  readonly entryPrice: number;
+  readonly entryPriceCurrency: string;
+  readonly exitPrice: number;
+  readonly exitPriceCurrency: string;
+  readonly durationMs: number;
+  readonly durationMinutes: number;
+  readonly totalChargesAccount: number;
 }
 
 export interface IJournalStatsSummary {

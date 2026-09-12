@@ -492,11 +492,15 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                           {contractLabel}
                         </span>
                       )}
-                      {(t as any).isLegacyExecutionData && (
+                      {(t as any).executionDataComplete === false ? (
+                        <span className="text-[9px] bg-amber-950/60 text-amber-400 border border-amber-800 px-1 py-0.5 rounded">
+                          Execution data unavailable
+                        </span>
+                      ) : (t as any).isLegacyExecutionData ? (
                         <span className="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1 py-0.5 rounded">
                           Legacy
                         </span>
-                      )}
+                      ) : null}
                     </div>
                     <span className="text-[10px] text-slate-400 font-normal block mt-0.5">
                       {formatQuantity(t.symbol, t.quantity)}
