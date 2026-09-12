@@ -21,6 +21,19 @@ export interface ICandle {
 
 export type CurrencyCode = 'INR' | 'USD' | 'USDT' | 'EUR' | string;
 export type MarginMode = 'SPOT' | 'ISOLATED' | 'CROSS';
+export type LiquidationModel = 'SPOT_NONE' | 'ISOLATED_LINEAR' | 'CROSS_STANDARD';
+
+export interface IVenueProfile {
+  venueId: string;
+  defaultLeverage: number;
+  maxLeverage: number;
+  marginMode: MarginMode;
+  initialMarginRate: number;
+  maintenanceMarginRate: number;
+  liquidationModel: LiquidationModel;
+  makerFeeBps?: number;
+  takerFeeBps?: number;
+}
 
 export interface IFxConversionResult {
   convertedAmount: number;
@@ -53,6 +66,8 @@ export interface IInstrument {
   maxLeverage?: number;
   initialMarginRate?: number;
   maintenanceMarginRate?: number;
+  liquidationModel?: LiquidationModel;
+  venueProfile?: IVenueProfile;
   minimumQuantity?: number;
   quantityPrecision?: number;
   pricePrecision?: number;

@@ -178,7 +178,12 @@ export class PositionSizer {
 
     // Unit value in account currency
     const unitPriceINR = entryPrice * effectiveContractSize * fxRate;
-    const initialMarginRate = resolvedInstrument?.initialMarginRate ?? (effMarginMode === 'SPOT' ? 1.0 : 1 / effLeverage);
+    const initialMarginRate =
+      requestedLeverage !== undefined || customLeverage !== undefined
+        ? effMarginMode === 'SPOT'
+          ? 1.0
+          : 1 / effLeverage
+        : resolvedInstrument?.initialMarginRate ?? (effMarginMode === 'SPOT' ? 1.0 : 1 / effLeverage);
     const marginPerUnitINR = unitPriceINR * initialMarginRate;
 
     const maxUnitsByMargin = marginPerUnitINR > 0 ? effAvailableMargin / marginPerUnitINR : Infinity;
@@ -248,7 +253,7 @@ export class PositionSizer {
       positionNotionalINR,
       effLeverage,
       effMarginMode,
-      resolvedInstrument?.initialMarginRate,
+      initialMarginRate,
       resolvedInstrument?.maintenanceMarginRate,
     );
 
@@ -315,49 +320,20 @@ export class PositionSizer {
         initialMarginRequired,
         maintenanceMarginRequired,
         isValid: false,
-        rejectionReason: `Required initial margin (${initialMarginRequired.toFixed(2)} INR) exceeds available margin (${effAvailableMargin.toFixed(2)} INR)`,
-      };
-    }
-
-    // 13. Gross Account Leverage Limit
-    if (positionNotionalINR > accountBalance * accountMaxLeverage + 1e-4) {
-      return {
-        accountBalance,
-        riskPercentage,
-        riskAmount: Number(actualRiskINR.toFixed(2)),
-        entryPrice,
-        stopLoss,
-        riskPerUnit: Number(riskPerUnitINR.toFixed(4)),
-        calculatedUnits: Number(calculatedUnits.toFixed(qtyPrecision)),
-        lotSize: effectiveLotSize,
-        roundedUnits,
-        totalPositionValue: positionNotionalINR,
-        maximumLoss: Number(actualRiskINR.toFixed(2)),
-        accountCurrency,
-        quoteCurrency,
-        fxPair: fxResult.fxPair,
-        fxRate: fxResult.fxRate,
-        fxTimestamp: fxResult.fxTimestamp,
-        fxSnapshotHash: fxResult.fxSnapshotHash,
-        contractSize: effectiveContractSize,
-        positionNotionalQuote,
-        positionNotionalAccount: positionNotionalINR,
-        leverage: effLeverage,
-        marginMode: effMarginMode,
-        initialMarginRequired,
-        maintenanceMarginRequired,
-        isValid: false,
         rejectionReason: `Position value (${positionNotionalINR.toFixed(2)} INR) exceeds maximum allowable account leverage (${accountMaxLeverage}x)`,
       };
     }
 
     // 14. Liquidation Safety Calculation
-    const liquidationPrice = TradeAccountingEngine.calculateLiquidationPrice(
+    const liquidationPrice = TradeAccountingEngine.calculateLiquidationPrice({
       entryPrice,
       direction,
-      effLeverage,
-      resolvedInstrument?.maintenanceMarginRate ?? 0.025,
-    );
+      leverage: effLeverage,
+      marginMode: effMarginMode,
+      initialMarginRate: resolvedInstrument?.initialMarginRate,
+      maintenanceMarginRate: resolvedInstrument?.maintenanceMarginRate ?? 0.025,
+      liquidationModel: resolvedInstrument?.liquidationModel ?? 'ISOLATED_LINEAR',
+    });
 
     // 15. Return Complete Institutional Position Sizing
     return {

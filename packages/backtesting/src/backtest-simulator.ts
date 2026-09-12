@@ -436,11 +436,8 @@ export class BacktestSimulator {
           const qCurr = inst?.quoteCurrency || (inst?.currency as any) || 'INR';
           let fx = 1.0;
           if (qCurr !== 'INR') {
-            try {
-              fx = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
-            } catch {
-              fx = 1.0;
-            }
+            // Strict fail-closed: throws if historical FX rate is unavailable for cross-currency instrument
+            fx = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
           }
           const notionalCalc = TradeAccountingEngine.calculateNotional(activeLot.remainingQuantity, activeLot.entryPrice, cSize, fx);
           activeLotExposureINR = notionalCalc.notionalAccount;
@@ -846,14 +843,11 @@ export class BacktestSimulator {
       let termFxTimestamp = activeLot.openedAt;
       let termFxPair = `${termQuoteCurrency}/${termAccountCurrency}`;
       if (termQuoteCurrency !== termAccountCurrency) {
-        try {
-          const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
-          termFxRate = fxRes.fxRate;
-          termFxTimestamp = fxRes.fxTimestamp;
-          termFxPair = fxRes.fxPair;
-        } catch {
-          termFxRate = 1.0;
-        }
+        // Strict fail-closed: throws if historical FX rate is unavailable for cross-currency instrument
+        const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
+        termFxRate = fxRes.fxRate;
+        termFxTimestamp = fxRes.fxTimestamp;
+        termFxPair = fxRes.fxPair;
       }
       const termLev = terminalInst?.defaultLeverage ?? 1;
       const termMarginMode = terminalInst?.marginMode ?? (termLev > 1 ? 'ISOLATED' : 'SPOT');

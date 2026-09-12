@@ -247,16 +247,16 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('Section 29: Insufficient available margin causes strict fail-closed rejection', () => {
-      // Equity ₹10,000 INR, BTC notional ₹41,400 INR, leverage 2x -> Required margin ₹20,700 > ₹10,000
+      // Equity ₹10,000 INR, available margin ₹2,000 INR, minimum 0.001 BTC at 2x leverage requires ₹4,140 INR margin > ₹2,000
       const sizing = PositionSizer.calculatePosition({
         accountBalance: 10000,
-        availableMargin: 10000,
+        availableMargin: 2000,
         riskPercentage: 9.2, // ₹920 risk
         maxRiskPercentage: 10.0,
         entryPrice: 90000,
         stopLoss: 88000,
         symbol: 'BTCUSDT',
-        leverage: 2,
+        requestedLeverage: 2,
         timestamp: t0,
       });
 
@@ -606,6 +606,165 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         expect(shadowPnl.netPnlAccount).toBe(btPnl.netPnlAccount);
         expect(livePnl.netPnlAccount).toBe(btPnl.netPnlAccount);
       }
+    });
+  });
+
+  // =========================================================================
+  // 9. INITIAL MARGIN RATE PRIORITY TESTS (AI Fix 98)
+  // =========================================================================
+  describe('9. Initial Margin Rate Model & Priority', () => {
+    it('TradeAccountingEngine.calculateMargin respects explicit initialMarginRate over naive 1/leverage', () => {
+      const notionalINR = 100000; // ₹1,00,000
+      // GOLD has defaultLeverage = 5, initialMarginRate = 0.10 (10%)
+      const margin = TradeAccountingEngine.calculateMargin(
+        notionalINR,
+        5, // leverage
+        'ISOLATED',
+        0.10, // explicit initialMarginRate
+        0.05, // maintenanceMarginRate
+      );
+
+      // Explicit initialMarginRate: 100,000 * 0.10 = ₹10,000, NOT 100,000 / 5 = ₹20,000
+      expect(margin.initialMarginRequired).toBe(10000);
+      expect(margin.maintenanceMarginRequired).toBe(5000);
+    });
+
+    it('SPOT margin mode requires 100% notional regardless of initialMarginRate or leverage', () => {
+      const notionalINR = 50000;
+      const margin = TradeAccountingEngine.calculateMargin(notionalINR, 10, 'SPOT', 0.05);
+      expect(margin.initialMarginRequired).toBe(50000);
+    });
+
+    it('Fallback to notional / leverage when initialMarginRate is not specified', () => {
+      const notionalINR = 100000;
+      const margin = TradeAccountingEngine.calculateMargin(notionalINR, 4, 'ISOLATED', undefined);
+      expect(margin.initialMarginRequired).toBe(25000);
+    });
+  });
+
+  // =========================================================================
+  // 10. MODEL-DRIVEN LIQUIDATION PRICE TESTS (AI Fix 98)
+  // =========================================================================
+  describe('10. Model-Driven Liquidation Price', () => {
+    it('SPOT / cash / 1x leverage cannot be liquidated (returns undefined)', () => {
+      const liqSpot = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 90000,
+        direction: 'LONG',
+        leverage: 1,
+        marginMode: 'SPOT',
+        liquidationModel: 'SPOT_NONE',
+      });
+      expect(liqSpot).toBeUndefined();
+    });
+
+    it('ISOLATED_LINEAR calculates exact liquidation threshold with initialMarginRate', () => {
+      const liqLong = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 1000,
+        direction: 'LONG',
+        leverage: 10,
+        initialMarginRate: 0.10,
+        maintenanceMarginRate: 0.02,
+        liquidationModel: 'ISOLATED_LINEAR',
+      });
+      // 1000 * (1 - 0.10 + 0.02) = 1000 * 0.92 = 920
+      expect(liqLong).toBe(920);
+
+      const liqShort = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 1000,
+        direction: 'SHORT',
+        leverage: 10,
+        initialMarginRate: 0.10,
+        maintenanceMarginRate: 0.02,
+        liquidationModel: 'ISOLATED_LINEAR',
+      });
+      // 1000 * (1 + 0.10 - 0.02) = 1000 * 1.08 = 1080
+      expect(liqShort).toBe(1080);
+    });
+
+    it('Unsupported liquidation model fails closed (returns undefined)', () => {
+      const liq = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 1000,
+        direction: 'LONG',
+        leverage: 10,
+        liquidationModel: 'CROSS_STANDARD' as any,
+      });
+      expect(liq).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
+  // 11. NET PNL, FEE & SLIPPAGE INVARIANTS (AI Fix 98)
+  // =========================================================================
+  describe('11. Net P&L Fee and Slippage Exactness', () => {
+    it('When slippage is included in prices, net P&L = gross P&L - explicit fees', () => {
+      const res = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 100,
+        exitPrice: 110,
+        quantity: 10,
+        direction: 'LONG',
+        fees: 15,
+        slippage: 5,
+        slippageIncludedInPrices: true,
+      });
+
+      // Gross: (110 - 100) * 10 = 100 INR
+      expect(res.grossPnlAccount).toBe(100);
+      // Net: 100 - 15 = 85 INR (slippage already in 100 and 110)
+      expect(res.netPnlAccount).toBe(85);
+    });
+
+    it('When slippage is unpriced, net P&L = gross P&L - fees - slippage', () => {
+      const res = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 100,
+        exitPrice: 110,
+        quantity: 10,
+        direction: 'LONG',
+        fees: 15,
+        slippage: 5,
+        slippageIncludedInPrices: false,
+      });
+
+      // Gross: 100 INR
+      expect(res.grossPnlAccount).toBe(100);
+      // Net: 100 - 15 - 5 = 80 INR
+      expect(res.netPnlAccount).toBe(80);
+    });
+  });
+
+  // =========================================================================
+  // 12. INSTRUMENT VS VENUE/ACCOUNT PROFILE SEPARATION (AI Fix 98)
+  // =========================================================================
+  describe('12. Instrument vs Venue/Account Profile Separation', () => {
+    it('Default authoritative instrument contains base contract specifications and default venue profile', () => {
+      const nifty = getAuthoritativeInstrument('NIFTY');
+      expect(nifty.symbol).toBe('NIFTY');
+      expect(nifty.lotSize).toBe(65);
+      expect(nifty.venueProfile?.venueId).toBe('NSE_DERIVATIVES');
+      expect(nifty.venueProfile?.defaultLeverage).toBe(5);
+    });
+
+    it('getAuthoritativeInstrument allows overriding venue margin profile without mutating contract specs', () => {
+      const customNifty = getAuthoritativeInstrument('NIFTY', {
+        venueId: 'CUSTOM_BROKER_PRO',
+        maxLeverage: 3,
+        initialMarginRate: 0.3333,
+        maintenanceMarginRate: 0.15,
+      });
+
+      // Contract specs preserved
+      expect(customNifty.symbol).toBe('NIFTY');
+      expect(customNifty.lotSize).toBe(65);
+      expect(customNifty.tickSize).toBe(0.05);
+
+      // Venue rules overridden
+      expect(customNifty.maxLeverage).toBe(3);
+      expect(customNifty.initialMarginRate).toBe(0.3333);
+      expect(customNifty.maintenanceMarginRate).toBe(0.15);
+      expect(customNifty.venueProfile?.venueId).toBe('CUSTOM_BROKER_PRO');
+
+      // Original specification unaffected
+      const originalNifty = getAuthoritativeInstrument('NIFTY');
+      expect(originalNifty.maxLeverage).toBe(5);
     });
   });
 });

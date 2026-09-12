@@ -1,4 +1,4 @@
-import { Direction, isLongPosition, MarginMode } from '@quant/shared';
+import { Direction, isLongPosition, LiquidationModel, MarginMode } from '@quant/shared';
 
 export interface ITradeMarginCalculation {
   positionNotionalQuote: number;
@@ -16,6 +16,29 @@ export interface ITradePnlCalculation {
   realizedR: number;
   fees: number;
   slippage: number;
+}
+
+export interface ILiquidationCalculationParams {
+  entryPrice: number;
+  direction: Direction | string;
+  leverage?: number;
+  marginMode?: MarginMode;
+  initialMarginRate?: number;
+  maintenanceMarginRate?: number;
+  liquidationModel?: LiquidationModel;
+}
+
+export interface ITradePnlParams {
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  direction: Direction | string;
+  contractSize?: number;
+  fxRate?: number;
+  fees?: number;
+  slippage?: number;
+  slippageIncludedInPrices?: boolean;
+  initialRiskAccount?: number;
 }
 
 export class TradeAccountingEngine {
@@ -40,7 +63,10 @@ export class TradeAccountingEngine {
 
   /**
    * Authoritatively calculates Initial and Maintenance Margin in INR.
-   * REMOVES ALL HARDCODED /5 ASSUMPTIONS.
+   * Priority:
+   * 1. SPOT: 100% notional
+   * 2. Explicit initialMarginRate if provided (> 0)
+   * 3. Leverage-based: notional / leverage
    */
   static calculateMargin(
     notionalAccount: number,
@@ -57,6 +83,8 @@ export class TradeAccountingEngine {
 
     if (marginMode === 'SPOT') {
       initialMarginRequired = notionalAccount;
+    } else if (initialMarginRate !== undefined && initialMarginRate > 0) {
+      initialMarginRequired = notionalAccount * initialMarginRate;
     } else {
       const effLeverage = Math.max(1, leverage);
       initialMarginRequired = notionalAccount / effLeverage;
@@ -71,29 +99,64 @@ export class TradeAccountingEngine {
   }
 
   /**
-   * Calculates isolated margin liquidation threshold price.
-   * Strictly distinct from stop-loss.
+   * Calculates model-driven liquidation threshold price.
+   * Returns undefined / 0 for SPOT or unsupported models.
    */
   static calculateLiquidationPrice(
-    entryPrice: number,
-    direction: Direction | string,
+    paramsOrEntryPrice: ILiquidationCalculationParams | number,
+    direction?: Direction | string,
     leverage = 1,
     maintenanceMarginRate = 0.025,
-  ): number {
-    if (entryPrice <= 0 || leverage <= 0) return 0;
-    if (leverage <= 1) return 0; // 1x spot/cash cannot be liquidated from leverage
+    initialMarginRate?: number,
+    liquidationModel?: LiquidationModel,
+  ): number | undefined {
+    let entryPrice: number;
+    let dir: Direction | string;
+    let lev: number;
+    let mmr: number;
+    let imr: number | undefined;
+    let model: LiquidationModel | undefined;
+    let marginMode: MarginMode | undefined;
 
-    const isLong = isLongPosition(direction as any);
-    const mmr = Math.max(0, maintenanceMarginRate);
-    const marginRatio = 1.0 / leverage;
+    if (typeof paramsOrEntryPrice === 'object') {
+      entryPrice = paramsOrEntryPrice.entryPrice;
+      dir = paramsOrEntryPrice.direction;
+      lev = paramsOrEntryPrice.leverage ?? 1;
+      mmr = paramsOrEntryPrice.maintenanceMarginRate ?? 0.025;
+      imr = paramsOrEntryPrice.initialMarginRate;
+      model = paramsOrEntryPrice.liquidationModel;
+      marginMode = paramsOrEntryPrice.marginMode;
+    } else {
+      entryPrice = paramsOrEntryPrice;
+      dir = direction || 'LONG';
+      lev = leverage;
+      mmr = maintenanceMarginRate;
+      imr = initialMarginRate;
+      model = liquidationModel;
+    }
+
+    if (entryPrice <= 0) return undefined;
+    if (marginMode === 'SPOT' || model === 'SPOT_NONE' || lev <= 1) {
+      return undefined; // SPOT / 1x cash positions cannot be liquidated
+    }
+
+    // Default to ISOLATED_LINEAR if isolated or not specified
+    const effModel = model || 'ISOLATED_LINEAR';
+    if (effModel !== 'ISOLATED_LINEAR') {
+      return undefined; // Unsupported liquidation model fails closed
+    }
+
+    const isLong = isLongPosition(dir as any);
+    const effectiveMmr = Math.max(0, mmr);
+    const marginRatio = imr !== undefined && imr > 0 ? imr : 1.0 / Math.max(1, lev);
 
     if (isLong) {
-      // Long liquidation occurs when price drops below entry * (1 - 1/leverage + MMR)
-      const liq = entryPrice * (1.0 - marginRatio + mmr);
+      // Long liquidation occurs when price drops below entry * (1 - initialMarginRate + MMR)
+      const liq = entryPrice * (1.0 - marginRatio + effectiveMmr);
       return Number(Math.max(0, liq).toFixed(4));
     } else {
-      // Short liquidation occurs when price rises above entry * (1 + 1/leverage - MMR)
-      const liq = entryPrice * (1.0 + marginRatio - mmr);
+      // Short liquidation occurs when price rises above entry * (1 + initialMarginRate - MMR)
+      const liq = entryPrice * (1.0 + marginRatio - effectiveMmr);
       return Number(liq.toFixed(4));
     }
   }
@@ -118,25 +181,64 @@ export class TradeAccountingEngine {
   /**
    * Calculates gross and net P&L with point-in-time FX conversion.
    * INVARIANT: Changing leverage DOES NOT change fixed-position gross P&L.
+   * INVARIANT: Net P&L = gross P&L - explicit fees - unpriced slippage.
    */
   static calculateTradePnl(
-    entryPrice: number,
-    exitPrice: number,
-    quantity: number,
-    direction: Direction | string,
+    paramsOrEntryPrice: ITradePnlParams | number,
+    exitPrice?: number,
+    quantity?: number,
+    direction?: Direction | string,
     contractSize = 1,
     fxRate = 1.0,
     fees = 0,
     slippage = 0,
     initialRiskAccount = 0,
+    slippageIncludedInPrices = true,
   ): ITradePnlCalculation {
-    const isLong = isLongPosition(direction as any);
-    const priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
-    const grossPnlQuote = Number((priceDiff * quantity * contractSize).toFixed(4));
-    const grossPnlAccount = Number((grossPnlQuote * fxRate).toFixed(2));
-    const netPnlAccount = Number((grossPnlAccount - fees).toFixed(2));
+    let pEntry: number;
+    let pExit: number;
+    let qty: number;
+    let dir: Direction | string;
+    let cSize: number;
+    let fx: number;
+    let feeAmount: number;
+    let slipAmount: number;
+    let riskAcct: number;
+    let slipIncluded: boolean;
 
-    const effRisk = Math.max(1, initialRiskAccount > 0 ? initialRiskAccount : Math.abs(grossPnlAccount));
+    if (typeof paramsOrEntryPrice === 'object') {
+      pEntry = paramsOrEntryPrice.entryPrice;
+      pExit = paramsOrEntryPrice.exitPrice;
+      qty = paramsOrEntryPrice.quantity;
+      dir = paramsOrEntryPrice.direction;
+      cSize = paramsOrEntryPrice.contractSize ?? 1;
+      fx = paramsOrEntryPrice.fxRate ?? 1.0;
+      feeAmount = paramsOrEntryPrice.fees ?? 0;
+      slipAmount = paramsOrEntryPrice.slippage ?? 0;
+      riskAcct = paramsOrEntryPrice.initialRiskAccount ?? 0;
+      slipIncluded = paramsOrEntryPrice.slippageIncludedInPrices ?? true;
+    } else {
+      pEntry = paramsOrEntryPrice;
+      pExit = exitPrice ?? 0;
+      qty = quantity ?? 0;
+      dir = direction || 'LONG';
+      cSize = contractSize;
+      fx = fxRate;
+      feeAmount = fees;
+      slipAmount = slippage;
+      riskAcct = initialRiskAccount;
+      slipIncluded = slippageIncludedInPrices;
+    }
+
+    const isLong = isLongPosition(dir as any);
+    const priceDiff = isLong ? pExit - pEntry : pEntry - pExit;
+    const grossPnlQuote = Number((priceDiff * qty * cSize).toFixed(4));
+    const grossPnlAccount = Number((grossPnlQuote * fx).toFixed(2));
+
+    const slippageAccountCost = slipIncluded ? 0 : Number((slipAmount * fx).toFixed(2));
+    const netPnlAccount = Number((grossPnlAccount - feeAmount - slippageAccountCost).toFixed(2));
+
+    const effRisk = Math.max(1, riskAcct > 0 ? riskAcct : Math.abs(grossPnlAccount));
     const realizedR = Number((netPnlAccount / effRisk).toFixed(2));
 
     return {
@@ -144,8 +246,8 @@ export class TradeAccountingEngine {
       grossPnlAccount,
       netPnlAccount,
       realizedR,
-      fees,
-      slippage,
+      fees: feeAmount,
+      slippage: slipAmount,
     };
   }
 }

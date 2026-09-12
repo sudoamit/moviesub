@@ -1,5 +1,5 @@
 import { AssetType } from '../enums';
-import { IInstrument } from '../interfaces';
+import { IInstrument, IVenueProfile } from '../interfaces';
 
 export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   NIFTY: {
@@ -20,6 +20,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 5,
     initialMarginRate: 0.2, // 20% initial margin for 5x
     maintenanceMarginRate: 0.1, // 10% maintenance margin
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'NSE_DERIVATIVES',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 65,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -44,6 +54,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 5,
     initialMarginRate: 0.2,
     maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'NSE_DERIVATIVES',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 15,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -68,6 +88,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 10,
     initialMarginRate: 0.1,
     maintenanceMarginRate: 0.05,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'MCX_COMMODITIES',
+      defaultLeverage: 5,
+      maxLeverage: 10,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.1,
+      maintenanceMarginRate: 0.05,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -92,6 +122,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 10,
     initialMarginRate: 0.1,
     maintenanceMarginRate: 0.05,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'MCX_COMMODITIES',
+      defaultLeverage: 5,
+      maxLeverage: 10,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.1,
+      maintenanceMarginRate: 0.05,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -116,6 +156,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 20,
     initialMarginRate: 0.05, // 5% for 20x
     maintenanceMarginRate: 0.025, // 2.5% maintenance margin
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'COMEX_METALS',
+      defaultLeverage: 10,
+      maxLeverage: 20,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.05,
+      maintenanceMarginRate: 0.025,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 0.01,
     quantityPrecision: 2,
     pricePrecision: 2,
@@ -140,6 +190,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 20,
     initialMarginRate: 0.05,
     maintenanceMarginRate: 0.025,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'BINANCE_PERP',
+      defaultLeverage: 5,
+      maxLeverage: 20,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.05,
+      maintenanceMarginRate: 0.025,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 0.001,
     quantityPrecision: 3,
     pricePrecision: 2,
@@ -164,6 +224,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 5,
     initialMarginRate: 0.2,
     maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'NSE_EQUITY_MARGIN',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -188,6 +258,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 5,
     initialMarginRate: 0.2,
     maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'NSE_EQUITY_MARGIN',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -212,6 +292,16 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     maxLeverage: 5,
     initialMarginRate: 0.2,
     maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'NSE_EQUITY_MARGIN',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -243,22 +333,47 @@ export function hasInstrument(symbol: string): boolean {
 
 /**
  * Resolves authoritative instrument specification.
+ * Supports optional venue/account profile overrides.
  * STRICT FAIL-CLOSED: Throws INVALID_INSTRUMENT_SPECIFICATION if instrument is unregistered/unrecognized.
  */
-export function getAuthoritativeInstrument(symbol: string): IInstrument {
+export function getAuthoritativeInstrument(
+  symbol: string,
+  venueOverride?: Partial<IVenueProfile>,
+): IInstrument {
   if (!symbol || typeof symbol !== 'string') {
     throw new Error(`INVALID_INSTRUMENT_SPECIFICATION: Symbol must be a non-empty string, got ${symbol}`);
   }
   const sym = symbol.toUpperCase();
+  let baseInstrument: IInstrument | undefined;
   if (customInstruments.has(sym)) {
-    return customInstruments.get(sym)!;
+    baseInstrument = customInstruments.get(sym);
+  } else if (sym in AUTHORITATIVE_INSTRUMENTS) {
+    baseInstrument = AUTHORITATIVE_INSTRUMENTS[sym];
   }
-  if (sym in AUTHORITATIVE_INSTRUMENTS) {
-    return AUTHORITATIVE_INSTRUMENTS[sym];
+
+  if (!baseInstrument) {
+    throw new Error(
+      `INVALID_INSTRUMENT_SPECIFICATION: No authoritative instrument specification found for symbol '${symbol}'. Production systems fail closed on unconfigured instruments.`,
+    );
   }
-  throw new Error(
-    `INVALID_INSTRUMENT_SPECIFICATION: No authoritative instrument specification found for symbol '${symbol}'. Production systems fail closed on unconfigured instruments.`,
-  );
+
+  if (!venueOverride) {
+    return baseInstrument;
+  }
+
+  // Compose with venue override
+  return {
+    ...baseInstrument,
+    marginMode: venueOverride.marginMode ?? baseInstrument.marginMode,
+    defaultLeverage: venueOverride.defaultLeverage ?? baseInstrument.defaultLeverage,
+    maxLeverage: venueOverride.maxLeverage ?? baseInstrument.maxLeverage,
+    initialMarginRate: venueOverride.initialMarginRate ?? baseInstrument.initialMarginRate,
+    maintenanceMarginRate: venueOverride.maintenanceMarginRate ?? baseInstrument.maintenanceMarginRate,
+    liquidationModel: venueOverride.liquidationModel ?? baseInstrument.liquidationModel,
+    venueProfile: baseInstrument.venueProfile
+      ? { ...baseInstrument.venueProfile, ...venueOverride }
+      : (venueOverride as IVenueProfile),
+  };
 }
 
 export function resetCustomInstruments(): void {

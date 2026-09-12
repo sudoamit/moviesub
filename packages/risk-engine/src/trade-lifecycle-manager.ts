@@ -225,6 +225,7 @@ export class TradeLifecycleManager {
     options?: {
       leverage?: number;
       marginMode?: MarginMode;
+      initialMarginRate?: number;
       contractSize?: number;
       lotSize?: number;
       fxRate?: number;
@@ -248,23 +249,21 @@ export class TradeLifecycleManager {
       if (quoteCurrency === accountCurrency) {
         fxRate = 1.0;
       } else {
-        try {
-          const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
-            quoteCurrency,
-            accountCurrency,
-            lot.openedAt,
-          );
-          fxRate = fxResult.fxRate;
-          fxTimestamp = fxResult.fxTimestamp;
-          fxPair = fxResult.fxPair;
-        } catch {
-          fxRate = 1.0;
-        }
+        // Strict fail-closed: throws if FX rate is unavailable for cross-currency instrument
+        const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
+          quoteCurrency,
+          accountCurrency,
+          lot.openedAt,
+        );
+        fxRate = fxResult.fxRate;
+        fxTimestamp = fxResult.fxTimestamp;
+        fxPair = fxResult.fxPair;
       }
     }
 
     const leverage = options?.leverage ?? instrument?.defaultLeverage ?? 1;
     const marginMode = options?.marginMode ?? instrument?.marginMode ?? (leverage > 1 ? 'ISOLATED' : 'SPOT');
+    const initialMarginRate = options?.initialMarginRate ?? (options?.leverage ? (marginMode === 'SPOT' ? 1.0 : 1 / leverage) : instrument?.initialMarginRate);
 
     const notionalCalc = TradeAccountingEngine.calculateNotional(
       lot.initialQuantity,
@@ -276,7 +275,7 @@ export class TradeLifecycleManager {
       notionalCalc.notionalAccount,
       leverage,
       marginMode,
-      instrument?.initialMarginRate,
+      initialMarginRate,
       instrument?.maintenanceMarginRate,
     );
 

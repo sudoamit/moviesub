@@ -77,6 +77,13 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
   }
 
   /**
+   * Clears all registered rates without reseeding (used for strict fail-closed testing).
+   */
+  public clearAllRates(): void {
+    this.rateHistory.clear();
+  }
+
+  /**
    * Authoritatively converts amount from fromCurrency to toCurrency at asOfTimestamp.
    * STRICT FAIL-CLOSED: If fromCurrency !== toCurrency and no rate is found, throws MISSING_FX_RATE.
    */
