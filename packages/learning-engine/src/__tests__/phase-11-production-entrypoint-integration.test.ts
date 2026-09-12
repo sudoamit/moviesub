@@ -1415,4 +1415,132 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it('Issue 5: proves COMMITTED lock with NO DecisionPair fails closed on restart and forbids live submission', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_committed_no_pair_test');
+    const testFile = path.join(testDir, 'committed-no-pair-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const mockLivePort: ILiveExecutionPort = {
+        isLiveBroker: true,
+        submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'should-never-be-called', status: 'PLACED' }),
+        cancelLiveOrder: jest.fn().mockResolvedValue(true),
+      };
+
+      const candles = generateCandles(60, 'BULLISH');
+      const lastCandle = candles[candles.length - 1];
+      const eventTime = lastCandle.timestamp.getTime();
+
+      const snapshotId = 'snap-committed-no-pair-01';
+      const marketEvent: LiveMarketEvent = {
+        snapshotId,
+        symbol: 'BTCUSDT',
+        candles,
+        timestamp: eventTime,
+        bid: 99.5,
+        ask: 100.5,
+        volume: 10,
+      };
+
+      const portfolioState: LivePortfolioAccountState = {
+        portfolioId: 'port-committed-no-pair-1',
+        cash: 100000,
+        equity: 100000,
+        openPositions: [],
+        timestamp: eventTime,
+      };
+
+      const strategyConfig = {
+        deterministicSignal: {
+          direction: Direction.BULLISH,
+          score: 95,
+          entryPrice: 100,
+          stopLoss: 95,
+          takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+        },
+      };
+
+      // 1. Manually write a COMMITTED lock file with NO DecisionPair in the store file
+      const lockFile = path.join(testDir, `.lock.${snapshotId}.${championModel.modelId}`);
+      const committedLockData = {
+        snapshotId,
+        modelId: championModel.modelId,
+        status: 'COMMITTED',
+        reservationToken: 'tok-anomalous-committed',
+        epoch: 3,
+        reservedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+      };
+      fs.writeFileSync(lockFile, JSON.stringify(committedLockData), 'utf-8');
+
+      // 2. Start fresh pipeline on restart
+      const store = new FileShadowExecutionStore(testFile);
+      const pipeline = new ProductionTradingPipeline({
+        store,
+        liveExecutionPort: mockLivePort,
+        shadowExecutionPort: new ShadowExecutionSimulator(),
+        championModel,
+        challengerModel,
+        strategyConfig,
+      });
+
+      // 3. Invariant: Attempting to process market event MUST FAIL CLOSED
+      await expect(pipeline.processMarketEvent(marketEvent, portfolioState)).rejects.toThrow(/CONCURRENT_EXECUTION_LOCK_ACQUIRED/);
+
+      // 4. Invariant: NO live order was submitted
+      expect(mockLivePort.submitLiveOrder).toHaveBeenCalledTimes(0);
+      expect(store.getAllPairs().length).toBe(0);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Issue 6: proves multi-generation claim competition resolves strictly in favor of the highest monotonic epoch', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_epoch_comp_test');
+    const testFile = path.join(testDir, 'epoch-comp-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const snapshotId = 'snap-epoch-comp-01';
+      const modelId = 'champ-v1-prod';
+      const lockFile = path.join(testDir, `.lock.${snapshotId}.${modelId}`);
+
+      // Write 3 competing claim files with epochs 5, 6, 7 (simulating crashed workers across restarts)
+      const claim5Path = path.join(testDir, `.claim.${snapshotId}.${modelId}.token-epoch-5`);
+      const claim6Path = path.join(testDir, `.claim.${snapshotId}.${modelId}.token-epoch-6`);
+      const claim7Path = path.join(testDir, `.claim.${snapshotId}.${modelId}.token-epoch-7`);
+
+      fs.writeFileSync(claim5Path, JSON.stringify({ snapshotId, modelId, status: 'FAILED_RETRYABLE', reservationToken: 'token-5', epoch: 5, reservedAt: 100, lastUpdatedAt: 100 }), 'utf-8');
+      fs.writeFileSync(claim6Path, JSON.stringify({ snapshotId, modelId, status: 'FAILED_RETRYABLE', reservationToken: 'token-6', epoch: 6, reservedAt: 200, lastUpdatedAt: 200 }), 'utf-8');
+      fs.writeFileSync(claim7Path, JSON.stringify({ snapshotId, modelId, status: 'FAILED_RETRYABLE', reservationToken: 'token-7', epoch: 7, reservedAt: 300, lastUpdatedAt: 300 }), 'utf-8');
+
+      // Canonical lock is initially missing
+      expect(fs.existsSync(lockFile)).toBe(false);
+
+      // Start fresh store instance
+      const store = new FileShadowExecutionStore(testFile);
+      const recovered = store.getReservation(snapshotId, modelId);
+
+      // STRICT INVARIANT: Epoch 7 becomes the authoritative canonical lock
+      expect(recovered).toBeDefined();
+      expect(recovered?.epoch).toBe(7);
+      expect(recovered?.reservationToken).toBe('token-7');
+      expect(recovered?.status).toBe('FAILED_RETRYABLE');
+
+      // Canonical lock file on disk is reconstructed with epoch 7
+      expect(fs.existsSync(lockFile)).toBe(true);
+      const diskContent = JSON.parse(fs.readFileSync(lockFile, 'utf-8'));
+      expect(diskContent.epoch).toBe(7);
+
+      // Obsolete claim files (epochs 5 and 6) were unlinked
+      expect(fs.existsSync(claim5Path)).toBe(false);
+      expect(fs.existsSync(claim6Path)).toBe(false);
+      expect(fs.existsSync(claim7Path)).toBe(false);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });

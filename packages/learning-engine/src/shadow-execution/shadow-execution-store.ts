@@ -927,7 +927,9 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     if (fs.existsSync(lockFile)) {
       try {
         fs.unlinkSync(lockFile);
-      } catch {}
+      } catch {
+        return false;
+      }
     }
 
     // 2. Memory store synchronization
@@ -967,7 +969,9 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
           lastUpdatedAt: Date.now(),
         };
         fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
-      } catch {}
+      } catch {
+        return false;
+      }
     }
 
     // 2. Memory store synchronization
