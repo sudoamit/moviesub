@@ -69,6 +69,7 @@ export interface DecisionLatencies {
 
 export interface DecisionContext {
   readonly decisionId: string;
+  readonly clientOrderId?: string;
   readonly snapshotId: string;
   readonly snapshotHash: string;
   readonly decisionTimestamp: number;
@@ -99,6 +100,7 @@ export type TradingAction = 'BUY' | 'SELL' | 'HOLD' | 'EXIT' | 'WAIT' | 'NO_ACTI
 
 export interface TradingDecision {
   readonly decisionId: string;
+  readonly clientOrderId?: string;
   readonly action: TradingAction;
   readonly confidence: number;
   readonly signal: string;
@@ -118,6 +120,7 @@ export type ShadowOrderType = 'MARKET' | 'LIMIT' | 'STOP';
 
 export interface ShadowOrder {
   readonly shadowOrderId: string;
+  readonly clientOrderId?: string;
   readonly decisionId: string;
   readonly instrument: MarketSnapshotInstrument;
   readonly side: 'BUY' | 'SELL';

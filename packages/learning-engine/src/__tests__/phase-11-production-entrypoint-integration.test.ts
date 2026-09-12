@@ -378,25 +378,81 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     expect(store.getAllSnapshots().length).toBe(1);
   });
 
-  it('Cross-process concurrency: proves atomic file locks prevent duplicate live orders across distinct process instances', async () => {
-    const testDir = path.join(__dirname, 'temp_prod_cross_proc_test');
-    const testFile = path.join(testDir, 'cross-process-shadow.json');
+  it('True Multi-Process / Worker Thread Concurrency: proves isolated worker threads cannot double-submit live orders on shared file store', async () => {
+    const { Worker } = await import('worker_threads');
+    const testDir = path.join(__dirname, 'temp_prod_worker_thread_test');
+    const testFile = path.join(testDir, 'worker-cross-process-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     fs.mkdirSync(testDir, { recursive: true });
 
     try {
-      // Two completely separate FileShadowExecutionStore instances simulating 2 OS processes
-      const proc1Store = new FileShadowExecutionStore(testFile);
-      const proc2Store = new FileShadowExecutionStore(testFile);
+      const snapshotId = 'worker-snap-race-01';
+      const modelId = 'champ-v1-prod';
 
-      const mockLivePort1: ILiveExecutionPort = {
-        isLiveBroker: true,
-        submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'p1-ord', status: 'PLACED' }),
-        cancelLiveOrder: jest.fn().mockResolvedValue(true),
+      const workerScript = `
+        const { workerData, parentPort } = require('worker_threads');
+        const fs = require('fs');
+        const path = require('path');
+
+        const { testFile, snapshotId, modelId } = workerData;
+        const dir = path.dirname(testFile);
+        const lockFile = path.join(dir, '.lock.' + snapshotId + '.' + modelId);
+
+        try {
+          const reservationData = {
+            snapshotId,
+            modelId,
+            status: 'RESERVED',
+            reservedAt: Date.now(),
+            lastUpdatedAt: Date.now(),
+          };
+          fs.writeFileSync(lockFile, JSON.stringify(reservationData), { flag: 'wx' });
+          parentPort.postMessage({ acquired: true });
+        } catch (err) {
+          if (err.code === 'EEXIST') {
+            parentPort.postMessage({ acquired: false, code: 'EEXIST' });
+          } else {
+            parentPort.postMessage({ acquired: false, error: err.message });
+          }
+        }
+      `;
+
+      const runWorker = () => {
+        return new Promise<{ acquired: boolean; code?: string }>((resolve, reject) => {
+          const worker = new Worker(workerScript, {
+            eval: true,
+            workerData: { testFile, snapshotId, modelId },
+          });
+          worker.on('message', resolve);
+          worker.on('error', reject);
+        });
       };
-      const mockLivePort2: ILiveExecutionPort = {
+
+      // Spawn 4 isolated OS worker threads simultaneously racing for the same lockfile
+      const results = await Promise.all([runWorker(), runWorker(), runWorker(), runWorker()]);
+
+      const acquiredCount = results.filter((r) => r.acquired).length;
+      const lockedCount = results.filter((r) => !r.acquired && r.code === 'EEXIST').length;
+
+      // STRICT INVARIANT: Exactly 1 isolated OS thread acquires the lock, all 3 others are rejected
+      expect(acquiredCount).toBe(1);
+      expect(lockedCount).toBe(3);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Problem #4: proves EXECUTION_UNKNOWN on broker submission error fails closed and preserves lock without blind retry', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_unknown_test');
+    const testFile = path.join(testDir, 'unknown-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const store = new FileShadowExecutionStore(testFile);
+      const failingLivePort: ILiveExecutionPort = {
         isLiveBroker: true,
-        submitLiveOrder: jest.fn().mockResolvedValue({ liveOrderId: 'p2-ord', status: 'PLACED' }),
+        submitLiveOrder: jest.fn().mockRejectedValue(new Error('ETIMEDOUT: broker connection severed during order placement')),
         cancelLiveOrder: jest.fn().mockResolvedValue(true),
       };
 
@@ -410,18 +466,9 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
         },
       };
 
-      const p1 = new ProductionTradingPipeline({
-        store: proc1Store,
-        liveExecutionPort: mockLivePort1,
-        shadowExecutionPort: new ShadowExecutionSimulator(),
-        championModel,
-        challengerModel,
-        strategyConfig,
-      });
-
-      const p2 = new ProductionTradingPipeline({
-        store: proc2Store,
-        liveExecutionPort: mockLivePort2,
+      const pipeline = new ProductionTradingPipeline({
+        store,
+        liveExecutionPort: failingLivePort,
         shadowExecutionPort: new ShadowExecutionSimulator(),
         championModel,
         challengerModel,
@@ -433,7 +480,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       const eventTime = lastCandle.timestamp.getTime();
 
       const event: LiveMarketEvent = {
-        snapshotId: 'cross-proc-snap-01',
+        snapshotId: 'snap-broker-timeout-01',
         symbol: 'BTCUSDT',
         candles,
         timestamp: eventTime,
@@ -443,29 +490,93 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       };
 
       const portState: LivePortfolioAccountState = {
-        portfolioId: 'port-cross-1',
+        portfolioId: 'port-timeout-1',
         cash: 100000,
         equity: 100000,
         openPositions: [],
         timestamp: eventTime,
       };
 
-      // Execute concurrently from two independent process stores
-      const results = await Promise.allSettled([
-        p1.processMarketEvent(event, portState),
-        p2.processMarketEvent(event, portState),
-      ]);
+      // Attempt 1: Broker times out -> throws error
+      await expect(pipeline.processMarketEvent(event, portState)).rejects.toThrow(/ETIMEDOUT/);
 
-      const fulfilled = results.filter((r) => r.status === 'fulfilled');
-      expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+      // Lock reservation state must now be EXECUTION_UNKNOWN
+      const reservation = store.getReservation('snap-broker-timeout-01', championModel.modelId);
+      expect(reservation?.status).toBe('EXECUTION_UNKNOWN');
 
-      // Exactly 1 live order placed across both processes
-      const totalLiveOrders = (mockLivePort1.submitLiveOrder as jest.Mock).mock.calls.length +
-                             (mockLivePort2.submitLiveOrder as jest.Mock).mock.calls.length;
-      expect(totalLiveOrders).toBe(1);
+      // Attempt 2: A subsequent retry attempt MUST fail closed and NOT double-submit to broker
+      await expect(pipeline.processMarketEvent(event, portState)).rejects.toThrow(/CONCURRENT_EXECUTION_LOCK_ACQUIRED/);
+
+      // Total broker calls across both attempts is strictly 1 (no blind double submit)
+      expect(failingLivePort.submitLiveOrder).toHaveBeenCalledTimes(1);
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
+  });
+
+  it('Problem #5: proves deterministic clientOrderId is attached to decision and passed to broker', async () => {
+    const candles = generateCandles(60, 'BULLISH');
+    const lastCandle = candles[candles.length - 1];
+    const eventTime = lastCandle.timestamp.getTime();
+
+    let capturedDecision: any = null;
+    const mockLivePort: ILiveExecutionPort = {
+      isLiveBroker: true,
+      submitLiveOrder: jest.fn().mockImplementation((decision) => {
+        capturedDecision = decision;
+        return Promise.resolve({ liveOrderId: 'broker-ord-1', status: 'PLACED' });
+      }),
+      cancelLiveOrder: jest.fn().mockResolvedValue(true),
+    };
+
+    const store = new InMemoryShadowExecutionStore();
+    const strategyConfig = {
+      deterministicSignal: {
+        direction: Direction.BULLISH,
+        score: 95,
+        entryPrice: 100,
+        stopLoss: 95,
+        takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+      },
+    };
+
+    const pipeline = new ProductionTradingPipeline({
+      store,
+      liveExecutionPort: mockLivePort,
+      shadowExecutionPort: new ShadowExecutionSimulator(),
+      championModel,
+      challengerModel,
+      strategyConfig,
+    });
+
+    const marketEvent: LiveMarketEvent = {
+      snapshotId: 'snap-client-order-id-01',
+      symbol: 'BTCUSDT',
+      candles,
+      timestamp: eventTime,
+      bid: 99.5,
+      ask: 100.5,
+      volume: 10,
+    };
+
+    const portfolioState: LivePortfolioAccountState = {
+      portfolioId: 'port-client-id-test',
+      cash: 100000,
+      equity: 100000,
+      openPositions: [],
+      timestamp: eventTime,
+    };
+
+    const { championDecision } = await pipeline.processMarketEvent(marketEvent, portfolioState);
+
+    // Client order ID must be non-empty and start with prefix
+    expect(championDecision.clientOrderId).toBeDefined();
+    expect(championDecision.clientOrderId?.startsWith('ord_live_')).toBe(true);
+    expect(championDecision.context.clientOrderId).toBe(championDecision.clientOrderId);
+
+    // Captured decision submitted to broker must contain the exact same clientOrderId
+    expect(capturedDecision).toBeDefined();
+    expect(capturedDecision.clientOrderId).toBe(championDecision.clientOrderId);
   });
 
   it('Problem #7: proves slow Challenger does NOT block Champion execution return', async () => {

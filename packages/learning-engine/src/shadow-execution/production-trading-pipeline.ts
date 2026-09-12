@@ -273,13 +273,15 @@ export class ProductionTradingPipeline {
     const costConfigHash = this.config.costConfigHash || 'chash_cost_default';
     const portfolioStateVersion = 'port_v1.0';
 
-    // 9. Deterministic Replay Decision IDs
+    // 9. Deterministic Replay Decision IDs and Client Order ID for Broker Idempotency
     const champDecisionId = `dec_champ_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.championModel.modelId}:${this.config.championModel.modelVersion}`).digest('hex').slice(0, 16)}`;
     const challDecisionId = `dec_chall_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.challengerModel.modelId}:${this.config.challengerModel.modelVersion}`).digest('hex').slice(0, 16)}`;
+    const clientOrderId = `ord_live_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.championModel.modelId}:${this.config.championModel.modelVersion}`).digest('hex').slice(0, 24)}`;
 
     // 10. Champion Decision Context (with capability to LiveExecutionPort)
     const champContext: DecisionContext = deepFreeze({
       decisionId: champDecisionId,
+      clientOrderId,
       snapshotId: marketSnapshot.snapshotId,
       snapshotHash: marketSnapshot.snapshotHash,
       portfolioSnapshot,
@@ -309,6 +311,7 @@ export class ProductionTradingPipeline {
     // 11. Challenger Decision Context (Shadow Mode Only with distinct config hashes)
     const challContext: DecisionContext = deepFreeze({
       decisionId: challDecisionId,
+      clientOrderId,
       snapshotId: marketSnapshot.snapshotId,
       snapshotHash: marketSnapshot.snapshotHash,
       portfolioSnapshot,
@@ -346,6 +349,7 @@ export class ProductionTradingPipeline {
     let champConfidence = champSignal.score / 100;
 
     let championDecision: TradingDecision;
+    let attemptedBrokerSubmission = false;
 
     try {
       if (this.config.championModelEvaluator) {
@@ -407,6 +411,7 @@ export class ProductionTradingPipeline {
 
       championDecision = deepFreeze({
         decisionId: champContext.decisionId,
+        clientOrderId,
         action: champAction,
         confidence: champConfidence,
         signal: champSignal.state,
@@ -432,15 +437,16 @@ export class ProductionTradingPipeline {
         context: champContext,
       });
 
-      // 13. Champion Live Execution (if action is BUY/SELL and live port configured)
+      // 13. Champion Live Execution (Sequencing: EXECUTING -> submitLiveOrder -> LIVE_SUBMITTED -> COMMITTED)
       if (this.config.liveExecutionPort && (champAction === 'BUY' || champAction === 'SELL')) {
         assertLiveExecution(champContext, this.config.liveExecutionPort);
+        attemptedBrokerSubmission = true;
+        await Promise.resolve(this.config.liveExecutionPort.submitLiveOrder(championDecision));
         this.config.store.updateReservationStatus(
           marketSnapshot.snapshotId,
           this.config.championModel.modelId,
           'LIVE_SUBMITTED'
         );
-        await Promise.resolve(this.config.liveExecutionPort.submitLiveOrder(championDecision));
         this.config.store.commitExecution(
           marketSnapshot.snapshotId,
           this.config.championModel.modelId
@@ -452,11 +458,21 @@ export class ProductionTradingPipeline {
         );
       }
     } catch (err) {
-      this.config.store.releaseExecution(
-        marketSnapshot.snapshotId,
-        this.config.championModel.modelId,
-        'FAILED_RETRYABLE'
-      );
+      if (attemptedBrokerSubmission) {
+        // Broker communication error or timeout: fail closed with EXECUTION_UNKNOWN (do NOT release lock for duplicate retry)
+        this.config.store.releaseExecution(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId,
+          'EXECUTION_UNKNOWN'
+        );
+      } else {
+        // Pre-broker local failure (e.g. calculation exception before broker call): release as FAILED_RETRYABLE
+        this.config.store.releaseExecution(
+          marketSnapshot.snapshotId,
+          this.config.championModel.modelId,
+          'FAILED_RETRYABLE'
+        );
+      }
       throw err;
     }
 

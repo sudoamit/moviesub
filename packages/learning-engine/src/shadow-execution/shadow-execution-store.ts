@@ -16,7 +16,9 @@ export type ExecutionReservationStatus =
   | 'EXECUTING'
   | 'LIVE_SUBMITTED'
   | 'COMMITTED'
-  | 'FAILED_RETRYABLE';
+  | 'FAILED_RETRYABLE'
+  | 'EXECUTION_UNKNOWN'
+  | 'FAILED_FINAL';
 
 export interface ExecutionReservation {
   readonly snapshotId: string;
@@ -524,12 +526,21 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
         try {
           const content = fs.readFileSync(lockFile, 'utf-8');
           const existing = JSON.parse(content) as ExecutionReservation;
-          // Stale lock recovery (60s)
-          if (Date.now() - existing.lastUpdatedAt > 60000) {
-            fs.unlinkSync(lockFile);
-            return this.reserveExecution(snapshotId, modelId);
+          // If previous execution was explicitly marked FAILED_RETRYABLE, allow atomic overwrite
+          if (existing && existing.status === 'FAILED_RETRYABLE') {
+            const reservationData: ExecutionReservation = {
+              snapshotId,
+              modelId,
+              status: 'RESERVED',
+              reservedAt: Date.now(),
+              lastUpdatedAt: Date.now(),
+            };
+            fs.writeFileSync(lockFile, JSON.stringify(reservationData), 'utf-8');
+            this.memoryStore.reserveExecution(snapshotId, modelId);
+            return true;
           }
         } catch {}
+        // Fail closed for all active and unknown states (RESERVED, EXECUTING, LIVE_SUBMITTED, COMMITTED, EXECUTION_UNKNOWN, FAILED_FINAL)
         return false;
       }
       throw err;
@@ -578,9 +589,23 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     this.memoryStore.releaseExecution(snapshotId, modelId, status);
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     if (fs.existsSync(lockFile)) {
-      try {
-        fs.unlinkSync(lockFile);
-      } catch {}
+      if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL')) {
+        // Keep lock file on disk with error status to prevent any worker from duplicate execution
+        try {
+          const data: ExecutionReservation = {
+            snapshotId,
+            modelId,
+            status,
+            reservedAt: Date.now(),
+            lastUpdatedAt: Date.now(),
+          };
+          fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
+        } catch {}
+      } else {
+        try {
+          fs.unlinkSync(lockFile);
+        } catch {}
+      }
     }
   }
 
