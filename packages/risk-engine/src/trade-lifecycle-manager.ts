@@ -1,4 +1,5 @@
 import {
+  buildAccountingSnapshot,
   Direction,
   ICandle,
   IBacktestTrade,
@@ -11,6 +12,7 @@ import {
   PointInTimeCurrencyConverter,
   MarginMode,
   IResolvedMarginModel,
+  ITradeAccountingSnapshot,
   resolveMarginModel,
 } from '@quant/shared';
 import {
@@ -247,6 +249,8 @@ export class TradeLifecycleManager {
     let fxRate = options?.fxRate;
     let fxTimestamp = lot.openedAt;
     let fxPair = `${quoteCurrency}/${accountCurrency}`;
+    let fxSource = 'SYSTEM_DIRECT';
+    let fxSnapshotHash = 'LOCAL_HASH';
     if (fxRate === undefined) {
       if (quoteCurrency === accountCurrency) {
         fxRate = 1.0;
@@ -260,6 +264,8 @@ export class TradeLifecycleManager {
         fxRate = fxResult.fxRate;
         fxTimestamp = fxResult.fxTimestamp;
         fxPair = fxResult.fxPair;
+        fxSource = fxResult.fxSource;
+        fxSnapshotHash = fxResult.fxSnapshotHash;
       }
     }
 
@@ -306,6 +312,27 @@ export class TradeLifecycleManager {
       fxRate,
     );
     const netPnl = Number((lot.realizedPnl - totalFees).toFixed(2));
+
+    const accountingSnapshot = buildAccountingSnapshot({
+      accountCurrency,
+      quoteCurrency,
+      fxResult: {
+        convertedAmount: notionalCalc.notionalAccount,
+        originalAmount: notionalCalc.notionalQuote,
+        fromCurrency: quoteCurrency,
+        toCurrency: accountCurrency,
+        fxPair,
+        fxRate,
+        fxTimestamp,
+        fxSource,
+        fxVersion: '1.0',
+        fxSnapshotHash,
+      },
+      contractSize,
+      lotSize,
+      resolvedMarginModel,
+      calculatedAt: lot.openedAt,
+    });
 
     return {
       id: tradeId,
@@ -358,6 +385,7 @@ export class TradeLifecycleManager {
       ambiguityMode,
       entrySnapshot: lot.entrySnapshot,
       resolvedMarginModel,
+      accountingSnapshot,
     };
   }
 

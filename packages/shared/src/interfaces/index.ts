@@ -56,6 +56,21 @@ export interface IFxConversionResult {
   fxSnapshotHash: string;
 }
 
+export interface ITradeAccountingSnapshot {
+  accountCurrency: CurrencyCode;
+  quoteCurrency: CurrencyCode;
+  fxPair: string;
+  fxRate: number;
+  fxTimestamp: number;
+  fxSource: string;
+  fxSnapshotHash: string;
+  contractSize: number;
+  lotSize: number;
+  resolvedMarginModel: IResolvedMarginModel;
+  calculatedAt: number;
+  snapshotHash: string;
+}
+
 export interface IInstrument {
   id: string;
   symbol: string;
@@ -290,6 +305,7 @@ export interface IPositionSizing {
   maintenanceMarginRequired?: number;
   liquidationPrice?: number;
   resolvedMarginModel?: IResolvedMarginModel;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface IMarketDataProvider {
@@ -407,6 +423,7 @@ export interface IBacktestTrade {
   initialMarginRequired?: number;
   maintenanceMarginRequired?: number;
   resolvedMarginModel?: IResolvedMarginModel;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 /**

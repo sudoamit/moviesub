@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { TradeLifecycleManager } from '@quant/risk-engine';
 import {
   CandidateArtifact,
   CandidateExecutionConfig,
@@ -318,13 +319,57 @@ export class CandidateArtifactBuilder {
     candidate: StrategyCandidate,
     options?: CandidateArtifactBuildOptions,
   ): ValidatedCandidateArtifact {
+    const rawCandidate = candidate as unknown as Record<string, unknown>;
+    const candidateChange = candidate.change as Record<string, unknown> | undefined;
+
+    const candidateRisk =
+      candidate.riskConfig ||
+      (candidateChange?.riskConfig as CandidateRiskConfig | undefined) ||
+      options?.riskConfig ||
+      options?.provenance?.riskConfig;
+
+    if (!candidateRisk || typeof candidateRisk !== 'object' || Object.keys(candidateRisk).length === 0) {
+      throw new Error(`CANDIDATE_RISK_CONFIG_MISSING: Candidate '${candidate.id}' is missing authoritative riskConfig`);
+    }
+
+    if (
+      typeof candidateRisk.initialCapital !== 'number' ||
+      !Number.isFinite(candidateRisk.initialCapital) ||
+      candidateRisk.initialCapital <= 0
+    ) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidate.id}' riskConfig initialCapital must be a positive finite number`,
+      );
+    }
+
+    if (
+      typeof candidateRisk.maxRiskPerTrade !== 'number' ||
+      !Number.isFinite(candidateRisk.maxRiskPerTrade) ||
+      candidateRisk.maxRiskPerTrade <= 0 ||
+      candidateRisk.maxRiskPerTrade > 1
+    ) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidate.id}' riskConfig maxRiskPerTrade must be a positive number <= 1.0`,
+      );
+    }
+
+    if (!candidateRisk.partialExitPolicy || typeof candidateRisk.partialExitPolicy !== 'object') {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidate.id}' riskConfig is missing partialExitPolicy`,
+      );
+    }
+
+    const policyVal = TradeLifecycleManager.validatePartialExitPolicy(candidateRisk.partialExitPolicy as any);
+    if (!policyVal.isValid) {
+      throw new Error(
+        `INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidate.id}' partialExitPolicy is invalid: ${policyVal.reason}`,
+      );
+    }
+
     const config = this.createExecutionConfig(candidate, options);
     const datasetHash = options?.datasetHash;
     const trainingSeed = options?.trainingSeed ?? DEFAULT_LEARNING_SEED;
     const provenance = options?.provenance;
-
-    const rawCandidate = candidate as unknown as Record<string, unknown>;
-    const candidateChange = candidate.change as Record<string, unknown> | undefined;
 
     const resolvedDatasetHash =
       datasetHash ||
@@ -396,16 +441,6 @@ export class CandidateArtifactBuilder {
       provenance?.oosExperienceDatasetHash ||
       (candidateChange?.oosExperienceDatasetHash as string) ||
       oosDatasetHash;
-
-    const candidateRisk =
-      candidate.riskConfig ||
-      (candidateChange?.riskConfig as CandidateRiskConfig | undefined) ||
-      options?.riskConfig ||
-      options?.provenance?.riskConfig;
-
-    if (!candidateRisk || typeof candidateRisk !== 'object' || Object.keys(candidateRisk).length === 0) {
-      throw new Error(`CANDIDATE_RISK_CONFIG_MISSING: Candidate '${candidate.id}' is missing authoritative riskConfig`);
-    }
 
     const resolvedRiskConfig: CandidateRiskConfig = deepFreeze({
       ...candidateRisk,

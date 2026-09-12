@@ -1,5 +1,10 @@
 import { createHash } from 'crypto';
-import { CurrencyCode, IFxConversionResult } from '../interfaces';
+import {
+  CurrencyCode,
+  IFxConversionResult,
+  IResolvedMarginModel,
+  ITradeAccountingSnapshot,
+} from '../interfaces';
 
 export interface IFxRateRecord {
   pair: string; // e.g. "USDT/INR", "USD/INR"
@@ -226,4 +231,76 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
       version: '1.0',
     });
   }
+}
+
+/**
+ * Computes a deterministic SHA-256 cryptographic hash over all immutable trade accounting parameters.
+ */
+export function computeAccountingSnapshotHash(params: {
+  accountCurrency: CurrencyCode;
+  quoteCurrency: CurrencyCode;
+  fxPair: string;
+  fxRate: number;
+  fxTimestamp: number;
+  fxSource: string;
+  fxSnapshotHash: string;
+  contractSize: number;
+  lotSize: number;
+  resolvedMarginModel: IResolvedMarginModel;
+  calculatedAt: number;
+}): string {
+  const payload = [
+    params.accountCurrency,
+    params.quoteCurrency,
+    params.fxPair,
+    Number(params.fxRate).toFixed(6),
+    params.fxTimestamp,
+    params.fxSource,
+    params.fxSnapshotHash,
+    params.contractSize,
+    params.lotSize,
+    params.resolvedMarginModel.marginMode,
+    params.resolvedMarginModel.effectiveLeverage,
+    Number(params.resolvedMarginModel.initialMarginRate).toFixed(4),
+    Number(params.resolvedMarginModel.maintenanceMarginRate).toFixed(4),
+    params.resolvedMarginModel.liquidationModel,
+    params.calculatedAt,
+  ].join(':');
+
+  return createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * Builds an immutable, verifiable ITradeAccountingSnapshot coupling FX provenance, contract sizing, and margin models.
+ */
+export function buildAccountingSnapshot(params: {
+  accountCurrency: CurrencyCode;
+  quoteCurrency: CurrencyCode;
+  fxResult: IFxConversionResult;
+  contractSize: number;
+  lotSize: number;
+  resolvedMarginModel: IResolvedMarginModel;
+  calculatedAt?: number;
+}): ITradeAccountingSnapshot {
+  const calcTime = params.calculatedAt ?? params.fxResult.fxTimestamp;
+  const snapshotData = {
+    accountCurrency: params.accountCurrency,
+    quoteCurrency: params.quoteCurrency,
+    fxPair: params.fxResult.fxPair,
+    fxRate: params.fxResult.fxRate,
+    fxTimestamp: params.fxResult.fxTimestamp,
+    fxSource: params.fxResult.fxSource,
+    fxSnapshotHash: params.fxResult.fxSnapshotHash,
+    contractSize: params.contractSize,
+    lotSize: params.lotSize,
+    resolvedMarginModel: params.resolvedMarginModel,
+    calculatedAt: calcTime,
+  };
+
+  const snapshotHash = computeAccountingSnapshotHash(snapshotData);
+
+  return {
+    ...snapshotData,
+    snapshotHash,
+  };
 }

@@ -1,4 +1,5 @@
 import {
+  buildAccountingSnapshot,
   CurrencyCode,
   getAuthoritativeInstrument,
   hasInstrument,
@@ -6,6 +7,7 @@ import {
   IInstrument,
   IPositionSizing,
   IResolvedMarginModel,
+  ITradeAccountingSnapshot,
   MarginMode,
   PointInTimeCurrencyConverter,
   resolveMarginModel,
@@ -361,7 +363,18 @@ export class PositionSizer {
       marginModel: resolvedMarginModel,
     });
 
-    // 15. Return Complete Institutional Position Sizing
+    // 15. Build Complete Verifiable Point-In-Time Accounting Snapshot
+    const accountingSnapshot = buildAccountingSnapshot({
+      accountCurrency,
+      quoteCurrency,
+      fxResult,
+      contractSize: effectiveContractSize,
+      lotSize: effectiveLotSize,
+      resolvedMarginModel,
+      calculatedAt: timestamp,
+    });
+
+    // 16. Return Complete Institutional Position Sizing
     return {
       accountBalance,
       riskPercentage,
@@ -389,6 +402,7 @@ export class PositionSizer {
       maintenanceMarginRequired,
       liquidationPrice,
       resolvedMarginModel,
+      accountingSnapshot,
       isValid: true,
     };
   }

@@ -1040,6 +1040,13 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
           trailStopOffsetR: 1.0,
         },
       },
+      executionConfig: {
+        fillModel: 'OHLC_PATH',
+        ambiguityMode: 'CONSERVATIVE',
+        latencyMs: 0,
+        feeModel: 'PERCENTAGE',
+        slippageModel: 'FIXED_TICKS',
+      } as any,
       status: 'GENERATED',
       createdAt: new Date(),
     };

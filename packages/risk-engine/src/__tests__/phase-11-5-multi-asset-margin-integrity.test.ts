@@ -1,9 +1,12 @@
 import {
+  buildAccountingSnapshot,
+  computeAccountingSnapshotHash,
   Direction,
   getAuthoritativeInstrument,
   hasInstrument,
   IInstrument,
   IPositionSizing,
+  ITradeAccountingSnapshot,
   PointInTimeCurrencyConverter,
   registerInstrument,
   resolveMarginModel,
@@ -1209,4 +1212,280 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       expect(liqPrice).toBe(83250);
     });
   });
+
+  // =========================================================================
+  // 22. CRYPTOGRAPHIC ACCOUNTING SNAPSHOT INTEGRITY (AI Fix 101)
+  // =========================================================================
+  describe('22. Cryptographic Accounting Snapshot & Hash Integrity', () => {
+    it('buildAccountingSnapshot constructs a comprehensive snapshot with deterministic SHA-256 hash', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      expect(snapshot.accountCurrency).toBe('INR');
+      expect(snapshot.quoteCurrency).toBe('USDT');
+      expect(snapshot.fxPair).toBe('USDT/INR');
+      expect(snapshot.fxRate).toBe(92.0);
+      expect(snapshot.fxTimestamp).toBe(1700000000000);
+      expect(snapshot.fxSource).toBe('TEST_FX');
+      expect(snapshot.fxSnapshotHash).toBeDefined();
+      expect(snapshot.contractSize).toBe(1);
+      expect(snapshot.lotSize).toBe(0.001);
+      expect(snapshot.resolvedMarginModel).toEqual(marginModel);
+      expect(snapshot.snapshotHash).toBeDefined();
+      expect(snapshot.snapshotHash.length).toBe(64); // SHA-256 hex length
+
+      // Verify re-computing the hash produces the exact same hash
+      const recomputedHash = computeAccountingSnapshotHash(snapshot);
+      expect(recomputedHash).toBe(snapshot.snapshotHash);
+    });
+
+    it('PositionSizer populates accountingSnapshot with valid SHA-256 snapshotHash', () => {
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: 500000,
+        riskPercentage: 1.0,
+        entryPrice: 90000,
+        stopLoss: 88000,
+        symbol: 'BTCUSDT',
+        requestedLeverage: 10,
+        timestamp: 1700000000000,
+      });
+
+      expect(sizing.isValid).toBe(true);
+      expect(sizing.accountingSnapshot).toBeDefined();
+      expect(sizing.accountingSnapshot?.accountCurrency).toBe('INR');
+      expect(sizing.accountingSnapshot?.quoteCurrency).toBe('USDT');
+      expect(sizing.accountingSnapshot?.fxRate).toBe(92.0);
+      expect(sizing.accountingSnapshot?.fxTimestamp).toBe(1700000000000);
+      expect(sizing.accountingSnapshot?.fxSource).toBe('TEST_FX');
+      expect(sizing.accountingSnapshot?.snapshotHash).toBeDefined();
+
+      const verifiedHash = computeAccountingSnapshotHash(sizing.accountingSnapshot!);
+      expect(verifiedHash).toBe(sizing.accountingSnapshot?.snapshotHash);
+    });
+  });
+
+  // =========================================================================
+  // 23. DETERMINISTIC HISTORICAL REPLAY VERIFICATION (AI Fix 101)
+  // =========================================================================
+  describe('23. Deterministic Historical Replay Verification', () => {
+    it('Replaying historical sizing with identical accounting snapshot reproduces byte-identical accounting', () => {
+      const run1 = PositionSizer.calculatePosition({
+        accountBalance: 1000000,
+        riskPercentage: 2.0,
+        entryPrice: 92000,
+        stopLoss: 89000,
+        symbol: 'BTCUSDT',
+        requestedLeverage: 5,
+        timestamp: 1700000000000,
+      });
+
+      const run2 = PositionSizer.calculatePosition({
+        accountBalance: 1000000,
+        riskPercentage: 2.0,
+        entryPrice: 92000,
+        stopLoss: 89000,
+        symbol: 'BTCUSDT',
+        requestedLeverage: 5,
+        timestamp: 1700000000000,
+      });
+
+      expect(run1.isValid).toBe(true);
+      expect(run2.isValid).toBe(true);
+      expect(run1.roundedUnits).toBe(run2.roundedUnits);
+      expect(run1.initialMarginRequired).toBe(run2.initialMarginRequired);
+      expect(run1.positionNotionalAccount).toBe(run2.positionNotionalAccount);
+      expect(run1.accountingSnapshot?.snapshotHash).toBe(run2.accountingSnapshot?.snapshotHash);
+    });
+
+    it('TradeLifecycleManager attaches deterministic accountingSnapshot to completed trade', () => {
+      const lot: PositionLot = {
+        id: 'lot_btc_replay',
+        tradeId: 'tr_btc_replay',
+        symbol: 'BTCUSDT',
+        direction: Direction.BULLISH,
+        initialQuantity: 0.01,
+        remainingQuantity: 0,
+        entryPrice: 90000,
+        entryTime: 1700000000000,
+        initialStopLoss: 88000,
+        currentStopLoss: 88000,
+        tp1: 93000,
+        tp2: 96000,
+        tp3: 99000,
+        realizedPnl: 60.0,
+        unrealizedPnl: 0,
+        realizedR: 3.0,
+        status: 'CLOSED',
+        openedAt: 1700000000000,
+        closedAt: 1700000060000,
+        mae: 0,
+        mfe: 0,
+        partialFills: [
+          {
+            fillId: 'f1',
+            targetType: 'ENTRY',
+            timestamp: 1700000000000,
+            price: 90000,
+            quantity: 0.01,
+            remainingQuantity: 0.01,
+            realizedPnl: 0,
+            realizedR: 0,
+            fee: 0,
+            slippage: 0,
+          },
+          {
+            fillId: 'f2',
+            targetType: 'TP2',
+            timestamp: 1700000060000,
+            price: 96000,
+            quantity: 0.01,
+            remainingQuantity: 0,
+            realizedPnl: 60.0,
+            realizedR: 3.0,
+            fee: 0,
+            slippage: 0,
+          },
+        ],
+        events: [],
+      };
+
+      const trade = TradeLifecycleManager.createCompletedTrade(
+        lot,
+        SignalState.TP2_HIT,
+        'OHLC_PATH',
+        'CONSERVATIVE',
+        lot.tradeId,
+        { leverage: 10, fxRate: 92.0 },
+      );
+
+      expect(trade.accountingSnapshot).toBeDefined();
+      expect(trade.accountingSnapshot?.accountCurrency).toBe('INR');
+      expect(trade.accountingSnapshot?.quoteCurrency).toBe('USDT');
+      expect(trade.accountingSnapshot?.fxRate).toBe(92.0);
+      expect(trade.accountingSnapshot?.resolvedMarginModel.effectiveLeverage).toBe(10);
+      expect(trade.accountingSnapshot?.snapshotHash).toBeDefined();
+    });
+  });
+
+  // =========================================================================
+  // 24. TAMPER DETECTION & CRYPTOGRAPHIC PROVENANCE DEFENSE (AI Fix 101)
+  // =========================================================================
+  describe('24. Tamper Detection & Cryptographic Provenance Defense', () => {
+    it('Altering FX rate, timestamp, source, or margin model changes snapshotHash', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const baseSnapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      // 1. Tamper with FX rate (92.0 -> 92.01)
+      const tamperedRate: ITradeAccountingSnapshot = {
+        ...baseSnapshot,
+        fxRate: 92.01,
+      };
+      expect(computeAccountingSnapshotHash(tamperedRate)).not.toBe(baseSnapshot.snapshotHash);
+
+      // 2. Tamper with FX timestamp
+      const tamperedTime: ITradeAccountingSnapshot = {
+        ...baseSnapshot,
+        fxTimestamp: 1700000001000,
+      };
+      expect(computeAccountingSnapshotHash(tamperedTime)).not.toBe(baseSnapshot.snapshotHash);
+
+      // 3. Tamper with FX source
+      const tamperedSource: ITradeAccountingSnapshot = {
+        ...baseSnapshot,
+        fxSource: 'SPOOFED_FEED',
+      };
+      expect(computeAccountingSnapshotHash(tamperedSource)).not.toBe(baseSnapshot.snapshotHash);
+
+      // 4. Tamper with leverage in margin model
+      const tamperedMargin: ITradeAccountingSnapshot = {
+        ...baseSnapshot,
+        resolvedMarginModel: {
+          ...baseSnapshot.resolvedMarginModel,
+          effectiveLeverage: 20,
+        },
+      };
+      expect(computeAccountingSnapshotHash(tamperedMargin)).not.toBe(baseSnapshot.snapshotHash);
+    });
+  });
+
+  // =========================================================================
+  // 25. CROSS-CURRENCY PNL VIA ACCOUNTING SNAPSHOT (AI Fix 101)
+  // =========================================================================
+  describe('25. Cross-Currency P&L via Accounting Snapshot & FX Snapshot', () => {
+    it('calculateTradePnl consumes ITradeAccountingSnapshot directly and attaches it to result', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 90000,
+        exitPrice: 95000,
+        quantity: 0.1,
+        direction: 'LONG',
+        accountingSnapshot: snapshot,
+      });
+
+      // Gross USDT = 500 USDT
+      expect(pnl.grossPnlQuote).toBe(500);
+      // Gross INR = 500 * 92.0 = ₹46,000 INR
+      expect(pnl.grossPnlAccount).toBe(46000);
+      expect(pnl.netPnlAccount).toBe(46000);
+      expect(pnl.accountingSnapshot).toBe(snapshot);
+      expect(pnl.accountingSnapshot?.snapshotHash).toBe(snapshot.snapshotHash);
+    });
+
+    it('calculateTradePnl consumes IFxConversionResult directly and builds accountingSnapshot', () => {
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 90000,
+        exitPrice: 95000,
+        quantity: 0.1,
+        direction: 'LONG',
+        quoteCurrency: 'USDT',
+        accountCurrency: 'INR',
+        fxSnapshot: fx,
+      });
+
+      expect(pnl.grossPnlQuote).toBe(500);
+      expect(pnl.grossPnlAccount).toBe(46000);
+      expect(pnl.accountingSnapshot).toBeDefined();
+      expect(pnl.accountingSnapshot?.fxSource).toBe('TEST_FX');
+      expect(pnl.accountingSnapshot?.fxPair).toBe('USDT/INR');
+      expect(pnl.accountingSnapshot?.snapshotHash).toBeDefined();
+    });
+  });
 });
+

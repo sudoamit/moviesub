@@ -1,8 +1,11 @@
 import {
+  buildAccountingSnapshot,
   CurrencyCode,
   Direction,
+  IFxConversionResult,
   isLongPosition,
   IResolvedMarginModel,
+  ITradeAccountingSnapshot,
   LiquidationModel,
   MarginMode,
 } from '@quant/shared';
@@ -14,6 +17,7 @@ export interface ITradeMarginCalculation {
   maintenanceMarginRequired: number; // in INR
   leverage: number;
   marginMode: MarginMode;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface ITradePnlCalculation {
@@ -23,6 +27,7 @@ export interface ITradePnlCalculation {
   realizedR: number;
   fees: number;
   slippage: number;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface ILiquidationCalculationParams {
@@ -49,6 +54,8 @@ export interface ITradePnlParams {
   slippage?: number;
   slippageIncludedInPrices?: boolean;
   initialRiskAccount?: number;
+  fxSnapshot?: IFxConversionResult;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export class TradeAccountingEngine {
@@ -289,6 +296,7 @@ export class TradeAccountingEngine {
     let slipIncluded: boolean;
     let qCurr: CurrencyCode | undefined;
     let aCurr: CurrencyCode | undefined;
+    let acctSnap: ITradeAccountingSnapshot | undefined;
 
     if (typeof paramsOrEntryPrice === 'object') {
       pEntry = paramsOrEntryPrice.entryPrice;
@@ -296,13 +304,32 @@ export class TradeAccountingEngine {
       qty = paramsOrEntryPrice.quantity;
       dir = paramsOrEntryPrice.direction;
       cSize = paramsOrEntryPrice.contractSize ?? 1;
-      qCurr = paramsOrEntryPrice.quoteCurrency;
-      aCurr = paramsOrEntryPrice.accountCurrency ?? 'INR';
-      fx = paramsOrEntryPrice.fxRate;
+      qCurr = paramsOrEntryPrice.quoteCurrency ?? paramsOrEntryPrice.accountingSnapshot?.quoteCurrency;
+      aCurr = paramsOrEntryPrice.accountCurrency ?? paramsOrEntryPrice.accountingSnapshot?.accountCurrency ?? 'INR';
+      fx = paramsOrEntryPrice.fxRate ?? paramsOrEntryPrice.accountingSnapshot?.fxRate ?? paramsOrEntryPrice.fxSnapshot?.fxRate;
       feeAmount = paramsOrEntryPrice.fees ?? 0;
       slipAmount = paramsOrEntryPrice.slippage ?? 0;
       riskAcct = paramsOrEntryPrice.initialRiskAccount ?? 0;
       slipIncluded = paramsOrEntryPrice.slippageIncludedInPrices ?? true;
+      acctSnap = paramsOrEntryPrice.accountingSnapshot;
+
+      if (!acctSnap && paramsOrEntryPrice.fxSnapshot) {
+        const defaultMarginModel: IResolvedMarginModel = {
+          marginMode: 'SPOT',
+          effectiveLeverage: 1,
+          initialMarginRate: 1.0,
+          maintenanceMarginRate: 0.0,
+          liquidationModel: 'SPOT_NONE',
+        };
+        acctSnap = buildAccountingSnapshot({
+          accountCurrency: aCurr ?? 'INR',
+          quoteCurrency: qCurr ?? (paramsOrEntryPrice.fxSnapshot.fxPair.split('/')[0] as CurrencyCode),
+          fxResult: paramsOrEntryPrice.fxSnapshot,
+          contractSize: cSize,
+          lotSize: qty,
+          resolvedMarginModel: defaultMarginModel,
+        });
+      }
     } else {
       pEntry = paramsOrEntryPrice;
       pExit = exitPrice ?? 0;
@@ -368,6 +395,7 @@ export class TradeAccountingEngine {
       realizedR,
       fees: safeFees,
       slippage: safeSlippage,
+      accountingSnapshot: acctSnap,
     };
   }
 }
