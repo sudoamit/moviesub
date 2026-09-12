@@ -1310,4 +1310,109 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       });
     }).rejects.toThrow(/POINT_IN_TIME_SKEW_ERROR/);
   });
+
+  it('Issue 4: proves crash at final commit boundary (DecisionPair persisted, crash leaves stale lock file) cleans up lock residue on restart without blocking or double-submitting', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_commit_crash_test');
+    const testFile = path.join(testDir, 'commit-crash-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const liveOrders: string[] = [];
+      const mockLivePort: ILiveExecutionPort = {
+        isLiveBroker: true,
+        submitLiveOrder: jest.fn().mockImplementation(async (dec: TradingDecision) => {
+          liveOrders.push(dec.decisionId);
+          return { liveOrderId: 'live-order-commit-crash', status: 'PLACED' };
+        }),
+        cancelLiveOrder: jest.fn().mockResolvedValue(true),
+      };
+
+      const candles = generateCandles(60, 'BULLISH');
+      const lastCandle = candles[candles.length - 1];
+      const eventTime = lastCandle.timestamp.getTime();
+
+      const marketEvent: LiveMarketEvent = {
+        snapshotId: 'snap-commit-crash-01',
+        symbol: 'BTCUSDT',
+        candles,
+        timestamp: eventTime,
+        bid: 99.5,
+        ask: 100.5,
+        volume: 10,
+      };
+
+      const portfolioState: LivePortfolioAccountState = {
+        portfolioId: 'port-commit-crash-1',
+        cash: 100000,
+        equity: 100000,
+        openPositions: [],
+        timestamp: eventTime,
+      };
+
+      const strategyConfig = {
+        deterministicSignal: {
+          direction: Direction.BULLISH,
+          score: 95,
+          entryPrice: 100,
+          stopLoss: 95,
+          takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+        },
+      };
+
+      const store1 = new FileShadowExecutionStore(testFile);
+      const pipeline1 = new ProductionTradingPipeline({
+        store: store1,
+        liveExecutionPort: mockLivePort,
+        shadowExecutionPort: new ShadowExecutionSimulator(),
+        championModel,
+        challengerModel,
+        strategyConfig,
+      });
+
+      // 1. First execution succeeds and persists DecisionPair
+      const { championDecision, pairPromise } = await pipeline1.processMarketEvent(marketEvent, portfolioState);
+      const pair = await pairPromise;
+      expect(pair).toBeDefined();
+      expect(liveOrders.length).toBe(1);
+
+      // 2. Simulate crash at final commit boundary:
+      // DecisionPair is already persisted in store file, but a stale .lock file is left on disk
+      const lockFile = path.join(testDir, `.lock.${marketEvent.snapshotId}.${championModel.modelId}`);
+      const staleLockData = {
+        snapshotId: marketEvent.snapshotId,
+        modelId: championModel.modelId,
+        status: 'COMMITTED',
+        reservationToken: 'stale-pre-crash-token',
+        epoch: 1,
+        reservedAt: Date.now(),
+        lastUpdatedAt: Date.now(),
+      };
+      fs.writeFileSync(lockFile, JSON.stringify(staleLockData), 'utf-8');
+      expect(fs.existsSync(lockFile)).toBe(true);
+
+      // 3. Fresh process starts up on restart
+      const store2 = new FileShadowExecutionStore(testFile);
+      const pipeline2 = new ProductionTradingPipeline({
+        store: store2,
+        liveExecutionPort: mockLivePort,
+        shadowExecutionPort: new ShadowExecutionSimulator(),
+        championModel,
+        challengerModel,
+        strategyConfig,
+      });
+
+      // 4. Process the same market event again on restart:
+      // Invariant: recognizes existing COMMITTED execution, cleans up stale lock residue, does NOT throw lock error
+      const retryResult = await pipeline2.processMarketEvent(marketEvent, portfolioState);
+      expect(retryResult.championDecision.decisionId).toBe(championDecision.decisionId);
+
+      // 5. Invariant: NO duplicate live order placed, NO second DecisionPair
+      expect(liveOrders.length).toBe(1);
+      expect(store2.getAllPairs().length).toBe(1);
+      expect(fs.existsSync(lockFile)).toBe(false); // Stale lock was cleaned up
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });

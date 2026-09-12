@@ -528,7 +528,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   }
 
   /**
-   * Deterministic recovery for interrupted retry claims or crashed workers.
+   * Deterministic recovery for interrupted retry claims or crashed workers with generation/epoch validation.
    */
   private recoverInterruptedClaim(snapshotId: string, modelId: string): void {
     const dir = path.dirname(this.filePath);
@@ -537,8 +537,27 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     const prefix = `.claim.${snapshotId}.${modelId}.`;
 
+    // 1. If DecisionPair already exists in persistent store, any lock or claim is obsolete post-commit residue
+    if (this.getDecisionPairBySnapshotAndModel(snapshotId, modelId) || this.getDecisionPairBySnapshot(snapshotId)) {
+      if (fs.existsSync(lockFile)) {
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
+      try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          if (file.startsWith(prefix)) {
+            try { fs.unlinkSync(path.join(dir, file)); } catch {}
+          }
+        }
+      } catch {}
+      return;
+    }
+
+    // 2. Scan claim files and validate generation/epoch against current state
     try {
       const files = fs.readdirSync(dir);
+      const claimCandidates: Array<{ path: string; reservation: ExecutionReservation }> = [];
+
       for (const file of files) {
         if (file.startsWith(prefix)) {
           const claimPath = path.join(dir, file);
@@ -546,18 +565,38 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
             const content = fs.readFileSync(claimPath, 'utf-8');
             const claimReservation = JSON.parse(content) as ExecutionReservation;
             if (claimReservation && (claimReservation.status === 'RESERVED' || claimReservation.status === 'FAILED_RETRYABLE')) {
-              if (!fs.existsSync(lockFile)) {
-                // Canonical lock was missing due to crash during rename -> restore canonical lock atomically
-                fs.renameSync(claimPath, lockFile);
-                this.memoryStore.saveReservation(claimReservation);
-              } else {
-                // Canonical lock already present -> remove obsolete temp claim file
-                fs.unlinkSync(claimPath);
-              }
+              claimCandidates.push({ path: claimPath, reservation: claimReservation });
+            } else {
+              try { fs.unlinkSync(claimPath); } catch {}
             }
           } catch {
-            // Ignore malformed temporary file
+            try { fs.unlinkSync(claimPath); } catch {}
           }
+        }
+      }
+
+      if (fs.existsSync(lockFile)) {
+        try {
+          const lockContent = fs.readFileSync(lockFile, 'utf-8');
+          const lockReservation = JSON.parse(lockContent) as ExecutionReservation;
+          // Unlink all claims with epoch <= lockReservation.epoch (they are obsolete prior generations)
+          for (const claim of claimCandidates) {
+            if (claim.reservation.epoch <= lockReservation.epoch) {
+              try { fs.unlinkSync(claim.path); } catch {}
+            }
+          }
+        } catch {}
+      } else if (claimCandidates.length > 0) {
+        // Lock file is missing -> find authoritative claim with highest monotonic epoch
+        claimCandidates.sort((a, b) => b.reservation.epoch - a.reservation.epoch);
+        const best = claimCandidates[0];
+        try {
+          fs.renameSync(best.path, lockFile);
+          this.memoryStore.saveReservation(best.reservation);
+        } catch {}
+        // Clean up any remaining older claims
+        for (let i = 1; i < claimCandidates.length; i++) {
+          try { fs.unlinkSync(claimCandidates[i].path); } catch {}
         }
       }
     } catch {}
@@ -660,15 +699,36 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   }
 
   public getDecisionPair(pairId: string): ChampionChallengerDecisionPair | undefined {
-    return this.memoryStore.getDecisionPair(pairId);
+    const pair = this.memoryStore.getDecisionPair(pairId);
+    if (pair) {
+      this.cleanupStaleLocksForPair(pair);
+    }
+    return pair;
   }
 
   public getDecisionPairBySnapshot(snapshotId: string): ChampionChallengerDecisionPair | undefined {
-    return this.memoryStore.getDecisionPairBySnapshot(snapshotId);
+    const pair = this.memoryStore.getDecisionPairBySnapshot(snapshotId);
+    if (pair) {
+      this.cleanupStaleLocksForPair(pair);
+    }
+    return pair;
   }
 
   public getDecisionPairBySnapshotAndModel(snapshotId: string, challengerModelId: string): ChampionChallengerDecisionPair | undefined {
-    return this.memoryStore.getDecisionPairBySnapshotAndModel(snapshotId, challengerModelId);
+    const pair = this.memoryStore.getDecisionPairBySnapshotAndModel(snapshotId, challengerModelId);
+    if (pair) {
+      this.cleanupStaleLocksForPair(pair);
+    }
+    return pair;
+  }
+
+  private cleanupStaleLocksForPair(pair: ChampionChallengerDecisionPair): void {
+    const challengerModelId = pair.challengerDecision?.context?.modelIdentity?.modelId || 'default';
+    const champModelId = pair.championDecision?.context?.modelIdentity?.modelId || 'default';
+    const lock1 = this.getLockFilePath(pair.snapshotId, challengerModelId);
+    const lock2 = this.getLockFilePath(pair.snapshotId, champModelId);
+    if (fs.existsSync(lock1)) { try { fs.unlinkSync(lock1); } catch {} }
+    if (fs.existsSync(lock2)) { try { fs.unlinkSync(lock2); } catch {} }
   }
 
   public saveShadowOrder(order: ShadowOrder): void {
@@ -710,8 +770,11 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     if (!snapshotId || !modelId) return { acquired: false };
     const lockFile = this.getLockFilePath(snapshotId, modelId);
 
-    // If pair already exists in persistent store, reject new execution
+    // If pair already exists in persistent store, clean up any post-commit crash lock residue and reject
     if (this.getDecisionPairBySnapshotAndModel(snapshotId, modelId) || this.getDecisionPairBySnapshot(snapshotId)) {
+      if (fs.existsSync(lockFile)) {
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
       return { acquired: false, currentStatus: 'COMMITTED' };
     }
 
@@ -720,7 +783,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    // Check and recover any interrupted retry claim first
+    // Check and recover any interrupted retry claim first with epoch validation
     this.recoverInterruptedClaim(snapshotId, modelId);
 
     const reservationToken = randomUUID();
@@ -802,9 +865,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       return false;
     }
 
-    const success = this.memoryStore.updateReservationStatus(snapshotId, modelId, status, reservationToken);
-    if (!success) return false;
-
+    // 1. File-first durable persistence
     if (fs.existsSync(lockFile)) {
       try {
         const data: ExecutionReservation = {
@@ -817,15 +878,25 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
           lastUpdatedAt: Date.now(),
         };
         fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
-        return true;
       } catch {
         return false;
       }
     }
-    return true;
+
+    // 2. Memory store synchronization
+    return this.memoryStore.updateReservationStatus(snapshotId, modelId, status, reservationToken);
   }
 
   public getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined {
+    // If DecisionPair is already persisted, any lock residue is obsolete
+    if (this.getDecisionPairBySnapshotAndModel(snapshotId, modelId) || this.getDecisionPairBySnapshot(snapshotId)) {
+      const lockFile = this.getLockFilePath(snapshotId, modelId);
+      if (fs.existsSync(lockFile)) {
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
+      return undefined;
+    }
+
     this.recoverInterruptedClaim(snapshotId, modelId);
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     if (fs.existsSync(lockFile)) {
@@ -852,14 +923,15 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       return false;
     }
 
-    this.memoryStore.commitExecution(snapshotId, modelId, reservationToken);
-
+    // 1. Durable file state: delete lockfile from disk FIRST
     if (fs.existsSync(lockFile)) {
       try {
         fs.unlinkSync(lockFile);
       } catch {}
     }
-    return true;
+
+    // 2. Memory store synchronization
+    return this.memoryStore.commitExecution(snapshotId, modelId, reservationToken);
   }
 
   public releaseExecution(
@@ -882,8 +954,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       return false;
     }
 
-    this.memoryStore.releaseExecution(snapshotId, modelId, status, reservationToken);
-
+    // 1. Durable file state: write lock file on disk FIRST
     if (fs.existsSync(lockFile)) {
       try {
         const data: ExecutionReservation = {
@@ -898,7 +969,9 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
         fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
       } catch {}
     }
-    return true;
+
+    // 2. Memory store synchronization
+    return this.memoryStore.releaseExecution(snapshotId, modelId, status, reservationToken);
   }
 
   public reconcileExecution(
