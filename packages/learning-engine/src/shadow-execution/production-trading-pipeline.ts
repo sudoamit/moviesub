@@ -34,7 +34,7 @@ import {
   validatePointInTimeSimultaneity,
   createDecisionPair
 } from './shadow-decision-orchestrator';
-import { IShadowExecutionStore } from './shadow-execution-store';
+import { IShadowExecutionStore, ExecutionReservationStatus } from './shadow-execution-store';
 import { deepFreeze } from '../champion-challenger/evaluation-identity';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
@@ -206,11 +206,13 @@ export class ProductionTradingPipeline {
     // 5. Audit Persistence upfront before live execution
     this.config.store.saveSnapshot(marketSnapshot);
 
-    // 6. Pre-Execution Reservation / Concurrency Lock (prevents parallel duplicate live orders)
-    const acquired = this.config.store.reserveExecution(
+    // 6. Pre-Execution Reservation / Concurrency Lock with Monotonic Fencing Token
+    const acquireResult = this.config.store.reserveExecution(
       marketSnapshot.snapshotId,
       this.config.championModel.modelId
     );
+    const acquired = typeof acquireResult === 'boolean' ? acquireResult : acquireResult.acquired;
+    const reservationToken = typeof acquireResult === 'object' ? acquireResult.reservationToken : undefined;
 
     if (!acquired) {
       const existing = this.config.store.getDecisionPairBySnapshotAndModel(
@@ -230,7 +232,8 @@ export class ProductionTradingPipeline {
     this.config.store.updateReservationStatus(
       marketSnapshot.snapshotId,
       this.config.championModel.modelId,
-      'EXECUTING'
+      'EXECUTING',
+      reservationToken
     );
 
     // 7. Base strategy & feature signal generation
@@ -445,7 +448,8 @@ export class ProductionTradingPipeline {
         this.config.store.updateReservationStatus(
           marketSnapshot.snapshotId,
           this.config.championModel.modelId,
-          'LIVE_SUBMITTED'
+          'LIVE_SUBMITTED',
+          reservationToken
         );
         // Persist champion decision durably immediately upon live broker acceptance
         this.config.store.saveDecision(championDecision);
@@ -458,14 +462,16 @@ export class ProductionTradingPipeline {
         this.config.store.releaseExecution(
           marketSnapshot.snapshotId,
           this.config.championModel.modelId,
-          'EXECUTION_UNKNOWN'
+          'EXECUTION_UNKNOWN',
+          reservationToken
         );
       } else {
         // Pre-broker local failure (e.g. calculation exception before broker call): release as FAILED_RETRYABLE
         this.config.store.releaseExecution(
           marketSnapshot.snapshotId,
           this.config.championModel.modelId,
-          'FAILED_RETRYABLE'
+          'FAILED_RETRYABLE',
+          reservationToken
         );
       }
       throw err;
@@ -609,7 +615,8 @@ export class ProductionTradingPipeline {
         // Durable commit: reservation transition to COMMITTED occurs only after DecisionPair is persisted
         this.config.store.commitExecution(
           marketSnapshot.snapshotId,
-          this.config.championModel.modelId
+          this.config.championModel.modelId,
+          reservationToken
         );
 
         return pair;
@@ -629,14 +636,23 @@ export class ProductionTradingPipeline {
    */
   public reconcileUnknownExecution(
     snapshotId: string,
-    brokerStatus: 'FOUND' | 'NOT_FOUND',
-    liveOrder?: any
+    brokerStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
+    options?: {
+      liveOrder?: any;
+      championDecision?: TradingDecision;
+      challengerDecision?: TradingDecision;
+      pair?: ChampionChallengerDecisionPair;
+    } | any
   ) {
-    return this.config.store.reconcileUnknownExecution(
+    const opts = (options && typeof options === 'object' && ('championDecision' in options || 'pair' in options || 'liveOrder' in options))
+      ? options
+      : { liveOrder: options };
+
+    return this.config.store.reconcileExecution(
       snapshotId,
       this.config.championModel.modelId,
       brokerStatus,
-      liveOrder
+      opts
     );
   }
 }

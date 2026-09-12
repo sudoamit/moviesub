@@ -19,7 +19,8 @@ import {
   computeDecisionFingerprint,
   ShadowOutcomeEvaluator,
   TradingAction,
-  TradingDecision
+  TradingDecision,
+  ChampionChallengerDecisionPair
 } from '../shadow-execution/index';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
@@ -394,21 +395,25 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
         const { workerData, parentPort } = require('worker_threads');
         const fs = require('fs');
         const path = require('path');
+        const crypto = require('crypto');
 
         const { testFile, snapshotId, modelId } = workerData;
         const dir = path.dirname(testFile);
         const lockFile = path.join(dir, '.lock.' + snapshotId + '.' + modelId);
 
         try {
+          const reservationToken = crypto.randomUUID();
           const reservationData = {
             snapshotId,
             modelId,
             status: 'RESERVED',
+            reservationToken,
+            epoch: 1,
             reservedAt: Date.now(),
             lastUpdatedAt: Date.now(),
           };
           fs.writeFileSync(lockFile, JSON.stringify(reservationData), { flag: 'wx' });
-          parentPort.postMessage({ acquired: true });
+          parentPort.postMessage({ acquired: true, reservationToken });
         } catch (err) {
           if (err.code === 'EEXIST') {
             parentPort.postMessage({ acquired: false, code: 'EEXIST' });
@@ -419,7 +424,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       `;
 
       const runWorker = () => {
-        return new Promise<{ acquired: boolean; code?: string }>((resolve, reject) => {
+        return new Promise<{ acquired: boolean; code?: string; reservationToken?: string }>((resolve, reject) => {
           const worker = new Worker(workerScript, {
             eval: true,
             workerData: { testFile, snapshotId, modelId },
@@ -515,7 +520,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     }
   });
 
-  it('Problem #6: proves atomic claim file prevents race conditions when transitioning FAILED_RETRYABLE -> RESERVED across workers', async () => {
+  it('Problem #6: proves POSIX rename atomic CAS prevents race conditions when transitioning FAILED_RETRYABLE -> RESERVED across workers without claim file leaks', async () => {
     const testDir = path.join(__dirname, 'temp_prod_retry_claim_test');
     const testFile = path.join(testDir, 'retry-claim-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
@@ -528,8 +533,11 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
       // 1. Initial reservation fails with retryable error
       const reserved = store.reserveExecution(snapshotId, modelId);
-      expect(reserved).toBe(true);
-      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE');
+      expect(reserved.acquired).toBe(true);
+      expect(reserved.reservationToken).toBeDefined();
+      expect(reserved.epoch).toBe(1);
+
+      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE', reserved.reservationToken);
 
       const existingRes = store.getReservation(snapshotId, modelId);
       expect(existingRes?.status).toBe('FAILED_RETRYABLE');
@@ -547,18 +555,67 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
         Promise.resolve().then(() => store4.reserveExecution(snapshotId, modelId)),
       ]);
 
-      const successCount = claimResults.filter((r) => r === true).length;
-      const rejectedCount = claimResults.filter((r) => r === false).length;
+      const successCount = claimResults.filter((r) => r.acquired === true).length;
+      const rejectedCount = claimResults.filter((r) => r.acquired === false).length;
 
-      // STRICT ATOMICITY INVARIANT: Exactly 1 worker claims the retry, all 3 other workers are rejected
+      // STRICT ATOMICITY INVARIANT: Exactly 1 worker claims the retry with incremented epoch, all 3 other workers are rejected
       expect(successCount).toBe(1);
       expect(rejectedCount).toBe(3);
+
+      const winner = claimResults.find((r) => r.acquired === true)!;
+      expect(winner.epoch).toBe(2);
+      expect(winner.reservationToken).toBeDefined();
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
 
-  it('Problem #8: proves EXECUTION_UNKNOWN reconciliation contract enables operational recovery', async () => {
+  it('Problem #9: proves ownership fencing token rejects stale worker commits and status updates', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_fencing_test');
+    const testFile = path.join(testDir, 'fencing-shadow.json');
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    fs.mkdirSync(testDir, { recursive: true });
+
+    try {
+      const store = new FileShadowExecutionStore(testFile);
+      const snapshotId = 'snap-fencing-01';
+      const modelId = 'champ-v1-prod';
+
+      // 1. Worker A acquires reservation
+      const resA = store.reserveExecution(snapshotId, modelId);
+      expect(resA.acquired).toBe(true);
+      const tokenA = resA.reservationToken!;
+
+      // 2. Worker A experiences transient failure and releases as FAILED_RETRYABLE
+      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE', tokenA);
+
+      // 3. Worker B acquires the reservation with a new token (tokenB)
+      const resB = store.reserveExecution(snapshotId, modelId);
+      expect(resB.acquired).toBe(true);
+      const tokenB = resB.reservationToken!;
+      expect(tokenB).not.toBe(tokenA);
+      expect(resB.epoch).toBe(2);
+
+      // 4. Stale Worker A attempts to mutate status using old tokenA -> REJECTED
+      const staleUpdate = store.updateReservationStatus(snapshotId, modelId, 'LIVE_SUBMITTED', tokenA);
+      expect(staleUpdate).toBe(false);
+
+      // 5. Stale Worker A attempts to commit using old tokenA -> REJECTED
+      const staleCommit = store.commitExecution(snapshotId, modelId, tokenA);
+      expect(staleCommit).toBe(false);
+
+      // Current reservation on disk is still owned by Worker B
+      expect(store.getReservation(snapshotId, modelId)?.reservationToken).toBe(tokenB);
+
+      // 6. Legitimate Worker B commits using tokenB -> SUCCEEDS
+      const legitCommit = store.commitExecution(snapshotId, modelId, tokenB);
+      expect(legitCommit).toBe(true);
+    } finally {
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Problem #8 & #4 & #5: proves tri-state broker reconciliation contract with durable DecisionPair persistence', async () => {
     const testDir = path.join(__dirname, 'temp_prod_reconcile_test');
     const testFile = path.join(testDir, 'reconcile-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
@@ -574,12 +631,96 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       store.releaseExecution(snapshotId, modelId, 'EXECUTION_UNKNOWN');
       expect(store.getReservation(snapshotId, modelId)?.status).toBe('EXECUTION_UNKNOWN');
 
-      // 2. Reconciliation scenario A: Order FOUND on broker -> transitions to COMMITTED and cleans transient lock
-      const reconcileFound = store.reconcileUnknownExecution(snapshotId, modelId, 'FOUND', { orderId: 'broker-123' });
+      // Scenario A: BROKER_STILL_UNKNOWN (e.g. broker API 500 error / unreachable during reconciliation) -> FAILS CLOSED
+      const reconcileUnknown = store.reconcileUnknownExecution(snapshotId, modelId, 'BROKER_STILL_UNKNOWN');
+      expect(reconcileUnknown.reconciled).toBe(false);
+      expect(reconcileUnknown.newStatus).toBe('EXECUTION_UNKNOWN');
+      expect(store.getReservation(snapshotId, modelId)?.status).toBe('EXECUTION_UNKNOWN');
+
+      // Scenario B: Order FOUND on broker -> durably persists DecisionPair and commits
+      const dummyChampionDecision: TradingDecision = {
+        decisionId: 'dec-champ-rec-1',
+        action: 'BUY',
+        confidence: 0.9,
+        signal: 'BULLISH_SMC',
+        entryPrice: 100000,
+        positionSize: 1,
+        riskAmount: 1000,
+        reason: 'Reconciled broker order',
+        decisionFingerprint: 'fp-champ-rec',
+        latencies: {
+          marketTimestamp: 1700000000000,
+          featureStartTimestamp: 1700000000000,
+          featureEndTimestamp: 1700000000005,
+          modelStartTimestamp: 1700000000005,
+          modelEndTimestamp: 1700000000010,
+          decisionTimestamp: 1700000000010,
+          dataToDecisionLatencyMs: 10,
+          featureLatencyMs: 5,
+          modelLatencyMs: 5,
+          totalDecisionLatencyMs: 10,
+        },
+        context: {
+          decisionId: 'dec-champ-rec-1',
+          snapshotId,
+          snapshotHash: 'hash-snap-rec',
+          decisionTimestamp: 1700000000010,
+          instrument: { symbol: 'BTCUSDT', market: 'BINANCE_SPOT' },
+          marketSnapshot: {} as any,
+          portfolioSnapshot: {} as any,
+          featureVersion: '2.0',
+          featureSchemaHash: 'fhash',
+          featureInputHash: 'fin',
+          featureDataCutoff: 1700000000000,
+          strategyVersion: 'v1.0',
+          strategyConfigHash: 'strat_hash',
+          executionConfigVersion: 'e1.0',
+          executionConfigHash: 'ehash',
+          riskConfigVersion: 'r1.0',
+          riskConfigHash: 'rhash',
+          costConfigVersion: 'c1.0',
+          costConfigHash: 'chash',
+          portfolioStateVersion: 'p1.0',
+          portfolioStateHash: 'phash',
+          modelIdentity: championModel,
+          evaluationFingerprint: 'efp',
+          mode: 'LIVE',
+          modelRole: 'CHAMPION',
+        },
+      };
+
+      const dummyPair: ChampionChallengerDecisionPair = {
+        pairId: 'pair-rec-1',
+        snapshotId,
+        snapshotHash: 'hash-snap-rec',
+        decisionTimestamp: 1700000000010,
+        championDecisionId: 'dec-champ-rec-1',
+        challengerDecisionId: 'dec-chall-rec-1',
+        championModelIdentity: championModel,
+        challengerModelIdentity: challengerModel,
+        championEvaluationFingerprint: 'efp-champ',
+        challengerEvaluationFingerprint: 'efp-chall',
+        championDecision: dummyChampionDecision,
+        challengerDecision: { ...dummyChampionDecision, decisionId: 'dec-chall-rec-1', context: { ...dummyChampionDecision.context, mode: 'SHADOW', modelRole: 'CHALLENGER' } },
+        divergence: 'AGREE',
+        divergenceType: 'AGREE',
+        decisionPairFingerprint: 'fp-pair-rec',
+      };
+
+      const reconcileFound = store.reconcileExecution(snapshotId, modelId, 'FOUND', {
+        liveOrder: { orderId: 'broker-123' },
+        championDecision: dummyChampionDecision,
+        pair: dummyPair,
+      });
+
       expect(reconcileFound.reconciled).toBe(true);
       expect(reconcileFound.newStatus).toBe('COMMITTED');
 
-      // 3. Reconciliation scenario B: Order NOT_FOUND on broker -> transitions to FAILED_RETRYABLE (authorizes controlled retry)
+      // Decision and DecisionPair are durably stored in persistent store
+      expect(store.getDecision('dec-champ-rec-1')).toBeDefined();
+      expect(store.getDecisionPair('pair-rec-1')).toBeDefined();
+
+      // Scenario C: Reconciliation scenario C: Order NOT_FOUND on broker -> transitions to FAILED_RETRYABLE
       const snapshotId2 = 'snap-reconcile-02';
       store.reserveExecution(snapshotId2, modelId);
       store.releaseExecution(snapshotId2, modelId, 'EXECUTION_UNKNOWN');
@@ -590,7 +731,20 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
       // Now a retry can acquire the reservation
       const retried = store.reserveExecution(snapshotId2, modelId);
-      expect(retried).toBe(true);
+      expect(retried.acquired).toBe(true);
+
+      // Scenario D: LIVE_SUBMITTED crash recovery is also supported
+      const snapshotId3 = 'snap-reconcile-03';
+      store.reserveExecution(snapshotId3, modelId);
+      store.updateReservationStatus(snapshotId3, modelId, 'LIVE_SUBMITTED');
+      expect(store.getReservation(snapshotId3, modelId)?.status).toBe('LIVE_SUBMITTED');
+
+      const reconcileLiveSubmitted = store.reconcileExecution(snapshotId3, modelId, 'FOUND', {
+        championDecision: dummyChampionDecision,
+        pair: dummyPair,
+      });
+      expect(reconcileLiveSubmitted.reconciled).toBe(true);
+      expect(reconcileLiveSubmitted.newStatus).toBe('COMMITTED');
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
