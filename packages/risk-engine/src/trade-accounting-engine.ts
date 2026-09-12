@@ -22,6 +22,7 @@ export interface ITradeMarginCalculation {
 
 export interface ITradePnlCalculation {
   grossPnlQuote: number;
+  quotePnl?: number;
   grossPnlAccount: number; // in INR
   netPnlAccount: number; // in INR
   realizedR: number;
@@ -425,6 +426,7 @@ export class TradeAccountingEngine {
 
     return {
       grossPnlQuote,
+      quotePnl: grossPnlQuote,
       grossPnlAccount,
       netPnlAccount,
       realizedR,

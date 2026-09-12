@@ -25,37 +25,20 @@ import {
   Download,
   X,
 } from 'lucide-react';
-import { ISignalSetup } from '@quant/shared';
+import {
+  ISignalSetup,
+  ITradeJournalRecord,
+  formatCurrencyAmount,
+  formatPriceWithCurrency,
+  formatPnlWithCurrency,
+} from '@quant/shared';
 
-interface ITradeRecord {
-  id: string;
-  symbol: string;
-  contractSymbol?: string;
-  instrumentType?: 'SPOT' | 'OPTION';
-  strike?: number;
-  optionType?: 'CE' | 'PE';
-  instrumentName: string;
-  currency: string;
-  direction: 'BULLISH' | 'BEARISH';
-  state: 'TP1_HIT' | 'TP2_HIT' | 'TP3_HIT' | 'SL_HIT';
-  grade: string;
-  score: number;
-  timeframe: string;
-  quantity?: number;
-  entryPrice: number;
-  stopLoss: number;
-  target1: number;
-  target2: number;
-  exitPrice: number;
-  pnlAmount: number;
-  pnlRMultiple: number;
-  tradeReason?: string;
-  checklist?: string[];
-  exitReason: string;
+type ITradeRecord = ITradeJournalRecord & {
+  pnlAmount?: number;
+  pnlRMultiple?: number;
   activatedAt?: string;
   closedAt?: string;
-  durationMinutes: number;
-}
+};
 
 interface IJournalStats {
   totalTrades: number;
@@ -74,12 +57,11 @@ interface TradeJournalProps {
   onTradeClosedNotification?: (trade: any) => void;
 }
 
-const formatDateTime = (dateStr?: string | Date, symbol?: string) => {
+const formatDateTime = (dateStr?: string | Date) => {
   if (!dateStr) return 'N/A';
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return 'N/A';
 
-  // If Indian NSE asset, ensure time is formatted in IST
   return d.toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
     day: '2-digit',
@@ -92,42 +74,33 @@ const formatDateTime = (dateStr?: string | Date, symbol?: string) => {
   });
 };
 
-const formatDuration = (mins: number) => {
-  if (!mins || mins <= 0) return '< 1m';
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return `${hrs}h ${rem}m`;
+const formatDuration = (mins: number, durationMs?: number) => {
+  const effectiveMs = durationMs ?? (mins > 0 ? mins * 60000 : 0);
+  if (!effectiveMs || effectiveMs <= 0) return '< 1m';
+  const totalSeconds = Math.floor(effectiveMs / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m`;
 };
 
 const formatQuantity = (symbol: string, qty?: number) => {
   if (qty && qty > 0) {
     if (symbol === 'BTCUSDT') return `${qty} BTC`;
     if (symbol === 'XAUUSD' || symbol === 'GOLD') return `${qty} oz Gold`;
-    if (symbol === 'NIFTY') return `${qty} Qty (${Math.round(qty / 65)}L)`;
-    if (symbol === 'BANKNIFTY') return `${qty} Qty (${Math.round(qty / 15)}L)`;
-    if (symbol === 'FINNIFTY') return `${qty} Qty (${Math.round(qty / 40)}L)`;
-    if (symbol === 'RELIANCE') return `${qty} Qty (${Math.round(qty / 250)}L)`;
-    if (symbol === 'HDFCBANK') return `${qty} Qty (${Math.round(qty / 550)}L)`;
-    if (symbol === 'INFY') return `${qty} Qty (${Math.round(qty / 400)}L)`;
     return `${qty} Qty`;
   }
-  if (symbol === 'BTCUSDT') return '0.20 BTC';
-  if (symbol === 'XAUUSD' || symbol === 'GOLD') return '10 oz Gold';
-  if (symbol === 'NIFTY') return '65 Qty (1L)';
-  if (symbol === 'BANKNIFTY') return '15 Qty (1L)';
-  if (symbol === 'RELIANCE') return '250 Qty (1L)';
-  if (symbol === 'HDFCBANK') return '550 Qty (1L)';
-  if (symbol === 'INFY') return '400 Qty (1L)';
-  return '100 Qty';
+  return 'N/A';
 };
 
 const getContractLabel = (symbol: string, direction: string, entryPrice: number) => {
   if (symbol !== 'NIFTY' && symbol !== 'BANKNIFTY') return null;
   const interval = symbol === 'NIFTY' ? 50 : 100;
   const strike = entryPrice > 1000 ? Math.round(entryPrice / interval) * interval : null;
-  if (!strike) return direction === 'BEARISH' ? 'PE' : 'CE';
-  return `${strike} ${direction === 'BEARISH' ? 'PE' : 'CE'}`;
+  if (!strike) return direction === 'BEARISH' || direction === 'SELL' ? 'PE' : 'CE';
+  return `${strike} ${direction === 'BEARISH' || direction === 'SELL' ? 'PE' : 'CE'}`;
 };
 
 export const TradeJournal: React.FC<TradeJournalProps> = ({
@@ -486,9 +459,11 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
           </thead>
           <tbody className="divide-y divide-slate-800/60 bg-slate-950/50">
             {filteredTrades.map((t) => {
-              const isWin = t.state !== 'SL_HIT';
+              const isWin = t.state !== 'SL_HIT' && Number(t.netPnlAccount ?? t.pnlAmount ?? 0) >= 0;
               const isCrypto = t.symbol === 'BTCUSDT' || t.symbol?.includes('BTC');
-              const currSymbol = isCrypto ? '$' : '₹';
+              const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
+              const priceCurr = (t as any).entryPriceCurrency || (t as any).currency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
+              const pnlCurr = (t as any).accountCurrency || 'INR';
               const isOption =
                 t.instrumentType === 'OPTION' ||
                 (Number(t.entryPrice) < 500 && (t.symbol === 'NIFTY' || t.symbol === 'BANKNIFTY'));
@@ -496,10 +471,12 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                 t.contractSymbol && t.contractSymbol !== t.symbol
                   ? t.contractSymbol
                   : isOption && t.strike
-                    ? `${t.strike} ${t.optionType || (t.direction === 'BEARISH' ? 'PE' : 'CE')}`
+                    ? `${t.strike} ${t.optionType || (t.direction === 'BEARISH' || t.direction === 'SELL' ? 'PE' : 'CE')}`
                     : getContractLabel(t.symbol, t.direction, Number(t.entryPrice));
 
               const isSaiyan = t.tradeReason?.includes('Saiyan') || t.symbol === 'BTCUSDT';
+              const effectivePnl = Number(t.netPnlAccount ?? t.pnlAmount ?? 0);
+              const effectiveR = Number(t.realizedR ?? t.pnlRMultiple ?? 0);
 
               return (
                 <tr key={t.id} className="hover:bg-slate-900/70 transition-colors">
@@ -508,11 +485,16 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-cyan-300 font-bold">{t.symbol}</span>
                       <span className="text-[9px] bg-slate-800 text-slate-400 px-1 py-0.5 rounded font-normal">
-                        {t.timeframe}
+                        {t.timeframe || '15m'}
                       </span>
                       {contractLabel && (
                         <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-800/80 px-1.5 py-0.5 rounded font-mono font-bold tracking-tight shadow-sm">
                           {contractLabel}
+                        </span>
+                      )}
+                      {(t as any).isLegacyExecutionData && (
+                        <span className="text-[9px] bg-slate-900 text-slate-400 border border-slate-700 px-1 py-0.5 rounded">
+                          Legacy
                         </span>
                       )}
                     </div>
@@ -525,12 +507,12 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                   <td className="py-3 px-3">
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-0.5 w-fit ${
-                        t.direction === 'BULLISH'
+                        t.direction === 'BULLISH' || t.direction === 'BUY'
                           ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
                           : 'bg-rose-950 text-rose-400 border border-rose-800/60'
                       }`}
                     >
-                      {t.direction === 'BULLISH' ? (
+                      {t.direction === 'BULLISH' || t.direction === 'BUY' ? (
                         <TrendingUp className="w-3 h-3" />
                       ) : (
                         <TrendingDown className="w-3 h-3" />
@@ -545,15 +527,13 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                       <div className="flex items-center gap-1 text-[11px]">
                         <span className="text-slate-500 font-normal">Entry:</span>
                         <span className="text-cyan-300 font-bold">
-                          {currSymbol}
-                          {t.entryPrice.toFixed(2)}
+                          {formatPriceWithCurrency(t.entryPrice, priceCurr)}
                         </span>
                       </div>
                       <div className="flex items-center gap-1 text-[11px]">
                         <span className="text-slate-500 font-normal">Exit:</span>
                         <span className="text-slate-200 font-bold">
-                          {currSymbol}
-                          {t.exitPrice.toFixed(2)}
+                          {formatPriceWithCurrency(t.exitPrice, priceCurr)}
                         </span>
                       </div>
                     </div>
@@ -626,26 +606,30 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
                   {/* Realized Return */}
                   <td
-                    className={`py-3 px-3 text-right font-bold ${(() => {
-                      const rawPnl = Number(t.pnlAmount);
-                      const effectivePnl = rawPnl;
-                      return effectivePnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
-                    })()}`}
+                    className={`py-3 px-3 text-right font-bold ${
+                      effectivePnl >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                    }`}
                   >
-                    {(() => {
-                      const rawPnl = Number(t.pnlAmount);
-                      const effectivePnl = rawPnl;
-                      const sign = effectivePnl >= 0 ? '+' : '-';
-                      return `${sign}${currSymbol}${Math.abs(effectivePnl).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-                    })()}
+                    <div>
+                      <span>
+                        {formatPnlWithCurrency(effectivePnl, pnlCurr)}
+                      </span>
+                      {(t as any).quotePnl !== undefined &&
+                        (t as any).quoteCurrency &&
+                        (t as any).quoteCurrency !== pnlCurr && (
+                          <span className="text-[10px] text-slate-400 block font-normal">
+                            {formatPnlWithCurrency(Number((t as any).quotePnl), (t as any).quoteCurrency)}
+                          </span>
+                        )}
+                    </div>
                   </td>
 
                   {/* R Multiple */}
                   <td
                     className={`py-3 px-3 text-right font-bold ${isWin ? 'text-teal-300' : 'text-rose-400'}`}
                   >
-                    {t.pnlRMultiple >= 0 ? '+' : ''}
-                    {t.pnlRMultiple.toFixed(1)}R
+                    {effectiveR >= 0 ? '+' : ''}
+                    {effectiveR.toFixed(1)}R
                   </td>
 
                   {/* Entry & Close Date/Time */}
@@ -653,13 +637,13 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     <div className="flex items-center gap-1">
                       <span className="text-slate-500">In:</span>
                       <span className="text-cyan-300 font-bold" suppressHydrationWarning>
-                        {formatDateTime(t.activatedAt)}
+                        {formatDateTime((t as any).entryTimeUtc || t.activatedAt)}
                       </span>
                     </div>
                     <div className="flex items-center gap-1">
                       <span className="text-slate-500">Out:</span>
                       <span className="text-emerald-400 font-bold" suppressHydrationWarning>
-                        {formatDateTime(t.closedAt)}
+                        {formatDateTime((t as any).exitTimeUtc || t.closedAt)}
                       </span>
                     </div>
                   </td>
@@ -667,7 +651,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                   {/* Duration */}
                   <td className="py-3 px-3 text-center text-slate-400 text-[11px]">
                     <span className="bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-amber-300 font-bold">
-                      {formatDuration(t.durationMinutes)}
+                      {formatDuration(t.durationMinutes, (t as any).durationMs)}
                     </span>
                   </td>
                 </tr>
@@ -706,7 +690,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     </span>
                     <span
                       className={`text-[10px] px-2 py-0.5 rounded font-bold ${
-                        selectedTradeReason.direction === 'BULLISH'
+                        selectedTradeReason.direction === 'BULLISH' || selectedTradeReason.direction === 'BUY'
                           ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
                           : 'bg-rose-950 text-rose-400 border border-rose-800'
                       }`}
@@ -714,12 +698,11 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                       {selectedTradeReason.direction}
                     </span>
                     <span className="text-[10px] bg-slate-900 text-slate-400 border border-slate-800 px-1.5 py-0.5 rounded">
-                      {selectedTradeReason.timeframe}
+                      {selectedTradeReason.timeframe || '15m'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
-                    Entry: ₹{selectedTradeReason.entryPrice.toFixed(2)} • Exit: ₹
-                    {selectedTradeReason.exitPrice.toFixed(2)}
+                    Entry: {formatPriceWithCurrency(selectedTradeReason.entryPrice, (selectedTradeReason as any).entryPriceCurrency || (selectedTradeReason as any).currency || 'INR')} • Exit: {formatPriceWithCurrency(selectedTradeReason.exitPrice, (selectedTradeReason as any).exitPriceCurrency || (selectedTradeReason as any).currency || 'INR')}
                   </p>
                 </div>
                 <div className="text-right">
@@ -728,8 +711,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     {selectedTradeReason.grade || 'A+'})
                   </span>
                   <div className="text-xs font-bold text-emerald-400 mt-1.5">
-                    {selectedTradeReason.pnlAmount >= 0 ? '+' : ''}₹
-                    {selectedTradeReason.pnlAmount.toFixed(2)} ({selectedTradeReason.pnlRMultiple}R)
+                    {formatPnlWithCurrency(Number((selectedTradeReason as any).netPnlAccount ?? selectedTradeReason.pnlAmount ?? 0), (selectedTradeReason as any).accountCurrency || 'INR')} ({selectedTradeReason.realizedR ?? selectedTradeReason.pnlRMultiple ?? 0}R)
                   </div>
                 </div>
               </div>

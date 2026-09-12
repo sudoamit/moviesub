@@ -5,13 +5,30 @@ import {
   TradingDecision
 } from './types';
 
+export interface ILiveExecutionResult {
+  readonly liveOrderId: string;
+  readonly status: string;
+  readonly brokerOrderId?: string;
+  readonly clientOrderId?: string;
+  readonly submittedAt?: number;
+  readonly acceptedAt?: number;
+  readonly filledAt?: number;
+  readonly filledQuantity?: number;
+  readonly averageFillPrice?: number;
+  readonly fee?: number;
+  readonly feeCurrency?: string;
+  readonly executionTimestamp?: number;
+  readonly executionIdentifiers?: string[];
+  readonly rawResponse?: unknown;
+}
+
 /**
  * Live Broker/Execution Port Interface
  * Only CHAMPION in LIVE mode can invoke this port.
  */
 export interface ILiveExecutionPort {
   readonly isLiveBroker: true;
-  submitLiveOrder(decision: TradingDecision): Promise<{ liveOrderId: string; status: string }>;
+  submitLiveOrder(decision: TradingDecision): Promise<ILiveExecutionResult | { liveOrderId: string; status: string }>;
   cancelLiveOrder(liveOrderId: string): Promise<boolean>;
 }
 

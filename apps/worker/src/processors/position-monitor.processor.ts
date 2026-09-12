@@ -1,7 +1,24 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { BULLMQ_QUEUES, Direction, PositionState, WS_EVENTS, ExecutionPriceResolver, ExecutionPriceSource, ValidatedLiveTickerResult } from '@quant/shared';
+import {
+  BULLMQ_QUEUES,
+  Direction,
+  PositionState,
+  OrderState,
+  WS_EVENTS,
+  ExecutionPriceResolver,
+  ExecutionPriceSource,
+  ValidatedLiveTickerResult,
+  buildAccountingSnapshot,
+  getAuthoritativeInstrument,
+  hasInstrument,
+  PointInTimeCurrencyConverter,
+  resolveMarginModel,
+  ExecutionAggregator,
+  IFillRecord,
+} from '@quant/shared';
+import { TradeAccountingEngine } from '@quant/risk-engine';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../redis.service';
 import { TrailingEngine } from '@quant/trading-engine';
@@ -423,19 +440,145 @@ export class PositionMonitorProcessor extends WorkerHost {
         return;
       }
 
-      // 2. Mark position CLOSED
+      // 2. Create Exit PaperOrder
+      const exitOrder = await tx.paperOrder.create({
+        data: {
+          accountId: pos.accountId,
+          symbol: pos.symbol,
+          contractSymbol: pos.contractSymbol,
+          instrumentType: pos.instrumentType,
+          strike: pos.strike,
+          optionType: pos.optionType,
+          direction: isBuy ? Direction.BEARISH : Direction.BULLISH,
+          orderType: 'MARKET',
+          requestedQuantity: pos.quantity,
+          filledQuantity: pos.quantity,
+          price: new Decimal(finalExitPrice),
+          status: OrderState.FILLED,
+          idempotencyKey: `exit_worker_${pos.id}_${Date.now()}`,
+          correlationId: pos.correlationId || `corr_${Date.now()}`,
+          submittedAt: exitTime,
+        },
+      });
+
+      // 3. Create Exit PaperFill
+      const exitFill = await tx.paperFill.create({
+        data: {
+          orderId: exitOrder.id,
+          fillPrice: new Decimal(finalExitPrice),
+          fillQuantity: pos.quantity,
+          fee: new Decimal(exitCharges.totalCharges),
+          feeBreakdownJson: exitCharges,
+          slippage: new Decimal(slip.slippageAmount),
+          executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+          liquidityType: 'TAKER',
+          sourceTimestamp: tickSourceTime,
+          fillTimestamp: exitTime,
+          correlationId: pos.correlationId || `corr_${Date.now()}`,
+        },
+      });
+
+      // 4. Retrieve Entry Fills for Execution Aggregation
+      let entryFills: IFillRecord[] = [];
+      if (pos.orderId) {
+        const rawFills = await tx.paperFill.findMany({ where: { orderId: pos.orderId } });
+        entryFills = rawFills.map((f) => ({
+          fillId: f.id,
+          orderId: f.orderId,
+          positionId: pos.id,
+          executionRole: 'ENTRY' as const,
+          fillPrice: Number(f.fillPrice),
+          fillQuantity: Number(f.fillQuantity),
+          fillTimestamp: f.fillTimestamp,
+          fee: Number(f.fee),
+          slippage: Number(f.slippage),
+          executionPriceSource: f.executionPriceSource,
+          sourceTimestamp: f.sourceTimestamp,
+        }));
+      }
+
+      if (entryFills.length === 0) {
+        entryFills = [
+          {
+            fillId: `fill_entry_${pos.id}`,
+            positionId: pos.id,
+            executionRole: 'ENTRY',
+            fillPrice: Number(pos.entryPrice),
+            fillQuantity: Number(pos.quantity),
+            fillTimestamp: pos.entryTime,
+            fee: Number(entryCharges.totalCharges || 0),
+          },
+        ];
+      }
+
+      const exitFillRecord: IFillRecord = {
+        fillId: exitFill.id,
+        orderId: exitOrder.id,
+        positionId: pos.id,
+        executionRole: 'EXIT',
+        fillPrice: finalExitPrice,
+        fillQuantity: Number(pos.quantity),
+        fillTimestamp: exitTime,
+        fee: exitCharges.totalCharges,
+        slippage: slip.slippageAmount,
+        executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+        sourceTimestamp: tickSourceTime,
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
+
+      // 5. Point-in-Time Accounting Snapshot & P&L
+      const inst = hasInstrument(pos.symbol) ? getAuthoritativeInstrument(pos.symbol) : null;
+      const quoteCurrency = inst?.currency ?? (pos.symbol === 'BTCUSDT' ? 'USDT' : 'INR');
+      const converter = PointInTimeCurrencyConverter.getInstance();
+      const fxRes = converter.getRate(quoteCurrency, 'INR', exitTime.getTime());
+      const resolvedMargin = inst
+        ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
+        : {
+            marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
+            effectiveLeverage: Number(pos.leverage) || 1,
+            initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
+            maintenanceMarginRate: 0.05,
+            liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
+          };
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency,
+        fxResult: fxRes,
+        contractSize: inst?.contractSize ?? 1,
+        lotSize: Number(pos.quantity),
+        resolvedMarginModel: resolvedMargin,
+        calculatedAt: exitTime.getTime(),
+      });
+
+      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: aggregated.entry.weightedPrice,
+        exitPrice: aggregated.exit.weightedPrice,
+        quantity: Number(pos.quantity),
+        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+        accountingSnapshot: snapshot,
+      });
+
+      const canonicalRealizedPnL = pnlCalc.netPnlAccount;
+      const canonicalRealizedR =
+        riskDistance > 0
+          ? Number(((isBuy ? aggregated.exit.weightedPrice - aggregated.entry.weightedPrice : aggregated.entry.weightedPrice - aggregated.exit.weightedPrice) / riskDistance).toFixed(2))
+          : 0;
+
+      // 6. Mark position CLOSED
       await tx.paperPosition.update({
         where: { id: pos.id },
         data: {
           status: PositionState.CLOSED,
-          closedAt: exitTime,
-          currentPrice: new Decimal(finalExitPrice),
+          closedAt: new Date(aggregated.exit.latestFillTimestamp),
+          currentPrice: new Decimal(aggregated.exit.weightedPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
         },
       });
 
-      // 3. Persist PaperTrade record
+      // 7. Persist PaperTrade record with canonical execution facts
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -447,31 +590,47 @@ export class PositionMonitorProcessor extends WorkerHost {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: pos.quantity,
-          entryPrice: pos.entryPrice,
-          exitPrice: new Decimal(finalExitPrice),
-          realizedPnL: new Decimal(realizedPnL),
-          realizedR: new Decimal(realizedR),
+          entryPrice: new Decimal(aggregated.entry.weightedPrice),
+          exitPrice: new Decimal(aggregated.exit.weightedPrice),
+          realizedPnL: new Decimal(canonicalRealizedPnL),
+          realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds,
-          entryTime: pos.entryTime,
-          exitTime,
+          holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+          entryTime: new Date(aggregated.entry.earliestFillTimestamp),
+          exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
-          chargesJson: { entryCharges, exitCharges, totalCharges },
+          chargesJson: {
+            entryCharges,
+            exitCharges,
+            totalCharges: Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2)),
+          },
           featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
           outcomeSnapshotJson: {
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
             livePrice: exitPrice,
-            exitPrice: finalExitPrice,
+            exitPrice: aggregated.exit.weightedPrice,
+            entryPrice: aggregated.entry.weightedPrice,
             slippageBps: slip.slippageBps,
             slippageAmount: slip.slippageAmount,
             exitReason,
-            realizedPnL,
-            realizedR,
-            holdingDurationSeconds,
+            realizedPnL: canonicalRealizedPnL,
+            quotePnl: pnlCalc.quotePnl,
+            quoteCurrency: snapshot.quoteCurrency,
+            netPnlAccount: pnlCalc.netPnlAccount,
+            accountCurrency: snapshot.accountCurrency,
+            accountingSnapshot: snapshot as any,
+            accountingSnapshotHash: snapshot.snapshotHash,
+            realizedR: canonicalRealizedR,
+            holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+            durationMs: aggregated.durationMs,
+            durationMinutes: aggregated.durationMinutes,
+            entryFillCount: aggregated.entry.fillCount,
+            exitFillCount: aggregated.exit.fillCount,
+            isLegacyExecutionData: false,
             outcomeClassification,
-            exitTime: exitTime.toISOString(),
+            exitTime: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             correlationId: pos.correlationId || `corr_${Date.now()}`,
           },
           outcomeClassification,
@@ -479,18 +638,18 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      // 4. Update PaperAccount Balance & Release Margin
+      // 8. Update PaperAccount Balance & Release Margin
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
           cashBalance: { increment: grossPnL - exitCharges.totalCharges },
           usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: realizedPnL },
+          realizedPnL: { increment: canonicalRealizedPnL },
           totalChargesPaid: { increment: exitCharges.totalCharges },
         },
       });
 
-      // 5. Audit Log
+      // 9. Audit Log
       await tx.auditEvent.create({
         data: {
           actor: 'WORKER',
@@ -500,14 +659,19 @@ export class PositionMonitorProcessor extends WorkerHost {
           entityId: tradeRecord.id,
           payloadJson: {
             contractSymbol: pos.contractSymbol,
-            entryPrice,
-            exitPrice: finalExitPrice,
+            entryPrice: aggregated.entry.weightedPrice,
+            exitPrice: aggregated.exit.weightedPrice,
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
             slippageBps: slip.slippageBps,
             slippageAmount: slip.slippageAmount,
-            realizedPnL,
-            realizedR,
+            realizedPnL: canonicalRealizedPnL,
+            quotePnl: pnlCalc.quotePnl,
+            quoteCurrency: snapshot.quoteCurrency,
+            accountCurrency: snapshot.accountCurrency,
+            snapshotHash: snapshot.snapshotHash,
+            realizedR: canonicalRealizedR,
+            durationMs: aggregated.durationMs,
             exitReason,
           },
           correlationId: pos.correlationId || `corr_${Date.now()}`,

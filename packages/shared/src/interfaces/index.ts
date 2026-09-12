@@ -560,3 +560,6 @@ export interface IModelDriftReport {
   rollingExpectancyR: number;
   recommendedAction: 'CONTINUE_LIVE' | 'REDUCE_RISK' | 'SWITCH_TO_PAPER' | 'DISABLE_MODEL';
 }
+
+export * from './trade-journal.interface';
+
