@@ -34,7 +34,7 @@ import {
   validatePointInTimeSimultaneity,
   createDecisionPair
 } from './shadow-decision-orchestrator';
-import { IShadowExecutionStore, ExecutionReservationStatus } from './shadow-execution-store';
+import { IShadowExecutionStore, ExecutionReservationStatus, ReconcileOptions } from './shadow-execution-store';
 import { deepFreeze } from '../champion-challenger/evaluation-identity';
 import { canonicalJsonStringify } from '../canonical-serializer';
 
@@ -206,15 +206,13 @@ export class ProductionTradingPipeline {
     // 5. Audit Persistence upfront before live execution
     this.config.store.saveSnapshot(marketSnapshot);
 
-    // 6. Pre-Execution Reservation / Concurrency Lock with Monotonic Fencing Token
+    // 6. Pre-Execution Reservation / Concurrency Lock with Mandatory Fencing Token
     const acquireResult = this.config.store.reserveExecution(
       marketSnapshot.snapshotId,
       this.config.championModel.modelId
     );
-    const acquired = typeof acquireResult === 'boolean' ? acquireResult : acquireResult.acquired;
-    const reservationToken = typeof acquireResult === 'object' ? acquireResult.reservationToken : undefined;
 
-    if (!acquired) {
+    if (!acquireResult.acquired || !acquireResult.reservationToken) {
       const existing = this.config.store.getDecisionPairBySnapshotAndModel(
         marketSnapshot.snapshotId,
         this.config.challengerModel.modelId
@@ -228,6 +226,8 @@ export class ProductionTradingPipeline {
       }
       throw new Error(`CONCURRENT_EXECUTION_LOCK_ACQUIRED: Snapshot ${marketSnapshot.snapshotId} is already executing in another worker`);
     }
+
+    const reservationToken = acquireResult.reservationToken;
 
     this.config.store.updateReservationStatus(
       marketSnapshot.snapshotId,
@@ -276,7 +276,7 @@ export class ProductionTradingPipeline {
     const costConfigHash = this.config.costConfigHash || 'chash_cost_default';
     const portfolioStateVersion = 'port_v1.0';
 
-    // 9. Deterministic Replay Decision IDs and Client Order ID for Broker Idempotency
+    // 9. Deterministic Replay Decision IDs and Deterministic Client Order ID for Broker Idempotency
     const champDecisionId = `dec_champ_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.championModel.modelId}:${this.config.championModel.modelVersion}`).digest('hex').slice(0, 16)}`;
     const challDecisionId = `dec_chall_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.challengerModel.modelId}:${this.config.challengerModel.modelVersion}`).digest('hex').slice(0, 16)}`;
     const clientOrderId = `ord_live_${createHash('sha256').update(`${marketSnapshot.snapshotHash}:${this.config.championModel.modelId}:${this.config.championModel.modelVersion}`).digest('hex').slice(0, 24)}`;
@@ -632,25 +632,22 @@ export class ProductionTradingPipeline {
   }
 
   /**
-   * Reconcile unknown live execution with broker response (operational recovery).
+   * Reconcile unknown live execution with broker response (operational recovery) requiring reservation ownership.
    */
   public reconcileUnknownExecution(
     snapshotId: string,
+    reservationToken: string,
     brokerStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
-    options?: {
-      liveOrder?: any;
-      championDecision?: TradingDecision;
-      challengerDecision?: TradingDecision;
-      pair?: ChampionChallengerDecisionPair;
-    } | any
+    options?: ReconcileOptions | any
   ) {
-    const opts = (options && typeof options === 'object' && ('championDecision' in options || 'pair' in options || 'liveOrder' in options))
+    const opts: ReconcileOptions = (options && typeof options === 'object' && ('championDecision' in options || 'pair' in options || 'liveOrder' in options))
       ? options
       : { liveOrder: options };
 
     return this.config.store.reconcileExecution(
       snapshotId,
       this.config.championModel.modelId,
+      reservationToken,
       brokerStatus,
       opts
     );

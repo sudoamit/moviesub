@@ -37,6 +37,26 @@ export interface ReservationAcquireResult {
   readonly currentStatus?: ExecutionReservationStatus;
 }
 
+export interface ReconcileOptions {
+  readonly liveOrder?: any;
+  readonly championDecision?: TradingDecision;
+  readonly challengerDecision?: TradingDecision;
+  readonly pair?: ChampionChallengerDecisionPair;
+}
+
+/**
+ * Authoritative state transition matrix enforcing strict lifecycle invariant sequencing.
+ */
+const VALID_TRANSITIONS: Record<ExecutionReservationStatus, ReadonlySet<ExecutionReservationStatus>> = {
+  RESERVED: new Set(['EXECUTING', 'FAILED_RETRYABLE', 'EXECUTION_UNKNOWN', 'FAILED_FINAL']),
+  EXECUTING: new Set(['LIVE_SUBMITTED', 'FAILED_RETRYABLE', 'EXECUTION_UNKNOWN', 'FAILED_FINAL']),
+  LIVE_SUBMITTED: new Set(['COMMITTED', 'EXECUTION_UNKNOWN']),
+  EXECUTION_UNKNOWN: new Set(['COMMITTED', 'FAILED_RETRYABLE', 'EXECUTION_UNKNOWN', 'FAILED_FINAL']),
+  FAILED_RETRYABLE: new Set(['RESERVED']),
+  COMMITTED: new Set([]),
+  FAILED_FINAL: new Set([]),
+};
+
 export interface IShadowExecutionStore {
   saveSnapshot(snapshot: MarketSnapshot): void;
   getSnapshot(snapshotId: string): MarketSnapshot | undefined;
@@ -60,30 +80,27 @@ export interface IShadowExecutionStore {
     snapshotId: string,
     modelId: string,
     status: ExecutionReservationStatus,
-    reservationToken?: string
+    reservationToken: string
   ): boolean;
   getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined;
-  commitExecution(snapshotId: string, modelId: string, reservationToken?: string): boolean;
+  commitExecution(snapshotId: string, modelId: string, reservationToken: string): boolean;
   releaseExecution(
     snapshotId: string,
     modelId: string,
-    status?: ExecutionReservationStatus,
-    reservationToken?: string
+    status: ExecutionReservationStatus,
+    reservationToken: string
   ): boolean;
   reconcileExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerQueryStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
-    options?: {
-      liveOrder?: any;
-      championDecision?: TradingDecision;
-      challengerDecision?: TradingDecision;
-      pair?: ChampionChallengerDecisionPair;
-    }
+    options?: ReconcileOptions
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus };
   reconcileUnknownExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
     liveOrder?: any
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus };
@@ -248,14 +265,21 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     snapshotId: string,
     modelId: string,
     status: ExecutionReservationStatus,
-    reservationToken?: string
+    reservationToken: string
   ): boolean {
+    if (!reservationToken) return false;
     const compositeKey = `${snapshotId}:${modelId}`;
     const existing = this.reservations.get(compositeKey);
     if (!existing) return false;
 
-    if (reservationToken && existing.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject mutation from stale worker
+    // Fencing token validation
+    if (existing.reservationToken !== reservationToken) {
+      return false;
+    }
+
+    // State transition matrix validation
+    const allowed = VALID_TRANSITIONS[existing.status];
+    if (!allowed || !allowed.has(status)) {
       return false;
     }
 
@@ -271,13 +295,18 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
     return this.reservations.get(`${snapshotId}:${modelId}`);
   }
 
-  public commitExecution(snapshotId: string, modelId: string, reservationToken?: string): boolean {
+  public commitExecution(snapshotId: string, modelId: string, reservationToken: string): boolean {
+    if (!reservationToken) return false;
     const compositeKey = `${snapshotId}:${modelId}`;
     const existing = this.reservations.get(compositeKey);
     if (!existing) return false;
 
-    if (reservationToken && existing.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject commit from stale worker
+    if (existing.reservationToken !== reservationToken) {
+      return false;
+    }
+
+    const allowed = VALID_TRANSITIONS[existing.status];
+    if (!allowed || !allowed.has('COMMITTED')) {
       return false;
     }
 
@@ -292,67 +321,60 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   public releaseExecution(
     snapshotId: string,
     modelId: string,
-    status?: ExecutionReservationStatus,
-    reservationToken?: string
+    status: ExecutionReservationStatus,
+    reservationToken: string
   ): boolean {
+    if (!reservationToken) return false;
     const compositeKey = `${snapshotId}:${modelId}`;
     const existing = this.reservations.get(compositeKey);
+    if (!existing) return false;
 
-    if (existing && reservationToken && existing.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject release from stale worker
+    if (existing.reservationToken !== reservationToken) {
       return false;
     }
 
-    if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL' || status === 'FAILED_RETRYABLE')) {
-      if (existing) {
-        this.reservations.set(compositeKey, {
-          ...existing,
-          status,
-          lastUpdatedAt: Date.now(),
-        });
-      } else {
-        const token = randomUUID();
-        this.reservations.set(compositeKey, {
-          snapshotId,
-          modelId,
-          status,
-          reservationToken: token,
-          epoch: 1,
-          reservedAt: Date.now(),
-          lastUpdatedAt: Date.now(),
-        });
-      }
-    } else {
-      this.reservations.delete(compositeKey);
+    const allowed = VALID_TRANSITIONS[existing.status];
+    if (!allowed || !allowed.has(status)) {
+      return false;
     }
+
+    this.reservations.set(compositeKey, {
+      ...existing,
+      status,
+      lastUpdatedAt: Date.now(),
+    });
     return true;
   }
 
   public reconcileExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerQueryStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
-    options?: {
-      liveOrder?: any;
-      championDecision?: TradingDecision;
-      challengerDecision?: TradingDecision;
-      pair?: ChampionChallengerDecisionPair;
-    }
+    options?: ReconcileOptions
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
     const compositeKey = `${snapshotId}:${modelId}`;
     const res = this.reservations.get(compositeKey);
 
-    if (!res || (res.status !== 'EXECUTION_UNKNOWN' && res.status !== 'LIVE_SUBMITTED')) {
+    if (!res || !reservationToken || res.reservationToken !== reservationToken) {
       return { reconciled: false, newStatus: res?.status || 'FAILED_FINAL' };
     }
 
+    if (res.status !== 'EXECUTION_UNKNOWN' && res.status !== 'LIVE_SUBMITTED') {
+      return { reconciled: false, newStatus: res.status };
+    }
+
     if (brokerQueryStatus === 'BROKER_STILL_UNKNOWN') {
-      // Fail closed: broker is temporarily unreachable or query failed. Keep lock strictly in place.
+      // Fail closed: broker query is ambiguous. Keep lock strictly in place.
       return { reconciled: false, newStatus: res.status };
     }
 
     if (brokerQueryStatus === 'NOT_FOUND') {
       // Order definitively does not exist on broker -> transition to FAILED_RETRYABLE
+      const allowed = VALID_TRANSITIONS[res.status];
+      if (!allowed || !allowed.has('FAILED_RETRYABLE')) {
+        return { reconciled: false, newStatus: res.status };
+      }
       this.reservations.set(compositeKey, {
         ...res,
         status: 'FAILED_RETRYABLE',
@@ -384,10 +406,11 @@ export class InMemoryShadowExecutionStore implements IShadowExecutionStore {
   public reconcileUnknownExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
     liveOrder?: any
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
-    return this.reconcileExecution(snapshotId, modelId, brokerStatus, { liveOrder });
+    return this.reconcileExecution(snapshotId, modelId, reservationToken, brokerStatus, { liveOrder });
   }
 
   public clear(): void {
@@ -476,7 +499,8 @@ interface PersistedShadowData {
 /**
  * File-based Shadow Execution Store
  * Atomically persists shadow decisions, pairs, orders, and outcomes.
- * Provides durable cross-process file-level locking with monotonic epoch & ownership fencing.
+ * Provides durable cross-process file-level locking with monotonic epoch, ownership fencing,
+ * state transition validation, and crash-safe interrupted retry claim recovery.
  */
 export class FileShadowExecutionStore implements IShadowExecutionStore {
   private readonly memoryStore = new InMemoryShadowExecutionStore();
@@ -501,6 +525,42 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   private getLockFilePath(snapshotId: string, modelId: string): string {
     const dir = path.dirname(this.filePath);
     return path.join(dir, `.lock.${snapshotId}.${modelId}`);
+  }
+
+  /**
+   * Deterministic recovery for interrupted retry claims or crashed workers.
+   */
+  private recoverInterruptedClaim(snapshotId: string, modelId: string): void {
+    const dir = path.dirname(this.filePath);
+    if (!fs.existsSync(dir)) return;
+
+    const lockFile = this.getLockFilePath(snapshotId, modelId);
+    const prefix = `.claim.${snapshotId}.${modelId}.`;
+
+    try {
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        if (file.startsWith(prefix)) {
+          const claimPath = path.join(dir, file);
+          try {
+            const content = fs.readFileSync(claimPath, 'utf-8');
+            const claimReservation = JSON.parse(content) as ExecutionReservation;
+            if (claimReservation && (claimReservation.status === 'RESERVED' || claimReservation.status === 'FAILED_RETRYABLE')) {
+              if (!fs.existsSync(lockFile)) {
+                // Canonical lock was missing due to crash during rename -> restore canonical lock atomically
+                fs.renameSync(claimPath, lockFile);
+                this.memoryStore.saveReservation(claimReservation);
+              } else {
+                // Canonical lock already present -> remove obsolete temp claim file
+                fs.unlinkSync(claimPath);
+              }
+            }
+          } catch {
+            // Ignore malformed temporary file
+          }
+        }
+      }
+    } catch {}
   }
 
   private saveToFile(): void {
@@ -660,6 +720,9 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       fs.mkdirSync(dir, { recursive: true });
     }
 
+    // Check and recover any interrupted retry claim first
+    this.recoverInterruptedClaim(snapshotId, modelId);
+
     const reservationToken = randomUUID();
     const reservationData: ExecutionReservation = {
       snapshotId,
@@ -706,10 +769,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
               this.memoryStore.saveReservation(newReservationData);
               return { acquired: true, reservationToken: claimToken, epoch: newEpoch };
             } catch (claimErr: any) {
-              // Lost atomic rename race or ENOENT -> clean up tempClaimFile if left behind
-              try {
-                if (fs.existsSync(tempClaimFile)) fs.unlinkSync(tempClaimFile);
-              } catch {}
+              // Lost atomic rename race or ENOENT -> fail closed
               return { acquired: false };
             }
           }
@@ -726,32 +786,34 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     snapshotId: string,
     modelId: string,
     status: ExecutionReservationStatus,
-    reservationToken?: string
+    reservationToken: string
   ): boolean {
+    if (!reservationToken) return false;
     const lockFile = this.getLockFilePath(snapshotId, modelId);
-    let currentRes = this.getReservation(snapshotId, modelId);
+    this.recoverInterruptedClaim(snapshotId, modelId);
+    const currentRes = this.getReservation(snapshotId, modelId);
 
-    if (currentRes && reservationToken && currentRes.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject mutation from stale worker
+    if (!currentRes || currentRes.reservationToken !== reservationToken) {
       return false;
     }
 
-    this.memoryStore.updateReservationStatus(snapshotId, modelId, status, reservationToken);
+    const allowed = VALID_TRANSITIONS[currentRes.status];
+    if (!allowed || !allowed.has(status)) {
+      return false;
+    }
+
+    const success = this.memoryStore.updateReservationStatus(snapshotId, modelId, status, reservationToken);
+    if (!success) return false;
 
     if (fs.existsSync(lockFile)) {
       try {
-        const content = fs.readFileSync(lockFile, 'utf-8');
-        const diskRes = JSON.parse(content) as ExecutionReservation;
-        if (reservationToken && diskRes.reservationToken !== reservationToken) {
-          return false;
-        }
         const data: ExecutionReservation = {
           snapshotId,
           modelId,
           status,
-          reservationToken: diskRes.reservationToken || reservationToken || randomUUID(),
-          epoch: diskRes.epoch || 1,
-          reservedAt: diskRes.reservedAt || Date.now(),
+          reservationToken: currentRes.reservationToken,
+          epoch: currentRes.epoch,
+          reservedAt: currentRes.reservedAt,
           lastUpdatedAt: Date.now(),
         };
         fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
@@ -764,6 +826,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   }
 
   public getReservation(snapshotId: string, modelId: string): ExecutionReservation | undefined {
+    this.recoverInterruptedClaim(snapshotId, modelId);
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     if (fs.existsSync(lockFile)) {
       try {
@@ -774,12 +837,18 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
     return this.memoryStore.getReservation(snapshotId, modelId);
   }
 
-  public commitExecution(snapshotId: string, modelId: string, reservationToken?: string): boolean {
+  public commitExecution(snapshotId: string, modelId: string, reservationToken: string): boolean {
+    if (!reservationToken) return false;
     const lockFile = this.getLockFilePath(snapshotId, modelId);
+    this.recoverInterruptedClaim(snapshotId, modelId);
     const existing = this.getReservation(snapshotId, modelId);
 
-    if (existing && reservationToken && existing.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject commit from stale worker
+    if (!existing || existing.reservationToken !== reservationToken) {
+      return false;
+    }
+
+    const allowed = VALID_TRANSITIONS[existing.status];
+    if (!allowed || !allowed.has('COMMITTED')) {
       return false;
     }
 
@@ -787,11 +856,6 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
 
     if (fs.existsSync(lockFile)) {
       try {
-        const content = fs.readFileSync(lockFile, 'utf-8');
-        const diskRes = JSON.parse(content) as ExecutionReservation;
-        if (reservationToken && diskRes.reservationToken !== reservationToken) {
-          return false;
-        }
         fs.unlinkSync(lockFile);
       } catch {}
     }
@@ -801,40 +865,38 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   public releaseExecution(
     snapshotId: string,
     modelId: string,
-    status?: ExecutionReservationStatus,
-    reservationToken?: string
+    status: ExecutionReservationStatus,
+    reservationToken: string
   ): boolean {
+    if (!reservationToken) return false;
     const lockFile = this.getLockFilePath(snapshotId, modelId);
+    this.recoverInterruptedClaim(snapshotId, modelId);
     const existing = this.getReservation(snapshotId, modelId);
 
-    if (existing && reservationToken && existing.reservationToken !== reservationToken) {
-      // Fencing token mismatch: reject release from stale worker
+    if (!existing || existing.reservationToken !== reservationToken) {
+      return false;
+    }
+
+    const allowed = VALID_TRANSITIONS[existing.status];
+    if (!allowed || !allowed.has(status)) {
       return false;
     }
 
     this.memoryStore.releaseExecution(snapshotId, modelId, status, reservationToken);
 
     if (fs.existsSync(lockFile)) {
-      if (status && (status === 'EXECUTION_UNKNOWN' || status === 'FAILED_FINAL' || status === 'FAILED_RETRYABLE')) {
-        try {
-          const content = fs.readFileSync(lockFile, 'utf-8');
-          const diskRes = JSON.parse(content) as ExecutionReservation;
-          const data: ExecutionReservation = {
-            snapshotId,
-            modelId,
-            status,
-            reservationToken: diskRes.reservationToken || reservationToken || randomUUID(),
-            epoch: diskRes.epoch || 1,
-            reservedAt: diskRes.reservedAt || Date.now(),
-            lastUpdatedAt: Date.now(),
-          };
-          fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
-        } catch {}
-      } else {
-        try {
-          fs.unlinkSync(lockFile);
-        } catch {}
-      }
+      try {
+        const data: ExecutionReservation = {
+          snapshotId,
+          modelId,
+          status,
+          reservationToken: existing.reservationToken,
+          epoch: existing.epoch,
+          reservedAt: existing.reservedAt,
+          lastUpdatedAt: Date.now(),
+        };
+        fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
+      } catch {}
     }
     return true;
   }
@@ -842,14 +904,11 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   public reconcileExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerQueryStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
-    options?: {
-      liveOrder?: any;
-      championDecision?: TradingDecision;
-      challengerDecision?: TradingDecision;
-      pair?: ChampionChallengerDecisionPair;
-    }
+    options?: ReconcileOptions
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
+    this.recoverInterruptedClaim(snapshotId, modelId);
     const lockFile = this.getLockFilePath(snapshotId, modelId);
     if (!this.memoryStore.getReservation(snapshotId, modelId) && fs.existsSync(lockFile)) {
       try {
@@ -859,7 +918,7 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       } catch {}
     }
 
-    const result = this.memoryStore.reconcileExecution(snapshotId, modelId, brokerQueryStatus, options);
+    const result = this.memoryStore.reconcileExecution(snapshotId, modelId, reservationToken, brokerQueryStatus, options);
 
     if (result.reconciled) {
       if (result.newStatus === 'COMMITTED') {
@@ -870,18 +929,20 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
       } else {
         // FAILED_RETRYABLE -> write updated status to lock file
         const diskRes = this.getReservation(snapshotId, modelId);
-        const data: ExecutionReservation = {
-          snapshotId,
-          modelId,
-          status: result.newStatus,
-          reservationToken: diskRes?.reservationToken || randomUUID(),
-          epoch: (diskRes?.epoch || 1) + 1,
-          reservedAt: diskRes?.reservedAt || Date.now(),
-          lastUpdatedAt: Date.now(),
-        };
-        try {
-          fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
-        } catch {}
+        if (diskRes) {
+          const data: ExecutionReservation = {
+            snapshotId,
+            modelId,
+            status: result.newStatus,
+            reservationToken: diskRes.reservationToken,
+            epoch: diskRes.epoch,
+            reservedAt: diskRes.reservedAt,
+            lastUpdatedAt: Date.now(),
+          };
+          try {
+            fs.writeFileSync(lockFile, JSON.stringify(data), 'utf-8');
+          } catch {}
+        }
       }
     }
     return result;
@@ -890,10 +951,31 @@ export class FileShadowExecutionStore implements IShadowExecutionStore {
   public reconcileUnknownExecution(
     snapshotId: string,
     modelId: string,
+    reservationToken: string,
     brokerStatus: 'FOUND' | 'NOT_FOUND' | 'BROKER_STILL_UNKNOWN',
     liveOrder?: any
   ): { reconciled: boolean; newStatus: ExecutionReservationStatus } {
-    return this.reconcileExecution(snapshotId, modelId, brokerStatus, { liveOrder });
+    return this.reconcileExecution(snapshotId, modelId, reservationToken, brokerStatus, { liveOrder });
+  }
+
+  public getAllSnapshots(): MarketSnapshot[] {
+    return this.memoryStore.getAllSnapshots();
+  }
+
+  public getAllDecisions(): TradingDecision[] {
+    return this.memoryStore.getAllDecisions();
+  }
+
+  public getAllPairs(): ChampionChallengerDecisionPair[] {
+    return this.memoryStore.getAllPairs();
+  }
+
+  public getAllOrders(): ShadowOrder[] {
+    return this.memoryStore.getAllOrders();
+  }
+
+  public getAllPositions(): ShadowPosition[] {
+    return this.memoryStore.getAllPositions();
   }
 
   public clear(): void {

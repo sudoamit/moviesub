@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { fork } from 'child_process';
 import { createHash } from 'crypto';
 import {
   ICandle,
@@ -380,69 +381,104 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     expect(store.getAllSnapshots().length).toBe(1);
   });
 
-  it('True Multi-Process / Worker Thread Concurrency: proves isolated worker threads cannot double-submit live orders on shared file store', async () => {
-    const { Worker } = await import('worker_threads');
-    const testDir = path.join(__dirname, 'temp_prod_worker_thread_test');
-    const testFile = path.join(testDir, 'worker-cross-process-shadow.json');
+  it('True Multi-Process Concurrency: 4 independent OS Node.js child processes executing ProductionTradingPipeline against shared store produce exactly 1 live order', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_fork_test');
+    const testFile = path.join(testDir, 'fork-shadow.json');
+    const liveOrdersLogFile = path.join(testDir, 'live_orders.log');
+    const workerScript = fs.existsSync(path.join(__dirname, 'helpers/fork-pipeline-worker.js'))
+      ? path.join(__dirname, 'helpers/fork-pipeline-worker.js')
+      : path.join(__dirname, '../../../dist/__tests__/helpers/fork-pipeline-worker.js');
+
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     fs.mkdirSync(testDir, { recursive: true });
 
     try {
-      const snapshotId = 'worker-snap-race-01';
-      const modelId = 'champ-v1-prod';
+      const candles = generateCandles(60, 'BULLISH');
+      const lastCandle = candles[candles.length - 1];
+      const eventTime = lastCandle.timestamp.getTime();
 
-      const workerScript = `
-        const { workerData, parentPort } = require('worker_threads');
-        const fs = require('fs');
-        const path = require('path');
-        const crypto = require('crypto');
+      const marketEvent: LiveMarketEvent = {
+        snapshotId: 'snap-fork-process-01',
+        symbol: 'BTCUSDT',
+        candles,
+        timestamp: eventTime,
+        bid: 99.5,
+        ask: 100.5,
+        volume: 10,
+      };
 
-        const { testFile, snapshotId, modelId } = workerData;
-        const dir = path.dirname(testFile);
-        const lockFile = path.join(dir, '.lock.' + snapshotId + '.' + modelId);
+      const portfolioState: LivePortfolioAccountState = {
+        portfolioId: 'port-fork-1',
+        cash: 100000,
+        equity: 100000,
+        openPositions: [],
+        timestamp: eventTime,
+      };
 
-        try {
-          const reservationToken = crypto.randomUUID();
-          const reservationData = {
-            snapshotId,
-            modelId,
-            status: 'RESERVED',
-            reservationToken,
-            epoch: 1,
-            reservedAt: Date.now(),
-            lastUpdatedAt: Date.now(),
-          };
-          fs.writeFileSync(lockFile, JSON.stringify(reservationData), { flag: 'wx' });
-          parentPort.postMessage({ acquired: true, reservationToken });
-        } catch (err) {
-          if (err.code === 'EEXIST') {
-            parentPort.postMessage({ acquired: false, code: 'EEXIST' });
-          } else {
-            parentPort.postMessage({ acquired: false, error: err.message });
-          }
-        }
-      `;
+      const strategyConfig = {
+        deterministicSignal: {
+          direction: Direction.BULLISH,
+          score: 95,
+          entryPrice: 100,
+          stopLoss: 95,
+          takeProfits: { tp1: 110, tp2: 120, tp3: 130 },
+        },
+      };
 
-      const runWorker = () => {
-        return new Promise<{ acquired: boolean; code?: string; reservationToken?: string }>((resolve, reject) => {
-          const worker = new Worker(workerScript, {
-            eval: true,
-            workerData: { testFile, snapshotId, modelId },
+      const runProcess = (): Promise<{ success: boolean; pid: number; isConcurrentLock?: boolean; decisionId?: string; clientOrderId?: string }> => {
+        return new Promise((resolve, reject) => {
+          const child = fork(workerScript, [], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+          let response: any = null;
+
+          child.on('message', (msg) => {
+            response = msg;
           });
-          worker.on('message', resolve);
-          worker.on('error', reject);
+
+          child.on('exit', () => {
+            if (response) {
+              resolve(response);
+            } else {
+              reject(new Error('Child process exited without response'));
+            }
+          });
+
+          child.on('error', reject);
+
+          child.send({
+            testFile,
+            marketEvent,
+            portfolioState,
+            championModel,
+            challengerModel,
+            strategyConfig,
+            liveOrdersLogFile,
+          });
         });
       };
 
-      // Spawn 4 isolated OS worker threads simultaneously racing for the same lockfile
-      const results = await Promise.all([runWorker(), runWorker(), runWorker(), runWorker()]);
+      // Fork 4 independent Node.js processes executing ProductionTradingPipeline simultaneously
+      const results = await Promise.all([runProcess(), runProcess(), runProcess(), runProcess()]);
 
-      const acquiredCount = results.filter((r) => r.acquired).length;
-      const lockedCount = results.filter((r) => !r.acquired && r.code === 'EEXIST').length;
+      const successCount = results.filter((r) => r.success).length;
+      const lockedCount = results.filter((r) => !r.success && r.isConcurrentLock).length;
 
-      // STRICT INVARIANT: Exactly 1 isolated OS thread acquires the lock, all 3 others are rejected
-      expect(acquiredCount).toBe(1);
+      // STRICT MULTI-PROCESS INVARIANT: Exactly 1 independent OS process succeeds, 3 fail-closed with CONCURRENT_LOCK
+      expect(successCount).toBe(1);
       expect(lockedCount).toBe(3);
+
+      // Verify log file records strictly 1 broker submission across all 4 OS processes
+      expect(fs.existsSync(liveOrdersLogFile)).toBe(true);
+      const orderLines = fs.readFileSync(liveOrdersLogFile, 'utf-8').trim().split('\n').filter(Boolean);
+      expect(orderLines.length).toBe(1);
+
+      // Verify persistent store integrity
+      const store = new FileShadowExecutionStore(testFile);
+      expect(store.getAllPairs().length).toBe(1);
+      expect(store.getAllSnapshots().length).toBe(1);
+      expect(store.getAllDecisions().length).toBe(2); // 1 Champion + 1 Challenger
+
+      const successfulResult = results.find((r) => r.success)!;
+      expect(successfulResult.clientOrderId?.startsWith('ord_live_')).toBe(true);
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
@@ -520,102 +556,147 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     }
   });
 
-  it('Problem #6: proves POSIX rename atomic CAS prevents race conditions when transitioning FAILED_RETRYABLE -> RESERVED across workers without claim file leaks', async () => {
-    const testDir = path.join(__dirname, 'temp_prod_retry_claim_test');
-    const testFile = path.join(testDir, 'retry-claim-shadow.json');
+  it('Problem #5 & #6: proves interrupted retry claims are deterministically recovered without leak or duplicate execution', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_crash_claim_test');
+    const testFile = path.join(testDir, 'crash-claim-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     fs.mkdirSync(testDir, { recursive: true });
 
     try {
-      const store = new FileShadowExecutionStore(testFile);
-      const snapshotId = 'snap-retry-race-01';
+      const store1 = new FileShadowExecutionStore(testFile);
+      const snapshotId = 'snap-crash-claim-01';
       const modelId = 'champ-v1-prod';
 
-      // 1. Initial reservation fails with retryable error
-      const reserved = store.reserveExecution(snapshotId, modelId);
-      expect(reserved.acquired).toBe(true);
-      expect(reserved.reservationToken).toBeDefined();
-      expect(reserved.epoch).toBe(1);
+      // 1. Initial reservation acquired and released as FAILED_RETRYABLE
+      const res1 = store1.reserveExecution(snapshotId, modelId);
+      expect(res1.acquired).toBe(true);
+      store1.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE', res1.reservationToken!);
 
-      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE', reserved.reservationToken);
+      // 2. Simulate worker crash during atomic rename:
+      // Old lock is moved to .claim.<snapshot>.<model>.<token> and process dies before completing
+      const lockFile = path.join(testDir, `.lock.${snapshotId}.${modelId}`);
+      const crashedClaimFile = path.join(testDir, `.claim.${snapshotId}.${modelId}.crashed-worker-uuid`);
 
-      const existingRes = store.getReservation(snapshotId, modelId);
-      expect(existingRes?.status).toBe('FAILED_RETRYABLE');
+      fs.renameSync(lockFile, crashedClaimFile);
+      expect(fs.existsSync(lockFile)).toBe(false);
+      expect(fs.existsSync(crashedClaimFile)).toBe(true);
 
-      // 2. 4 parallel workers race to claim the FAILED_RETRYABLE lock simultaneously
-      const store1 = new FileShadowExecutionStore(testFile);
+      // 3. Start a fresh FileShadowExecutionStore on restart
       const store2 = new FileShadowExecutionStore(testFile);
-      const store3 = new FileShadowExecutionStore(testFile);
-      const store4 = new FileShadowExecutionStore(testFile);
+
+      // 4. 4 parallel workers race to acquire retry after recovery
+      const storeW1 = new FileShadowExecutionStore(testFile);
+      const storeW2 = new FileShadowExecutionStore(testFile);
+      const storeW3 = new FileShadowExecutionStore(testFile);
+      const storeW4 = new FileShadowExecutionStore(testFile);
 
       const claimResults = await Promise.all([
-        Promise.resolve().then(() => store1.reserveExecution(snapshotId, modelId)),
-        Promise.resolve().then(() => store2.reserveExecution(snapshotId, modelId)),
-        Promise.resolve().then(() => store3.reserveExecution(snapshotId, modelId)),
-        Promise.resolve().then(() => store4.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => storeW1.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => storeW2.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => storeW3.reserveExecution(snapshotId, modelId)),
+        Promise.resolve().then(() => storeW4.reserveExecution(snapshotId, modelId)),
       ]);
 
       const successCount = claimResults.filter((r) => r.acquired === true).length;
       const rejectedCount = claimResults.filter((r) => r.acquired === false).length;
 
-      // STRICT ATOMICITY INVARIANT: Exactly 1 worker claims the retry with incremented epoch, all 3 other workers are rejected
+      // STRICT INVARIANT: Exactly 1 worker acquires the recovered retry, all 3 others rejected
       expect(successCount).toBe(1);
       expect(rejectedCount).toBe(3);
 
       const winner = claimResults.find((r) => r.acquired === true)!;
       expect(winner.epoch).toBe(2);
       expect(winner.reservationToken).toBeDefined();
+
+      // Interrupted claim was recovered and canonical lock is restored
+      expect(fs.existsSync(lockFile)).toBe(true);
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
 
-  it('Problem #9: proves ownership fencing token rejects stale worker commits and status updates', async () => {
-    const testDir = path.join(__dirname, 'temp_prod_fencing_test');
-    const testFile = path.join(testDir, 'fencing-shadow.json');
+  it('Problem #9 & #10: proves stale reconciliation token cannot mutate or commit an overwritten reservation', async () => {
+    const testDir = path.join(__dirname, 'temp_prod_stale_rec_test');
+    const testFile = path.join(testDir, 'stale-rec-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     fs.mkdirSync(testDir, { recursive: true });
 
     try {
       const store = new FileShadowExecutionStore(testFile);
-      const snapshotId = 'snap-fencing-01';
+      const snapshotId = 'snap-stale-rec-01';
       const modelId = 'champ-v1-prod';
 
-      // 1. Worker A acquires reservation
+      // 1. Worker A acquires reservation (tokenA)
       const resA = store.reserveExecution(snapshotId, modelId);
       expect(resA.acquired).toBe(true);
       const tokenA = resA.reservationToken!;
 
-      // 2. Worker A experiences transient failure and releases as FAILED_RETRYABLE
-      store.releaseExecution(snapshotId, modelId, 'FAILED_RETRYABLE', tokenA);
+      // 2. Worker A enters EXECUTION_UNKNOWN
+      store.releaseExecution(snapshotId, modelId, 'EXECUTION_UNKNOWN', tokenA);
 
-      // 3. Worker B acquires the reservation with a new token (tokenB)
+      // 3. Worker A times out/reconciles offline to NOT_FOUND -> FAILED_RETRYABLE
+      store.reconcileExecution(snapshotId, modelId, tokenA, 'NOT_FOUND');
+      expect(store.getReservation(snapshotId, modelId)?.status).toBe('FAILED_RETRYABLE');
+
+      // 4. Worker B acquires the retry with tokenB
       const resB = store.reserveExecution(snapshotId, modelId);
       expect(resB.acquired).toBe(true);
       const tokenB = resB.reservationToken!;
       expect(tokenB).not.toBe(tokenA);
       expect(resB.epoch).toBe(2);
 
-      // 4. Stale Worker A attempts to mutate status using old tokenA -> REJECTED
-      const staleUpdate = store.updateReservationStatus(snapshotId, modelId, 'LIVE_SUBMITTED', tokenA);
-      expect(staleUpdate).toBe(false);
+      // 5. Worker A's stale FOUND response arrives late with tokenA -> REJECTED
+      const staleFound = store.reconcileExecution(snapshotId, modelId, tokenA, 'FOUND', {
+        liveOrder: { orderId: 'stale-broker-order' }
+      });
+      expect(staleFound.reconciled).toBe(false);
+      expect(store.getReservation(snapshotId, modelId)?.reservationToken).toBe(tokenB);
+      expect(store.getReservation(snapshotId, modelId)?.status).toBe('RESERVED');
 
-      // 5. Stale Worker A attempts to commit using old tokenA -> REJECTED
-      const staleCommit = store.commitExecution(snapshotId, modelId, tokenA);
-      expect(staleCommit).toBe(false);
-
-      // Current reservation on disk is still owned by Worker B
+      // 6. Worker A's stale NOT_FOUND arrives late with tokenA -> REJECTED
+      const staleNotFound = store.reconcileExecution(snapshotId, modelId, tokenA, 'NOT_FOUND');
+      expect(staleNotFound.reconciled).toBe(false);
       expect(store.getReservation(snapshotId, modelId)?.reservationToken).toBe(tokenB);
 
-      // 6. Legitimate Worker B commits using tokenB -> SUCCEEDS
-      const legitCommit = store.commitExecution(snapshotId, modelId, tokenB);
-      expect(legitCommit).toBe(true);
+      // 7. Legitimate Worker B updates status and commits using tokenB -> SUCCEEDS
+      expect(store.updateReservationStatus(snapshotId, modelId, 'EXECUTING', tokenB)).toBe(true);
+      expect(store.updateReservationStatus(snapshotId, modelId, 'LIVE_SUBMITTED', tokenB)).toBe(true);
+      expect(store.commitExecution(snapshotId, modelId, tokenB)).toBe(true);
     } finally {
       if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
 
-  it('Problem #8 & #4 & #5: proves tri-state broker reconciliation contract with durable DecisionPair persistence', async () => {
+  it('Problem #3: State Transition Matrix strictly validates allowed transitions and rejects illegal mutations', async () => {
+    const store = new InMemoryShadowExecutionStore();
+    const snapshotId = 'snap-trans-test-01';
+    const modelId = 'champ-v1-prod';
+
+    const res = store.reserveExecution(snapshotId, modelId);
+    expect(res.acquired).toBe(true);
+    const token = res.reservationToken!;
+
+    // 1. RESERVED -> COMMITTED is ILLEGAL (must go through EXECUTING/LIVE_SUBMITTED)
+    expect(store.commitExecution(snapshotId, modelId, token)).toBe(false);
+    expect(store.getReservation(snapshotId, modelId)?.status).toBe('RESERVED');
+
+    // 2. RESERVED -> EXECUTING is LEGAL
+    expect(store.updateReservationStatus(snapshotId, modelId, 'EXECUTING', token)).toBe(true);
+
+    // 3. EXECUTING -> COMMITTED is ILLEGAL (must go through LIVE_SUBMITTED)
+    expect(store.commitExecution(snapshotId, modelId, token)).toBe(false);
+
+    // 4. EXECUTING -> LIVE_SUBMITTED is LEGAL
+    expect(store.updateReservationStatus(snapshotId, modelId, 'LIVE_SUBMITTED', token)).toBe(true);
+
+    // 5. LIVE_SUBMITTED -> COMMITTED is LEGAL
+    expect(store.commitExecution(snapshotId, modelId, token)).toBe(true);
+
+    // 6. COMMITTED is TERMINAL -> any further update is REJECTED
+    expect(store.updateReservationStatus(snapshotId, modelId, 'EXECUTING', token)).toBe(false);
+  });
+
+  it('Problem #8 & #11 & #13: proves tri-state broker reconciliation contract with durable DecisionPair persistence and restart recovery', async () => {
     const testDir = path.join(__dirname, 'temp_prod_reconcile_test');
     const testFile = path.join(testDir, 'reconcile-shadow.json');
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
@@ -627,12 +708,13 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       const modelId = 'champ-v1-prod';
 
       // 1. Enter EXECUTION_UNKNOWN state
-      store.reserveExecution(snapshotId, modelId);
-      store.releaseExecution(snapshotId, modelId, 'EXECUTION_UNKNOWN');
+      const res = store.reserveExecution(snapshotId, modelId);
+      const token = res.reservationToken!;
+      store.releaseExecution(snapshotId, modelId, 'EXECUTION_UNKNOWN', token);
       expect(store.getReservation(snapshotId, modelId)?.status).toBe('EXECUTION_UNKNOWN');
 
       // Scenario A: BROKER_STILL_UNKNOWN (e.g. broker API 500 error / unreachable during reconciliation) -> FAILS CLOSED
-      const reconcileUnknown = store.reconcileUnknownExecution(snapshotId, modelId, 'BROKER_STILL_UNKNOWN');
+      const reconcileUnknown = store.reconcileUnknownExecution(snapshotId, modelId, token, 'BROKER_STILL_UNKNOWN');
       expect(reconcileUnknown.reconciled).toBe(false);
       expect(reconcileUnknown.newStatus).toBe('EXECUTION_UNKNOWN');
       expect(store.getReservation(snapshotId, modelId)?.status).toBe('EXECUTION_UNKNOWN');
@@ -707,7 +789,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
         decisionPairFingerprint: 'fp-pair-rec',
       };
 
-      const reconcileFound = store.reconcileExecution(snapshotId, modelId, 'FOUND', {
+      const reconcileFound = store.reconcileExecution(snapshotId, modelId, token, 'FOUND', {
         liveOrder: { orderId: 'broker-123' },
         championDecision: dummyChampionDecision,
         pair: dummyPair,
@@ -722,10 +804,11 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
       // Scenario C: Reconciliation scenario C: Order NOT_FOUND on broker -> transitions to FAILED_RETRYABLE
       const snapshotId2 = 'snap-reconcile-02';
-      store.reserveExecution(snapshotId2, modelId);
-      store.releaseExecution(snapshotId2, modelId, 'EXECUTION_UNKNOWN');
+      const res2 = store.reserveExecution(snapshotId2, modelId);
+      const token2 = res2.reservationToken!;
+      store.releaseExecution(snapshotId2, modelId, 'EXECUTION_UNKNOWN', token2);
 
-      const reconcileNotFound = store.reconcileUnknownExecution(snapshotId2, modelId, 'NOT_FOUND');
+      const reconcileNotFound = store.reconcileUnknownExecution(snapshotId2, modelId, token2, 'NOT_FOUND');
       expect(reconcileNotFound.reconciled).toBe(true);
       expect(reconcileNotFound.newStatus).toBe('FAILED_RETRYABLE');
 
@@ -733,13 +816,21 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
       const retried = store.reserveExecution(snapshotId2, modelId);
       expect(retried.acquired).toBe(true);
 
-      // Scenario D: LIVE_SUBMITTED crash recovery is also supported
+      // Scenario D: LIVE_SUBMITTED crash recovery on process restart
       const snapshotId3 = 'snap-reconcile-03';
-      store.reserveExecution(snapshotId3, modelId);
-      store.updateReservationStatus(snapshotId3, modelId, 'LIVE_SUBMITTED');
+      const res3 = store.reserveExecution(snapshotId3, modelId);
+      const token3 = res3.reservationToken!;
+      store.updateReservationStatus(snapshotId3, modelId, 'EXECUTING', token3);
+      store.updateReservationStatus(snapshotId3, modelId, 'LIVE_SUBMITTED', token3);
       expect(store.getReservation(snapshotId3, modelId)?.status).toBe('LIVE_SUBMITTED');
 
-      const reconcileLiveSubmitted = store.reconcileExecution(snapshotId3, modelId, 'FOUND', {
+      // Process restart simulation: load from disk and reconcile
+      const restartStore = new FileShadowExecutionStore(testFile);
+      const recoveredRes = restartStore.getReservation(snapshotId3, modelId);
+      expect(recoveredRes?.status).toBe('LIVE_SUBMITTED');
+      expect(recoveredRes?.reservationToken).toBe(token3);
+
+      const reconcileLiveSubmitted = restartStore.reconcileExecution(snapshotId3, modelId, token3, 'FOUND', {
         championDecision: dummyChampionDecision,
         pair: dummyPair,
       });
@@ -750,7 +841,7 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     }
   });
 
-  it('Problem #5 & #7: proves broker adapter maps TradingDecision.clientOrderId to broker-side idempotency payload', async () => {
+  it('Problem #5 & #7 & #12: proves deterministic clientOrderId generation invariant across submissions, restarts, and retries', async () => {
     const candles = generateCandles(60, 'BULLISH');
     const lastCandle = candles[candles.length - 1];
     const eventTime = lastCandle.timestamp.getTime();
