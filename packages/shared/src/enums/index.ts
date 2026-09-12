@@ -47,10 +47,16 @@ export function normalizeDirection(dir: Direction | PositionSide | string | unde
 }
 
 export function isLongPosition(dir: Direction | PositionSide | string | undefined | null): boolean {
+  if (!dir) return false;
+  const upper = String(dir).toUpperCase();
+  if (upper === 'BUY') return true;
   return normalizeDirection(dir) === PositionSide.LONG;
 }
 
 export function isShortPosition(dir: Direction | PositionSide | string | undefined | null): boolean {
+  if (!dir) return false;
+  const upper = String(dir).toUpperCase();
+  if (upper === 'SELL') return true;
   return normalizeDirection(dir) === PositionSide.SHORT;
 }
 

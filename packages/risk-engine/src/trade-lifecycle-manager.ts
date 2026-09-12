@@ -1,4 +1,16 @@
-import { Direction, ICandle, IBacktestTrade, ISignalSetup, SignalState, isLongPosition, normalizeDirection } from '@quant/shared';
+import {
+  Direction,
+  ICandle,
+  IBacktestTrade,
+  ISignalSetup,
+  SignalState,
+  isLongPosition,
+  normalizeDirection,
+  hasInstrument,
+  getAuthoritativeInstrument,
+  PointInTimeCurrencyConverter,
+  MarginMode,
+} from '@quant/shared';
 import {
   IEntryExecutionSnapshot,
   IExecutionEvent,
@@ -8,6 +20,7 @@ import {
   PositionLot,
   PositionStatus,
 } from './types';
+import { TradeAccountingEngine } from './trade-accounting-engine';
 
 export const DEFAULT_PARTIAL_EXIT_POLICY: IPartialExitPolicy = {
   tp1Ratio: 0.3, // 30% scale-out at TP1
@@ -209,12 +222,71 @@ export class TradeLifecycleManager {
     fillModel?: string,
     ambiguityMode?: string,
     tradeId = lot.tradeId,
+    options?: {
+      leverage?: number;
+      marginMode?: MarginMode;
+      contractSize?: number;
+      lotSize?: number;
+      fxRate?: number;
+    },
   ): IBacktestTrade {
     const firstFill = lot.partialFills[0];
     const lastFill = lot.partialFills[lot.partialFills.length - 1];
     const totalFees = lot.partialFills.reduce((sum, fill) => sum + fill.fee, 0);
     const totalSlippage = lot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0);
-    const initialRisk = Math.abs(lot.entryPrice - lot.initialStopLoss) * lot.initialQuantity;
+
+    let instrument = hasInstrument(lot.symbol) ? getAuthoritativeInstrument(lot.symbol) : undefined;
+    const contractSize = options?.contractSize ?? instrument?.contractSize ?? 1;
+    const lotSize = options?.lotSize ?? instrument?.lotSize ?? 1;
+    const quoteCurrency = instrument?.quoteCurrency || (instrument?.currency as any) || 'INR';
+    const accountCurrency = 'INR';
+
+    let fxRate = options?.fxRate;
+    let fxTimestamp = lot.openedAt;
+    let fxPair = `${quoteCurrency}/${accountCurrency}`;
+    if (fxRate === undefined) {
+      if (quoteCurrency === accountCurrency) {
+        fxRate = 1.0;
+      } else {
+        try {
+          const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
+            quoteCurrency,
+            accountCurrency,
+            lot.openedAt,
+          );
+          fxRate = fxResult.fxRate;
+          fxTimestamp = fxResult.fxTimestamp;
+          fxPair = fxResult.fxPair;
+        } catch {
+          fxRate = 1.0;
+        }
+      }
+    }
+
+    const leverage = options?.leverage ?? instrument?.defaultLeverage ?? 1;
+    const marginMode = options?.marginMode ?? instrument?.marginMode ?? (leverage > 1 ? 'ISOLATED' : 'SPOT');
+
+    const notionalCalc = TradeAccountingEngine.calculateNotional(
+      lot.initialQuantity,
+      lot.entryPrice,
+      contractSize,
+      fxRate,
+    );
+    const marginCalc = TradeAccountingEngine.calculateMargin(
+      notionalCalc.notionalAccount,
+      leverage,
+      marginMode,
+      instrument?.initialMarginRate,
+      instrument?.maintenanceMarginRate,
+    );
+
+    const initialRisk = TradeAccountingEngine.calculateStopRisk(
+      lot.entryPrice,
+      lot.initialStopLoss,
+      lot.initialQuantity,
+      contractSize,
+      fxRate,
+    );
     const netPnl = Number((lot.realizedPnl - totalFees).toFixed(2));
 
     return {
@@ -227,7 +299,20 @@ export class TradeLifecycleManager {
       stopLoss: lot.initialStopLoss,
       takeProfit: lot.tp2,
       positionSize: lot.initialQuantity,
-      marginRequired: Number(((lot.initialQuantity * lot.entryPrice) / 5).toFixed(2)),
+      marginRequired: marginCalc.initialMarginRequired,
+      initialMarginRequired: marginCalc.initialMarginRequired,
+      maintenanceMarginRequired: marginCalc.maintenanceMarginRequired,
+      positionNotionalQuote: notionalCalc.notionalQuote,
+      positionNotionalAccount: notionalCalc.notionalAccount,
+      accountCurrency,
+      quoteCurrency,
+      fxPair,
+      fxRate,
+      fxTimestamp,
+      contractSize,
+      lotSize,
+      leverage,
+      marginMode,
       riskAmount: Number(initialRisk.toFixed(2)),
       pnl: netPnl,
       pnlRMultiple: Number((netPnl / Math.max(1, initialRisk)).toFixed(2)),

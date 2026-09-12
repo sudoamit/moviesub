@@ -19,6 +19,22 @@ export interface ICandle {
   isClosed?: boolean;
 }
 
+export type CurrencyCode = 'INR' | 'USD' | 'USDT' | 'EUR' | string;
+export type MarginMode = 'SPOT' | 'ISOLATED' | 'CROSS';
+
+export interface IFxConversionResult {
+  convertedAmount: number;
+  originalAmount: number;
+  fromCurrency: CurrencyCode;
+  toCurrency: CurrencyCode;
+  fxPair: string;
+  fxRate: number;
+  fxTimestamp: number;
+  fxSource: string;
+  fxVersion: string;
+  fxSnapshotHash: string;
+}
+
 export interface IInstrument {
   id: string;
   symbol: string;
@@ -29,6 +45,17 @@ export interface IInstrument {
   lotSize: number;
   contractSize: number;
   currency: string;
+  baseCurrency?: string;
+  quoteCurrency?: CurrencyCode;
+  accountingCurrency?: CurrencyCode;
+  marginMode?: MarginMode;
+  defaultLeverage?: number;
+  maxLeverage?: number;
+  initialMarginRate?: number;
+  maintenanceMarginRate?: number;
+  minimumQuantity?: number;
+  quantityPrecision?: number;
+  pricePrecision?: number;
   tradingHoursJson?: Record<string, any> | null;
   isActive: boolean;
   createdAt?: Date;
@@ -225,6 +252,20 @@ export interface IPositionSizing {
   maximumLoss: number;
   isValid: boolean;
   rejectionReason?: string;
+  accountCurrency?: CurrencyCode;
+  quoteCurrency?: CurrencyCode;
+  fxPair?: string;
+  fxRate?: number;
+  fxTimestamp?: number;
+  fxSnapshotHash?: string;
+  contractSize?: number;
+  positionNotionalQuote?: number;
+  positionNotionalAccount?: number;
+  leverage?: number;
+  marginMode?: MarginMode;
+  initialMarginRequired?: number;
+  maintenanceMarginRequired?: number;
+  liquidationPrice?: number;
 }
 
 export interface IMarketDataProvider {
@@ -328,6 +369,19 @@ export interface IBacktestTrade {
   fillModel?: string;
   ambiguityMode?: string;
   entrySnapshot?: IEntryExecutionSnapshot;
+  accountCurrency?: CurrencyCode;
+  quoteCurrency?: CurrencyCode;
+  fxPair?: string;
+  fxRate?: number;
+  fxTimestamp?: number;
+  contractSize?: number;
+  lotSize?: number;
+  positionNotionalQuote?: number;
+  positionNotionalAccount?: number;
+  leverage?: number;
+  marginMode?: MarginMode;
+  initialMarginRequired?: number;
+  maintenanceMarginRequired?: number;
 }
 
 /**

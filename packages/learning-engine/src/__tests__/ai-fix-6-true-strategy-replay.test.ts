@@ -1008,6 +1008,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
           maxAdverseExcursion: 0.2,
           holdingTimeSeconds: 600,
         },
+        labelBinary: i % 2 === 0 ? 1 : 0,
         marketContext: { regime: 'BULLISH', volatilityRegime: 'NORMAL', session: 'NY', dayOfWeek: 1 },
         outcomeClassification: 'GOOD_TRADE_WIN',
         reasons: [],
@@ -1027,6 +1028,18 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       description: 'WFV continuous candidate',
       change: { parameter: 'minMtfScore', value: 65 },
       evidence: { sampleSize: 30, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
+      riskConfig: {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      },
       status: 'GENERATED',
       createdAt: new Date(),
     };

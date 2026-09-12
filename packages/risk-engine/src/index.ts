@@ -1,4 +1,5 @@
 export * from './types';
+export * from './trade-accounting-engine';
 export * from './position-sizer';
 export * from './drawdown-guard';
 export * from './portfolio-risk-manager';

@@ -8,6 +8,9 @@ import {
   Timeframe,
   PositionSide,
   isLongPosition,
+  hasInstrument,
+  getAuthoritativeInstrument,
+  PointInTimeCurrencyConverter,
 } from '@quant/shared';
 import {
   SignalGenerator,
@@ -22,6 +25,7 @@ import {
   DEFAULT_PARTIAL_EXIT_POLICY,
   PositionLot,
   IExecutionEvent,
+  TradeAccountingEngine,
 } from '@quant/risk-engine';
 import {
   IBacktestOptions,
@@ -423,26 +427,39 @@ export class BacktestSimulator {
           drawdownPercent: ddPercent,
         });
 
+        let activeLotMargin = 0;
+        let activeLotExposureINR = 0;
+        if (activeLot) {
+          const lotSym = activeLot.symbol;
+          const inst = hasInstrument(lotSym) ? getAuthoritativeInstrument(lotSym) : undefined;
+          const cSize = inst?.contractSize ?? 1;
+          const qCurr = inst?.quoteCurrency || (inst?.currency as any) || 'INR';
+          let fx = 1.0;
+          if (qCurr !== 'INR') {
+            try {
+              fx = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
+            } catch {
+              fx = 1.0;
+            }
+          }
+          const notionalCalc = TradeAccountingEngine.calculateNotional(activeLot.remainingQuantity, activeLot.entryPrice, cSize, fx);
+          activeLotExposureINR = notionalCalc.notionalAccount;
+          const lev = inst?.defaultLeverage ?? 1;
+          const mMode = inst?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
+          const mCalc = TradeAccountingEngine.calculateMargin(notionalCalc.notionalAccount, lev, mMode, inst?.initialMarginRate, inst?.maintenanceMarginRate);
+          activeLotMargin = mCalc.initialMarginRequired;
+        }
+
         equitySnapshots.push({
           timestamp: new Date(candleTime),
           cash: currentCash,
           realizedPnL: activeLot ? activeLot.realizedPnl : 0,
           unrealizedPnL: activeLot ? activeLot.unrealizedPnl : 0,
           equity: currentEquity,
-          marginUsed: activeLot
-            ? Number(((activeLot.remainingQuantity * activeLot.entryPrice) / 5).toFixed(2))
-            : 0,
-          availableMargin: Math.max(
-            0,
-            currentEquity -
-              (activeLot ? (activeLot.remainingQuantity * activeLot.entryPrice) / 5 : 0),
-          ),
-          grossExposure: activeLot ? activeLot.remainingQuantity * activeLot.entryPrice : 0,
-          netExposure: activeLot
-            ? (isLong ? 1 : -1) *
-              activeLot.remainingQuantity *
-              activeLot.entryPrice
-            : 0,
+          marginUsed: activeLotMargin,
+          availableMargin: Math.max(0, currentEquity - activeLotMargin),
+          grossExposure: activeLotExposureINR,
+          netExposure: activeLot ? (isLong ? 1 : -1) * activeLotExposureINR : 0,
           fees: cumulativeFees,
           slippage: cumulativeSlippage,
           drawdownPercent: ddPercent,
@@ -820,6 +837,30 @@ export class BacktestSimulator {
       const lastFill = activeLot.partialFills[activeLot.partialFills.length - 1];
       const firstFill = activeLot.partialFills[0];
 
+      const terminalInst = hasInstrument(activeLot.symbol) ? getAuthoritativeInstrument(activeLot.symbol) : undefined;
+      const termContractSize = terminalInst?.contractSize ?? 1;
+      const termLotSize = terminalInst?.lotSize ?? 1;
+      const termQuoteCurrency = terminalInst?.quoteCurrency || (terminalInst?.currency as any) || 'INR';
+      const termAccountCurrency = 'INR';
+      let termFxRate = 1.0;
+      let termFxTimestamp = activeLot.openedAt;
+      let termFxPair = `${termQuoteCurrency}/${termAccountCurrency}`;
+      if (termQuoteCurrency !== termAccountCurrency) {
+        try {
+          const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
+          termFxRate = fxRes.fxRate;
+          termFxTimestamp = fxRes.fxTimestamp;
+          termFxPair = fxRes.fxPair;
+        } catch {
+          termFxRate = 1.0;
+        }
+      }
+      const termLev = terminalInst?.defaultLeverage ?? 1;
+      const termMarginMode = terminalInst?.marginMode ?? (termLev > 1 ? 'ISOLATED' : 'SPOT');
+      const termNotional = TradeAccountingEngine.calculateNotional(activeLot.initialQuantity, activeLot.entryPrice, termContractSize, termFxRate);
+      const termMargin = TradeAccountingEngine.calculateMargin(termNotional.notionalAccount, termLev, termMarginMode, terminalInst?.initialMarginRate, terminalInst?.maintenanceMarginRate);
+      const termRisk = TradeAccountingEngine.calculateStopRisk(activeLot.entryPrice, activeLot.initialStopLoss, activeLot.initialQuantity, termContractSize, termFxRate);
+
       const tradeRecord: IBacktestTrade = {
         id: `${runId}_tr_${trades.length + 1}`,
         direction: activeLot.direction,
@@ -830,11 +871,24 @@ export class BacktestSimulator {
         stopLoss: activeLot.initialStopLoss,
         takeProfit: activeLot.tp2,
         positionSize: activeLot.initialQuantity,
-        marginRequired: Number(((activeLot.initialQuantity * activeLot.entryPrice) / 5).toFixed(2)),
-        riskAmount: Number((initialRiskDist * activeLot.initialQuantity).toFixed(2)),
+        marginRequired: termMargin.initialMarginRequired,
+        initialMarginRequired: termMargin.initialMarginRequired,
+        maintenanceMarginRequired: termMargin.maintenanceMarginRequired,
+        positionNotionalQuote: termNotional.notionalQuote,
+        positionNotionalAccount: termNotional.notionalAccount,
+        accountCurrency: termAccountCurrency,
+        quoteCurrency: termQuoteCurrency,
+        fxPair: termFxPair,
+        fxRate: termFxRate,
+        fxTimestamp: termFxTimestamp,
+        contractSize: termContractSize,
+        lotSize: termLotSize,
+        leverage: termLev,
+        marginMode: termMarginMode,
+        riskAmount: termRisk,
         pnl: netPnl,
         pnlRMultiple: Number(
-          (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
+          (netPnl / Math.max(1, termRisk)).toFixed(2),
         ),
         exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
         signalTimestamp: new Date(

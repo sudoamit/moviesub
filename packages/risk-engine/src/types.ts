@@ -147,6 +147,14 @@ export interface IOpenPosition {
   currentPrice: number;
   unrealizedPnL: number;
   openTimestamp: Date;
+  quoteCurrency?: string;
+  accountCurrency?: string;
+  contractSize?: number;
+  fxRate?: number;
+  notionalINR?: number;
+  initialMarginRequired?: number;
+  maintenanceMarginRequired?: number;
+  leverage?: number;
 }
 
 export interface ITradeStateUpdate {

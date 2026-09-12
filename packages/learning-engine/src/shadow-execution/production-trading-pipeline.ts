@@ -374,7 +374,10 @@ export class ProductionTradingPipeline {
           riskPercentage: this.config.riskConfig?.riskPercentage ?? 1.0,
           entryPrice: champSignal.entryZone?.optimal ?? lastCandle.close,
           stopLoss: champSignal.stopLoss,
-          lotSize: this.config.riskConfig?.lotSize ?? 1,
+          symbol: event.symbol,
+          direction: champAction,
+          timestamp: marketSnapshot.timestamp,
+          lotSize: event.lotSize ?? this.config.riskConfig?.lotSize ?? 1,
           maxRiskPercentage: this.config.riskConfig?.maxRiskPercentage ?? 2.5,
           maxLeverage: this.config.riskConfig?.maxLeverage ?? 10,
         });
@@ -517,7 +520,10 @@ export class ProductionTradingPipeline {
             riskPercentage: this.config.riskConfig?.riskPercentage ?? 1.0,
             entryPrice: challSignal.entryZone?.optimal ?? lastCandle.close,
             stopLoss: challSignal.stopLoss,
-            lotSize: this.config.riskConfig?.lotSize ?? 1,
+            symbol: event.symbol,
+            direction: challAction,
+            timestamp: marketSnapshot.timestamp,
+            lotSize: event.lotSize ?? this.config.riskConfig?.lotSize ?? 1,
             maxRiskPercentage: this.config.riskConfig?.maxRiskPercentage ?? 2.5,
             maxLeverage: this.config.riskConfig?.maxLeverage ?? 10,
           });
