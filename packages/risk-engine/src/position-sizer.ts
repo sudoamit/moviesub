@@ -274,25 +274,36 @@ export class PositionSizer {
       );
     }
 
-    // 10. Calculate Notional Value
+    // 10. Build Authoritative Verifiable Point-In-Time Accounting Snapshot
+    const accountingSnapshot = buildAccountingSnapshot({
+      accountCurrency,
+      quoteCurrency,
+      fxResult,
+      contractSize: effectiveContractSize,
+      lotSize: effectiveLotSize,
+      resolvedMarginModel,
+      calculatedAt: timestamp,
+    });
+
+    // 11. Calculate Notional Value via Accounting Snapshot
     const notionalCalc = TradeAccountingEngine.calculateNotional(
       roundedUnits,
       entryPrice,
-      effectiveContractSize,
-      fxRate,
+      accountingSnapshot,
     );
     const positionNotionalQuote = notionalCalc.notionalQuote;
     const positionNotionalINR = notionalCalc.notionalAccount;
 
+    // 12. Calculate Initial & Maintenance Margin via Accounting Snapshot
     const marginCalc = TradeAccountingEngine.calculateMargin(
       positionNotionalINR,
-      resolvedMarginModel,
+      accountingSnapshot,
     );
 
     const initialMarginRequired = marginCalc.initialMarginRequired;
     const maintenanceMarginRequired = marginCalc.maintenanceMarginRequired;
 
-    // 12. Check Available Margin
+    // 13. Check Available Margin
     if (initialMarginRequired > effAvailableMargin + 1e-4) {
       return {
         accountBalance,
@@ -319,12 +330,14 @@ export class PositionSizer {
         marginMode: effMarginMode,
         initialMarginRequired,
         maintenanceMarginRequired,
+        resolvedMarginModel,
+        accountingSnapshot,
         isValid: false,
         rejectionReason: `Required initial margin (${initialMarginRequired.toFixed(2)} INR) exceeds available margin (${effAvailableMargin.toFixed(2)} INR)`,
       };
     }
 
-    // 13. Gross Account Leverage Limit
+    // 14. Gross Account Leverage Limit
     if (positionNotionalINR > accountBalance * accountMaxLeverage + 1e-4) {
       return {
         accountBalance,
@@ -351,27 +364,18 @@ export class PositionSizer {
         marginMode: effMarginMode,
         initialMarginRequired,
         maintenanceMarginRequired,
+        resolvedMarginModel,
+        accountingSnapshot,
         isValid: false,
         rejectionReason: `Position value (${positionNotionalINR.toFixed(2)} INR) exceeds maximum allowable account leverage (${accountMaxLeverage}x)`,
       };
     }
 
-    // 14. Liquidation Safety Calculation (consuming identical resolved margin model)
+    // 15. Liquidation Safety Calculation (consuming identical accounting snapshot)
     const liquidationPrice = TradeAccountingEngine.calculateLiquidationPrice({
       entryPrice,
       direction,
-      marginModel: resolvedMarginModel,
-    });
-
-    // 15. Build Complete Verifiable Point-In-Time Accounting Snapshot
-    const accountingSnapshot = buildAccountingSnapshot({
-      accountCurrency,
-      quoteCurrency,
-      fxResult,
-      contractSize: effectiveContractSize,
-      lotSize: effectiveLotSize,
-      resolvedMarginModel,
-      calculatedAt: timestamp,
+      accountingSnapshot,
     });
 
     // 16. Return Complete Institutional Position Sizing

@@ -67,6 +67,7 @@ export class TradeLifecycleManager {
     entryFee = 0,
     entrySlippage = 0,
     policy: IPartialExitPolicy = DEFAULT_PARTIAL_EXIT_POLICY,
+    accountingSnapshot?: ITradeAccountingSnapshot,
   ): PositionLot {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
     const isLong = isLongPosition(signal.direction);
@@ -217,6 +218,7 @@ export class TradeLifecycleManager {
       mae: 0,
       mfe: 0,
       entrySnapshot,
+      accountingSnapshot,
     };
   }
 
@@ -240,99 +242,104 @@ export class TradeLifecycleManager {
     const totalFees = lot.partialFills.reduce((sum, fill) => sum + fill.fee, 0);
     const totalSlippage = lot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0);
 
-    let instrument = hasInstrument(lot.symbol) ? getAuthoritativeInstrument(lot.symbol) : undefined;
-    const contractSize = options?.contractSize ?? instrument?.contractSize ?? 1;
-    const lotSize = options?.lotSize ?? instrument?.lotSize ?? 1;
-    const quoteCurrency = instrument?.quoteCurrency || (instrument?.currency as any) || 'INR';
-    const accountCurrency = 'INR';
+    let accountingSnapshot: ITradeAccountingSnapshot;
 
-    let fxRate = options?.fxRate;
-    let fxTimestamp = lot.openedAt;
-    let fxPair = `${quoteCurrency}/${accountCurrency}`;
-    let fxSource = 'SYSTEM_DIRECT';
-    let fxSnapshotHash = 'LOCAL_HASH';
-    if (fxRate === undefined) {
-      if (quoteCurrency === accountCurrency) {
-        fxRate = 1.0;
-      } else {
-        // Strict fail-closed: throws if FX rate is unavailable for cross-currency instrument
-        const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
-          quoteCurrency,
-          accountCurrency,
-          lot.openedAt,
-        );
-        fxRate = fxResult.fxRate;
-        fxTimestamp = fxResult.fxTimestamp;
-        fxPair = fxResult.fxPair;
-        fxSource = fxResult.fxSource;
-        fxSnapshotHash = fxResult.fxSnapshotHash;
-      }
-    }
-
-    let resolvedMarginModel: IResolvedMarginModel;
-    if (instrument) {
-      resolvedMarginModel = resolveMarginModel(instrument, {
-        requestedLeverage: options?.leverage,
-        venueOverride: {
-          marginMode: options?.marginMode,
-          initialMarginRate: options?.initialMarginRate,
-        },
-      });
+    if (lot.accountingSnapshot) {
+      accountingSnapshot = lot.accountingSnapshot;
     } else {
-      const lev = options?.leverage ?? 1;
-      const mMode: MarginMode = options?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
-      resolvedMarginModel = {
-        marginMode: mMode,
-        effectiveLeverage: Math.max(1, lev),
-        initialMarginRate: options?.initialMarginRate ?? (mMode === 'SPOT' ? 1.0 : 1 / Math.max(1, lev)),
-        maintenanceMarginRate: 0.05,
-        liquidationModel: mMode === 'SPOT' ? 'SPOT_NONE' : 'ISOLATED_LINEAR',
-      };
+      const instrument = hasInstrument(lot.symbol) ? getAuthoritativeInstrument(lot.symbol) : undefined;
+      const contractSize = options?.contractSize ?? instrument?.contractSize ?? 1;
+      const lotSize = options?.lotSize ?? instrument?.lotSize ?? 1;
+      const quoteCurrency = instrument?.quoteCurrency || (instrument?.currency as any) || 'INR';
+      const accountCurrency = 'INR';
+
+      let fxRate = options?.fxRate;
+      let fxTimestamp = lot.openedAt;
+      let fxPair = `${quoteCurrency}/${accountCurrency}`;
+      let fxSource = 'SYSTEM_DIRECT';
+      let fxSnapshotHash = 'LOCAL_HASH';
+      if (fxRate === undefined) {
+        if (quoteCurrency === accountCurrency) {
+          fxRate = 1.0;
+        } else {
+          // Strict fail-closed: throws if FX rate is unavailable for cross-currency instrument
+          const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
+            quoteCurrency,
+            accountCurrency,
+            lot.openedAt,
+          );
+          fxRate = fxResult.fxRate;
+          fxTimestamp = fxResult.fxTimestamp;
+          fxPair = fxResult.fxPair;
+          fxSource = fxResult.fxSource;
+          fxSnapshotHash = fxResult.fxSnapshotHash;
+        }
+      }
+
+      let resolvedMarginModel: IResolvedMarginModel;
+      if (instrument) {
+        resolvedMarginModel = resolveMarginModel(instrument, {
+          requestedLeverage: options?.leverage,
+          venueOverride: {
+            marginMode: options?.marginMode,
+            initialMarginRate: options?.initialMarginRate,
+          },
+        });
+      } else {
+        const lev = options?.leverage ?? 1;
+        const mMode: MarginMode = options?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
+        resolvedMarginModel = {
+          marginMode: mMode,
+          effectiveLeverage: Math.max(1, lev),
+          initialMarginRate: options?.initialMarginRate ?? (mMode === 'SPOT' ? 1.0 : 1 / Math.max(1, lev)),
+          maintenanceMarginRate: 0.05,
+          liquidationModel: mMode === 'SPOT' ? 'SPOT_NONE' : 'ISOLATED_LINEAR',
+        };
+      }
+
+      accountingSnapshot = buildAccountingSnapshot({
+        accountCurrency,
+        quoteCurrency,
+        fxResult: {
+          convertedAmount: 0,
+          originalAmount: 0,
+          fromCurrency: quoteCurrency,
+          toCurrency: accountCurrency,
+          fxPair,
+          fxRate,
+          fxTimestamp,
+          fxSource,
+          fxVersion: '1.0',
+          fxSnapshotHash,
+        },
+        contractSize,
+        lotSize,
+        resolvedMarginModel,
+        calculatedAt: lot.openedAt,
+      });
     }
 
+    const resolvedMarginModel = accountingSnapshot.resolvedMarginModel;
     const leverage = resolvedMarginModel.effectiveLeverage;
     const marginMode = resolvedMarginModel.marginMode;
 
     const notionalCalc = TradeAccountingEngine.calculateNotional(
       lot.initialQuantity,
       lot.entryPrice,
-      contractSize,
-      fxRate,
+      accountingSnapshot,
     );
     const marginCalc = TradeAccountingEngine.calculateMargin(
       notionalCalc.notionalAccount,
-      resolvedMarginModel,
+      accountingSnapshot,
     );
 
     const initialRisk = TradeAccountingEngine.calculateStopRisk(
       lot.entryPrice,
       lot.initialStopLoss,
       lot.initialQuantity,
-      contractSize,
-      fxRate,
+      accountingSnapshot,
     );
     const netPnl = Number((lot.realizedPnl - totalFees).toFixed(2));
-
-    const accountingSnapshot = buildAccountingSnapshot({
-      accountCurrency,
-      quoteCurrency,
-      fxResult: {
-        convertedAmount: notionalCalc.notionalAccount,
-        originalAmount: notionalCalc.notionalQuote,
-        fromCurrency: quoteCurrency,
-        toCurrency: accountCurrency,
-        fxPair,
-        fxRate,
-        fxTimestamp,
-        fxSource,
-        fxVersion: '1.0',
-        fxSnapshotHash,
-      },
-      contractSize,
-      lotSize,
-      resolvedMarginModel,
-      calculatedAt: lot.openedAt,
-    });
 
     return {
       id: tradeId,
@@ -349,13 +356,13 @@ export class TradeLifecycleManager {
       maintenanceMarginRequired: marginCalc.maintenanceMarginRequired,
       positionNotionalQuote: notionalCalc.notionalQuote,
       positionNotionalAccount: notionalCalc.notionalAccount,
-      accountCurrency,
-      quoteCurrency,
-      fxPair,
-      fxRate,
-      fxTimestamp,
-      contractSize,
-      lotSize,
+      accountCurrency: accountingSnapshot.accountCurrency,
+      quoteCurrency: accountingSnapshot.quoteCurrency,
+      fxPair: accountingSnapshot.fxPair,
+      fxRate: accountingSnapshot.fxRate,
+      fxTimestamp: accountingSnapshot.fxTimestamp,
+      contractSize: accountingSnapshot.contractSize,
+      lotSize: accountingSnapshot.lotSize,
       leverage,
       marginMode,
       riskAmount: Number(initialRisk.toFixed(2)),

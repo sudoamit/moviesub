@@ -1487,5 +1487,181 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       expect(pnl.accountingSnapshot?.snapshotHash).toBeDefined();
     });
   });
+
+  // =========================================================================
+  // 26. UNIVERSAL ACCOUNTING SNAPSHOT CONSUMPTION VERIFICATION (AI Fix 102)
+  // =========================================================================
+  describe('26. Universal AccountingSnapshot Consumption Across All Primitives & Engines', () => {
+    it('All TradeAccountingEngine primitives consume ITradeAccountingSnapshot as single source of truth', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      // 1. calculateNotional consuming snapshot
+      const notional = TradeAccountingEngine.calculateNotional(0.05, 90000, snapshot);
+      expect(notional.notionalQuote).toBe(4500); // 0.05 * 90000 * 1 = 4,500 USDT
+      expect(notional.notionalAccount).toBe(414000); // 4500 * 92 = ₹414,000 INR
+
+      // 2. calculateMargin consuming snapshot
+      const margin = TradeAccountingEngine.calculateMargin(notional.notionalAccount, snapshot);
+      expect(margin.initialMarginRequired).toBe(41400); // 10% of ₹414,000 = ₹41,400 INR
+      expect(margin.maintenanceMarginRequired).toBe(10350); // 2.5% of ₹414,000 = ₹10,350 INR
+
+      // 3. calculateStopRisk consuming snapshot
+      const stopRisk = TradeAccountingEngine.calculateStopRisk(90000, 88000, 0.05, snapshot);
+      expect(stopRisk).toBe(9200); // 2000 * 0.05 * 92 = ₹9,200 INR
+
+      // 4. calculateLiquidationPrice consuming snapshot
+      const liqPrice = TradeAccountingEngine.calculateLiquidationPrice({
+        entryPrice: 90000,
+        direction: 'LONG',
+        accountingSnapshot: snapshot,
+      });
+      // 90000 * (1 - 0.10 + 0.025) = 90000 * 0.925 = 83250
+      expect(liqPrice).toBe(83250);
+
+      // 5. calculateTradePnl consuming snapshot
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: 90000,
+        exitPrice: 95000,
+        quantity: 0.05,
+        direction: 'LONG',
+        accountingSnapshot: snapshot,
+      });
+      expect(pnl.grossPnlQuote).toBe(250); // 5000 * 0.05 = 250 USDT
+      expect(pnl.grossPnlAccount).toBe(23000); // 250 * 92 = ₹23,000 INR
+      expect(pnl.accountingSnapshot).toBe(snapshot);
+    });
+
+    it('PortfolioRiskManager evaluates open positions and proposed orders via ITradeAccountingSnapshot', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      const openPos = {
+        id: 'pos_btc_1',
+        symbol: 'BTCUSDT',
+        assetType: 'CRYPTO',
+        direction: Direction.BULLISH,
+        entryPrice: 90000,
+        stopLoss: 88000,
+        units: 0.01,
+        riskAmount: 1840,
+        currentPrice: 90000,
+        unrealizedPnL: 0,
+        openTimestamp: new Date(1700000000000),
+        accountingSnapshot: snapshot,
+      };
+
+      const proposedSizing: IPositionSizing = {
+        accountBalance: 500000,
+        riskPercentage: 1.0,
+        riskAmount: 5000,
+        entryPrice: 90000,
+        stopLoss: 88000,
+        riskPerUnit: 184000,
+        calculatedUnits: 0.027,
+        lotSize: 0.001,
+        roundedUnits: 0.027,
+        totalPositionValue: 223560,
+        maximumLoss: 4968,
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxPair: 'BTC/INR',
+        fxRate: 92.0,
+        contractSize: 1,
+        positionNotionalAccount: 223560,
+        positionNotionalQuote: 2430,
+        leverage: 10,
+        marginMode: 'ISOLATED',
+        initialMarginRequired: 22356,
+        maintenanceMarginRequired: 5589,
+        isValid: true,
+        accountingSnapshot: snapshot,
+      };
+
+      const status = PortfolioRiskManager.validateNewPosition(
+        500000,
+        [openPos],
+        proposedSizing,
+      );
+
+      expect(status.isAllowed).toBe(true);
+      expect(status.totalOpenPositions).toBe(1);
+      // Total gross exposure includes open position (0.01 * 90000 * 92 = 82800) + proposed (223560) = 306360
+      expect(status.totalGrossExposure).toBe(306360);
+      expect(status.initialMarginUsed).toBe(30636); // 8280 + 22356
+    });
+
+    it('PositionLot preserves accountingSnapshot through lifecycle to completed trade', () => {
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
+      const fx = converter.getRate('USDT', 'INR', 1700000000000);
+
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: 'USDT',
+        fxResult: fx,
+        contractSize: 1,
+        lotSize: 0.001,
+        resolvedMarginModel: marginModel,
+        calculatedAt: 1700000000000,
+      });
+
+      const signal = {
+        symbol: 'BTCUSDT',
+        direction: Direction.BULLISH,
+        stopLoss: 88000,
+      };
+
+      const lot = TradeLifecycleManager.createPositionLot(
+        signal as any,
+        90000,
+        0.01,
+        1700000000000,
+        'ord_entry',
+        0,
+        0,
+        undefined,
+        snapshot,
+      );
+
+      expect(lot.accountingSnapshot).toBe(snapshot);
+
+      // Complete the trade and verify it consumes lot.accountingSnapshot
+      const completedTrade = TradeLifecycleManager.createCompletedTrade(
+        lot,
+        SignalState.TP2_HIT,
+        'OHLC_PATH',
+        'CONSERVATIVE',
+      );
+
+      expect(completedTrade.accountingSnapshot).toBe(snapshot);
+      expect(completedTrade.accountingSnapshot?.snapshotHash).toBe(snapshot.snapshotHash);
+      expect(completedTrade.initialMarginRequired).toBe(8280); // (90000 * 0.01 * 92) * 10% = 8280
+      expect(completedTrade.riskAmount).toBe(1840); // (90000 - 88000) * 0.01 * 92 = 1840
+    });
+  });
 });
+
 

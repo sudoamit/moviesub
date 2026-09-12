@@ -1,4 +1,4 @@
-import { Direction, IInstrument, IPositionSizing, ISignalSetup, SignalState } from '@quant/shared';
+import { Direction, IInstrument, IPositionSizing, ISignalSetup, ITradeAccountingSnapshot, SignalState } from '@quant/shared';
 
 export type ExecutionEventType =
   | 'ENTRY_TRIGGERED'
@@ -119,6 +119,7 @@ export interface PositionLot {
   mae: number; // Maximum Adverse Excursion (in price distance & percentage)
   mfe: number; // Maximum Favorable Excursion (in price distance & percentage)
   entrySnapshot?: Readonly<IEntryExecutionSnapshot>;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface IRiskConfig {
@@ -155,6 +156,7 @@ export interface IOpenPosition {
   initialMarginRequired?: number;
   maintenanceMarginRequired?: number;
   leverage?: number;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface ITradeStateUpdate {

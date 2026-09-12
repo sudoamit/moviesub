@@ -1,9 +1,13 @@
 import { IOpenPosition, IRiskConfig } from './types';
 import {
+  buildAccountingSnapshot,
+  CurrencyCode,
   getAuthoritativeInstrument,
   hasInstrument,
   IPositionSizing,
+  ITradeAccountingSnapshot,
   PointInTimeCurrencyConverter,
+  resolveMarginModel,
 } from '@quant/shared';
 import { TradeAccountingEngine } from './trade-accounting-engine';
 
@@ -67,12 +71,18 @@ export class PortfolioRiskManager {
     const maxRiskPerTrade = config.maxRiskPercentage ?? 2.5;
     const maxOpenRiskPct = config.maxOpenRiskPercent ?? 6.0;
     const maxConcurrent = config.maxConcurrentPositions ?? 5;
-    const maxPerAssetType = 3;
+    const maxLeverage = config.maxLeverage ?? 10;
+    const maxSymbolExposurePct = config.maxSymbolExposurePercent ?? 25.0;
+    const maxCorrelatedExposurePct = config.maxCorrelatedExposurePercent ?? 15.0;
     const maxDailyLossPct = config.maxDailyDrawdownPercent ?? 5.0;
     const maxWeeklyLossPct = config.maxWeeklyDrawdownPercent ?? 8.0;
     const maxDrawdownPct = config.maxAccountDrawdownPercent ?? 10.0;
     const maxConsecutiveLosses = config.maxConsecutiveLosses ?? 3;
-    const maxLeverage = config.maxLeverage ?? 10;
+    const maxPerAssetType = 3;
+
+    if (proposedPosition.accountingSnapshot?.fxPair) {
+      proposedSymbol = proposedPosition.accountingSnapshot.fxPair.split('/')[0] || proposedSymbol;
+    }
 
     let totalOpenRiskAmount = 0; // in INR
     let totalGrossExposure = 0; // in INR
@@ -85,51 +95,61 @@ export class PortfolioRiskManager {
       const posSymbol = pos.symbol;
       const instrument = hasInstrument(posSymbol) ? getAuthoritativeInstrument(posSymbol) : undefined;
       const contractSize = pos.contractSize ?? instrument?.contractSize ?? 1;
-      const quoteCurrency = pos.quoteCurrency || instrument?.quoteCurrency || (instrument?.currency as any) || 'INR';
+      const quoteCurrency: CurrencyCode =
+        (pos.quoteCurrency as CurrencyCode) ||
+        instrument?.quoteCurrency ||
+        (instrument?.currency as CurrencyCode) ||
+        'INR';
 
-      let fxRate = pos.fxRate;
-      if (fxRate === undefined) {
-        if (quoteCurrency === 'INR') {
-          fxRate = 1.0;
-        } else {
-          try {
-            const fxRes = currencyConverter.getRate(
-              quoteCurrency,
-              'INR',
-              pos.openTimestamp ? pos.openTimestamp.getTime() : Date.now(),
-            );
-            fxRate = fxRes.fxRate;
-          } catch {
-            fxRate = 1.0;
-          }
-        }
+      let posSnapshot: ITradeAccountingSnapshot | undefined = pos.accountingSnapshot;
+
+      if (!posSnapshot) {
+        const posTimestamp = pos.openTimestamp ? pos.openTimestamp.getTime() : Date.now();
+        const fxRes = currencyConverter.getRate(quoteCurrency, 'INR', posTimestamp);
+        const resolvedMargin = instrument
+          ? resolveMarginModel(instrument, { requestedLeverage: pos.leverage })
+          : {
+              marginMode: pos.leverage && pos.leverage > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
+              effectiveLeverage: Math.max(1, pos.leverage ?? 1),
+              initialMarginRate: pos.leverage && pos.leverage > 1 ? 1 / pos.leverage : 1.0,
+              maintenanceMarginRate: 0.05,
+              liquidationModel: pos.leverage && pos.leverage > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
+            };
+
+        posSnapshot = buildAccountingSnapshot({
+          accountCurrency: 'INR',
+          quoteCurrency,
+          fxResult: fxRes,
+          contractSize,
+          lotSize: pos.units,
+          resolvedMarginModel: resolvedMargin,
+          calculatedAt: posTimestamp,
+        });
       }
 
-      // Notional in INR
-      const notionalQuote = pos.units * pos.currentPrice * contractSize;
-      const notionalINR = pos.notionalINR ?? Number((notionalQuote * fxRate).toFixed(2));
+      // Notional in INR via Snapshot
+      const notionalCalc = TradeAccountingEngine.calculateNotional(
+        pos.units,
+        pos.currentPrice,
+        posSnapshot,
+      );
+      const notionalINR = pos.notionalINR ?? notionalCalc.notionalAccount;
 
-      // Risk in INR
+      // Risk in INR via Snapshot
       let riskAmountINR = pos.riskAmount;
-      if (quoteCurrency !== 'INR' && fxRate !== 1.0 && !pos.riskAmount) {
+      if (quoteCurrency !== 'INR' && !pos.riskAmount) {
         riskAmountINR = TradeAccountingEngine.calculateStopRisk(
           pos.entryPrice,
           pos.stopLoss,
           pos.units,
-          contractSize,
-          fxRate,
+          posSnapshot,
         );
       }
 
-      // Margin in INR
-      const posLeverage = pos.leverage ?? instrument?.defaultLeverage ?? 1;
-      const posMarginMode = instrument?.marginMode ?? (posLeverage > 1 ? 'ISOLATED' : 'SPOT');
+      // Margin in INR via Snapshot
       const marginCalc = TradeAccountingEngine.calculateMargin(
         notionalINR,
-        posLeverage,
-        posMarginMode,
-        instrument?.initialMarginRate,
-        instrument?.maintenanceMarginRate,
+        posSnapshot,
       );
 
       const initMarginINR = pos.initialMarginRequired ?? marginCalc.initialMarginRequired;
@@ -144,18 +164,18 @@ export class PortfolioRiskManager {
       positionsBySymbol[posSymbol] = (positionsBySymbol[posSymbol] || 0) + notionalINR;
     }
 
-    // Proposed Position INR Metrics
-    const proposedInstrument = hasInstrument(proposedSymbol) ? getAuthoritativeInstrument(proposedSymbol) : undefined;
+    // Proposed Position INR Metrics via Snapshot
     const proposedExposure = proposedPosition.positionNotionalAccount ?? proposedPosition.totalPositionValue;
-    const proposedRisk = proposedPosition.riskAmount;
-    const proposedLev = proposedPosition.leverage ?? proposedInstrument?.defaultLeverage ?? 1;
-    const proposedMarginMode = proposedPosition.marginMode ?? proposedInstrument?.marginMode ?? (proposedLev > 1 ? 'ISOLATED' : 'SPOT');
     const proposedInitMargin =
       proposedPosition.initialMarginRequired ??
-      TradeAccountingEngine.calculateMargin(proposedExposure, proposedLev, proposedMarginMode).initialMarginRequired;
+      (proposedPosition.accountingSnapshot
+        ? TradeAccountingEngine.calculateMargin(proposedExposure, proposedPosition.accountingSnapshot).initialMarginRequired
+        : proposedExposure);
     const proposedMaintMargin =
       proposedPosition.maintenanceMarginRequired ??
-      TradeAccountingEngine.calculateMargin(proposedExposure, proposedLev, proposedMarginMode).maintenanceMarginRequired;
+      (proposedPosition.accountingSnapshot
+        ? TradeAccountingEngine.calculateMargin(proposedExposure, proposedPosition.accountingSnapshot).maintenanceMarginRequired
+        : proposedExposure * 0.05);
 
     const totalGrossWithProposed = totalGrossExposure + proposedExposure;
     const grossLeverage = Number((totalGrossWithProposed / Math.max(1, accountEquity)).toFixed(2));

@@ -39,6 +39,7 @@ export interface ILiquidationCalculationParams {
   maintenanceMarginRate?: number;
   liquidationModel?: LiquidationModel;
   marginModel?: IResolvedMarginModel;
+  accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
 export interface ITradePnlParams {
@@ -62,13 +63,25 @@ export class TradeAccountingEngine {
   /**
    * Calculates notional values in both quote currency and INR account currency.
    * STRICT FAIL-CLOSED: Rejects non-finite, zero, or negative inputs.
+   * Can consume ITradeAccountingSnapshot directly.
    */
   static calculateNotional(
     quantity: number,
     price: number,
-    contractSize = 1,
+    contractSizeOrSnapshot: number | ITradeAccountingSnapshot = 1,
     fxRate = 1.0,
   ): { notionalQuote: number; notionalAccount: number } {
+    let cSize: number;
+    let effectiveFx: number;
+
+    if (typeof contractSizeOrSnapshot === 'object' && contractSizeOrSnapshot !== null) {
+      cSize = contractSizeOrSnapshot.contractSize ?? 1;
+      effectiveFx = contractSizeOrSnapshot.fxRate;
+    } else {
+      cSize = contractSizeOrSnapshot;
+      effectiveFx = fxRate;
+    }
+
     if (
       typeof quantity !== 'number' ||
       !Number.isFinite(quantity) ||
@@ -76,33 +89,33 @@ export class TradeAccountingEngine {
       typeof price !== 'number' ||
       !Number.isFinite(price) ||
       price <= 0 ||
-      typeof contractSize !== 'number' ||
-      !Number.isFinite(contractSize) ||
-      contractSize <= 0 ||
-      typeof fxRate !== 'number' ||
-      !Number.isFinite(fxRate) ||
-      fxRate <= 0
+      typeof cSize !== 'number' ||
+      !Number.isFinite(cSize) ||
+      cSize <= 0 ||
+      typeof effectiveFx !== 'number' ||
+      !Number.isFinite(effectiveFx) ||
+      effectiveFx <= 0
     ) {
       throw new Error(
-        `INVALID_NOTIONAL_INPUTS: quantity (${quantity}), price (${price}), contractSize (${contractSize}), fxRate (${fxRate}) must be valid positive finite numbers`,
+        `INVALID_NOTIONAL_INPUTS: quantity (${quantity}), price (${price}), contractSize (${cSize}), fxRate (${effectiveFx}) must be valid positive finite numbers`,
       );
     }
-    const notionalQuote = Number((quantity * price * contractSize).toFixed(4));
-    const notionalAccount = Number((notionalQuote * fxRate).toFixed(2));
+    const notionalQuote = Number((quantity * price * cSize).toFixed(4));
+    const notionalAccount = Number((notionalQuote * effectiveFx).toFixed(2));
     return { notionalQuote, notionalAccount };
   }
 
   /**
    * Authoritatively calculates Initial and Maintenance Margin in INR.
    * Priority:
-   * 1. Consumes IResolvedMarginModel if provided
+   * 1. Consumes ITradeAccountingSnapshot or IResolvedMarginModel if provided
    * 2. SPOT: 100% notional
    * 3. Explicit initialMarginRate if provided (> 0)
    * 4. Leverage-based: notional / leverage
    */
   static calculateMargin(
     notionalAccount: number,
-    leverageOrModel?: number | IResolvedMarginModel,
+    leverageOrModelOrSnapshot?: number | IResolvedMarginModel | ITradeAccountingSnapshot,
     marginMode: MarginMode = 'ISOLATED',
     initialMarginRate?: number,
     maintenanceMarginRate = 0.05,
@@ -120,13 +133,18 @@ export class TradeAccountingEngine {
     let imr: number | undefined;
     let mmr: number;
 
-    if (typeof leverageOrModel === 'object' && leverageOrModel !== null) {
-      lev = leverageOrModel.effectiveLeverage;
-      mMode = leverageOrModel.marginMode;
-      imr = leverageOrModel.initialMarginRate;
-      mmr = leverageOrModel.maintenanceMarginRate;
+    if (typeof leverageOrModelOrSnapshot === 'object' && leverageOrModelOrSnapshot !== null) {
+      const resolvedModel: IResolvedMarginModel =
+        'resolvedMarginModel' in leverageOrModelOrSnapshot
+          ? (leverageOrModelOrSnapshot as ITradeAccountingSnapshot).resolvedMarginModel
+          : (leverageOrModelOrSnapshot as IResolvedMarginModel);
+
+      lev = resolvedModel.effectiveLeverage;
+      mMode = resolvedModel.marginMode;
+      imr = resolvedModel.initialMarginRate;
+      mmr = resolvedModel.maintenanceMarginRate;
     } else {
-      lev = leverageOrModel ?? 1;
+      lev = leverageOrModelOrSnapshot ?? 1;
       mMode = marginMode;
       imr = initialMarginRate;
       mmr = maintenanceMarginRate;
@@ -167,6 +185,7 @@ export class TradeAccountingEngine {
   /**
    * Calculates model-driven liquidation threshold price.
    * Returns undefined for SPOT or unsupported models.
+   * Can consume ITradeAccountingSnapshot directly.
    */
   static calculateLiquidationPrice(
     paramsOrEntryPrice: ILiquidationCalculationParams | number,
@@ -187,7 +206,9 @@ export class TradeAccountingEngine {
     if (typeof paramsOrEntryPrice === 'object') {
       entryPrice = paramsOrEntryPrice.entryPrice;
       dir = paramsOrEntryPrice.direction;
-      const mm = paramsOrEntryPrice.marginModel;
+      const mm =
+        paramsOrEntryPrice.accountingSnapshot?.resolvedMarginModel ??
+        paramsOrEntryPrice.marginModel;
       lev = mm?.effectiveLeverage ?? paramsOrEntryPrice.leverage ?? 1;
       mmr = mm?.maintenanceMarginRate ?? paramsOrEntryPrice.maintenanceMarginRate ?? 0.025;
       imr = mm?.initialMarginRate ?? paramsOrEntryPrice.initialMarginRate;
@@ -233,14 +254,26 @@ export class TradeAccountingEngine {
   /**
    * Calculates authoritative stop-based risk in INR.
    * INVARIANT: Risk is stop-based and independent of leverage.
+   * Can consume ITradeAccountingSnapshot directly.
    */
   static calculateStopRisk(
     entryPrice: number,
     stopLoss: number,
     quantity: number,
-    contractSize = 1,
+    contractSizeOrSnapshot: number | ITradeAccountingSnapshot = 1,
     fxRate = 1.0,
   ): number {
+    let cSize: number;
+    let effectiveFx: number;
+
+    if (typeof contractSizeOrSnapshot === 'object' && contractSizeOrSnapshot !== null) {
+      cSize = contractSizeOrSnapshot.contractSize ?? 1;
+      effectiveFx = contractSizeOrSnapshot.fxRate;
+    } else {
+      cSize = contractSizeOrSnapshot;
+      effectiveFx = fxRate;
+    }
+
     if (
       typeof entryPrice !== 'number' ||
       !Number.isFinite(entryPrice) ||
@@ -251,18 +284,18 @@ export class TradeAccountingEngine {
       typeof quantity !== 'number' ||
       !Number.isFinite(quantity) ||
       quantity <= 0 ||
-      typeof contractSize !== 'number' ||
-      !Number.isFinite(contractSize) ||
-      contractSize <= 0 ||
-      typeof fxRate !== 'number' ||
-      !Number.isFinite(fxRate) ||
-      fxRate <= 0
+      typeof cSize !== 'number' ||
+      !Number.isFinite(cSize) ||
+      cSize <= 0 ||
+      typeof effectiveFx !== 'number' ||
+      !Number.isFinite(effectiveFx) ||
+      effectiveFx <= 0
     ) {
       throw new Error('INVALID_RISK_INPUTS: Inputs to calculateStopRisk must be positive finite numbers');
     }
     const stopDistance = Math.abs(entryPrice - stopLoss);
-    const riskQuote = stopDistance * quantity * contractSize;
-    const riskAccount = riskQuote * fxRate;
+    const riskQuote = stopDistance * quantity * cSize;
+    const riskAccount = riskQuote * effectiveFx;
     return Number(riskAccount.toFixed(2));
   }
 
@@ -270,7 +303,7 @@ export class TradeAccountingEngine {
    * Calculates gross and net P&L with point-in-time FX conversion.
    * INVARIANT: Changing leverage DOES NOT change fixed-position gross P&L.
    * INVARIANT: Net P&L = gross P&L - explicit fees - unpriced slippage.
-   * STRICT FAIL-CLOSED: Cross-currency calculation requires explicit valid fxRate.
+   * STRICT FAIL-CLOSED: Cross-currency calculation requires explicit valid fxRate or snapshot.
    */
   static calculateTradePnl(
     paramsOrEntryPrice: ITradePnlParams | number,
@@ -303,15 +336,17 @@ export class TradeAccountingEngine {
       pExit = paramsOrEntryPrice.exitPrice;
       qty = paramsOrEntryPrice.quantity;
       dir = paramsOrEntryPrice.direction;
-      cSize = paramsOrEntryPrice.contractSize ?? 1;
-      qCurr = paramsOrEntryPrice.quoteCurrency ?? paramsOrEntryPrice.accountingSnapshot?.quoteCurrency;
-      aCurr = paramsOrEntryPrice.accountCurrency ?? paramsOrEntryPrice.accountingSnapshot?.accountCurrency ?? 'INR';
-      fx = paramsOrEntryPrice.fxRate ?? paramsOrEntryPrice.accountingSnapshot?.fxRate ?? paramsOrEntryPrice.fxSnapshot?.fxRate;
+      acctSnap = paramsOrEntryPrice.accountingSnapshot;
+
+      cSize = acctSnap?.contractSize ?? paramsOrEntryPrice.contractSize ?? 1;
+      qCurr = acctSnap?.quoteCurrency ?? paramsOrEntryPrice.quoteCurrency;
+      aCurr = acctSnap?.accountCurrency ?? paramsOrEntryPrice.accountCurrency ?? 'INR';
+      fx = acctSnap?.fxRate ?? paramsOrEntryPrice.fxRate ?? paramsOrEntryPrice.fxSnapshot?.fxRate;
+
       feeAmount = paramsOrEntryPrice.fees ?? 0;
       slipAmount = paramsOrEntryPrice.slippage ?? 0;
       riskAcct = paramsOrEntryPrice.initialRiskAccount ?? 0;
       slipIncluded = paramsOrEntryPrice.slippageIncludedInPrices ?? true;
-      acctSnap = paramsOrEntryPrice.accountingSnapshot;
 
       if (!acctSnap && paramsOrEntryPrice.fxSnapshot) {
         const defaultMarginModel: IResolvedMarginModel = {
