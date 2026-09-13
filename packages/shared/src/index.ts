@@ -8,3 +8,4 @@ export * from './currency/currency-converter';
 export * from './currency/currency-formatter';
 export * from './instrument/instrument-registry';
 export * from './execution/execution-aggregator';
+export * from './timeframe/timeframe-registry';

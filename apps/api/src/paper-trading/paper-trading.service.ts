@@ -241,7 +241,11 @@ export class PaperTradingService implements IExecutionProvider {
       const isBuy = pos.direction === Direction.BULLISH;
       const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
-      const unrealizedPnL = Number((priceDiff * quantity - charges.totalCharges).toFixed(2));
+      // BTC is USDT-quoted: convert price diff to INR before subtracting INR charges
+      const isCryptoPosUnrealized = pos.symbol === 'BTCUSDT' || pos.symbol === 'BTCUSD';
+      const USDT_INR_RATE = 92.0;
+      const priceDiffINR = isCryptoPosUnrealized ? priceDiff * USDT_INR_RATE : priceDiff;
+      const unrealizedPnL = Number((priceDiffINR * quantity - charges.totalCharges).toFixed(2));
       const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
       const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
       const riskAnchor = initialStopLoss ?? stopLoss;
@@ -395,7 +399,7 @@ export class PaperTradingService implements IExecutionProvider {
     }
 
     const symbol = this.normalizeSymbol(req.symbol);
-    const isCrypto = symbol === 'BTCUSDT';
+    const isCrypto = symbol === 'BTCUSDT' || symbol === 'BTCUSD';
     const correlationId =
       req.correlationId || `corr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const instrumentType = req.instrumentType || (req.strike ? 'OPTION' : 'SPOT');
@@ -748,7 +752,10 @@ export class PaperTradingService implements IExecutionProvider {
       },
     });
     const todayRealizedPnL = todayTrades.reduce((acc, t) => acc + Number(t.realizedPnL), 0);
-    const maxDailyLossAllowed = initialCapital * (Number(config.maxDailyLossPercent) / 100);
+    // Use beginning-of-day balance (current balance minus today's PnL swing) as the denominator
+    // so the limit scales with the actual account size, not the fixed initial capital.
+    const beginOfDayBalance = Math.max(initialCapital, Number(account.cashBalance) - todayRealizedPnL);
+    const maxDailyLossAllowed = beginOfDayBalance * (Number(config.maxDailyLossPercent) / 100);
 
     if (todayRealizedPnL < -maxDailyLossAllowed) {
       await this.rejectOrder(
@@ -801,7 +808,8 @@ export class PaperTradingService implements IExecutionProvider {
     const turnover = finalFillPrice * req.quantity;
     const charges = this.calculateCharges(turnover, isCrypto);
     const effLeverage = Math.max(1, Math.min(req.leverage || 5, Number(config.maxLeverage)));
-    const requiredMargin = Number((turnover / effLeverage + charges.totalCharges).toFixed(2));
+    // requiredMargin is pure margin (notional / leverage); charges are a separate cash deduction
+    const requiredMargin = Number((turnover / effLeverage).toFixed(2));
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
     // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
@@ -836,9 +844,9 @@ export class PaperTradingService implements IExecutionProvider {
       const txUsedMargin = Number(txAccount.usedMargin);
       const txAvailable = txCash - txUsedMargin;
 
-      if (txAvailable < requiredMargin) {
+      if (txAvailable < requiredMargin + charges.totalCharges) {
         throw new BadRequestException(
-          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${requiredMargin.toFixed(2)}, Available: ₹${txAvailable.toFixed(2)}`,
+          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${(requiredMargin + charges.totalCharges).toFixed(2)} (margin ₹${requiredMargin.toFixed(2)} + charges ₹${charges.totalCharges.toFixed(2)}), Available: ₹${txAvailable.toFixed(2)}`,
         );
       }
 
@@ -1073,7 +1081,7 @@ export class PaperTradingService implements IExecutionProvider {
 
     const correlationId = correlationIdOverride || correlationIdOpt || pos.correlationId || `corr_${Date.now()}`;
     const symbol = pos.symbol;
-    const isCrypto = symbol === 'BTCUSDT';
+    const isCrypto = symbol === 'BTCUSDT' || symbol === 'BTCUSD';
     const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
     const config = await this.getSystemConfig();
 

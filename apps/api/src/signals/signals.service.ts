@@ -70,7 +70,7 @@ export class SignalsService implements OnModuleInit {
       const count = await this.prisma.signal.count();
       if (count === 0) {
         this.logger.log('Trade Journal empty on startup. Initializing completed trades...');
-        await this.syncHistoricalTrades();
+        await this.seedInitialCompletedTrades();
       }
     } catch (err: any) {
       this.logger.warn(`Failed to auto-seed initial completed trades: ${err?.message}`);
@@ -390,7 +390,7 @@ export class SignalsService implements OnModuleInit {
   }
 
   private getPriceTolerance(symbol: string, entryPrice: number, exitPrice: number): number {
-    if (symbol.toUpperCase() === 'BTCUSDT') return 1.0;
+    if (symbol.toUpperCase() === 'BTCUSDT' || symbol.toUpperCase() === 'BTCUSD') return 50.0;
     const maxPrice = Math.max(Math.abs(entryPrice), Math.abs(exitPrice));
     if (maxPrice < 5000) return 0.05; // option premiums/equities
     if (symbol.toUpperCase() === 'BANKNIFTY') return 0.5;
@@ -667,9 +667,9 @@ export class SignalsService implements OnModuleInit {
         exitPrice: t.exitPrice !== null ? Number(t.exitPrice) : null,
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
-        stopLoss: t.entryPrice !== null ? Number(t.entryPrice) * 0.99 : null,
-        target1: t.entryPrice !== null ? Number(t.entryPrice) * 1.015 : null,
-        target2: t.entryPrice !== null ? Number(t.entryPrice) * 1.025 : null,
+        stopLoss: null,   // PaperTrade does not store SL; no fabricated reconstruction
+        target1: null,    // PaperTrade does not store TP levels; no fabricated reconstruction
+        target2: null,    // PaperTrade does not store TP levels; no fabricated reconstruction
         pnlAmount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
         netPnlAccount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
         accountCurrency: executionDataComplete ? (accountCurrency || 'INR') : null,
@@ -1023,7 +1023,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 24115.0,
         tp2: 24085.0, // Candle @ 11:45 AM [Low 24077.00, High 24109.65]
         exit: 24085.0,
-        pnl: 1875.0, // 75 pts * 25 qty
+        qty: 65,        // 1 lot (current NSE lot size as of 2024 revision)
+        pnl: 4875.0,   // 75 pts * 65 qty = ₹4,875
         r: 3.0,
         reason: 'Target 2 Completed (3.0R Structural Breakdown)',
         actIST: [11, 15], // 11:15 AM IST
@@ -1038,7 +1039,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 57450.0,
         tp2: 57350.0, // Candle @ 12:00 PM [Low 57333.05, High 57391.75]
         exit: 57350.0,
-        pnl: 3000.0, // 200 pts * 15 qty
+        qty: 15,        // 1 lot (current NSE BankNifty lot size)
+        pnl: 3000.0,   // 200 pts * 15 qty = ₹3,000
         r: 2.5,
         reason: 'Target 2 Completed (2.5R Order Block Rejection)',
         actIST: [10, 45], // 10:45 AM IST
@@ -1053,7 +1055,9 @@ export class SignalsService implements OnModuleInit {
         tp1: 78268.84,
         tp2: 78448.84, // Binance 15m Candle @ 02:00 PM [High 78680.00]
         exit: 78448.84,
-        pnl: 7830.0, // 450 pts * 0.20 BTC * 87
+        qty: 0.20,
+        // (78448.84 - 77998.84) = 450 USDT * 0.20 BTC = 90 USDT * 92 USDT/INR = ₹8,280
+        pnl: 8280.0,
         r: 2.5,
         reason: 'Target 2 Completed (2.5R Saiyan ALMA Crossover)',
         actIST: [10, 45], // 10:45 AM IST
@@ -1069,7 +1073,9 @@ export class SignalsService implements OnModuleInit {
         tp2: 78030.08,
         tp3: 77760.08, // Binance 15m Candle @ 06:00 PM [Low 77750.00]
         exit: 77760.08,
-        pnl: 12528.0, // 720 pts * 0.20 BTC * 87
+        qty: 0.20,
+        // (78480.08 - 77760.08) = 720 USDT * 0.20 BTC = 144 USDT * 92 USDT/INR = ₹13,248
+        pnl: 13248.0,
         r: 4.0,
         reason: 'Target 3 Completed (4.0R Dynamic Supply Rejection)',
         actIST: [16, 45], // 04:45 PM IST
@@ -1129,7 +1135,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 2882.0,
         tp2: 2891.0,
         exit: 2891.0,
-        pnl: 16095.0, // (2891.0 - 2872.5 = 18.5 USD/oz * 10 oz * 87 INR)
+        qty: 10,        // 10 troy oz (explicit; XAUUSD is USD-quoted so USD/INR=87 applies)
+        pnl: 16095.0,  // (2891.0 - 2872.5 = 18.5 USD/oz) * 10 oz * 87 USD/INR = ₹16,095
         r: 2.47,
         reason: 'Target 2 Completed (2.47R NY Open Expansion)',
         actIST: [17, 30], // 05:30 PM IST (NY Open)
@@ -1163,6 +1170,7 @@ export class SignalsService implements OnModuleInit {
           pnlRMultiple: t.r,
           reasonsJson: {
             exitReason: t.reason,
+            quantity: (t as any).qty || 1,
             tradeReason:
               t.sym === 'BTCUSDT'
                 ? '⚡ Saiyan OCC ALMA (len=2, sigma=5, offset=0.85) 8x Alternate Resolution Crossover + Swing Demand POI BOS Breakout'

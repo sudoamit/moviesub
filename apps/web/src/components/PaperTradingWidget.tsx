@@ -37,7 +37,13 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
 }) => {
   const isCrypto = currentSymbol === 'BTCUSDT';
   const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
-  const currencySymbol = isGold || isCrypto ? '$' : '₹';
+  const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
+  // FX rates for price display conversion
+  const USDT_INR_RATE = 92.0;
+  const USD_INR_RATE = 87.0;
+  const fxRate = isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0;
+  // Display price helper: converts USD/USDT prices to INR for BTC/Gold
+  const dp = (price: number) => (isCrypto || isGold ? price * fxRate : price);
 
   const [portfolio, setPortfolio] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'analytics'>('positions');
@@ -89,11 +95,13 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const totalQuantity = customQty > 0 ? customQty : lots * lotMultiplier;
 
   const cmp = livePrice || activeSignal?.entryZone?.optimal || 100.0;
+  const cmpINR = dp(cmp); // CMP in INR for display (BTC: USDT*92, Gold: USD*87, others: as-is)
   const notionalTurnover = cmp * totalQuantity;
+  const notionalTurnoverINR = dp(notionalTurnover); // Notional in INR for display
   const estimatedCharges = isCrypto
-    ? Number((notionalTurnover * 0.0004).toFixed(2))
+    ? Number((notionalTurnover * 0.001).toFixed(2))   // 0.1% Binance flat rate (matches API)
     : Number((20.0 + notionalTurnover * 0.00016).toFixed(2));
-  const estimatedMargin = Number((notionalTurnover / leverage + estimatedCharges).toFixed(2));
+  const estimatedMargin = Number((notionalTurnoverINR / leverage + estimatedCharges).toFixed(2));
 
   const fetchPortfolio = async () => {
     try {
@@ -146,7 +154,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       }
 
       setStatusMessage(
-        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmp.toFixed(2)} (${leverage}x)`,
+        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmpINR.toFixed(2)} (${leverage}x)`,
       );
       setTimeout(() => setStatusMessage(null), 5000);
       if (typeof window !== 'undefined') {
@@ -174,7 +182,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       });
       const data = await res.json();
       setStatusMessage(
-        `✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net PnL: ${currencySymbol}${data.realizedPnL.toFixed(2)}`,
+        `✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net P&L: ${currencySymbol}${data.realizedPnL.toFixed(2)}`,
       );
       setTimeout(() => setStatusMessage(null), 5000);
       if (typeof window !== 'undefined') {
@@ -193,7 +201,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const handleResetPortfolio = async () => {
     if (
       !confirm(
-        `Are you sure you want to reset your virtual paper balance to ${isCrypto ? '$10,000' : '₹10,00,000'}?`,
+        `Are you sure you want to reset your virtual paper balance to ₹10,00,000? All open positions and trade history will be cleared.`,
       )
     )
       return;
@@ -201,11 +209,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       await fetch('http://localhost:3001/api/paper-trading/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initialCapital: isCrypto ? 10000.0 : 1000000.0 }),
+        body: JSON.stringify({ initialCapital: 1000000.0 }),
       });
-      setStatusMessage(
-        `✓ Virtual Brokerage balance reset to ${isCrypto ? '$10,000' : '₹10,00,000'}`,
-      );
+      setStatusMessage(`✓ Virtual Brokerage balance reset to ₹10,00,000`);
       setTimeout(() => setStatusMessage(null), 4000);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol: 'ALL' } }));
@@ -255,7 +261,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             className="text-xs text-slate-400 hover:text-cyan-300 flex items-center gap-1 bg-slate-900 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-lg transition-all font-bold"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            Reset Balance ({isCrypto ? '$10k' : '₹10.0L'})
+            Reset Balance (₹10.0L)
           </button>
         </div>
       </div>
@@ -267,7 +273,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           <span className="text-lg sm:text-xl font-black text-white block mt-0.5">
             {currencySymbol}
             {portfolio?.totalEquity?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
-              (isCrypto ? '10,000.00' : '10,00,000.00')}
+              '10,00,000.00'}
           </span>
           <span className="text-[9px] text-slate-500">Virtual Portfolio</span>
         </div>
@@ -279,7 +285,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           <span className="text-lg sm:text-xl font-black text-cyan-300 block mt-0.5">
             {currencySymbol}
             {portfolio?.availableMargin?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
-              (isCrypto ? '10,000.00' : '10,00,000.00')}
+              '10,00,000.00'}
           </span>
           <span className="text-[9px] text-slate-500">
             Used: {currencySymbol}
@@ -385,14 +391,15 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             CMP:{' '}
             <strong className="text-white">
               {currencySymbol}
-              {cmp.toFixed(2)}
+              {cmpINR.toFixed(2)}
+              {(isCrypto || isGold) && <span className="text-slate-500 text-[9px] ml-1">(native: {cmp.toFixed(2)})</span>}
             </strong>
           </div>
           <div>
             Notional:{' '}
             <strong className="text-cyan-300">
               {currencySymbol}
-              {notionalTurnover.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              {notionalTurnoverINR.toLocaleString(undefined, { maximumFractionDigits: 2 })}
             </strong>
           </div>
           <div>
@@ -420,7 +427,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           >
             <TrendingUp className="w-4 h-4" />
             1-CLICK BUY MARKET ({totalQuantity} {currentSymbol} @ {currencySymbol}
-            {cmp.toFixed(2)})
+            {cmpINR.toFixed(2)})
           </button>
 
           <button
@@ -430,7 +437,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           >
             <TrendingDown className="w-4 h-4" />
             1-CLICK SELL SHORT ({totalQuantity} {currentSymbol} @ {currencySymbol}
-            {cmp.toFixed(2)})
+            {cmpINR.toFixed(2)})
           </button>
         </div>
 
@@ -508,7 +515,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                   <tbody className="divide-y divide-slate-800/60 bg-slate-950/60">
                     {portfolio?.openPositions?.map((pos: any) => {
                       const isCryptoPos = pos.symbol === 'BTCUSDT' || pos.symbol?.includes('BTC');
-                      const posCurr = isCryptoPos ? '$' : '₹';
+                      const isGoldPos = pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD';
+                      const posFx = isCryptoPos ? USDT_INR_RATE : isGoldPos ? USD_INR_RATE : 1.0;
+                      const dpPos = (p: number) => (isCryptoPos || isGoldPos ? p * posFx : p);
                       return (
                         <tr key={pos.id} className="hover:bg-slate-900/50 transition-colors">
                           <td className="p-3 font-black text-white">
@@ -529,21 +538,21 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{pos.quantity}</td>
                           <td className="p-3 text-slate-300">
-                            {posCurr}
-                            {pos.entryPrice?.toFixed(2) || pos.averageEntryPrice?.toFixed(2)}
+                            {currencySymbol}
+                            {dpPos(pos.entryPrice ?? pos.averageEntryPrice ?? 0).toFixed(2)}
                           </td>
                           <td className="p-3 text-cyan-300 font-bold">
-                            {posCurr}
-                            {pos.currentPrice.toFixed(2)}
+                            {currencySymbol}
+                            {dpPos(pos.currentPrice).toFixed(2)}
                           </td>
                           <td className="p-3 text-[11px]">
                             <span className="text-rose-400 font-bold block">
-                              SL: {posCurr}
-                              {pos.stopLoss ? pos.stopLoss.toFixed(2) : '-'}
+                              SL: {currencySymbol}
+                              {pos.stopLoss ? dpPos(pos.stopLoss).toFixed(2) : '-'}
                             </span>
                             <span className="text-emerald-400 font-bold block">
-                              TP: {posCurr}
-                              {pos.target2 ? pos.target2.toFixed(2) : '-'}
+                              TP: {currencySymbol}
+                              {pos.target2 ? dpPos(pos.target2).toFixed(2) : '-'}
                             </span>
                           </td>
                           <td className="p-3 font-bold">
@@ -553,12 +562,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                               }
                             >
                               {pos.unrealizedPnL >= 0 ? '+' : ''}
-                              {posCurr}
+                              {currencySymbol}
                               {pos.unrealizedPnL.toFixed(2)} ({pos.unrealizedR}R)
                             </span>
                           </td>
                           <td className="p-3 text-slate-500">
-                            {posCurr}
+                            {currencySymbol}
                             {pos.charges?.totalCharges || 20}
                           </td>
                           <td className="p-3 text-right">
@@ -606,7 +615,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                     {portfolio?.tradeHistory?.map((trade: any) => {
                       const isCryptoTrade =
                         trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
-                      const tradeCurr = isCryptoTrade ? '$' : '₹';
+                      const isGoldTrade = trade.symbol === 'XAUUSD' || trade.symbol === 'GOLD';
+                      const tradeFx = isCryptoTrade ? USDT_INR_RATE : isGoldTrade ? USD_INR_RATE : 1.0;
+                      const dpTrade = (p: number) => (isCryptoTrade || isGoldTrade ? p * tradeFx : p);
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">
                           <td className="p-3 font-black text-white">
@@ -627,12 +638,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{trade.quantity}</td>
                           <td className="p-3 text-slate-300">
-                            {tradeCurr}
-                            {trade.entryPrice.toFixed(2)}
+                            {currencySymbol}
+                            {dpTrade(trade.entryPrice).toFixed(2)}
                           </td>
                           <td className="p-3 text-cyan-300 font-bold">
-                            {tradeCurr}
-                            {trade.exitPrice.toFixed(2)}
+                            {currencySymbol}
+                            {dpTrade(trade.exitPrice).toFixed(2)}
                           </td>
                           <td className="p-3 font-black">
                             <span
@@ -641,7 +652,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                               }
                             >
                               {trade.realizedPnL >= 0 ? '+' : ''}
-                              {tradeCurr}
+                              {currencySymbol}
                               {trade.realizedPnL.toFixed(2)}
                             </span>
                           </td>

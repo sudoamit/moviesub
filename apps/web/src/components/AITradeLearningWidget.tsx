@@ -605,7 +605,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
 
               {/* Reason list */}
               <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800/80 text-xs text-slate-300 space-y-1">
-                {prediction.aiPrediction.reasons.map((r, idx) => (
+                {(prediction?.aiPrediction?.reasons || []).map((r, idx) => (
                   <div key={idx} className="flex items-start gap-2">
                     <span className="text-cyan-400">•</span>
                     <span>{r}</span>
@@ -643,7 +643,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
           </div>
 
           <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {modelState?.featureImportance.map((fi) => {
+            {(modelState?.featureImportance || []).map((fi) => {
               const isPositive = fi.weight >= 0;
               const widthPct = Math.min(100, Math.round(fi.absoluteWeight * 400));
 
@@ -1028,7 +1028,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {insights?.performanceByRegime.map((r) => (
+                {(insights?.performanceByRegime || []).map((r) => (
                   <tr key={r.regime} className="hover:bg-slate-800/30 transition-colors">
                     <td className="py-2 text-slate-200 font-bold">{r.regime}</td>
                     <td className="py-2 text-emerald-400 font-bold">{r.winRate}%</td>
@@ -1051,7 +1051,7 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
           </div>
 
           <div className="space-y-2.5">
-            {insights?.postMortemPatterns.map((pm, idx) => (
+            {(insights?.postMortemPatterns || []).map((pm, idx) => (
               <div
                 key={idx}
                 className="bg-slate-900/80 border border-slate-800 p-3 rounded-lg text-xs space-y-1 hover:border-slate-700 transition-colors"

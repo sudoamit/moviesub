@@ -5,6 +5,24 @@ import { BacktestSimulator } from '@quant/backtesting';
 import { Timeframe, toPrismaTimeframe } from '@quant/shared';
 import { RunBacktestDto } from './dto/run-backtest.dto';
 import { Decimal } from '@prisma/client/runtime/library';
+import { SignalState } from '@prisma/client';
+
+/**
+ * Maps raw exit reason strings from the backtest engine to valid Prisma SignalState enum values.
+ * The engine can emit strings like 'MARKET' (end-of-data forced close) that are not SignalState members.
+ */
+function normalizeExitReason(raw: string | undefined | null): SignalState {
+  if (!raw) return SignalState.EXPIRED;
+  const upper = raw.toUpperCase();
+  if (upper === 'SL_HIT' || upper === 'STOP_LOSS' || upper === 'STOPPED') return SignalState.SL_HIT;
+  if (upper === 'TP1_HIT' || upper === 'TARGET_1' || upper === 'TARGET_HIT') return SignalState.TP1_HIT;
+  if (upper === 'TP2_HIT' || upper === 'TARGET_2') return SignalState.TP2_HIT;
+  if (upper === 'TP3_HIT' || upper === 'TARGET_3') return SignalState.TP3_HIT;
+  if (upper === 'CANCELLED' || upper === 'CANCEL') return SignalState.CANCELLED;
+  if (upper === 'INVALIDATED') return SignalState.INVALIDATED;
+  // 'MARKET', 'TIME_EXIT', 'CLOSED', 'EOD', 'FORCE_CLOSE' and any unknown → EXPIRED
+  return SignalState.EXPIRED;
+}
 
 @Injectable()
 export class BacktestsService {
@@ -89,7 +107,7 @@ export class BacktestsService {
           positionSize: new Decimal(tr.positionSize),
           pnl: new Decimal(tr.pnl),
           pnlRMultiple: new Decimal(tr.pnlRMultiple),
-          exitReason: tr.exitReason as any,
+          exitReason: normalizeExitReason(tr.exitReason),
         },
       });
     }

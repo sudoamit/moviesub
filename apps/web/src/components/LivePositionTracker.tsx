@@ -148,7 +148,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     symbol.toUpperCase().includes('BTC') ||
     symbol.toUpperCase().includes('ETH');
   const isGold = symbol === 'XAUUSD' || symbol === 'GOLD' || symbol.toUpperCase().includes('XAU');
-  const currencySymbol = isCrypto || isGold ? '$' : '₹';
+  const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
 
   // Toggle between Option Premium Mode (default for Indian markets) and Spot Mode
   const [isOptionMode, setIsOptionMode] = useState<boolean>(!isCrypto && !isGold);
@@ -165,7 +165,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const executionEntryTimeStorageKey = `quant_running_entry_time_${positionLockKey}`;
   const [paperPosition, setPaperPosition] = useState<RunningPaperPosition | null>(null);
   const [lockedExecutionEntryTime, setLockedExecutionEntryTime] = useState<string>(
-    '2026-09-03T09:15:00.000Z',
+    () => new Date().toISOString(),
   );
 
   useEffect(() => {
@@ -258,7 +258,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     if (!price || price <= 0 || isNaN(price)) return false;
     if (sym === 'BTCUSDT' || sym.toUpperCase().includes('BTC')) return price >= 50000;
     if (sym === 'XAUUSD' || sym === 'GOLD' || sym.toUpperCase().includes('XAU'))
-      return price >= 1500 && price <= 5000;
+      return price >= 1500 && price <= 8000;
     if (sym === 'NIFTY') return price >= 15000 && price <= 35000;
     if (sym === 'BANKNIFTY') return price >= 35000 && price <= 75000;
     if (sym === 'RELIANCE') return price >= 500 && price <= 5000;
@@ -507,7 +507,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   }, [symbol, direction, currentCMP, spotEntryPrice, activeStrike, isCrypto, lockStorageKey]);
 
   // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY
-  const lotSize = symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : isCrypto ? 0.2 : 100;
+  const lotSize = symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : isCrypto ? 0.01 : 100;
   const activeQty = isAutoScaledOut ? lotSize * 0.5 : lotSize;
   const numericQty = activeQty;
   const totalQuantity = isCrypto ? activeQty.toFixed(4) : activeQty.toLocaleString();
@@ -610,18 +610,36 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? currentSL > effectiveEntryPrice
         : currentSL < effectiveEntryPrice;
 
-  // USD to INR conversion rate for crypto (1 USD ≈ ₹87.00)
-  const USD_INR_RATE = 87.0;
+  // BTC is USDT-quoted; XAUUSD is USD-quoted — use separate rates
+  const USDT_INR_RATE = 92.0; // For BTCUSDT (Binance perpetual, USDT settlement)
+  const USD_INR_RATE = 87.0;  // For XAUUSD (gold, USD-denominated)
+  const cryptoFxRate = isGold ? USD_INR_RATE : USDT_INR_RATE;
+
+  // Read leverage from localStorage (written by PaperTradingWidget) or fall back to 5x default
+  const [activeLeverage, setActiveLeverage] = React.useState<number>(5);
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('quant_risk_leverage');
+      if (saved && !isNaN(Number(saved))) setActiveLeverage(Number(saved));
+    }
+  }, []);
 
   const rawLockedProfit = isProfitLocked
     ? Math.abs(effectiveEntryPrice - currentSL) * numericQty
     : 0;
   const lockedProfitAmount = Number(
-    (isCrypto ? rawLockedProfit * USD_INR_RATE : rawLockedProfit).toFixed(2),
+    (isCrypto || isGold ? rawLockedProfit * cryptoFxRate : rawLockedProfit).toFixed(2),
   );
 
   const rawMaxRisk = numericQty * Math.abs(effectiveEntryPrice - originalSL);
-  const maxRiskAmount = Number((isCrypto ? rawMaxRisk * USD_INR_RATE : rawMaxRisk).toFixed(2));
+  const maxRiskAmount = Number((isCrypto || isGold ? rawMaxRisk * cryptoFxRate : rawMaxRisk).toFixed(2));
+
+  // Display price helper: converts USD/USDT prices to INR for BTC and Gold display.
+  // Internal computation values (spotEntryPrice, currentSL, tp1, etc.) remain in native quote currency.
+  const dp = React.useCallback(
+    (price: number) => (isCrypto || isGold ? price * cryptoFxRate : price),
+    [isCrypto, isGold, cryptoFxRate],
+  );
 
   // Guaranteed Directional Take Profit Roadmap (Strictly < Entry for BEARISH, > Entry for BULLISH)
   const validTP1 = isBull
@@ -661,13 +679,14 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         : effectiveEntryPrice - effectiveCurrentPrice;
 
   const rawPnL = priceDifference * numericQty;
-  const inrPnL = isCrypto ? rawPnL * USD_INR_RATE : rawPnL;
+  const inrPnL = isCrypto || isGold ? rawPnL * cryptoFxRate : rawPnL;
   const runningPnL = Number((inrPnL + scaledOutPnL).toFixed(2));
 
-  // Margin Used with 100x leverage for BTC
-  const totalMarginUsed = isCrypto
-    ? Number(((effectiveEntryPrice * numericQty * USD_INR_RATE) / 100).toFixed(2))
-    : Number((effectiveEntryPrice * numericQty).toFixed(2));
+  // Margin used: notional (in INR for crypto, direct for INR instruments) divided by active leverage
+  const notionalINR = isCrypto || isGold
+    ? effectiveEntryPrice * numericQty * cryptoFxRate
+    : effectiveEntryPrice * numericQty;
+  const totalMarginUsed = Number((notionalINR / activeLeverage).toFixed(2));
 
   const runningRMultiple = riskPerUnit > 0 ? Number((priceDifference / riskPerUnit).toFixed(2)) : 0;
   const returnPercentage =
@@ -744,7 +763,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
     const closedUnits = numericQty * partialRatio;
     const rawClosedPnL = finalDiff * closedUnits;
-    const finalPnL = Number((isCrypto ? rawClosedPnL * USD_INR_RATE : rawClosedPnL).toFixed(2));
+    const finalPnL = Number((isCrypto || isGold ? rawClosedPnL * cryptoFxRate : rawClosedPnL).toFixed(2));
     const finalR =
       riskPerUnit > 0
         ? Number((finalDiff / riskPerUnit).toFixed(2))
@@ -1176,22 +1195,22 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 {isClosed ? (
                   <span className="text-slate-400 block mt-0.5">
                     Exited @ {currencySymbol}
-                    {closedTradeSummary.exitPrice.toFixed(2)} ({closedTradeSummary.reason}) • Logged
+                    {dp(closedTradeSummary.exitPrice).toFixed(2)} ({closedTradeSummary.reason}) • Logged
                     to Institutional Trade Journal
                   </span>
                 ) : isOptionMode && !isCrypto ? (
                   <>
                     <span className={priceDifference >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
                       Option LTP: {currencySymbol}
-                      {effectiveCurrentPrice.toFixed(2)} (Entry: {currencySymbol}
-                      {effectiveEntryPrice.toFixed(2)} | {priceDifference >= 0 ? '+' : ''}
-                      {priceDifference.toFixed(2)} pts)
+                      {dp(effectiveCurrentPrice).toFixed(2)} (Entry: {currencySymbol}
+                      {dp(effectiveEntryPrice).toFixed(2)} | {priceDifference >= 0 ? '+' : ''}
+                      {dp(priceDifference).toFixed(2)} pts)
                     </span>
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
                       Spot CMP: {currencySymbol}
-                      {currentCMP.toFixed(2)} ({isBull ? 'Long' : 'Short'} Entry: {currencySymbol}
-                      {spotEntryPrice.toFixed(2)})
+                      {dp(currentCMP).toFixed(2)} ({isBull ? 'Long' : 'Short'} Entry: {currencySymbol}
+                      {dp(spotEntryPrice).toFixed(2)})
                     </span>
                   </>
                 ) : (
@@ -1199,13 +1218,13 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                     <span className={priceDifference >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
                       {isBull ? '🟢 LONG / BULLISH' : '🔻 SHORT / BEARISH'}:{' '}
                       {priceDifference >= 0 ? '+' : ''}
-                      {priceDifference.toFixed(2)} pts
+                      {dp(priceDifference).toFixed(2)} pts
                     </span>
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
                       CMP: {currencySymbol}
-                      {currentCMP.toFixed(2)} (Entry: {currencySymbol}
-                      {spotEntryPrice.toFixed(2)})
+                      {dp(currentCMP).toFixed(2)} (Entry: {currencySymbol}
+                      {dp(spotEntryPrice).toFixed(2)})
                     </span>
                   </>
                 )}
@@ -1226,7 +1245,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             {isOptionMode && !isCrypto && !isGold
               ? `⚡ ${optionData?.contractName || `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`} (Locked)`
               : isCrypto
-                ? `0.2000 BTC Contract (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
+                ? `0.01 BTC Contract (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                 : isGold
                   ? `10.0 oz Gold Spot (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                   : `${symbol === 'NIFTY' ? '1 Lot (65 Qty)' : '1 Lot'}`}
@@ -1240,12 +1259,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           </span>
           <span className="text-xl font-black text-white block mt-1">
             {currencySymbol}
-            {effectiveEntryPrice.toFixed(2)}
+            {dp(effectiveEntryPrice).toFixed(2)}
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">
             {isOptionMode && !isCrypto
-              ? `Spot: ${currencySymbol}${spotEntryPrice.toFixed(2)} | Margin: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-              : `Margin Used: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto ? ' (100x Leverage)' : ''}`}
+              ? `Spot: ${currencySymbol}${dp(spotEntryPrice).toFixed(2)} | Margin: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+              : `Margin Used: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto ? ` (${activeLeverage}x Leverage)` : ''}`}
           </span>
         </div>
 
@@ -1279,7 +1298,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             }`}
           >
             {currencySymbol}
-            {currentSL.toFixed(2)}
+            {dp(currentSL).toFixed(2)}
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">
             {isProfitLocked
@@ -1303,17 +1322,17 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <div className="flex items-center gap-3 text-[10px]">
             <span className={isTP1Reached ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
               TP1: {currencySymbol}
-              {tp1.toFixed(2)} ({isTP1Reached ? '✅ HIT' : '+100%'})
+              {dp(tp1).toFixed(2)} ({isTP1Reached ? '✅ HIT' : '+100%'})
             </span>
             <span className="text-slate-600">•</span>
             <span className={isTP2Reached ? 'text-teal-300 font-bold' : 'text-slate-400'}>
               TP2: {currencySymbol}
-              {tp2.toFixed(2)} ({isTP2Reached ? '🎯 HIT' : '+250%'})
+              {dp(tp2).toFixed(2)} ({isTP2Reached ? '🎯 HIT' : '+250%'})
             </span>
             <span className="text-slate-600">•</span>
             <span className="text-slate-400">
               TP3: {currencySymbol}
-              {tp3.toFixed(2)} (+400%)
+              {dp(tp3).toFixed(2)} (+400%)
             </span>
           </div>
         </div>
@@ -1403,7 +1422,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             >
               <TrendingUp className="w-3.5 h-3.5" />
               {isTrailingSLActive
-                ? `Trailing SL Active (${currencySymbol}${trailingSL.toFixed(2)})`
+                ? `Trailing SL Active (${currencySymbol}${dp(trailingSL).toFixed(2)})`
                 : 'Enable Trailing SL'}
             </button>
 
@@ -1426,7 +1445,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               className="bg-rose-500 hover:bg-rose-400 text-slate-950 font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg shadow-rose-500/20 transition-all text-xs"
             >
               <XCircle className="w-4 h-4" />⚡ Exit Trade @ Market ({currencySymbol}
-              {effectiveCurrentPrice.toFixed(2)})
+              {dp(effectiveCurrentPrice).toFixed(2)})
             </button>
           </div>
         </div>

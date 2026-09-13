@@ -29,7 +29,7 @@ interface RiskWidgetProps {
 export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const isCrypto = selectedSignal?.symbol === 'BTCUSDT';
   const isGold = selectedSignal?.symbol === 'XAUUSD' || selectedSignal?.symbol === 'GOLD';
-  const currencySymbol = isCrypto || isGold ? '$' : '₹';
+  const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
 
   // Persistent States with localStorage fallback
   const [accountBalance, setAccountBalance] = useState<number>(1000000);
@@ -143,15 +143,20 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     }
   }, [selectedSignal]);
 
-  // Mathematical Risk Calculations
-  const USD_INR_RATE = 87.0;
+  // BTC is USDT-quoted; XAUUSD is USD-quoted — use separate FX rates
+  const USDT_INR_RATE = 92.0; // BTCUSDT settles in Tether (USDT), not USD
+  const USD_INR_RATE = 87.0;  // XAUUSD is denominated in USD
+  // Effective INR conversion rate for cross-currency instruments
+  const cryptoInrRate = isGold ? USD_INR_RATE : USDT_INR_RATE;
+  // Display price helper: converts USD/USDT prices to INR for BTC and Gold display
+  const dp = (price: number) => (isCrypto || isGold ? price * cryptoInrRate : price);
   const riskPerUnit = Math.abs(entryPrice - stopLoss);
   const target1Distance = Math.abs(tp1Price - entryPrice);
   const target2Distance = Math.abs(tp2Price - entryPrice);
   const plannedRiskAmount = (accountBalance * riskPercent) / 100;
 
   // Unit / Quantity sizing
-  const inrRiskPerUnit = isCrypto ? riskPerUnit * USD_INR_RATE : riskPerUnit;
+  const inrRiskPerUnit = isCrypto ? riskPerUnit * USDT_INR_RATE : isGold ? riskPerUnit * USD_INR_RATE : riskPerUnit;
   let calculatedUnits = inrRiskPerUnit > 0 ? plannedRiskAmount / inrRiskPerUnit : 0;
   let finalUnits = 0;
   let lotsCount = 0;
@@ -170,11 +175,11 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   }
 
   // Notional & Profit/Loss Values
-  const totalPositionValue = finalUnits * entryPrice * (isCrypto ? USD_INR_RATE : 1.0);
-  const actualMaxRisk = finalUnits * riskPerUnit * (isCrypto ? USD_INR_RATE : 1.0);
+  const totalPositionValue = finalUnits * entryPrice * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
+  const actualMaxRisk = finalUnits * riskPerUnit * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
   const actualRiskPercent = accountBalance > 0 ? (actualMaxRisk / accountBalance) * 100 : 0;
-  const expectedProfitTP1 = finalUnits * target1Distance * (isCrypto ? USD_INR_RATE : 1.0);
-  const expectedProfitTP2 = finalUnits * target2Distance * (isCrypto ? USD_INR_RATE : 1.0);
+  const expectedProfitTP1 = finalUnits * target1Distance * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
+  const expectedProfitTP2 = finalUnits * target2Distance * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
   const rewardToRiskRatio =
     riskPerUnit > 0 ? Number((target2Distance / riskPerUnit).toFixed(2)) : 0;
 
@@ -303,15 +308,24 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
             {/* 3. Entry Price */}
             <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl space-y-1.5">
               <label className="text-[10px] uppercase text-slate-400 font-bold block">
-                Entry Price ({currencySymbol})
+                Entry Price ({currencySymbol}{isCrypto ? ' · USD×92' : isGold ? ' · USD×87' : ''})
               </label>
-              <input
-                type="number"
-                step="any"
-                value={entryPrice}
-                onChange={(e) => setEntryPrice(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-cyan-400 font-black text-sm focus:border-cyan-500 focus:outline-none"
-              />
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cyan-400 text-xs font-black">{currencySymbol}</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={isCrypto || isGold ? Number(dp(entryPrice).toFixed(2)) : entryPrice}
+                  readOnly={isCrypto || isGold}
+                  onChange={(e) => setEntryPrice(Number(e.target.value))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-cyan-400 font-black text-sm focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+              {(isCrypto || isGold) && (
+                <span className="text-[9px] text-slate-500 block">
+                  Native: {isCrypto ? 'USDT' : 'USD'} {entryPrice.toFixed(2)} (auto-converted)
+                </span>
+              )}
             </div>
 
             {/* 4. Stop Loss */}
@@ -321,16 +335,25 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
                   Stop Loss ({currencySymbol})
                 </label>
                 <span className="text-[10px] text-rose-400 font-bold">
-                  Δ {riskPerUnit.toFixed(2)} pts
+                  Δ {isCrypto || isGold ? dp(riskPerUnit).toFixed(2) : riskPerUnit.toFixed(2)} pts
                 </span>
               </div>
-              <input
-                type="number"
-                step="any"
-                value={stopLoss}
-                onChange={(e) => setStopLoss(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-rose-400 font-black text-sm focus:border-rose-500 focus:outline-none"
-              />
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-rose-400 text-xs font-black">{currencySymbol}</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={isCrypto || isGold ? Number(dp(stopLoss).toFixed(2)) : stopLoss}
+                  readOnly={isCrypto || isGold}
+                  onChange={(e) => setStopLoss(Number(e.target.value))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-rose-400 font-black text-sm focus:border-rose-500 focus:outline-none"
+                />
+              </div>
+              {(isCrypto || isGold) && (
+                <span className="text-[9px] text-slate-500 block">
+                  Native: {isCrypto ? 'USDT' : 'USD'} {stopLoss.toFixed(2)} (auto-converted)
+                </span>
+              )}
             </div>
 
             {/* 5. Sizing Mode */}

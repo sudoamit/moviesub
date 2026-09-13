@@ -98,14 +98,15 @@ export class CandlesService {
     limit = 200,
   ): Promise<ICandle[]> {
     const sym = symbol.toUpperCase();
-    const cacheKey = `${sym}_${timeframe}`;
+    // Normalize timeframe before building cache key so all variants (M15, 15m, 15M) hit the same entry
+    const normTf = (timeframe || '15m').toUpperCase().replace('MIN', 'M').replace('MINUTES', 'M');
+    const cacheKey = `${sym}_${normTf}`;
     const cached = this.candleCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < 3000) {
       return cached.candles;
     }
 
     try {
-      const normTf = (timeframe || '15m').toUpperCase().replace('MIN', 'M').replace('MINUTES', 'M');
       const is1m = normTf === 'M1' || normTf === '1M';
       const is5m = normTf === 'M5' || normTf === '5M';
       const is15m = normTf === 'M15' || normTf === '15M' || normTf === '15';
