@@ -167,7 +167,17 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
           <TradingChart
             symbol={pane1Symbol}
             timeframe={pane1Tf}
-            candles={pane1Candles}
+            snapshot={{
+              symbol: pane1Symbol,
+              timeframe: pane1Tf,
+              closedCandles: pane1Candles,
+              formingCandle: null,
+              smcSnapshot: null,
+              dataProvenance: 'LIVE',
+              sourceIdentity: 'POLYGON',
+              livePrice: tickers[pane1Symbol]?.price,
+              asOfTimestamp: new Date().toISOString(),
+            }}
             signal={signals.find((s) => s.symbol === pane1Symbol)}
             livePrice={tickers[pane1Symbol]?.price}
             onTimeframeChange={setPane1Tf}
@@ -208,7 +218,17 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
           <TradingChart
             symbol={pane2Symbol}
             timeframe={pane2Tf}
-            candles={pane2Candles}
+            snapshot={{
+              symbol: pane2Symbol,
+              timeframe: pane2Tf,
+              closedCandles: pane2Candles,
+              formingCandle: null,
+              smcSnapshot: null,
+              dataProvenance: 'LIVE',
+              sourceIdentity: 'POLYGON',
+              livePrice: tickers[pane2Symbol]?.price,
+              asOfTimestamp: new Date().toISOString(),
+            }}
             signal={signals.find((s) => s.symbol === pane2Symbol)}
             livePrice={tickers[pane2Symbol]?.price}
             onTimeframeChange={setPane2Tf}
@@ -250,7 +270,17 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
             <TradingChart
               symbol={pane3Symbol}
               timeframe={pane3Tf}
-              candles={pane3Candles}
+              snapshot={{
+                symbol: pane3Symbol,
+                timeframe: pane3Tf,
+                closedCandles: pane3Candles,
+                formingCandle: null,
+                smcSnapshot: null,
+                dataProvenance: 'LIVE',
+                sourceIdentity: 'POLYGON',
+                livePrice: tickers[pane3Symbol]?.price,
+                asOfTimestamp: new Date().toISOString(),
+              }}
               signal={signals.find((s) => s.symbol === pane3Symbol)}
               livePrice={tickers[pane3Symbol]?.price}
               onTimeframeChange={setPane3Tf}
@@ -260,7 +290,7 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
 
         {/* Pane 4 (Quad Only) */}
         {layout === 'quad' && (
-          <div className="space-y-2 bg-[#111827]/90 border border-slate-800 p-3 rounded-xl">
+          <div className="space-[#111827]/90 border border-slate-800 p-3 rounded-xl">
             <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-2 text-xs">
               <div className="flex items-center gap-2">
                 <select
@@ -293,7 +323,17 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
             <TradingChart
               symbol={pane4Symbol}
               timeframe={pane4Tf}
-              candles={pane4Candles}
+              snapshot={{
+                symbol: pane4Symbol,
+                timeframe: pane4Tf,
+                closedCandles: pane4Candles,
+                formingCandle: null,
+                smcSnapshot: null,
+                dataProvenance: 'LIVE',
+                sourceIdentity: 'POLYGON',
+                livePrice: tickers[pane4Symbol]?.price,
+                asOfTimestamp: new Date().toISOString(),
+              }}
               signal={signals.find((s) => s.symbol === pane4Symbol)}
               livePrice={tickers[pane4Symbol]?.price}
               onTimeframeChange={setPane4Tf}

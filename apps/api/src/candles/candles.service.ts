@@ -3,6 +3,9 @@ import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import { MarketDataService } from '../market-data/market-data.service';
 import {
+  AssetType,
+  ChartMarketSnapshot,
+  DataProvenance,
   ICandle,
   MarketDataSourceMode,
   MarketDataSourcePolicy,
@@ -310,7 +313,7 @@ export class CandlesService {
     symbol: string,
     timeframe: Timeframe = Timeframe.M15,
     limit = 200,
-  ): Promise<IChartDataResponse> {
+  ): Promise<ChartMarketSnapshot | any> {
     const sym = symbol.toUpperCase();
     const inst = await this.prisma.instrument.findUnique({
       where: { symbol: sym },
@@ -427,19 +430,64 @@ export class CandlesService {
       this.logger.debug(`Signal generation: ${(e as Error).message}`);
     }
 
+    const sourceIdentity =
+      inst.assetType === AssetType.CRYPTO
+        ? 'BINANCE_SPOT'
+        : inst.assetType === AssetType.INDEX || inst.assetType === AssetType.EQUITY
+          ? 'NSE_FEED'
+          : 'YAHOO_HISTORICAL';
+
+    const lastCandleClose = formattedCandles.length > 0 ? formattedCandles[formattedCandles.length - 1].close : null;
+    const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
+
     return {
+      symbol: inst.symbol,
+      timeframe,
+      closedCandles: formattedCandles.map((c) => ({ ...c, isClosed: true })),
+      formingCandle: candlesResp.formingCandle
+        ? {
+            timestamp: candlesResp.formingCandle.timestamp,
+            open: candlesResp.formingCandle.open,
+            high: candlesResp.formingCandle.high,
+            low: candlesResp.formingCandle.low,
+            close: candlesResp.formingCandle.close,
+            volume: candlesResp.formingCandle.volume ?? 0,
+            isClosed: false,
+            provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
+          }
+        : null,
+      livePrice,
+      asOfTimestamp: latestClosedTimestamp || new Date().toISOString(),
+      dataProvenance: candlesResp.dataProvenance || 'LIVE',
+      sourceIdentity,
+      smcSnapshot: {
+        symbol: inst.symbol,
+        timeframe,
+        asOfTimestamp: latestClosedTimestamp || new Date().toISOString(),
+        provenance: candlesResp.dataProvenance || 'LIVE',
+        structures: {
+          swings: smcAnalysis.swingPoints || [],
+          bos: smcAnalysis.breaksOfStructure || [],
+          choch: smcAnalysis.changesOfCharacter || [],
+          marketRegime: smcAnalysis.marketRegime,
+          dealingRange: smcAnalysis.dealingRange,
+        },
+        liquidity: {
+          pools: smcAnalysis.liquidityPools || [],
+          sweeps: smcAnalysis.liquiditySweeps || [],
+        },
+        fvgs: smcAnalysis.fairValueGaps || [],
+        orderBlocks: smcAnalysis.orderBlocks || [],
+      },
       instrument: {
         symbol: inst.symbol,
         name: inst.name,
         currency: inst.currency,
         tickSize: Number(inst.tickSize),
       },
-      timeframe,
-      dataProvenance: candlesResp.dataProvenance || 'LIVE',
       closedThrough: latestClosedTimestamp,
       isDegraded: smcAnalysis.isDegraded || false,
       candles: formattedCandles,
-      formingCandle: candlesResp.formingCandle || null,
       indicators: {
         ema20,
         ema50,

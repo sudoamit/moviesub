@@ -46,29 +46,15 @@ import {
   LiquidityHeatmapEngine,
   MTFFlowRadarEngine,
 } from '@quant/trading-engine';
-import { TimeframeRegistry } from '@quant/shared';
+import { ChartMarketSnapshot } from '@quant/shared';
+import { ChartSnapshotValidator } from '@quant/trading-engine';
 
 interface TradingChartProps {
   symbol: string;
   timeframe: string;
-  candles: any[];
-  formingCandle?: any | null;
-  dataProvenance?: string;
+  snapshot?: ChartMarketSnapshot | null;
   isDataUnavailable?: boolean;
   signal?: any;
-  structures?: {
-    swings?: any[];
-    bos?: any[];
-    choch?: any[];
-    marketRegime?: any;
-    dealingRange?: any;
-  };
-  liquidity?: {
-    pools?: any[];
-    sweeps?: any[];
-  };
-  fvgs?: any[];
-  orderBlocks?: any[];
   livePrice?: number;
   liveChangePercent?: number;
   isTradeActive?: boolean;
@@ -79,21 +65,26 @@ interface TradingChartProps {
 export const TradingChart: React.FC<TradingChartProps> = ({
   symbol,
   timeframe,
-  candles,
-  formingCandle,
-  dataProvenance = 'LIVE',
+  snapshot,
   isDataUnavailable = false,
   signal,
-  structures,
-  liquidity,
-  fvgs,
-  orderBlocks,
-  livePrice,
+  livePrice: propLivePrice,
   liveChangePercent = 0,
   isTradeActive = true,
   onTimeframeChange,
   onSymbolChange,
 }) => {
+  const candles = snapshot?.closedCandles || [];
+  const formingCandle = snapshot?.formingCandle || null;
+  const dataProvenance = snapshot?.dataProvenance || 'LIVE';
+  const smcSnapshot = snapshot?.smcSnapshot && ChartSnapshotValidator.validateSMCSnapshot(snapshot.smcSnapshot, symbol, timeframe)
+    ? snapshot.smcSnapshot
+    : null;
+
+  const structures = smcSnapshot?.structures;
+  const liquidity = smcSnapshot?.liquidity;
+  const fvgs = smcSnapshot?.fvgs;
+  const orderBlocks = smcSnapshot?.orderBlocks;
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartApiRef = useRef<IChartApi | null>(null);
@@ -236,7 +227,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // Combine immutable closed historical candles with the forming candle
   const allCandles = useMemo(() => {
-    const list = [...(candles || [])];
+    const list: any[] = [...(candles || [])];
     if (formingCandle) {
       const formingTime = new Date(formingCandle.timestamp).getTime();
       const existingIdx = list.findIndex(
@@ -251,7 +242,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     return list;
   }, [candles, formingCandle]);
 
-  const currentPrice = livePrice || (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
+  const currentPrice = propLivePrice || (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
   const timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
   // 1. Canonical SMC Structures (Server-provided when available, fallback to deterministic closed-candle analysis)
@@ -295,12 +286,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!allCandles || allCandles.length < 5) return null;
     try {
       const cleanCandles = allCandles.map((c, idx) => ({
-        timestamp:
-          c.timestamp instanceof Date
-            ? c.timestamp.toISOString()
-            : typeof c.timestamp === 'string'
-              ? c.timestamp
-              : new Date((c.time || 0) * 1000).toISOString(),
+        timestamp: c.timestamp instanceof Date ? c.timestamp.toISOString() : new Date(c.timestamp).toISOString(),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -326,10 +312,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 10) return null;
     try {
       const cleanCandles = candles.map((c, idx) => ({
-        timestamp:
-          c.timestamp instanceof Date
-            ? c.timestamp
-            : new Date(c.time ? c.time * 1000 : c.timestamp),
+        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -349,10 +332,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!candles || candles.length < 5) return null;
     try {
       const cleanCandles = candles.map((c, idx) => ({
-        timestamp:
-          c.timestamp instanceof Date
-            ? c.timestamp
-            : new Date(c.time ? c.time * 1000 : c.timestamp),
+        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -729,25 +709,51 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           .filter((item): item is { time: Time; value: number } => item !== null);
       };
 
-      // Session VWAP: resets cumulative volume & typical volume on UTC daily session boundaries
+      // Session VWAP: resets cumulative volume & typical volume on venue-specific session boundaries
+      // (09:15 IST for NSE, 22:00 UTC for Gold, 00:00 UTC for Crypto)
+      const isNewSession = (prevDate: Date | null, currDate: Date): boolean => {
+        if (!prevDate) return true;
+        const symUpper = symbol.toUpperCase();
+        if (symUpper === 'XAUUSD' || symUpper === 'GOLD') {
+          const prevShifted = new Date(prevDate.getTime() + 2 * 3600 * 1000);
+          const currShifted = new Date(currDate.getTime() + 2 * 3600 * 1000);
+          return (
+            prevShifted.getUTCDay() !== currShifted.getUTCDay() ||
+            prevShifted.getUTCFullYear() !== currShifted.getUTCFullYear()
+          );
+        } else if (symUpper === 'BTCUSDT' || symUpper.endsWith('USDT') || symUpper.endsWith('USD')) {
+          return (
+            prevDate.getUTCDay() !== currDate.getUTCDay() ||
+            prevDate.getUTCFullYear() !== currDate.getUTCFullYear()
+          );
+        } else {
+          // NSE 09:15 IST boundary (03:45 UTC)
+          const prevIstSession = new Date(prevDate.getTime() + (5.5 * 3600 - 9.25 * 3600) * 1000);
+          const currIstSession = new Date(currDate.getTime() + (5.5 * 3600 - 9.25 * 3600) * 1000);
+          return (
+            prevIstSession.getUTCDay() !== currIstSession.getUTCDay() ||
+            prevIstSession.getUTCFullYear() !== currIstSession.getUTCFullYear()
+          );
+        }
+      };
+
       const calcSessionVWAP = () => {
         let cumVol = 0;
         let cumTypVol = 0;
-        let lastDateStr = '';
+        let prevDate: Date | null = null;
         return sorted.map((c) => {
-          const d = new Date(c.timestamp);
-          const dateStr = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
-          if (dateStr !== lastDateStr) {
+          const currDate = new Date(c.timestamp);
+          if (isNewSession(prevDate, currDate)) {
             cumVol = 0;
             cumTypVol = 0;
-            lastDateStr = dateStr;
           }
+          prevDate = currDate;
           const typ = (c.high + c.low + c.close) / 3;
           const vol = c.volume ?? 1;
           cumVol += vol;
           cumTypVol += typ * vol;
           return {
-            time: Math.floor(d.getTime() / 1000) as unknown as Time,
+            time: Math.floor(currDate.getTime() / 1000) as unknown as Time,
             value: cumVol > 0 ? Number((cumTypVol / cumVol).toFixed(2)) : c.close,
           };
         });
@@ -759,7 +765,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       if (vwapSeriesRef.current) vwapSeriesRef.current.setData(showVWAP ? calcSessionVWAP() : []);
       if (sma20SeriesRef.current) sma20SeriesRef.current.setData(showSMA20 ? calcSMA(20) : []);
     }
-  }, [allCandles, chartType, showVolume, showEMA20, showEMA50, showEMA200, showVWAP, showSMA20]);
+  }, [allCandles, chartType, showVolume, showEMA20, showEMA50, showEMA200, showVWAP, showSMA20, symbol]);
 
   // Fit content strictly when symbol or timeframe changes so manual pan/drag is never interrupted
   const prevSymbolTfRef = useRef<string>('');
@@ -770,41 +776,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       chartApiRef.current.timeScale().fitContent();
     }
   }, [symbol, timeframe, candles.length]);
-
-  // 3. Real-Time Incremental Tick Updates (Forming Candle Only, Never Mutating Closed Candles)
-  useEffect(() => {
-    if (!mainSeriesRef.current || !allCandles || allCandles.length === 0 || !currentPrice) return;
-
-    let durationMs = 15 * 60 * 1000;
-    try {
-      durationMs = TimeframeRegistry.getDurationMs(timeframe);
-    } catch (e) {}
-
-    const now = Date.now();
-    const currentBucketMs = Math.floor(now / durationMs) * durationMs;
-
-    const lastCandle = allCandles[allCandles.length - 1];
-    const lastCandleMs = new Date(lastCandle.timestamp).getTime();
-
-    const isSameBucket = Math.abs(currentBucketMs - lastCandleMs) < durationMs;
-    const updateTimeMs = isSameBucket ? lastCandleMs : currentBucketMs;
-    const timeSec = Math.floor(updateTimeMs / 1000) as unknown as Time;
-
-    if (chartType === 'Candles' || chartType === 'Bar') {
-      mainSeriesRef.current.update({
-        time: timeSec,
-        open: isSameBucket ? lastCandle.open : currentPrice,
-        high: isSameBucket ? Math.max(lastCandle.high, currentPrice) : currentPrice,
-        low: isSameBucket ? Math.min(lastCandle.low, currentPrice) : currentPrice,
-        close: currentPrice,
-      });
-    } else {
-      mainSeriesRef.current.update({
-        time: timeSec,
-        value: currentPrice,
-      });
-    }
-  }, [currentPrice, chartType, allCandles, timeframe]);
 
   // 4. Trade Setup Calculation & Guaranteed Native Price Lines
   const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
@@ -971,25 +942,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       }
     };
 
-    // Find the Exact Entry Candle X-Coordinate
-    let entryCandleX: number = width * 0.55;
-    if (candles && candles.length > 0) {
-      let entryTimestamp = effSignal?.timestamp;
-      if (!entryTimestamp && clientSMC && clientSMC.orderBlocks.length > 0) {
-        entryTimestamp = clientSMC.orderBlocks[0].timestamp;
-      }
-      if (!entryTimestamp) {
-        const targetCandle = candles[Math.max(0, candles.length - 16)];
-        entryTimestamp = targetCandle?.timestamp;
-      }
-
-      if (entryTimestamp) {
-        const timeSec = Math.floor(new Date(entryTimestamp).getTime() / 1000) as unknown as Time;
-        const coord = chart.timeScale().timeToCoordinate(timeSec);
-        if (coord !== null) {
-          entryCandleX = Math.max(20, Math.min(coord, width - 100));
-        }
-      }
+    // Find the Exact Entry Candle X-Coordinate anchored strictly to real timestamp
+    let entryCandleX: number | null = null;
+    if (effSignal?.timestamp) {
+      const timeSec = Math.floor(new Date(effSignal.timestamp).getTime() / 1000) as unknown as Time;
+      entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
+    } else if (clientSMC && clientSMC.orderBlocks && clientSMC.orderBlocks.length > 0) {
+      const timeSec = Math.floor(new Date(clientSMC.orderBlocks[0].timestamp).getTime() / 1000) as unknown as Time;
+      entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
+    } else if (allCandles && allCandles.length > 0) {
+      const targetCandle = allCandles[Math.max(0, allCandles.length - 16)];
+      const timeSec = Math.floor(new Date(targetCandle.timestamp).getTime() / 1000) as unknown as Time;
+      entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
     }
 
     // A-E. Pure SMC Overlays (Dealing Range, OB, FVG, Structure Breaks, Liquidity Pools)
@@ -1022,23 +986,26 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
           ctx.fillStyle = '#94A3B8';
           ctx.font = 'bold 9px monospace';
-          ctx.fillText(`50% EQUILIBRIUM (₹${dr.equilibrium.toFixed(2)})`, 15, midY - 4);
+          ctx.fillText(`50% EQUILIBRIUM (${currSymbol}${dr.equilibrium.toFixed(2)})`, 15, midY - 4);
         }
       }
 
-      // B. Institutional Order Blocks (OB)
+      // B. Institutional Order Blocks (OB) - Strictly anchored to real timestamps
       if (showOB && clientSMC.orderBlocks && clientSMC.orderBlocks.length > 0) {
-        clientSMC.orderBlocks.slice(0, 6).forEach((ob, idx) => {
+        clientSMC.orderBlocks.slice(0, 8).forEach((ob) => {
           const obTopY = priceToY(ob.high);
           const obBotY = priceToY(ob.low);
           if (obTopY !== null && obBotY !== null) {
+            const timeSec = Math.floor(new Date(ob.timestamp).getTime() / 1000) as unknown as Time;
+            const startX = chart.timeScale().timeToCoordinate(timeSec);
+            if (startX === null) return; // Do NOT render unanchored objects if timestamp coordinate is null
+
             const isBull = ob.direction === 'BULLISH';
             const boxH = Math.max(8, Math.abs(obBotY - obTopY));
             const boxY = Math.min(obTopY, obBotY);
-            const startX = width * (0.3 + idx * 0.05);
             const boxW = width - 65 - startX;
 
-            if (boxW > 20) {
+            if (boxW > 10) {
               ctx.fillStyle = isBull ? 'rgba(8, 153, 129, 0.25)' : 'rgba(242, 54, 69, 0.25)';
               ctx.fillRect(startX, boxY, boxW, boxH);
 
@@ -1060,19 +1027,22 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         });
       }
 
-      // C. Fair Value Gaps (FVG)
+      // C. Fair Value Gaps (FVG) - Strictly anchored to real timestamps
       if (showFVG && clientSMC.fairValueGaps && clientSMC.fairValueGaps.length > 0) {
-        clientSMC.fairValueGaps.slice(0, 6).forEach((fvg, idx) => {
+        clientSMC.fairValueGaps.slice(0, 8).forEach((fvg) => {
           const fvgTopY = priceToY(fvg.upperBound);
           const fvgBotY = priceToY(fvg.lowerBound);
           if (fvgTopY !== null && fvgBotY !== null) {
+            const timeSec = Math.floor(new Date(fvg.timestamp).getTime() / 1000) as unknown as Time;
+            const startX = chart.timeScale().timeToCoordinate(timeSec);
+            if (startX === null) return; // Do NOT render unanchored objects if timestamp coordinate is null
+
             const isBull = fvg.direction === 'BULLISH';
             const fvgH = Math.max(6, Math.abs(fvgBotY - fvgTopY));
             const fvgY = Math.min(fvgTopY, fvgBotY);
-            const startX = width * (0.2 + idx * 0.05);
             const boxW = width - 65 - startX;
 
-            if (boxW > 20) {
+            if (boxW > 10) {
               ctx.fillStyle = isBull ? 'rgba(6, 182, 212, 0.18)' : 'rgba(244, 63, 94, 0.18)';
               ctx.fillRect(startX, fvgY, boxW, fvgH);
 
@@ -1095,16 +1065,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
       // D. Structure Breaks (BOS & CHoCH) - Localized Structural Breakout Segments
       if (showCHoCH && clientSMC.changesOfCharacter && clientSMC.changesOfCharacter.length > 0) {
-        clientSMC.changesOfCharacter.slice(-3).forEach((ch) => {
+        clientSMC.changesOfCharacter.slice(-5).forEach((ch) => {
           const y = priceToY(ch.brokenLevel);
           if (y !== null) {
             const isBull = ch.direction === 'BULLISH';
             const timeSec = Math.floor(new Date(ch.timestamp).getTime() / 1000) as unknown as Time;
             const candleX = chart.timeScale().timeToCoordinate(timeSec);
+            if (candleX === null) return;
 
-            // Local bounded segment (anchored to the breakout candle)
-            const endX = candleX !== null ? candleX + 15 : width * 0.75;
-            const startX = candleX !== null ? Math.max(10, candleX - 85) : width * 0.55;
+            const endX = candleX + 20;
+            const startX = Math.max(10, candleX - 60);
 
             ctx.strokeStyle = isBull ? '#089981' : '#F23645';
             ctx.lineWidth = 1.6;
@@ -1113,7 +1083,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             ctx.lineTo(endX, y);
             ctx.stroke();
 
-            // Compact CHoCH Tag centered on the local segment
             const midX = (startX + endX) / 2;
             ctx.fillStyle = isBull ? '#089981' : '#F23645';
             ctx.fillRect(midX - 26, y - 13, 52, 12);
@@ -1127,16 +1096,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       }
 
       if (showBOS && clientSMC.breaksOfStructure && clientSMC.breaksOfStructure.length > 0) {
-        clientSMC.breaksOfStructure.slice(-4).forEach((bos) => {
+        clientSMC.breaksOfStructure.slice(-6).forEach((bos) => {
           const y = priceToY(bos.brokenLevel || bos.brokenSwingPoint?.price || bos.breakPrice);
           if (y !== null) {
             const isBull = bos.direction === 'BULLISH';
             const timeSec = Math.floor(new Date(bos.timestamp).getTime() / 1000) as unknown as Time;
             const candleX = chart.timeScale().timeToCoordinate(timeSec);
+            if (candleX === null) return;
 
-            // Local bounded dashed segment
-            const endX = candleX !== null ? candleX + 15 : width * 0.7;
-            const startX = candleX !== null ? Math.max(10, candleX - 75) : width * 0.55;
+            const endX = candleX + 20;
+            const startX = Math.max(10, candleX - 60);
 
             ctx.strokeStyle = isBull ? 'rgba(8, 153, 129, 0.85)' : 'rgba(242, 54, 69, 0.85)';
             ctx.lineWidth = 1.3;
@@ -1147,7 +1116,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Compact BOS Tag centered on the local segment
             const midX = (startX + endX) / 2;
             ctx.fillStyle = isBull ? 'rgba(8, 153, 129, 0.9)' : 'rgba(242, 54, 69, 0.9)';
             ctx.fillRect(midX - 20, y - 12, 40, 11);
@@ -1162,10 +1130,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
       // E. LIQUIDITY POOLS (BSL / SSL) & LIQUIDITY SWEEPS - Anchored Directly On Candle Wicks
       if (showLiq && clientSMC.liquidityPools && clientSMC.liquidityPools.length > 0) {
-        // Draw resting unswept pools as local bounded lines
         clientSMC.liquidityPools
           .filter((lp) => !lp.isSwept)
-          .slice(0, 4)
+          .slice(0, 6)
           .forEach((lp) => {
             const y = priceToY(lp.priceLevel);
             if (y !== null) {
@@ -1174,10 +1141,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 new Date(lp.firstTimestamp).getTime() / 1000,
               ) as unknown as Time;
               const startCoord = chart.timeScale().timeToCoordinate(timeSec);
-              const startX = startCoord !== null ? Math.max(10, startCoord) : width * 0.3;
+              if (startCoord === null) return;
+              const startX = Math.max(10, startCoord);
               const endX = width - 65;
 
-              // Liquidity Level Local Segment
               ctx.strokeStyle = 'rgba(245, 158, 11, 0.7)';
               ctx.lineWidth = 1.2;
               ctx.setLineDash([3, 3]);
@@ -1187,7 +1154,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               ctx.stroke();
               ctx.setLineDash([]);
 
-              // Right Price Scale Tag
               ctx.fillStyle = '#F59E0B';
               ctx.fillRect(endX, y - 7, 65, 14);
               ctx.fillStyle = '#0F172A';
@@ -1197,7 +1163,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           });
       }
 
-      // Render Liquidity Sweeps Directly Above/Below Candle Wicks (No Full Horizontal Lines)
+      // Render Liquidity Sweeps Directly Above/Below Candle Wicks
       if (showLiq && clientSMC.liquiditySweeps && clientSMC.liquiditySweeps.length > 0) {
         clientSMC.liquiditySweeps.slice(-5).forEach((sweep) => {
           const sweepPrice = sweep.sweptPrice || sweep.priceLevel;
@@ -1211,7 +1177,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             if (candleX !== null && candleX > 10 && candleX < width - 65) {
               const isBSLSweep = sweep.type === 'BUY_SIDE' || sweep.type === 'EQUAL_HIGHS';
 
-              // Short 30px tick mark directly across the candle wick
               ctx.strokeStyle = '#F59E0B';
               ctx.lineWidth = 1.4;
               ctx.beginPath();
@@ -1220,7 +1185,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               ctx.stroke();
 
               if (isBSLSweep) {
-                // Swept High (Downward pointer arrow right above candle wick)
                 ctx.fillStyle = '#F59E0B';
                 ctx.beginPath();
                 ctx.moveTo(candleX, y - 2);
@@ -1229,7 +1193,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 ctx.closePath();
                 ctx.fill();
 
-                // Compact Pill directly on the candle
                 ctx.fillStyle = 'rgba(245, 158, 11, 0.95)';
                 ctx.fillRect(candleX - 28, y - 22, 56, 12);
                 ctx.fillStyle = '#0F172A';
@@ -1238,7 +1201,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 ctx.fillText('⚡ LIQ SWEEP', candleX, y - 13);
                 ctx.textAlign = 'left';
               } else {
-                // Swept Low (Upward pointer arrow right below candle wick)
                 ctx.fillStyle = '#06B6D4';
                 ctx.beginPath();
                 ctx.moveTo(candleX, y + 2);
@@ -1247,7 +1209,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 ctx.closePath();
                 ctx.fill();
 
-                // Compact Pill directly on the candle
                 ctx.fillStyle = 'rgba(6, 182, 212, 0.95)';
                 ctx.fillRect(candleX - 28, y + 10, 56, 12);
                 ctx.fillStyle = '#0F172A';
@@ -1263,7 +1224,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
 
     // F. ENTRY, STOP LOSS (SL) & TAKE PROFIT (TP) SHADED BOXES & ANCHORS
-    if (showLevels && isActualTradeActive && entryPrice && slPrice && tp2Price) {
+    if (showLevels && isActualTradeActive && entryPrice && slPrice && tp2Price && entryCandleX !== null) {
       const rawEntryY = priceToY(entryPrice);
       const rawSlY = priceToY(slPrice);
       const rawTp1Y = tp1Price ? priceToY(tp1Price) : null;

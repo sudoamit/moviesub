@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { ICandle, ISignalSetup, Timeframe, WS_EVENTS } from '@quant/shared';
+import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot } from '@quant/shared';
+import { ChartSnapshotValidator } from '@quant/trading-engine';
 import { MarketStreamProvider, useMarketStream } from '../context/MarketStreamContext';
 import { Header, NavTab, StrategyMode } from '../components/Header';
 import { LiveTickerBar, ITickerInfo } from '../components/LiveTickerBar';
@@ -62,16 +63,8 @@ function DashboardContent() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('NIFTY');
   const [selectedTimeframe, setSelectedTimeframe] = useState<string>('15m');
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyMode>('SMC');
-  const [candles, setCandles] = useState<ICandle[]>([]);
-  const [formingCandle, setFormingCandle] = useState<ICandle | null>(null);
-  const [dataProvenance, setDataProvenance] = useState<string>('LIVE');
+  const [chartSnapshot, setChartSnapshot] = useState<ChartMarketSnapshot | null>(null);
   const [isDataUnavailable, setIsDataUnavailable] = useState<boolean>(false);
-  const [serverSMC, setServerSMC] = useState<{
-    structures?: any;
-    liquidity?: any;
-    fvgs?: any[];
-    orderBlocks?: any[];
-  } | null>(null);
   const [signals, setSignals] = useState<ISignalSetup[]>([]);
   const [selectedSignal, setSelectedSignal] = useState<ISignalSetup | null>(null);
   const [isOptionChainModalOpen, setIsOptionChainModalOpen] = useState<boolean>(false);
@@ -82,6 +75,8 @@ function DashboardContent() {
     message: string;
     type?: string;
   } | null>(null);
+
+  const fetchAbortRef = useRef<AbortController | null>(null);
 
   const {
     isConnected,
@@ -180,59 +175,74 @@ function DashboardContent() {
   };
 
   const fetchCandles = async (sym: string, tf: string) => {
+    if (fetchAbortRef.current) {
+      fetchAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     setIsDataUnavailable(false);
     try {
       const res = await fetch(
         `http://localhost:3001/api/candles/chart-data?symbol=${sym}&timeframe=${tf}&limit=200`,
+        { signal: controller.signal },
       );
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
-      if (data && Array.isArray(data.candles) && data.candles.length > 0) {
-        const parsedCandles: ICandle[] = data.candles.map((c: any) => ({
-          timestamp: new Date(c.time * 1000),
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume ?? 0,
-          isClosed: true,
-          provenance: data.dataProvenance || 'LIVE',
-        }));
-        setCandles(parsedCandles);
-        setDataProvenance(data.dataProvenance || 'LIVE');
-        if (data.formingCandle) {
-          setFormingCandle({
-            timestamp: new Date((data.formingCandle.time || data.formingCandle.timestamp) * 1000),
-            open: data.formingCandle.open,
-            high: data.formingCandle.high,
-            low: data.formingCandle.low,
-            close: data.formingCandle.close,
-            volume: data.formingCandle.volume ?? 0,
-            isClosed: false,
-            provenance: data.dataProvenance || 'LIVE',
-          });
-        } else {
-          setFormingCandle(null);
+      if (data && (Array.isArray(data.closedCandles) || Array.isArray(data.candles))) {
+        const closed = Array.isArray(data.closedCandles)
+          ? data.closedCandles
+          : data.candles.map((c: any) => ({
+              timestamp: new Date(c.time ? c.time * 1000 : c.timestamp),
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+              volume: c.volume ?? 0,
+              isClosed: true as const,
+              provenance: data.dataProvenance || 'LIVE',
+            }));
+
+        const validation = ChartSnapshotValidator.validateSnapshot({
+          symbol: data.symbol || sym,
+          timeframe: data.timeframe || tf,
+          closedCandles: closed,
+          formingCandle: data.formingCandle || null,
+          livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
+          asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
+          dataProvenance: data.dataProvenance || 'LIVE',
+          sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
+          smcSnapshot: data.smcSnapshot || null,
+        });
+
+        if (!validation.isValid) {
+          console.warn(`Chart snapshot validation rejected: ${validation.error}`);
+          setChartSnapshot(null);
+          setIsDataUnavailable(true);
+          return;
         }
-        setServerSMC({
-          structures: data.structures,
-          liquidity: data.liquidity,
-          fvgs: data.fvgs,
-          orderBlocks: data.orderBlocks,
+
+        setChartSnapshot({
+          symbol: data.symbol || sym,
+          timeframe: data.timeframe || tf,
+          closedCandles: closed,
+          formingCandle: data.formingCandle || null,
+          livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
+          asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
+          dataProvenance: data.dataProvenance || 'LIVE',
+          sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
+          smcSnapshot: data.smcSnapshot || null,
         });
       } else {
-        setCandles([]);
-        setFormingCandle(null);
-        setServerSMC(null);
+        setChartSnapshot(null);
         setIsDataUnavailable(true);
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e.name === 'AbortError') return;
       console.error('Failed to fetch chart data:', e);
-      setCandles([]);
-      setFormingCandle(null);
-      setServerSMC(null);
+      setChartSnapshot(null);
       setIsDataUnavailable(true);
     }
   };
@@ -242,6 +252,41 @@ function DashboardContent() {
     fetchCandles(selectedSymbol, selectedTimeframe);
     subscribeToSymbol(selectedSymbol);
   }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
+
+  // Single Authoritative Live Tick Update Pipeline (P0-1 & P0-3)
+  useEffect(() => {
+    const tick = tickers[selectedSymbol];
+    if (tick && typeof tick.price === 'number' && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
+      setChartSnapshot((prev) => {
+        if (!prev || prev.symbol !== selectedSymbol) return prev;
+        const liveP = tick.price;
+        const currentForming = prev.formingCandle;
+        const nextForming = currentForming
+          ? {
+              ...currentForming,
+              high: Math.max(currentForming.high, liveP),
+              low: Math.min(currentForming.low, liveP),
+              close: liveP,
+              volume: currentForming.volume + (tick.volume || 0),
+            }
+          : {
+              timestamp: new Date(),
+              open: liveP,
+              high: liveP,
+              low: liveP,
+              close: liveP,
+              volume: tick.volume || 0,
+              isClosed: false as const,
+              provenance: prev.dataProvenance,
+            };
+        return {
+          ...prev,
+          livePrice: liveP,
+          formingCandle: nextForming,
+        };
+      });
+    }
+  }, [tickers, selectedSymbol]);
 
   const handleSelectSymbol = (rawSym: string) => {
     const s = (rawSym || '').toUpperCase();
@@ -278,7 +323,7 @@ function DashboardContent() {
 
   const currentTicker = tickers[selectedSymbol] || {
     symbol: selectedSymbol,
-    price: candles.length > 0 ? candles[candles.length - 1].close : undefined,
+    price: chartSnapshot?.livePrice ?? undefined,
     changePercent: 0,
     changeAmount: 0,
     high: 0,
@@ -304,9 +349,10 @@ function DashboardContent() {
     ) {
       return false;
     }
+    const closedCandles = chartSnapshot?.closedCandles || [];
     const currentCMP =
       currentTicker.price ||
-      (candles.length > 0 ? candles[candles.length - 1].close : selectedSignal.entryZone.optimal);
+      (closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : selectedSignal.entryZone.optimal);
     if (!currentCMP || !selectedSignal.stopLoss) return true;
     const isBull = selectedSignal.direction === 'BULLISH';
     const isSLReached = isBull
@@ -322,7 +368,7 @@ function DashboardContent() {
     if (isTPReached) return false;
 
     return true;
-  }, [selectedSignal, currentTicker.price, candles, selectedSymbol]);
+  }, [selectedSignal, currentTicker.price, chartSnapshot, selectedSymbol]);
 
   return (
     <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
@@ -433,15 +479,9 @@ function DashboardContent() {
                 <TradingChart
                   symbol={selectedSymbol}
                   timeframe={selectedTimeframe}
-                  candles={candles}
-                  formingCandle={formingCandle}
-                  dataProvenance={dataProvenance}
+                  snapshot={chartSnapshot}
                   isDataUnavailable={isDataUnavailable}
                   signal={selectedSignal}
-                  structures={serverSMC?.structures}
-                  liquidity={serverSMC?.liquidity}
-                  fvgs={serverSMC?.fvgs}
-                  orderBlocks={serverSMC?.orderBlocks}
                   livePrice={currentTicker.price}
                   liveChangePercent={currentTicker.changePercent}
                   isTradeActive={isPositionActive}
