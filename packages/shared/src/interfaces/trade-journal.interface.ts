@@ -27,8 +27,8 @@ export interface ITradeJournalRecord {
   readonly entryTimeUtc: string | null;
   readonly exitTimeUtc: string | null;
 
-  readonly holdingDurationMs: number;
-  readonly holdingDurationSeconds: number;
+  readonly holdingDurationMs: number | null;
+  readonly holdingDurationSeconds: number | null;
 
   // Multi-Asset P&L & Accounting
   readonly quotePnl?: number;
@@ -62,9 +62,9 @@ export interface ITradeJournalRecord {
   readonly entryPriceCurrency?: string | null;
   readonly exitPrice?: number | null;
   readonly exitPriceCurrency?: string | null;
-  readonly durationMs: number;
-  readonly durationMinutes: number;
-  readonly totalChargesAccount: number;
+  readonly durationMs?: number | null;
+  readonly durationMinutes?: number | null;
+  readonly totalChargesAccount?: number;
 }
 
 export interface IJournalStatsSummary {

@@ -484,11 +484,6 @@ export class SignalsService implements OnModuleInit {
       const quoteCurrency = snapshot.quoteCurrency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
       const accountCurrency = snapshot.accountCurrency || 'INR';
 
-      const durationMs =
-        outcome.durationMs ??
-        Math.max(0, new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime());
-      const durationMinutes = Math.max(0, Math.round(durationMs / 60000));
-
       const isOption = t.instrumentType === 'OPTION';
       const contractSymbol =
         t.contractSymbol ||
@@ -526,6 +521,16 @@ export class SignalsService implements OnModuleInit {
         : Number(t.exitPrice);
       const actualExitPriceCurrency = outcome.actualExitPriceCurrency || quoteCurrency;
       const exitTimeUtc = outcome.exitTimeUtc || (t.exitTime ? new Date(t.exitTime).toISOString() : null);
+
+      const holdingDurationMs = executionDataComplete
+        ? (outcome.durationMs ?? (t.exitTime && t.entryTime ? Math.max(0, new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) : null))
+        : null;
+      const holdingDurationSeconds = executionDataComplete && holdingDurationMs !== null
+        ? Math.floor(holdingDurationMs / 1000)
+        : null;
+      const durationMinutes = executionDataComplete && holdingDurationMs !== null
+        ? Math.max(0, Math.round(holdingDurationMs / 60000))
+        : null;
 
       return {
         id: t.id,
@@ -577,12 +582,12 @@ export class SignalsService implements OnModuleInit {
         exitReason: t.exitReason,
         activatedAt: t.entryTime,
         closedAt: t.exitTime,
-        holdingDurationMs: durationMs,
-        holdingDurationSeconds: Math.floor(durationMs / 1000),
-        durationMs,
+        holdingDurationMs,
+        holdingDurationSeconds,
+        durationMs: holdingDurationMs,
         durationMinutes,
         executionSource: outcome.executionPriceSource || 'PAPER_FILL',
-        entryFillCount: outcome.entryFillCount || 1,
+        entryFillCount: outcome.entryFillCount || (executionDataComplete ? 1 : 0),
         exitFillCount: outcome.exitFillCount || 1,
         accountingSnapshotHash: outcome.accountingSnapshotHash || snapshot.snapshotHash || undefined,
         isLegacyExecutionData: isLegacy,
@@ -631,11 +636,6 @@ export class SignalsService implements OnModuleInit {
             ? `${s.instrument.symbol} ${reasons.strike} ${reasons.optionType || (s.direction === 'BULLISH' ? 'CE' : 'PE')}`
             : s.instrument.symbol);
 
-        const activatedAtMs = s.activatedAt ? new Date(s.activatedAt).getTime() : 0;
-        const closedAtMs = s.closedAt ? new Date(s.closedAt).getTime() : activatedAtMs;
-        const durationMs = Math.max(0, closedAtMs - activatedAtMs);
-        const durationMinutes = Math.max(0, Math.round(durationMs / 60000));
-
         return {
           id: s.id,
           tradeId: s.id,
@@ -654,6 +654,7 @@ export class SignalsService implements OnModuleInit {
           score: s.score,
           timeframe: s.timeframe,
           quantity: reasons.quantity || 1,
+          requestedEntryPrice: Number(s.entryPrice),
           actualEntryPrice: null,
           actualEntryPriceCurrency: null,
           entryPrice: Number(s.entryPrice),
@@ -686,10 +687,10 @@ export class SignalsService implements OnModuleInit {
           exitReason: reasons.exitReason || `${s.state} Hit`,
           activatedAt: s.activatedAt,
           closedAt: s.closedAt,
-          holdingDurationMs: durationMs,
-          holdingDurationSeconds: Math.floor(durationMs / 1000),
-          durationMs,
-          durationMinutes,
+          holdingDurationMs: null,
+          holdingDurationSeconds: null,
+          durationMs: null,
+          durationMinutes: null,
           executionSource: 'LEGACY_SIGNAL',
           entryFillCount: 0,
           exitFillCount: 0,

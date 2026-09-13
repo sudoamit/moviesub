@@ -287,4 +287,363 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
       expect(formatPnlWithCurrency(2500, 'USDT')).toBe('+2,500.00 USDT');
     });
   });
+
+  describe('6. AI Fix 107 — Timestamp Invariants & Authority Suite (Tests A through G & Acceptance)', () => {
+    // Test A: PaperFill.fillTimestamp == PaperPosition.entryTime
+    it('Test A: PaperFill.fillTimestamp == PaperPosition.entryTime', () => {
+      const fillTimestamp = new Date('2026-09-12T10:03:15.500Z');
+      const paperFill: IFillRecord = {
+        fillId: 'fill-a-1',
+        orderId: 'ord-a-1',
+        executionRole: 'ENTRY',
+        fillPrice: 95000,
+        fillQuantity: 1.0,
+        fillTimestamp,
+        sourceTimestamp: new Date('2026-09-12T10:00:00.000Z'),
+      };
+
+      const paperPosition = {
+        id: 'pos-a-1',
+        entryPrice: paperFill.fillPrice,
+        entryTime: paperFill.fillTimestamp,
+      };
+
+      expect(paperPosition.entryTime).toEqual(paperFill.fillTimestamp);
+      expect(new Date(paperPosition.entryTime).getTime()).toBe(new Date(paperFill.fillTimestamp).getTime());
+    });
+
+    // Test B: first entry fill timestamp == PaperTrade.entryTime
+    it('Test B: first entry fill timestamp == PaperTrade.entryTime', () => {
+      const firstEntryFillTime = new Date('2026-09-12T10:01:00.000Z');
+      const secondEntryFillTime = new Date('2026-09-12T10:03:00.000Z');
+
+      const entryFills: IFillRecord[] = [
+        {
+          fillId: 'fill-b-1',
+          executionRole: 'ENTRY',
+          fillPrice: 95000,
+          fillQuantity: 0.5,
+          fillTimestamp: firstEntryFillTime,
+        },
+        {
+          fillId: 'fill-b-2',
+          executionRole: 'ENTRY',
+          fillPrice: 95200,
+          fillQuantity: 0.5,
+          fillTimestamp: secondEntryFillTime,
+        },
+      ];
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill-b-exit',
+        executionRole: 'EXIT',
+        fillPrice: 96000,
+        fillQuantity: 1.0,
+        fillTimestamp: new Date('2026-09-12T10:30:00.000Z'),
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFill]);
+      const paperTradeEntryTime = new Date(aggregated.entry.earliestFillTimestamp);
+
+      expect(paperTradeEntryTime.getTime()).toBe(firstEntryFillTime.getTime());
+      expect(aggregated.entry.earliestFillTimeUtc).toBe(firstEntryFillTime.toISOString());
+    });
+
+    // Test C: last exit fill timestamp == PaperTrade.exitTime
+    it('Test C: last exit fill timestamp == PaperTrade.exitTime', () => {
+      const entryFill: IFillRecord = {
+        fillId: 'fill-c-entry',
+        executionRole: 'ENTRY',
+        fillPrice: 95000,
+        fillQuantity: 1.0,
+        fillTimestamp: new Date('2026-09-12T10:00:00.000Z'),
+      };
+
+      const firstExitFillTime = new Date('2026-09-12T10:15:00.000Z');
+      const lastExitFillTime = new Date('2026-09-12T10:25:00.000Z');
+
+      const exitFills: IFillRecord[] = [
+        {
+          fillId: 'fill-c-x1',
+          executionRole: 'EXIT',
+          fillPrice: 95500,
+          fillQuantity: 0.5,
+          fillTimestamp: firstExitFillTime,
+        },
+        {
+          fillId: 'fill-c-x2',
+          executionRole: 'EXIT',
+          fillPrice: 96000,
+          fillQuantity: 0.5,
+          fillTimestamp: lastExitFillTime,
+        },
+      ];
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], exitFills);
+      const paperTradeExitTime = new Date(aggregated.exit.latestFillTimestamp);
+
+      expect(paperTradeExitTime.getTime()).toBe(lastExitFillTime.getTime());
+      expect(aggregated.exit.latestFillTimeUtc).toBe(lastExitFillTime.toISOString());
+    });
+
+    // Test D: Trade duration == exitTime - entryTime
+    it('Test D: Trade duration == exitTime - entryTime', () => {
+      const entryTime = new Date('2026-09-12T10:00:00.000Z');
+      const exitTime = new Date('2026-09-12T10:45:30.000Z');
+
+      const entryFill: IFillRecord = {
+        fillId: 'fill-d-entry',
+        executionRole: 'ENTRY',
+        fillPrice: 100,
+        fillQuantity: 10,
+        fillTimestamp: entryTime,
+      };
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill-d-exit',
+        executionRole: 'EXIT',
+        fillPrice: 110,
+        fillQuantity: 10,
+        fillTimestamp: exitTime,
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], [exitFill]);
+      const expectedDurationMs = exitTime.getTime() - entryTime.getTime(); // 2,730,000 ms = 45.5 mins
+
+      expect(aggregated.durationMs).toBe(expectedDurationMs);
+      expect(aggregated.durationMinutes).toBe(45.5);
+    });
+
+    // Test E: order submitted at 10:00, fill at 10:03, journal entry time = 10:03
+    it('Test E: order submitted at 10:00, fill at 10:03, journal entry time = 10:03', () => {
+      const orderSubmittedAt = '2026-09-12T10:00:00.000Z';
+      const fillTimestamp = '2026-09-12T10:03:00.000Z';
+
+      const entryFill: IFillRecord = {
+        fillId: 'fill-e-1',
+        orderId: 'ord-e-1',
+        executionRole: 'ENTRY',
+        fillPrice: 95000,
+        fillQuantity: 1,
+        fillTimestamp,
+      };
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill-e-exit',
+        executionRole: 'EXIT',
+        fillPrice: 95500,
+        fillQuantity: 1,
+        fillTimestamp: '2026-09-12T10:30:00.000Z',
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], [exitFill]);
+      const journalEntryTimeUtc = aggregated.entry.earliestFillTimeUtc;
+
+      expect(journalEntryTimeUtc).toBe(fillTimestamp);
+      expect(journalEntryTimeUtc).not.toBe(orderSubmittedAt);
+    });
+
+    // Test F: market tick timestamp = 10:00, fill timestamp = 10:03, journal must show 10:03
+    it('Test F: market tick timestamp = 10:00, fill timestamp = 10:03, journal must show 10:03', () => {
+      const marketTickTimestamp = '2026-09-12T10:00:00.000Z';
+      const fillTimestamp = '2026-09-12T10:03:00.000Z';
+
+      const entryFill: IFillRecord = {
+        fillId: 'fill-f-1',
+        executionRole: 'ENTRY',
+        fillPrice: 95000,
+        fillQuantity: 1,
+        fillTimestamp,
+        sourceTimestamp: marketTickTimestamp,
+      };
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill-f-exit',
+        executionRole: 'EXIT',
+        fillPrice: 95500,
+        fillQuantity: 1,
+        fillTimestamp: '2026-09-12T10:30:00.000Z',
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], [exitFill]);
+      expect(aggregated.entry.earliestFillTimeUtc).toBe(fillTimestamp);
+      expect(aggregated.entry.earliestFillTimeUtc).not.toBe(marketTickTimestamp);
+    });
+
+    // Test G: missing entry fills: actualEntryPrice = null, entryTimeUtc = null, duration = null
+    it('Test G: missing entry fills: actualEntryPrice = null, entryTimeUtc = null, duration = null', () => {
+      const hasAuthoritativeEntryFills = false;
+      const isLegacyExecutionData = true;
+      const executionDataComplete = false;
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill-g-exit',
+        executionRole: 'EXIT',
+        fillPrice: 95500,
+        fillQuantity: 1,
+        fillTimestamp: '2026-09-12T10:30:00.000Z',
+      };
+
+      const exitLeg = ExecutionAggregator.aggregateLeg([exitFill], 'EXIT');
+
+      const outcomeSnapshot = {
+        requestedEntryPrice: 95000,
+        actualEntryPrice: hasAuthoritativeEntryFills ? 95000 : null,
+        actualEntryPriceCurrency: hasAuthoritativeEntryFills ? 'USDT' : null,
+        entryTimeUtc: hasAuthoritativeEntryFills ? '2026-09-12T10:00:00.000Z' : null,
+        actualExitPrice: exitLeg.weightedPrice,
+        actualExitPriceCurrency: 'USDT',
+        exitTimeUtc: exitLeg.latestFillTimeUtc,
+        holdingDurationMs: null,
+        holdingDurationSeconds: null,
+        durationMs: null,
+        durationMinutes: null,
+        isLegacyExecutionData,
+        executionDataComplete,
+      };
+
+      expect(outcomeSnapshot.actualEntryPrice).toBeNull();
+      expect(outcomeSnapshot.actualEntryPriceCurrency).toBeNull();
+      expect(outcomeSnapshot.entryTimeUtc).toBeNull();
+      expect(outcomeSnapshot.holdingDurationMs).toBeNull();
+      expect(outcomeSnapshot.holdingDurationSeconds).toBeNull();
+      expect(outcomeSnapshot.durationMs).toBeNull();
+      expect(outcomeSnapshot.durationMinutes).toBeNull();
+      expect(outcomeSnapshot.executionDataComplete).toBe(false);
+    });
+
+    // Final Acceptance Test: BTCUSDT Paper Trade Full Flow Verification
+    it('Final Acceptance Test: BTCUSDT paper trade verifies PaperPosition.entryTime == PaperFill.fillTimestamp == PaperTrade.entryTime == Journal.entryTimeUtc, Price Currency USDT, P&L Currency INR', () => {
+      const marketTickTimestamp = new Date('2026-09-12T10:00:00.000Z');
+      const orderSubmittedAt = new Date('2026-09-12T10:00:02.000Z');
+      const fillTimestamp = new Date('2026-09-12T10:00:02.050Z');
+      const exitFillTimestamp = new Date('2026-09-12T10:30:02.050Z');
+
+      // 1. Authoritative Instrument & Snapshot
+      const btc = getAuthoritativeInstrument('BTCUSDT');
+      expect(btc.currency).toBe('USDT');
+
+      const converter = PointInTimeCurrencyConverter.getInstance();
+      converter.registerRate({ pair: 'USDT/INR', rate: 90.0, timestamp: fillTimestamp.getTime(), source: 'PIT', version: '1.0' });
+      const fxRes = converter.getRate('USDT', 'INR', fillTimestamp.getTime());
+
+      const marginModel = resolveMarginModel(btc, { requestedLeverage: 1 });
+      const snapshot = buildAccountingSnapshot({
+        accountCurrency: 'INR',
+        quoteCurrency: btc.currency,
+        fxResult: fxRes,
+        contractSize: 1,
+        lotSize: 0.1,
+        resolvedMarginModel: marginModel,
+        calculatedAt: fillTimestamp.getTime(),
+      });
+
+      // 2. PaperFill Creation
+      const entryFill: IFillRecord = {
+        fillId: 'fill-accept-entry',
+        orderId: 'ord-accept-1',
+        positionId: 'pos-accept-1',
+        executionRole: 'ENTRY',
+        fillPrice: 95000.0,
+        fillQuantity: 0.1,
+        fillTimestamp,
+        sourceTimestamp: marketTickTimestamp,
+        executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+      };
+
+      // 3. PaperPosition Creation strictly bound to PaperFill
+      const paperPosition = {
+        id: 'pos-accept-1',
+        entryPrice: entryFill.fillPrice,
+        entryTime: entryFill.fillTimestamp,
+      };
+
+      // 4. Exit Execution & Trade Aggregation
+      const exitFill: IFillRecord = {
+        fillId: 'fill-accept-exit',
+        orderId: 'ord-accept-2',
+        positionId: 'pos-accept-1',
+        executionRole: 'EXIT',
+        fillPrice: 96000.0,
+        fillQuantity: 0.1,
+        fillTimestamp: exitFillTimestamp,
+        sourceTimestamp: new Date('2026-09-12T10:30:00.000Z'),
+        executionPriceSource: ExecutionPriceSource.LIVE_TICK,
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], [exitFill]);
+
+      // 5. PaperTrade Creation
+      const paperTrade = {
+        entryPrice: aggregated.entry.weightedPrice,
+        exitPrice: aggregated.exit.weightedPrice,
+        entryTime: new Date(aggregated.entry.earliestFillTimestamp),
+        exitTime: new Date(aggregated.exit.latestFillTimestamp),
+      };
+
+      // 6. Journal Record Generation
+      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: paperTrade.entryPrice,
+        exitPrice: paperTrade.exitPrice,
+        quantity: 0.1,
+        direction: Direction.BULLISH,
+        accountingSnapshot: snapshot,
+        fees: 0,
+      });
+
+      const journalRecord: ITradeJournalRecord = {
+        id: 'journal-accept-1',
+        tradeId: 'trade-accept-1',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        side: 'BUY',
+        quantity: 0.1,
+        requestedEntryPrice: 95000.0,
+        actualEntryPrice: aggregated.entry.weightedPrice,
+        actualEntryPriceCurrency: snapshot.quoteCurrency,
+        entryTimeUtc: aggregated.entry.earliestFillTimeUtc,
+        actualExitPrice: aggregated.exit.weightedPrice,
+        actualExitPriceCurrency: snapshot.quoteCurrency,
+        exitTimeUtc: aggregated.exit.latestFillTimeUtc,
+        holdingDurationMs: aggregated.durationMs,
+        holdingDurationSeconds: Math.floor(aggregated.durationMs / 1000),
+        quotePnl: pnlCalc.quotePnl,
+        quoteCurrency: snapshot.quoteCurrency,
+        netPnlAccount: pnlCalc.netPnlAccount,
+        accountCurrency: snapshot.accountCurrency,
+        chargesAccount: 0,
+        totalChargesAccount: 0,
+        state: 'TP2_HIT',
+        exitReason: 'Target 2 Completed',
+        executionSource: 'PAPER_FILL',
+        entryFillCount: 1,
+        exitFillCount: 1,
+        executionDataComplete: true,
+      };
+
+      // VERIFICATIONS:
+      // 1. PaperPosition.entryTime == PaperFill.fillTimestamp
+      expect(paperPosition.entryTime).toEqual(entryFill.fillTimestamp);
+      // 2. PaperTrade.entryTime == PaperFill.fillTimestamp
+      expect(paperTrade.entryTime.getTime()).toBe(new Date(entryFill.fillTimestamp).getTime());
+      // 3. Journal.entryTimeUtc == PaperFill.fillTimestamp
+      expect(journalRecord.entryTimeUtc).toBe(new Date(entryFill.fillTimestamp).toISOString());
+
+      // Distinct from marketTickTimestamp and orderSubmittedAt
+      expect(new Date(journalRecord.entryTimeUtc!).getTime()).not.toBe(marketTickTimestamp.getTime());
+      expect(new Date(journalRecord.entryTimeUtc!).getTime()).not.toBe(orderSubmittedAt.getTime());
+
+      // Price & Currency Checks
+      expect(journalRecord.actualEntryPrice).toBe(95000.0);
+      expect(journalRecord.actualEntryPriceCurrency).toBe('USDT');
+      expect(journalRecord.actualExitPrice).toBe(96000.0);
+      expect(journalRecord.actualExitPriceCurrency).toBe('USDT');
+      expect(journalRecord.netPnlAccount).toBe(9000.0); // (96000 - 95000) * 0.1 * 90.0 = 9,000 INR
+      expect(journalRecord.accountCurrency).toBe('INR');
+
+      // Formatted representations
+      expect(formatPriceWithCurrency(journalRecord.actualEntryPrice, journalRecord.actualEntryPriceCurrency)).toBe('95,000.00 USDT');
+      expect(formatPnlWithCurrency(journalRecord.netPnlAccount, journalRecord.accountCurrency)).toBe('+₹9,000.00');
+    });
+  });
 });

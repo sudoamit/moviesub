@@ -516,8 +516,8 @@ export class PositionMonitorProcessor extends WorkerHost {
       let aggregated: {
         entry: any;
         exit: any;
-        durationMs: number;
-        durationMinutes: number;
+        durationMs: number | null;
+        durationMinutes: number | null;
       };
       let isLegacyExecutionData = false;
       let executionDataComplete = true;
@@ -526,16 +526,15 @@ export class PositionMonitorProcessor extends WorkerHost {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
         // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
+        // Duration is unknown and must not be calculated from unverified position dates.
         isLegacyExecutionData = true;
         executionDataComplete = false;
         const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
-        const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
-        const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
         aggregated = {
           entry: null,
           exit: exitLeg,
-          durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
-          durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
+          durationMs: null,
+          durationMinutes: null,
         };
       }
 
@@ -605,7 +604,7 @@ export class PositionMonitorProcessor extends WorkerHost {
           realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : 0,
           entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
@@ -639,7 +638,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
             realizedR: canonicalRealizedR,
-            holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+            holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
             entryFillCount: aggregated.entry ? aggregated.entry.fillCount : 0,

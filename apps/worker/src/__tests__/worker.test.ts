@@ -713,7 +713,7 @@ describe('Worker Processors', () => {
               slippageBps: expect.any(Number),
               slippageAmount: expect.any(Number),
               exitReason: expect.any(String),
-              holdingDurationSeconds: expect.any(Number),
+              holdingDurationSeconds: null,
               realizedPnL: expect.any(Number),
               realizedR: expect.any(Number),
               outcomeClassification: expect.any(String),

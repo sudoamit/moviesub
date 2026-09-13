@@ -74,8 +74,11 @@ const formatDateTime = (dateStr?: string | Date) => {
   });
 };
 
-const formatDuration = (mins: number, durationMs?: number) => {
-  const effectiveMs = durationMs ?? (mins > 0 ? mins * 60000 : 0);
+const formatDuration = (mins?: number | null, durationMs?: number | null) => {
+  if (mins === null || durationMs === null || (mins === undefined && durationMs === undefined)) {
+    return 'Unavailable (Legacy)';
+  }
+  const effectiveMs = durationMs ?? (mins && mins > 0 ? mins * 60000 : 0);
   if (!effectiveMs || effectiveMs <= 0) return '< 1m';
   const totalSeconds = Math.floor(effectiveMs / 1000);
   const m = Math.floor(totalSeconds / 60);
@@ -678,9 +681,15 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
                   {/* Duration */}
                   <td className="py-3 px-3 text-center text-slate-400 text-[11px]">
-                    <span className="bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-amber-300 font-bold">
-                      {formatDuration(t.durationMinutes, (t as any).durationMs)}
-                    </span>
+                    {t.holdingDurationMs != null || (t as any).durationMs != null || (t.durationMinutes != null && (t as any).executionDataComplete !== false) ? (
+                      <span className="bg-slate-900 border border-slate-800 px-2 py-0.5 rounded text-amber-300 font-bold">
+                        {formatDuration(t.durationMinutes, (t as any).durationMs ?? t.holdingDurationMs)}
+                      </span>
+                    ) : (
+                      <span className="text-amber-400/90 font-normal italic text-[9px]">
+                        Unavailable (Legacy)
+                      </span>
+                    )}
                   </td>
                 </tr>
               );

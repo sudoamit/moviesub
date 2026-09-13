@@ -890,7 +890,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // Create PaperPosition
+      // Create PaperPosition strictly bound to PaperFill execution timestamp
       const position = await tx.paperPosition.create({
         data: {
           accountId: account.id,
@@ -903,7 +903,7 @@ export class PaperTradingService implements IExecutionProvider {
           direction: this.toSignalDirection(req.direction),
           quantity: new Decimal(req.quantity),
           entryPrice: new Decimal(finalFillPrice),
-          entryTime: fillExecutionTime,
+          entryTime: fill.fillTimestamp,
           currentPrice: new Decimal(finalFillPrice),
           stopLoss: new Decimal(stopLoss),
           initialStopLoss: new Decimal(stopLoss),
@@ -925,7 +925,7 @@ export class PaperTradingService implements IExecutionProvider {
           executionEventsJson: {
             accountingSnapshot: openingAccountingSnapshot as any,
           } as any,
-          openedAt: fillExecutionTime,
+          openedAt: fill.fillTimestamp,
           correlationId,
         },
       });
@@ -1244,8 +1244,8 @@ export class PaperTradingService implements IExecutionProvider {
       let aggregated: {
         entry: any;
         exit: any;
-        durationMs: number;
-        durationMinutes: number;
+        durationMs: number | null;
+        durationMinutes: number | null;
       };
       let isLegacyExecutionData = false;
       let executionDataComplete = true;
@@ -1254,16 +1254,15 @@ export class PaperTradingService implements IExecutionProvider {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
         // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
+        // Duration is unknown and must not be calculated from unverified position dates.
         isLegacyExecutionData = true;
         executionDataComplete = false;
         const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
-        const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
-        const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
         aggregated = {
           entry: null,
           exit: exitLeg,
-          durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
-          durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
+          durationMs: null,
+          durationMinutes: null,
         };
       }
 
@@ -1333,7 +1332,7 @@ export class PaperTradingService implements IExecutionProvider {
           realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : 0,
           entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
@@ -1367,7 +1366,7 @@ export class PaperTradingService implements IExecutionProvider {
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
             realizedR: canonicalRealizedR,
-            holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
+            holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
             entryFillCount: aggregated.entry ? aggregated.entry.fillCount : 0,

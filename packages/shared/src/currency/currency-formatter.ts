@@ -12,13 +12,16 @@ import { CurrencyCode } from '../interfaces';
  * - BTC: 0.25000000 BTC
  */
 export function formatCurrencyAmount(
-  amount: number,
-  currency: CurrencyCode | string,
+  amount: number | null | undefined,
+  currency: CurrencyCode | string | null | undefined,
   options?: {
     showSign?: boolean;
     decimals?: number;
   },
 ): string {
+  if (amount === null || amount === undefined || Number.isNaN(amount)) {
+    return 'Unavailable (Legacy)';
+  }
   const normalized = (currency || 'INR').toUpperCase();
   const showSign = options?.showSign ?? false;
   const isNegative = amount < 0;
@@ -62,10 +65,13 @@ export function formatCurrencyAmount(
  * Formats a market price in its quote/native currency.
  */
 export function formatPriceWithCurrency(
-  price: number,
-  currency: CurrencyCode | string,
+  price: number | null | undefined,
+  currency: CurrencyCode | string | null | undefined,
   decimals?: number,
 ): string {
+  if (price === null || price === undefined) {
+    return 'Unavailable (Legacy)';
+  }
   return formatCurrencyAmount(price, currency, { showSign: false, decimals });
 }
 
@@ -73,10 +79,13 @@ export function formatPriceWithCurrency(
  * Formats realized or unrealized P&L in its denomination currency with explicit +/- sign.
  */
 export function formatPnlWithCurrency(
-  pnl: number,
-  currency: CurrencyCode | string,
+  pnl: number | null | undefined,
+  currency: CurrencyCode | string | null | undefined,
   decimals?: number,
 ): string {
+  if (pnl === null || pnl === undefined) {
+    return 'Unavailable (Legacy)';
+  }
   return formatCurrencyAmount(pnl, currency, { showSign: true, decimals });
 }
 
@@ -107,8 +116,9 @@ export function formatDateTimeToTimezone(
 /**
  * Formats duration from milliseconds into human-readable representation.
  */
-export function formatDurationMs(effectiveMs?: number): string {
-  if (!effectiveMs || effectiveMs <= 0) return '< 1m';
+export function formatDurationMs(effectiveMs?: number | null): string {
+  if (effectiveMs === null || effectiveMs === undefined) return 'Unavailable (Legacy)';
+  if (effectiveMs <= 0) return '< 1m';
   const totalSeconds = Math.floor(effectiveMs / 1000);
   const m = Math.floor(totalSeconds / 60);
   const s = totalSeconds % 60;
