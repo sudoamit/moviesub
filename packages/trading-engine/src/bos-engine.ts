@@ -66,11 +66,12 @@ export class BOSEngine {
           ? priorVolumes.reduce((a, b) => a + b, 0) / priorVolumes.length
           : undefined;
 
-      // 1. Check for Bullish BOS (Targeting the most recent confirmed active high)
+      // 1. Check for Bullish BOS (Targeting active protected structural high)
       const eligibleHighs = activeHighs.filter((h) => i > h.confirmedAtIndex);
       if (eligibleHighs.length > 0) {
-        // Target the most recent confirmed structural high
-        const targetHigh = eligibleHighs[eligibleHighs.length - 1];
+        // Explicit structural-level selection: Target active protected structural pivot if present, else latest structural high
+        const protectedHigh = eligibleHighs.filter((h) => h.isProtected === true).pop();
+        const targetHigh = protectedHigh || eligibleHighs[eligibleHighs.length - 1];
 
         const dispMetrics = DisplacementEngine.calculate(
           candle,
@@ -110,10 +111,12 @@ export class BOSEngine {
         }
       }
 
-      // 2. Check for Bearish BOS (Targeting the most recent confirmed active low)
+      // 2. Check for Bearish BOS (Targeting active protected structural low)
       const eligibleLows = activeLows.filter((l) => i > l.confirmedAtIndex);
       if (eligibleLows.length > 0) {
-        const targetLow = eligibleLows[eligibleLows.length - 1];
+        // Explicit structural-level selection: Target active protected structural pivot if present, else latest structural low
+        const protectedLow = eligibleLows.filter((l) => l.isProtected === true).pop();
+        const targetLow = protectedLow || eligibleLows[eligibleLows.length - 1];
 
         const dispMetrics = DisplacementEngine.calculate(
           candle,

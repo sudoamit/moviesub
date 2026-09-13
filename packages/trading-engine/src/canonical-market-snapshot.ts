@@ -52,17 +52,57 @@ export class CanonicalMarketSnapshotBuilder {
     const rawCandles = options.executionCandles || [];
     const provenance = options.dataProvenance || (rawCandles.length > 0 && rawCandles[0].provenance as MarketDataProvenance) || 'LIVE';
 
+    // 1. Synthetic Market Data Policy Enforcement
     if (provenance === 'SYNTHETIC' && options.allowSyntheticInProduction !== true) {
-      // In live analytical context, synthetic candles cannot trigger confirmed production signals
+      throw new Error(
+        `[SNAPSHOT FAIL-CLOSED] Synthetic market data is strictly prohibited in production analytical contexts for '${symbol}'. Explicitly specify allowSyntheticInProduction: true for backtests or unit tests.`,
+      );
     }
 
-    // 1. Partition into confirmed closed candles and forming candle
+    if (
+      provenance === 'LIVE' &&
+      rawCandles.some((c: any) => c.isSynthetic === true || c.provenance === 'SYNTHETIC')
+    ) {
+      throw new Error(
+        `[SNAPSHOT FAIL-CLOSED] Synthetic candle detected within LIVE market data stream for '${symbol}'. Snapshot construction aborted to fail closed.`,
+      );
+    }
+
+    // 2. Resolve Authoritative Instrument with Strict Fail-Closed Validation
+    let instrument: IInstrument;
+    try {
+      instrument = getAuthoritativeInstrument(symbol);
+    } catch (err: any) {
+      throw new Error(
+        `[SNAPSHOT FAIL-CLOSED] Unknown or unregistered symbol: '${symbol}'. Cannot construct canonical market snapshot without authoritative instrument definition. Cause: ${err?.message || err}`,
+      );
+    }
+
+    if (instrument.isActive === false) {
+      throw new Error(
+        `[SNAPSHOT FAIL-CLOSED] Instrument '${symbol}' is marked inactive. Cannot construct canonical market snapshot for inactive instrument.`,
+      );
+    }
+
+    if (
+      !instrument.lotSize ||
+      instrument.lotSize <= 0 ||
+      !instrument.tickSize ||
+      instrument.tickSize <= 0 ||
+      !instrument.currency
+    ) {
+      throw new Error(
+        `[SNAPSHOT FAIL-CLOSED] Instrument '${symbol}' has invalid accounting metadata (lotSize: ${instrument.lotSize}, tickSize: ${instrument.tickSize}, currency: ${instrument.currency}).`,
+      );
+    }
+
+    // 3. Partition into confirmed closed candles and forming candle
     const { closedCandles, formingCandle } = CandleNormalizer.partitionCandles(rawCandles, {
       asOfTimestamp: options.asOfTimestamp,
       timeframe,
     });
 
-    // 2. Determine closedThroughTimestamp & decisionTimestamp
+    // 4. Determine closedThroughTimestamp & decisionTimestamp
     let closedThroughTimestamp: Date;
     if (closedCandles.length > 0) {
       const lastClosed = closedCandles[closedCandles.length - 1];
@@ -77,7 +117,7 @@ export class CanonicalMarketSnapshotBuilder {
       ? new Date(options.asOfTimestamp)
       : closedThroughTimestamp;
 
-    // 3. Gap Detection on confirmed closed candles
+    // 5. Gap Detection on confirmed closed candles
     const rawGaps = CandleNormalizer.detectGaps(closedCandles, timeframe);
     const gapStatus = rawGaps.length > 0 ? 'DETECTED' : 'NONE';
     const gapDetails: IDataGapDetail[] = rawGaps.map((g) => ({
@@ -85,25 +125,6 @@ export class CanonicalMarketSnapshotBuilder {
       actualTime: g.actualTime,
       missingCount: g.missingCount,
     }));
-
-    // 4. Resolve Authoritative Instrument
-    let instrument: IInstrument;
-    try {
-      instrument = getAuthoritativeInstrument(symbol);
-    } catch {
-      instrument = {
-        id: `inst-${symbol.toLowerCase()}`,
-        symbol,
-        name: symbol,
-        exchange: 'NSE',
-        assetType: 'EQUITY' as any,
-        currency: 'INR' as any,
-        lotSize: 1,
-        tickSize: 0.05,
-        contractSize: 1,
-        isActive: true,
-      };
-    }
 
     const snapshot: ICanonicalMarketSnapshot = Object.freeze({
       symbol,

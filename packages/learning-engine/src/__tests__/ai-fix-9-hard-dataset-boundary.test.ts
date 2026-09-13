@@ -46,6 +46,8 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
         prediction: {},
         outcome: {
           status: i % 2 === 0 ? 'WIN' : 'LOSS',
+          label: i % 2 === 0 ? 1 : 0,
+          labelBinary: i % 2 === 0 ? 1 : 0,
           pnl: i % 2 === 0 ? 100 : -50,
           pnlR: i % 2 === 0 ? 2.0 : -1.0,
           maxFavorableExcursion: 2.0,

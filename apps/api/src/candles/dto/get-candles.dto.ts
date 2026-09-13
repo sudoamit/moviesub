@@ -24,6 +24,10 @@ export class GetCandlesDto {
   @IsOptional()
   @IsDateString()
   to?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceMode?: 'LIVE_DECISION' | 'BACKTEST' | 'LEARNING' | 'CHART' | 'HISTORICAL';
 }
 
 export class IngestCandlesDto {

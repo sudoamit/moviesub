@@ -199,6 +199,9 @@ export interface IOrderBlock {
   invalidatedAtIndex?: number;
   invalidatedAtTimestamp?: Date;
   confirmedAt?: Date;
+  availableAtIndex?: number;
+  availableAtTimestamp?: Date;
+  availableAt?: Date;
   mitigatedAt?: Date;
   invalidatedAt?: Date;
 }

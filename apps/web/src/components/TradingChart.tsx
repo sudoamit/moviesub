@@ -41,7 +41,6 @@ import {
   Clock,
 } from 'lucide-react';
 import {
-  SMCAnalyzer,
   VolumeProfileAnalyzer,
   SessionFilter,
   LiquidityHeatmapEngine,
@@ -255,30 +254,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             : (structures.choch && structures.choch.length > 0)
               ? structures.choch[structures.choch.length - 1].direction
               : 'NEUTRAL',
+        isCanonical: true,
       };
     }
 
-    if (!candles || candles.length < 5) return null;
-    try {
-      const cleanCandles = candles.map((c, idx) => ({
-        timestamp:
-          c.timestamp instanceof Date
-            ? c.timestamp
-            : new Date(c.time ? c.time * 1000 : c.timestamp),
-        open: Number(c.open),
-        high: Number(c.high),
-        low: Number(c.low),
-        close: Number(c.close),
-        volume: Number(c.volume || 1),
-        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
-        provenance: c.provenance,
-      }));
-      return SMCAnalyzer.analyze(cleanCandles, { timeframe });
-    } catch (e) {
-      console.error('SMC calculation error:', e);
-      return null;
-    }
-  }, [candles, structures, orderBlocks, fvgs, liquidity, timeframe]);
+    // Server-provided SMC structures are authoritative.
+    // The browser must NOT run SMCAnalyzer as an independent fallback.
+    return null;
+  }, [structures, orderBlocks, fvgs, liquidity]);
 
   const clientSMC = canonicalSMC;
 
@@ -2199,58 +2182,68 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                 <Shield className="w-3 h-3 text-cyan-400" />
                 SMC Metric
               </span>
-              <span className="text-slate-400 font-bold">Status / Value</span>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-300">Market Bias</span>
-              <span
-                className={`font-bold flex items-center gap-1 ${
-                  isBullish ? 'text-emerald-400' : 'text-rose-400'
-                }`}
-              >
-                {isBullish ? (
-                  <ArrowUpRight className="w-3 h-3" />
-                ) : (
-                  <ArrowDownRight className="w-3 h-3" />
-                )}
-                {isBullish ? 'BULLISH ▲' : 'BEARISH ▼'}
+              <span className={`font-bold ${clientSMC ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {clientSMC ? 'Authoritative' : 'Degraded'}
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-300">Active OBs</span>
-              <span className="text-yellow-400 font-bold">
-                {clientSMC?.orderBlocks?.length || 0}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-300">Active FVGs</span>
-              <span className="text-cyan-400 font-bold">
-                {clientSMC?.fairValueGaps?.length || 0}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-300">Liq Pools (BSL/SSL)</span>
-              <span className="text-amber-400 font-bold">
-                {clientSMC?.liquidityPools?.length || 0}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-300">Target R:R</span>
-              <span className="text-emerald-400 font-bold">
-                1 : {typeof rrRatio === 'number' ? rrRatio.toFixed(1) : rrRatio}
-              </span>
-            </div>
-
-            {effSignal?.score !== undefined && (
-              <div className="flex items-center justify-between gap-4 pt-1 border-t border-slate-800/80">
-                <span className="text-slate-300">Setup Score</span>
-                <span className="text-cyan-400 font-bold">{effSignal.score}/100</span>
+            {!clientSMC ? (
+              <div className="py-2 text-center text-amber-400/90 text-[10px] font-mono">
+                SMC Stream Degraded / Waiting for Server Analysis
               </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Market Bias</span>
+                  <span
+                    className={`font-bold flex items-center gap-1 ${
+                      isBullish ? 'text-emerald-400' : 'text-rose-400'
+                    }`}
+                  >
+                    {isBullish ? (
+                      <ArrowUpRight className="w-3 h-3" />
+                    ) : (
+                      <ArrowDownRight className="w-3 h-3" />
+                    )}
+                    {isBullish ? 'BULLISH ▲' : 'BEARISH ▼'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Active OBs</span>
+                  <span className="text-yellow-400 font-bold">
+                    {clientSMC?.orderBlocks?.length || 0}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Active FVGs</span>
+                  <span className="text-cyan-400 font-bold">
+                    {clientSMC?.fairValueGaps?.length || 0}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Liq Pools (BSL/SSL)</span>
+                  <span className="text-amber-400 font-bold">
+                    {clientSMC?.liquidityPools?.length || 0}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Target R:R</span>
+                  <span className="text-emerald-400 font-bold">
+                    1 : {typeof rrRatio === 'number' ? rrRatio.toFixed(1) : rrRatio}
+                  </span>
+                </div>
+
+                {effSignal?.score !== undefined && (
+                  <div className="flex items-center justify-between gap-4 pt-1 border-t border-slate-800/80">
+                    <span className="text-slate-300">Setup Score</span>
+                    <span className="text-cyan-400 font-bold">{effSignal.score}/100</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

@@ -68,6 +68,18 @@ export interface IChartDataResponse {
   activeSignal: any | null;
 }
 
+export type MarketDataSourceMode = 'LIVE_DECISION' | 'BACKTEST' | 'LEARNING' | 'CHART' | 'HISTORICAL';
+
+export class MarketDataSourcePolicy {
+  static validate(mode: MarketDataSourceMode, hasLiveFeed: boolean, symbol: string) {
+    if (mode === 'LIVE_DECISION' && !hasLiveFeed) {
+      throw new Error(
+        `[MARKET DATA FAIL-CLOSED] Authoritative live exchange stream unavailable for '${symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
+      );
+    }
+  }
+}
+
 @Injectable()
 export class CandlesService {
   private readonly logger = new Logger(CandlesService.name);
@@ -102,79 +114,69 @@ export class CandlesService {
       const is1h = normTf === 'H1' || normTf === '1H' || normTf === '60M' || normTf === '60';
       const is4h = normTf === 'H4' || normTf === '4H' || normTf === '240M' || normTf === '240';
 
-      if (sym === 'BTCUSDT' || sym === 'XAUUSD' || sym === 'GOLD' || sym === 'PAXGUSDT') {
-        const binanceInterval = is1m
-          ? '1m'
-          : is5m
-            ? '5m'
-            : is15m
-              ? '15m'
-              : is1h
-                ? '1h'
-                : is4h
-                  ? '4h'
-                  : '1d';
-        const binancePair = sym === 'XAUUSD' || sym === 'GOLD' ? 'PAXGUSDT' : 'BTCUSDT';
-
+      if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'XAUUSD' || sym === 'GOLD' || sym === 'PAXGUSDT') {
+        const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
+        const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym === 'XAUUSD' || sym === 'GOLD' ? 'PAXGUSDT' : sym;
         const res = await fetch(
-          `https://api.binance.com/api/v3/klines?symbol=${binancePair}&interval=${binanceInterval}&limit=${limit}`,
+          `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
         );
         if (res.ok) {
-          const data = await res.json();
-          const candles: ICandle[] = data.map((d: any, idx: number) => ({
-            timestamp: new Date(d[0]),
-            open: Number(parseFloat(d[1]).toFixed(2)),
-            high: Number(parseFloat(d[2]).toFixed(2)),
-            low: Number(parseFloat(d[3]).toFixed(2)),
-            close: Number(parseFloat(d[4]).toFixed(2)),
-            volume: Number(parseFloat(d[5]).toFixed(2)),
-            isClosed: idx < data.length - 1,
-          }));
-          this.candleCache.set(cacheKey, { timestamp: Date.now(), candles });
-          return candles;
+          const raw = await res.json();
+          if (Array.isArray(raw) && raw.length > 0) {
+            const candles: ICandle[] = raw.map((k: any) => ({
+              timestamp: new Date(k[0]),
+              open: parseFloat(k[1]),
+              high: parseFloat(k[2]),
+              low: parseFloat(k[3]),
+              close: parseFloat(k[4]),
+              volume: parseFloat(k[5]),
+              isClosed: true,
+              provenance: 'LIVE',
+            }));
+            const sliced = candles.slice(-limit);
+            this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced });
+            return sliced;
+          }
         }
-      } else {
-        const symbolMap: Record<string, string> = {
-          NIFTY: '^NSEI',
-          BANKNIFTY: '^NSEBANK',
-          XAUUSD: 'GC=F',
-          GOLD: 'GC=F',
-          RELIANCE: 'RELIANCE.NS',
-          HDFCBANK: 'HDFCBANK.NS',
-          INFY: 'INFY.NS',
-        };
-        const ysym = symbolMap[sym] || `${sym}.NS`;
-        const yInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h || is4h ? '60m' : '1d';
-        const yRange = is1m ? '1d' : is5m || is15m ? '5d' : is1h || is4h ? '1mo' : '1y';
+      }
 
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ysym)}?interval=${yInterval}&range=${yRange}`;
-        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const isNifty = sym === 'NIFTY' || sym === 'NIFTY50' || sym === '^NSEI';
+      const isBankNifty = sym === 'BANKNIFTY' || sym === '^NSEBANK';
+
+      if (isNifty || isBankNifty) {
+        const ySymbol = isNifty ? '^NSEI' : '^NSEBANK';
+        const yInterval = is1m ? '1m' : is5m ? '5m' : '15m';
+        const yRange = is1m ? '1d' : is5m ? '5d' : '1mo';
+        const res = await fetch(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=${yInterval}&range=${yRange}`,
+          { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } },
+        );
         if (res.ok) {
-          const data = await res.json();
-          const result = data?.chart?.result?.[0];
+          const json = await res.json();
+          const result = json.chart?.result?.[0];
           const timestamps = result?.timestamp || [];
           const quote = result?.indicators?.quote?.[0] || {};
           const candles: ICandle[] = [];
 
           for (let i = 0; i < timestamps.length; i++) {
-            const o = quote.open?.[i];
-            const h = quote.high?.[i];
-            const l = quote.low?.[i];
-            const c = quote.close?.[i];
-            const v = quote.volume?.[i] || 0;
-            if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
+            const open = quote.open?.[i];
+            const high = quote.high?.[i];
+            const low = quote.low?.[i];
+            const close = quote.close?.[i];
+            const volume = quote.volume?.[i] || 1;
+            if (open != null && high != null && low != null && close != null) {
               candles.push({
                 timestamp: new Date(timestamps[i] * 1000),
-                open: Number(o.toFixed(2)),
-                high: Number(h.toFixed(2)),
-                low: Number(l.toFixed(2)),
-                close: Number(c.toFixed(2)),
-                volume: v,
-                isClosed: i < timestamps.length - 1,
+                open: Number(open.toFixed(2)),
+                high: Number(high.toFixed(2)),
+                low: Number(low.toFixed(2)),
+                close: Number(close.toFixed(2)),
+                volume: Number(volume),
+                isClosed: true,
+                provenance: 'LIVE',
               });
             }
           }
-
           if (candles.length > 0) {
             const sliced = candles.slice(-limit);
             this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced });
@@ -194,21 +196,31 @@ export class CandlesService {
     const timeframe = query.timeframe || Timeframe.M15;
     const limit = query.limit || 100;
     const prismaTf = toPrismaTimeframe(timeframe);
+    const sourceMode: MarketDataSourceMode =
+      (query.sourceMode as MarketDataSourceMode) ||
+      (query.from || query.to ? 'HISTORICAL' : 'CHART');
 
-    // 1. Try real live exchange candles first
-    if (!query.from && !query.to) {
-      const liveCandles = await this.fetchRealExchangeCandles(symbol, timeframe as string, limit);
-      if (liveCandles.length > 0) {
-        return {
-          symbol,
-          timeframe,
-          count: liveCandles.length,
-          candles: liveCandles,
-          dataProvenance: 'LIVE',
-        };
+    // 1. Live Exchange Fetch: Executed only for LIVE_DECISION and CHART modes
+    if (sourceMode === 'LIVE_DECISION' || sourceMode === 'CHART') {
+      if (!query.from && !query.to) {
+        const liveCandles = await this.fetchRealExchangeCandles(symbol, timeframe as string, limit);
+        if (liveCandles.length > 0) {
+          return {
+            symbol,
+            timeframe,
+            count: liveCandles.length,
+            candles: liveCandles,
+            dataProvenance: 'LIVE',
+          };
+        } else if (sourceMode === 'LIVE_DECISION') {
+          throw new Error(
+            `[MARKET DATA FAIL-CLOSED] Authoritative live exchange data stream unavailable for '${symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
+          );
+        }
       }
     }
 
+    // 2. Database / Historical Provider Query: Used for BACKTEST, LEARNING, HISTORICAL, and CHART fallbacks
     const inst = await this.prisma.instrument.findUnique({
       where: { symbol },
     });
@@ -238,6 +250,13 @@ export class CandlesService {
       take: limit,
     });
 
+    const provenanceValue =
+      sourceMode === 'BACKTEST'
+        ? 'BACKTEST'
+        : sourceMode === 'LEARNING'
+          ? 'HISTORICAL'
+          : 'DELAYED';
+
     const candles: ICandle[] = dbCandles.reverse().map((c) => ({
       timestamp: c.timestamp,
       open: Number(c.open),
@@ -246,7 +265,7 @@ export class CandlesService {
       close: Number(c.close),
       volume: Number(c.volume),
       isClosed: c.isClosed,
-      provenance: 'DELAYED',
+      provenance: provenanceValue as any,
     }));
 
     return {
@@ -254,7 +273,7 @@ export class CandlesService {
       timeframe,
       count: candles.length,
       candles,
-      dataProvenance: 'DELAYED',
+      dataProvenance: provenanceValue as any,
     };
   }
 

@@ -102,6 +102,9 @@ function createDummyCandidate(id = 'cand-shadow-35'): StrategyCandidate {
       lotSize: 1,
       contractSize: 1,
       maxLeverage: 10,
+      fillModel: 'NEXT_BAR_OPEN',
+      slippageModel: 'ZERO',
+      feeModel: 'ZERO',
       partialExitPolicy: {
         tp1Ratio: 0.33,
         tp2Ratio: 0.33,

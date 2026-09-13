@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { CandlesService } from '../candles/candles.service';
-import { SMCAnalyzer } from '@quant/trading-engine';
+import { CanonicalMarketSnapshotBuilder, SMCAnalyzer } from '@quant/trading-engine';
 import { Timeframe } from '@quant/shared';
 
 @Injectable()
@@ -16,21 +16,28 @@ export class SMCService {
       limit,
     });
 
-    const candles = candlesRes.candles;
-    const closedList = candles.filter((c) => c.isClosed !== false);
-    const latestClosedCandle = closedList.length > 0 ? closedList[closedList.length - 1] : candles[candles.length - 1];
-    const latestClosedTimestamp = latestClosedCandle ? latestClosedCandle.timestamp : new Date();
+    const snapshot = CanonicalMarketSnapshotBuilder.build({
+      symbol,
+      executionCandles: candlesRes.candles,
+      executionTimeframe: timeframe,
+      dataProvenance: (candlesRes.dataProvenance as any) || 'LIVE',
+      allowSyntheticInProduction: true,
+    });
 
-    const analysis = SMCAnalyzer.analyze(candles, {
-      asOfTimestamp: latestClosedTimestamp,
+    const analysis = SMCAnalyzer.analyze(snapshot, {
       timeframe: String(timeframe),
     });
 
     return {
-      symbol: symbol.toUpperCase(),
+      symbol: snapshot.symbol,
       timeframe,
-      dataProvenance: candlesRes.dataProvenance || 'LIVE',
-      closedThrough: latestClosedTimestamp,
+      decisionTimestamp: snapshot.decisionTimestamp,
+      closedThrough: snapshot.closedThroughTimestamp,
+      closedThroughTimestamp: snapshot.closedThroughTimestamp,
+      dataProvenance: snapshot.dataProvenance,
+      gapStatus: snapshot.gapStatus,
+      gapDetails: snapshot.gapDetails,
+      isDegraded: analysis.isDegraded || snapshot.gapStatus === 'DETECTED',
       ...analysis,
     };
   }

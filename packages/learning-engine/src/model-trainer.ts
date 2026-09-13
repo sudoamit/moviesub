@@ -208,6 +208,18 @@ export class ModelTrainer {
         ((exp as any).labelBinary === 0 || (exp as any).labelBinary === 1)
       ) {
         label = (exp as any).labelBinary;
+      } else if (
+        (exp as any).outcome &&
+        typeof ((exp as any).outcome as any).label === 'number' &&
+        (((exp as any).outcome as any).label === 0 || ((exp as any).outcome as any).label === 1)
+      ) {
+        label = ((exp as any).outcome as any).label;
+      } else if (
+        (exp as any).outcome &&
+        typeof ((exp as any).outcome as any).labelBinary === 'number' &&
+        (((exp as any).outcome as any).labelBinary === 0 || ((exp as any).outcome as any).labelBinary === 1)
+      ) {
+        label = ((exp as any).outcome as any).labelBinary;
       } else {
         throw new Error(`TRAINING_LABEL_MISSING: Training sample is missing explicit binary label (must be 0 or 1)`);
       }

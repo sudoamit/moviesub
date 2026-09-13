@@ -1249,6 +1249,9 @@ describe('Learning Engine Correctness & Self-Improvement Regression Suite (Phase
       riskConfig: {
         initialCapital: 100000,
         maxRiskPerTrade: 0.01,
+        fillModel: 'NEXT_BAR_OPEN',
+        slippageModel: 'ZERO',
+        feeModel: 'ZERO',
         partialExitPolicy: {
           tp1Ratio: 0.33,
           tp2Ratio: 0.33,

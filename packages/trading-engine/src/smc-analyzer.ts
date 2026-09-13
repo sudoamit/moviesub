@@ -9,48 +9,88 @@ import { OrderBlockEngine } from './order-block-engine';
 import { DealingRangeEngine } from './dealing-range';
 import { MarketRegimeEngine } from './market-regime';
 import { CandleNormalizer } from './candle-normalizer';
+import { ICanonicalMarketSnapshot } from './canonical-market-snapshot';
 
 export class SMCAnalyzer {
   /**
    * Performs full deterministic Smart Money Concepts (SMC) analysis on candle series
-   * with strict point-in-time correctness.
+   * or a CanonicalMarketSnapshot with strict point-in-time correctness.
    */
-  static analyze(rawCandles: ICandle[], config: ISMCAnalysisConfig = {}): ISMCAnalysisResult {
-    if (!rawCandles || rawCandles.length === 0) {
-      return {
-        candlesCount: 0,
-        swingPoints: [],
-        confirmedSwingHighs: [],
-        confirmedSwingLows: [],
-        breaksOfStructure: [],
-        changesOfCharacter: [],
-        liquidityPools: [],
-        liquiditySweeps: [],
-        fairValueGaps: [],
-        activeFVGs: [],
-        orderBlocks: [],
-        activeOrderBlocks: [],
-        dealingRange: null,
-        marketRegime: {
-          regime: 'RANGE' as any,
-          atr: 0,
-          adx: 0,
-          volatility: 0,
-          timestamp: new Date(),
-        },
-        currentTrend: Direction.NEUTRAL,
-        isDegraded: false,
-        gapCount: 0,
-        dataGaps: [],
-      };
+  static analyze(
+    input: ICandle[] | ICanonicalMarketSnapshot,
+    config: ISMCAnalysisConfig = {},
+  ): ISMCAnalysisResult {
+    let closedCandles: ICandle[];
+    let formingCandle: ICandle | null = null;
+    let closedThrough: Date | undefined;
+    let gaps: any[] = [];
+    let isDegraded = false;
+    const effectiveConfig: ISMCAnalysisConfig = { ...config };
+
+    if (input && typeof input === 'object' && 'candles' in input && 'decisionTimestamp' in input) {
+      // Input is an authoritative ICanonicalMarketSnapshot
+      const snapshot = input as ICanonicalMarketSnapshot;
+      closedCandles = [...snapshot.candles];
+      formingCandle = snapshot.formingCandle ? { ...snapshot.formingCandle } : null;
+      closedThrough = snapshot.closedThroughTimestamp;
+      gaps = [...snapshot.gapDetails];
+      isDegraded = snapshot.gapStatus === 'DETECTED';
+      if (!effectiveConfig.timeframe) {
+        effectiveConfig.timeframe = snapshot.executionTimeframe;
+      }
+      if (!effectiveConfig.asOfTimestamp) {
+        effectiveConfig.asOfTimestamp = snapshot.decisionTimestamp;
+      }
+    } else {
+      const rawCandles = (input as ICandle[]) || [];
+      if (!rawCandles || rawCandles.length === 0) {
+        return {
+          candlesCount: 0,
+          swingPoints: [],
+          confirmedSwingHighs: [],
+          confirmedSwingLows: [],
+          breaksOfStructure: [],
+          changesOfCharacter: [],
+          liquidityPools: [],
+          liquiditySweeps: [],
+          fairValueGaps: [],
+          activeFVGs: [],
+          orderBlocks: [],
+          activeOrderBlocks: [],
+          dealingRange: null,
+          marketRegime: {
+            regime: 'RANGE' as any,
+            atr: 0,
+            adx: 0,
+            volatility: 0,
+            timestamp: new Date(),
+          },
+          currentTrend: Direction.NEUTRAL,
+          isDegraded: false,
+          gapCount: 0,
+          dataGaps: [],
+        };
+      }
+
+      const partition = CandleNormalizer.partitionCandles(rawCandles, {
+        asOfTimestamp: effectiveConfig.asOfTimestamp,
+        timeframe: effectiveConfig.timeframe,
+      });
+      closedCandles = partition.closedCandles;
+      formingCandle = partition.formingCandle;
+      if (closedCandles.length > 0) {
+        closedThrough = CandleNormalizer.getCandleCloseTimestamp(
+          closedCandles[closedCandles.length - 1],
+          effectiveConfig.timeframe,
+        );
+      }
+      gaps = effectiveConfig.timeframe
+        ? CandleNormalizer.detectGaps(closedCandles, effectiveConfig.timeframe)
+        : [];
+      isDegraded = gaps.length > 0;
     }
 
-    const { closedCandles: candles, formingCandle } = CandleNormalizer.partitionCandles(rawCandles, {
-      asOfTimestamp: config.asOfTimestamp,
-      timeframe: config.timeframe,
-    });
-
-    if (candles.length === 0) {
+    if (closedCandles.length === 0) {
       return {
         candlesCount: 0,
         formingCandle,
@@ -71,33 +111,22 @@ export class SMCAnalyzer {
           atr: 0,
           adx: 0,
           volatility: 0,
-          timestamp: config.asOfTimestamp || new Date(),
+          timestamp: effectiveConfig.asOfTimestamp || new Date(),
         },
         currentTrend: Direction.NEUTRAL,
-        isDegraded: false,
-        gapCount: 0,
-        dataGaps: [],
+        isDegraded,
+        gapCount: gaps.length,
+        dataGaps: gaps,
       };
     }
 
-    const closedThrough = CandleNormalizer.getCandleCloseTimestamp(
-      candles[candles.length - 1],
-      config.timeframe,
-    );
-
-    // Detect data gaps
-    const gaps = config.timeframe
-      ? CandleNormalizer.detectGaps(candles, config.timeframe)
-      : [];
-    const isDegraded = gaps.length > 0;
-
     // 1. Detect Swings (Zero look-ahead bias)
-    const swingPoints = SwingDetector.detectSwings(candles, {
-      leftBars: config.swingLeftBars,
-      rightBars: config.swingRightBars,
-      minDistanceAtrMultiplier: config.minSwingDistanceAtrMultiplier,
-      asOfTimestamp: config.asOfTimestamp,
-      timeframe: config.timeframe ? String(config.timeframe) : undefined,
+    const swingPoints = SwingDetector.detectSwings(closedCandles, {
+      leftBars: effectiveConfig.swingLeftBars,
+      rightBars: effectiveConfig.swingRightBars,
+      minDistanceAtrMultiplier: effectiveConfig.minSwingDistanceAtrMultiplier,
+      asOfTimestamp: effectiveConfig.asOfTimestamp,
+      timeframe: effectiveConfig.timeframe ? String(effectiveConfig.timeframe) : undefined,
     });
 
     const confirmedSwingHighs = swingPoints.filter(
@@ -115,50 +144,50 @@ export class SMCAnalyzer {
     );
 
     // 2. Detect Breaks of Structure (BOS)
-    const breaksOfStructure = BOSEngine.detectBOS(candles, swingPoints, {
-      displacementThresholdAtr: config.displacementThresholdAtr,
-      confirmationType: config.bosConfirmationType,
-      minDisplacementScore: config.minDisplacementScore,
-      asOfTimestamp: config.asOfTimestamp,
-      timeframe: config.timeframe ? String(config.timeframe) : undefined,
+    const breaksOfStructure = BOSEngine.detectBOS(closedCandles, swingPoints, {
+      displacementThresholdAtr: effectiveConfig.displacementThresholdAtr,
+      confirmationType: effectiveConfig.bosConfirmationType,
+      minDisplacementScore: effectiveConfig.minDisplacementScore,
+      asOfTimestamp: effectiveConfig.asOfTimestamp,
+      timeframe: effectiveConfig.timeframe ? String(effectiveConfig.timeframe) : undefined,
     });
 
     // 3. Detect Change of Character (CHoCH)
-    const changesOfCharacter = CHOCHEngine.detectCHOCH(candles, swingPoints, {
-      confirmationType: config.bosConfirmationType,
-      minDisplacementScore: config.minDisplacementScore,
-      asOfTimestamp: config.asOfTimestamp,
-      timeframe: config.timeframe ? String(config.timeframe) : undefined,
+    const changesOfCharacter = CHOCHEngine.detectCHOCH(closedCandles, swingPoints, {
+      confirmationType: effectiveConfig.bosConfirmationType,
+      minDisplacementScore: effectiveConfig.minDisplacementScore,
+      asOfTimestamp: effectiveConfig.asOfTimestamp,
+      timeframe: effectiveConfig.timeframe ? String(effectiveConfig.timeframe) : undefined,
     });
 
     // 4. Detect Liquidity Pools & Sweeps
     const { pools: liquidityPools, sweeps: liquiditySweeps } = LiquidityEngine.detectLiquidity(
-      candles,
+      closedCandles,
       swingPoints,
       {
-        equalHighLowToleranceAtr: config.equalHighLowToleranceAtr,
-        asOfTimestamp: config.asOfTimestamp,
-        timeframe: config.timeframe ? String(config.timeframe) : undefined,
+        equalHighLowToleranceAtr: effectiveConfig.equalHighLowToleranceAtr,
+        asOfTimestamp: effectiveConfig.asOfTimestamp,
+        timeframe: effectiveConfig.timeframe ? String(effectiveConfig.timeframe) : undefined,
       },
     );
 
     // 5. Detect Fair Value Gaps (FVG)
-    const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(candles, {
-      minGapAtrMultiplier: config.fvgMinGapAtr,
-      asOfTimestamp: config.asOfTimestamp,
-      timeframe: String(config.timeframe || ''),
+    const { allFVGs: fairValueGaps, activeFVGs } = FVGEngine.detectFVGs(closedCandles, {
+      minGapAtrMultiplier: effectiveConfig.fvgMinGapAtr,
+      asOfTimestamp: effectiveConfig.asOfTimestamp,
+      timeframe: String(effectiveConfig.timeframe || ''),
     });
 
     // 6. Detect Order Blocks (OB)
     const { allOrderBlocks: orderBlocks, activeOrderBlocks } = OrderBlockEngine.detectOrderBlocks(
-      candles,
+      closedCandles,
       breaksOfStructure,
       fairValueGaps,
       {
-        displacementThresholdAtr: config.displacementThresholdAtr,
-        minDisplacementScore: config.minDisplacementScore,
-        asOfTimestamp: config.asOfTimestamp,
-        timeframe: String(config.timeframe || ''),
+        displacementThresholdAtr: effectiveConfig.displacementThresholdAtr,
+        minDisplacementScore: effectiveConfig.minDisplacementScore,
+        asOfTimestamp: effectiveConfig.asOfTimestamp,
+        timeframe: String(effectiveConfig.timeframe || ''),
       },
     );
 
@@ -166,7 +195,7 @@ export class SMCAnalyzer {
     const dealingRange = DealingRangeEngine.calculateDealingRange(swingPoints);
 
     // 8. Classify Market Regime
-    const marketRegime = MarketRegimeEngine.classifyRegime(candles, swingPoints);
+    const marketRegime = MarketRegimeEngine.classifyRegime(closedCandles, swingPoints);
 
     // Determine current structural trend from confirmed structure breaks at or before asOfTimestamp
     let currentTrend: Direction = Direction.NEUTRAL;
@@ -177,7 +206,7 @@ export class SMCAnalyzer {
     }
 
     return {
-      candlesCount: candles.length,
+      candlesCount: closedCandles.length,
       closedThrough,
       formingCandle,
       isDegraded,

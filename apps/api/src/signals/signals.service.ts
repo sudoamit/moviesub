@@ -891,6 +891,7 @@ export class SignalsService implements OnModuleInit {
       'Net Realized PnL (INR)',
       'R-Multiple',
       'Duration (Minutes)',
+      'Accounting Quality',
       'Activated At (IST)',
       'Closed At (IST)',
       'Trade Reason / Setup Confluence',
@@ -918,15 +919,23 @@ export class SignalsService implements OnModuleInit {
       const qty = Number(t.quantity) || 1;
       const turnover = Number(((entryP + exitP) * qty).toFixed(2));
 
+      const isCanonical =
+        t.isLegacyExecutionData !== true &&
+        t.totalChargesAccount !== undefined &&
+        t.totalChargesAccount !== null;
+      const isLegacy = t.isLegacyExecutionData === true;
+      const accountingQuality: 'CANONICAL' | 'ESTIMATED' | 'LEGACY' = isLegacy
+        ? 'LEGACY'
+        : isCanonical
+          ? 'CANONICAL'
+          : 'ESTIMATED';
+
       // Canonical transaction charges
-      const totalCharges = Number(
-        (t.totalChargesAccount !== undefined && t.totalChargesAccount !== null && Number(t.totalChargesAccount) > 0
-          ? Number(t.totalChargesAccount)
-          : t.chargesAccount !== undefined && t.chargesAccount !== null && Number(t.chargesAccount) > 0
-            ? Number(t.chargesAccount)
-            : (isCrypto || isGold ? turnover * 0.0005 : 40.0)
-        ).toFixed(2),
-      );
+      const totalCharges = isCanonical
+        ? Number(Number(t.totalChargesAccount).toFixed(2))
+        : t.chargesAccount !== undefined && t.chargesAccount !== null && Number(t.chargesAccount) > 0
+          ? Number(Number(t.chargesAccount).toFixed(2))
+          : (isCrypto || isGold ? Number((turnover * 0.0005).toFixed(2)) : 40.0);
 
       const brokerage = isCrypto || isGold ? totalCharges : 40.0;
       const stt = isCrypto || isGold ? 0 : Number((turnover * 0.000125).toFixed(2));
@@ -969,6 +978,7 @@ export class SignalsService implements OnModuleInit {
         netPnL.toFixed(2),
         t.pnlRMultiple,
         t.durationMinutes,
+        escapeCsv(accountingQuality),
         escapeCsv(formatIST(t.activatedAt)),
         escapeCsv(formatIST(t.closedAt)),
         escapeCsv(t.tradeReason),

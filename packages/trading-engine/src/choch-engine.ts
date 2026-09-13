@@ -76,21 +76,21 @@ export class CHOCHEngine {
         }
       }
 
-      // Valid Lower Highs in a Bearish trend
+      // Valid Lower Highs in a Bearish trend: strictly LOWER_HIGH or explicitly protected structural high
       const validLowerHighs = visibleSwings.filter(
         (s) =>
-          (s.type === StructureType.LOWER_HIGH || s.type === StructureType.SWING_HIGH || s.isProtected) &&
+          (s.type === StructureType.LOWER_HIGH || (s.isProtected && s.type === StructureType.SWING_HIGH)) &&
           !brokenSwingIndices.has(s.index),
       );
 
-      // Valid Higher Lows in a Bullish trend
+      // Valid Higher Lows in a Bullish trend: strictly HIGHER_LOW or explicitly protected structural low
       const validHigherLows = visibleSwings.filter(
         (s) =>
-          (s.type === StructureType.HIGHER_LOW || s.type === StructureType.SWING_LOW || s.isProtected) &&
+          (s.type === StructureType.HIGHER_LOW || (s.isProtected && s.type === StructureType.SWING_LOW)) &&
           !brokenSwingIndices.has(s.index),
       );
 
-      // Target the active protected pivot (preferring isProtected)
+      // Target the active protected pivot (preferring isProtected, then validated structural LH/HL)
       const protectedLH = validLowerHighs.filter((h) => h.isProtected).pop() || validLowerHighs[validLowerHighs.length - 1];
       const protectedHL = validHigherLows.filter((l) => l.isProtected).pop() || validHigherLows[validHigherLows.length - 1];
 
