@@ -4,29 +4,43 @@ import { Job } from 'bullmq';
 import {
   BULLMQ_QUEUES,
   Direction,
-  ICandle,
+  IMarketDataProvider,
+  RealLiveMarketDataProvider,
   Timeframe,
   toPrismaTimeframe,
   WS_EVENTS,
 } from '@quant/shared';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../redis.service';
-import { SignalGenerator } from '@quant/trading-engine';
+import {
+  CanonicalMarketSnapshotBuilder,
+  SignalGenerator,
+} from '@quant/trading-engine';
 import { Decimal } from '@prisma/client/runtime/library';
 
 @Processor(BULLMQ_QUEUES.SIGNAL_GENERATION)
 export class ScannerProcessor extends WorkerHost {
   private readonly logger = new Logger(ScannerProcessor.name);
+  private provider: IMarketDataProvider;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
   ) {
     super();
+    this.provider = new RealLiveMarketDataProvider();
+  }
+
+  setProvider(provider: IMarketDataProvider) {
+    this.provider = provider;
+  }
+
+  getProvider(): IMarketDataProvider {
+    return this.provider;
   }
 
   async process(job: Job<any, any, string>): Promise<any> {
-    this.logger.log(`Starting market scanner execution for job ${job.id}: ${job.name}`);
+    this.logger.log(`Starting canonical market scanner execution for job ${job.id}: ${job.name}`);
     const startTime = Date.now();
 
     const instruments = await this.prisma.instrument.findMany({
@@ -59,61 +73,63 @@ export class ScannerProcessor extends WorkerHost {
     await this.redis.set('scanner:status:latest', JSON.stringify(summary), 86400);
 
     this.logger.log(
-      `Market scan complete in ${duration}ms. Scanned: ${instruments.length} instruments, Generated: ${results.length} valid signals`,
+      `Canonical market scan complete in ${duration}ms. Scanned: ${instruments.length} instruments, Generated: ${results.length} valid signals`,
     );
 
     return summary;
   }
 
+  /**
+   * Scans a single instrument using strictly canonical point-in-time snapshots and LIVE_DECISION authority.
+   * Zero direct Prisma candle queries are performed.
+   */
   private async scanInstrument(instrumentId: string, symbol: string) {
-    const prisma15m = toPrismaTimeframe('15m');
-    const prisma1h = toPrismaTimeframe('1h');
-    const prisma4h = toPrismaTimeframe('4h');
+    const sym = symbol.toUpperCase();
 
-    // Fetch multi-timeframe candles
-    const [db15m, db1h, db4h] = await Promise.all([
-      this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma15m as any },
-        orderBy: { timestamp: 'desc' },
-        take: 200,
-      }),
-      this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma1h as any },
-        orderBy: { timestamp: 'desc' },
-        take: 150,
-      }),
-      this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma4h as any },
-        orderBy: { timestamp: 'desc' },
-        take: 100,
-      }),
+    // 1. Fetch Multi-Timeframe Candles via Authoritative Live Market Data Provider
+    const [rawM15, rawH1, rawH4] = await Promise.all([
+      this.provider.getHistoricalCandles(sym, Timeframe.M15, 200),
+      this.provider.getHistoricalCandles(sym, Timeframe.H1, 150),
+      this.provider.getHistoricalCandles(sym, Timeframe.H4, 100),
     ]);
 
-    const toCandles = (dbList: any[]): ICandle[] =>
-      dbList.reverse().map((c) => ({
-        timestamp: c.timestamp,
-        open: Number(c.open),
-        high: Number(c.high),
-        low: Number(c.low),
-        close: Number(c.close),
-        volume: Number(c.volume),
-        isClosed: c.isClosed,
-      }));
+    if (!rawM15 || rawM15.length < 20) {
+      return null;
+    }
 
-    const execCandles = toCandles(db15m);
-    const htf1Candles = toCandles(db1h);
-    const htf2Candles = toCandles(db4h);
-
-    if (execCandles.length < 20) return null;
-
-    const signal = SignalGenerator.generateSignal({
-      symbol,
-      executionCandles: execCandles,
+    // 2. Construct Canonical Market Snapshots under LIVE_DECISION Mode
+    const executionSnapshot = CanonicalMarketSnapshotBuilder.build({
+      symbol: sym,
+      executionCandles: rawM15,
       executionTimeframe: Timeframe.M15,
-      htf1Candles,
-      htf1Timeframe: Timeframe.H1,
-      htf2Candles,
-      htf2Timeframe: Timeframe.H4,
+      dataProvenance: 'LIVE',
+    });
+
+    const htf1Snapshot = rawH1 && rawH1.length > 0
+      ? CanonicalMarketSnapshotBuilder.build({
+          symbol: sym,
+          executionCandles: rawH1,
+          executionTimeframe: Timeframe.H1,
+          asOfTimestamp: executionSnapshot.decisionTimestamp,
+          dataProvenance: 'LIVE',
+        })
+      : undefined;
+
+    const htf2Snapshot = rawH4 && rawH4.length > 0
+      ? CanonicalMarketSnapshotBuilder.build({
+          symbol: sym,
+          executionCandles: rawH4,
+          executionTimeframe: Timeframe.H4,
+          asOfTimestamp: executionSnapshot.decisionTimestamp,
+          dataProvenance: 'LIVE',
+        })
+      : undefined;
+
+    // 3. Generate Signal via Canonical Snapshot API
+    const signal = SignalGenerator.generateFromSnapshots({
+      executionSnapshot,
+      htf1Snapshot,
+      htf2Snapshot,
     });
 
     if (signal.direction === Direction.NEUTRAL || signal.score < 60) {
@@ -188,7 +204,7 @@ export class ScannerProcessor extends WorkerHost {
         WS_EVENTS.ALERT_TRIGGERED,
         JSON.stringify({
           alertId: `alert-${signal.id}`,
-          symbol,
+          symbol: sym,
           score: signal.score,
           grade: signal.grade,
           direction: signal.direction,

@@ -651,8 +651,11 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       } as any);
     }
 
-    const model1 = ModelTrainer.trainModel(trainData, { epochs: 10 });
-    const model2 = ModelTrainer.trainModel(trainData, { epochs: 10 });
+    const scaler = new TemporalFeatureScaler();
+    scaler.fit(trainData);
+
+    const model1 = ModelTrainer.trainModel(trainData, { epochs: 10, scaler, featureNames: ['smcScore', 'rsi'] });
+    const model2 = ModelTrainer.trainModel(trainData, { epochs: 10, scaler, featureNames: ['smcScore', 'rsi'] });
 
     expect(model1.modelVersion).toBe(model2.modelVersion);
     expect(model1.modelHash).toBe(model2.modelHash);
@@ -799,8 +802,13 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       } as any);
     }
 
-    const model1 = ModelTrainer.trainModel(fold1Data);
-    const model2 = ModelTrainer.trainModel(fold2Data);
+    const scaler1 = new TemporalFeatureScaler();
+    scaler1.fit(fold1Data);
+    const scaler2 = new TemporalFeatureScaler();
+    scaler2.fit(fold2Data);
+
+    const model1 = ModelTrainer.trainModel(fold1Data, { scaler: scaler1, featureNames: ['smcScore'] });
+    const model2 = ModelTrainer.trainModel(fold2Data, { scaler: scaler2, featureNames: ['smcScore'] });
 
     expect(model1.modelHash).not.toBe(model2.modelHash);
   });
@@ -818,6 +826,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
     const candidate: StrategyCandidate = {
       id: 'cand_param_opt',
+      symbol: 'BTCUSDT',
       baseStrategyVersion: 'v2.0',
       candidateVersion: 'v2.0-opt',
       type: 'THRESHOLD',
@@ -852,6 +861,7 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
 
     const exp: any = {
       id: 'exp_cf',
+      instrument: { symbol: 'BTCUSDT' },
       execution: { entryPrice: 100, entryTime: new Date(baseTime) },
       risk: { stopLoss: 95, target1: 110 },
       candlesDuringTrade: candles,

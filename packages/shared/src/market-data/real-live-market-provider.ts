@@ -1,20 +1,25 @@
 import { ICandle, IMarketDataProvider } from '../interfaces';
-import { Timeframe } from '../enums';
-import { CandleValidator } from './candle-validator';
+import { AssetType, Timeframe, getTimeframeDurationMs } from '../enums';
+import { getAuthoritativeInstrument } from '../instrument/instrument-registry';
 
 export class RealLiveMarketDataProvider implements IMarketDataProvider {
   public readonly providerName = 'RealLiveMarketDataProvider';
 
-  private static readonly SYMBOL_MAP: Record<string, string> = {
+  private static readonly YAHOO_SYMBOL_MAP: Record<string, string> = {
     NIFTY: '^NSEI',
     BANKNIFTY: '^NSEBANK',
     RELIANCE: 'RELIANCE.NS',
     HDFCBANK: 'HDFCBANK.NS',
     INFY: 'INFY.NS',
+    XAUUSD: 'GC=F',
+    GOLD: 'GC=F',
+    GOLD_MCX: 'GC=F',
   };
 
   /**
-   * Fetches real historical candles directly from Yahoo Finance and Binance public APIs
+   * Fetches real historical/live candles according to the authoritative Instrument Registry and Venue Profile.
+   * STRICT FAIL-CLOSED: Fails on unknown or inactive instruments.
+   * XAUUSD is routed exclusively to authoritative metals feeds (Yahoo GC=F), NEVER Binance PAXGUSDT.
    */
   async getHistoricalCandles(
     symbol: string,
@@ -24,8 +29,17 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
   ): Promise<ICandle[]> {
     const sym = symbol.toUpperCase();
 
-    if (sym === 'BTCUSDT') {
-      return this.fetchBinanceCandles(timeframe, limit);
+    // 1. Authoritative Instrument Resolution & Validation
+    const instrument = getAuthoritativeInstrument(sym);
+    if (!instrument || instrument.isActive === false) {
+      throw new Error(
+        `[MARKET DATA FAIL-CLOSED] Inactive or unrecognized instrument: '${sym}'. RealLiveMarketDataProvider requires an active authoritative instrument.`,
+      );
+    }
+
+    // 2. Route by Venue & Asset Type
+    if (instrument.exchange === 'BINANCE' || instrument.assetType === AssetType.CRYPTO) {
+      return this.fetchBinanceCandles(sym, timeframe, limit);
     }
 
     return this.fetchYahooCandles(sym, timeframe, limit);
@@ -33,6 +47,9 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
 
   async getLatestCandle(symbol: string, timeframe: Timeframe | string): Promise<ICandle> {
     const candles = await this.getHistoricalCandles(symbol, timeframe, 5);
+    if (!candles || candles.length === 0) {
+      throw new Error(`[MARKET DATA FAIL-CLOSED] No market data returned for '${symbol}' on ${timeframe}.`);
+    }
     return candles[candles.length - 1];
   }
 
@@ -47,31 +64,42 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
   async unsubscribeFromMarketData(symbol: string, timeframe: Timeframe | string): Promise<void> {}
 
   private async fetchBinanceCandles(
+    symbol: string,
     timeframe: Timeframe | string,
     limit: number,
   ): Promise<ICandle[]> {
     const interval = this.mapTimeframeToBinance(timeframe);
-    const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
+    const durationMs = getTimeframeDurationMs(timeframe);
+    const serverNow = Date.now();
+    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.min(limit + 10, 500)}`;
 
     try {
       const res = await fetch(url);
       const data = await res.json();
 
       if (!Array.isArray(data)) {
-        throw new Error(`Binance API error: ${JSON.stringify(data)}`);
+        throw new Error(`Binance API error for ${symbol}: ${JSON.stringify(data)}`);
       }
 
-      return data.map((k: any) => ({
-        timestamp: new Date(k[0]),
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-        isClosed: true,
-      }));
+      const candles: ICandle[] = data.map((k: any) => {
+        const openTimeMs = Number(k[0]);
+        const closeTimeMs = Number(k[6]) || (openTimeMs + durationMs - 1);
+        const isClosed = serverNow >= openTimeMs + durationMs || serverNow > closeTimeMs;
+        return {
+          timestamp: new Date(openTimeMs),
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+          volume: parseFloat(k[5]),
+          isClosed,
+          provenance: 'LIVE',
+        };
+      });
+
+      return candles.slice(-limit);
     } catch (err) {
-      console.error(`Error fetching Binance candles: ${(err as Error).message}`);
+      console.error(`Error fetching Binance candles for ${symbol}: ${(err as Error).message}`);
       return [];
     }
   }
@@ -81,16 +109,18 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
     timeframe: Timeframe | string,
     limit: number,
   ): Promise<ICandle[]> {
-    const yahooSymbol = RealLiveMarketDataProvider.SYMBOL_MAP[symbol] || symbol;
+    const yahooSymbol = RealLiveMarketDataProvider.YAHOO_SYMBOL_MAP[symbol] || symbol;
     const interval = this.mapTimeframeToYahoo(timeframe);
     const range = this.getRangeForTimeframe(timeframe, limit);
+    const durationMs = getTimeframeDurationMs(timeframe);
+    const serverNow = Date.now();
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
       yahooSymbol,
     )}?interval=${interval}&range=${range}`;
 
     try {
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       });
       const data = await res.json();
 
@@ -113,14 +143,17 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
         const v = quote.volume[i] || 0;
 
         if (o !== null && h !== null && l !== null && c !== null) {
+          const openTimeMs = timestamps[i] * 1000;
+          const isClosed = serverNow >= openTimeMs + durationMs;
           candles.push({
-            timestamp: new Date(timestamps[i] * 1000),
+            timestamp: new Date(openTimeMs),
             open: Number(Number(o).toFixed(2)),
             high: Number(Number(h).toFixed(2)),
             low: Number(Number(l).toFixed(2)),
             close: Number(Number(c).toFixed(2)),
             volume: Math.round(v),
-            isClosed: true,
+            isClosed,
+            provenance: 'LIVE',
           });
         }
       }
@@ -128,7 +161,7 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
       return candles.slice(-limit);
     } catch (err) {
       console.error(
-        `Error fetching Yahoo Finance candles for ${symbol}: ${(err as Error).message}`,
+        `Error fetching Yahoo Finance candles for ${symbol} (${yahooSymbol}): ${(err as Error).message}`,
       );
       return [];
     }

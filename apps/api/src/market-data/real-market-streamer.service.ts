@@ -223,21 +223,21 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         await this.broadcastTick(ticker);
       }
 
-      // Fetch Real Spot Gold Price (via PAXGUSDT 1:1 backed physical gold ounces)
-      const goldRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
-      const goldData = await goldRes.json();
+      // Fetch Binance PAXGUSDT Price
+      const paxgRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
+      const paxgData = await paxgRes.json();
 
-      if (goldData && goldData.lastPrice) {
-        const livePrice = parseFloat(goldData.lastPrice);
-        const open = parseFloat(goldData.openPrice);
-        const high = parseFloat(goldData.highPrice);
-        const low = parseFloat(goldData.lowPrice);
-        const volume = parseFloat(goldData.volume);
-        const changePercent = parseFloat(goldData.priceChangePercent);
-        const changeAmount = parseFloat(goldData.priceChange);
+      if (paxgData && paxgData.lastPrice) {
+        const livePrice = parseFloat(paxgData.lastPrice);
+        const open = parseFloat(paxgData.openPrice);
+        const high = parseFloat(paxgData.highPrice);
+        const low = parseFloat(paxgData.lowPrice);
+        const volume = parseFloat(paxgData.volume);
+        const changePercent = parseFloat(paxgData.priceChangePercent);
+        const changeAmount = parseFloat(paxgData.priceChange);
 
-        const ticker = this.tickers.get('XAUUSD') || {
-          symbol: 'XAUUSD',
+        const ticker = this.tickers.get('PAXGUSDT') || {
+          symbol: 'PAXGUSDT',
           price: livePrice,
           open,
           high,
@@ -261,11 +261,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         ticker.changeAmount = changeAmount;
         ticker.lastUpdated = Date.now();
 
-        this.tickers.set('XAUUSD', ticker);
+        this.tickers.set('PAXGUSDT', ticker);
         await this.broadcastTick(ticker);
       }
     } catch (err) {
-      this.logger.debug(`Binance / Gold real tick notice: ${(err as Error).message}`);
+      this.logger.debug(`Binance real tick notice: ${(err as Error).message}`);
     }
   }
 
@@ -276,6 +276,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       RELIANCE: 'RELIANCE.NS',
       HDFCBANK: 'HDFCBANK.NS',
       INFY: 'INFY.NS',
+      XAUUSD: 'GC=F',
+      GOLD: 'GC=F',
     };
 
     for (const [sym, yahooSym] of Object.entries(symbolMap)) {

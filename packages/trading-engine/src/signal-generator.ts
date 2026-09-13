@@ -16,7 +16,19 @@ import { calculateEMA, calculateRSI } from '@quant/indicators';
 import { SessionFilter } from './session-filter';
 import { SaiyanOCCEngine } from './saiyan-occ-engine';
 import { SnapshotBuilder } from './quant/snapshot-builder';
+import { ICanonicalMarketSnapshot } from './canonical-market-snapshot';
 import { CandleNormalizer } from './candle-normalizer';
+
+export interface IGenerateFromSnapshotsOptions {
+  executionSnapshot: ICanonicalMarketSnapshot;
+  htf1Snapshot?: ICanonicalMarketSnapshot;
+  htf2Snapshot?: ICanonicalMarketSnapshot;
+  mtfMode?: MTFMode;
+  strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID';
+  scoringWeights?: IScoringWeights;
+  strategyConfig?: Record<string, any>;
+  minimumCandles?: number;
+}
 
 export interface IGenerateSignalOptions {
   symbol: string;
@@ -35,6 +47,73 @@ export interface IGenerateSignalOptions {
 }
 
 export class SignalGenerator {
+  /**
+   * Authoritative Canonical Production Entry Point: Generates signal setup directly from CanonicalMarketSnapshots.
+   * STRICT FAIL-CLOSED:
+   * - Enforces snapshot decision boundary as the authoritative point-in-time reference
+   * - Validates symbol consistency across all snapshots
+   * - Rejects HTF snapshots if closedThroughTimestamp > executionSnapshot.decisionTimestamp
+   * - Never reads future or forming candles
+   */
+  static generateFromSnapshots(options: IGenerateFromSnapshotsOptions): ISignalSetup {
+    if (!options || !options.executionSnapshot) {
+      throw new Error('INVALID_SNAPSHOT: executionSnapshot is required for canonical signal generation');
+    }
+
+    const execSnap = options.executionSnapshot;
+    const symbol = execSnap.symbol.toUpperCase();
+    const decisionTimestamp = execSnap.decisionTimestamp;
+    const decisionTimeMs = decisionTimestamp.getTime();
+
+    // 1. Symbol Parity Validation
+    if (options.htf1Snapshot && options.htf1Snapshot.symbol.toUpperCase() !== symbol) {
+      throw new Error(
+        `SNAPSHOT_SYMBOL_MISMATCH: HTF1 symbol '${options.htf1Snapshot.symbol}' does not match execution symbol '${symbol}'`,
+      );
+    }
+    if (options.htf2Snapshot && options.htf2Snapshot.symbol.toUpperCase() !== symbol) {
+      throw new Error(
+        `SNAPSHOT_SYMBOL_MISMATCH: HTF2 symbol '${options.htf2Snapshot.symbol}' does not match execution symbol '${symbol}'`,
+      );
+    }
+
+    // 2. Strict Point-in-Time HTF Alignment Invariants
+    if (options.htf1Snapshot) {
+      const htf1ClosedMs = options.htf1Snapshot.closedThroughTimestamp.getTime();
+      if (htf1ClosedMs > decisionTimeMs) {
+        throw new Error(
+          `HTF_LOOKAHEAD_VIOLATION: HTF1 closedThroughTimestamp (${options.htf1Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
+        );
+      }
+    }
+
+    if (options.htf2Snapshot) {
+      const htf2ClosedMs = options.htf2Snapshot.closedThroughTimestamp.getTime();
+      if (htf2ClosedMs > decisionTimeMs) {
+        throw new Error(
+          `HTF_LOOKAHEAD_VIOLATION: HTF2 closedThroughTimestamp (${options.htf2Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
+        );
+      }
+    }
+
+    // 3. Delegate to canonical execution using confirmed immutable snapshot candles
+    return SignalGenerator.generateSignal({
+      symbol,
+      executionCandles: execSnap.candles as ICandle[],
+      executionTimeframe: execSnap.executionTimeframe,
+      htf1Candles: options.htf1Snapshot ? (options.htf1Snapshot.candles as ICandle[]) : undefined,
+      htf1Timeframe: options.htf1Snapshot ? options.htf1Snapshot.executionTimeframe : undefined,
+      htf2Candles: options.htf2Snapshot ? (options.htf2Snapshot.candles as ICandle[]) : undefined,
+      htf2Timeframe: options.htf2Snapshot ? options.htf2Snapshot.executionTimeframe : undefined,
+      mtfMode: options.mtfMode,
+      strategyMode: options.strategyMode,
+      asOfTimestamp: decisionTimestamp,
+      scoringWeights: options.scoringWeights,
+      strategyConfig: options.strategyConfig,
+      minimumCandles: options.minimumCandles,
+    });
+  }
+
   /**
    * Generates analytical LONG / SHORT / NO_TRADE signal setup with full scoring, levels, and rationale
    * with strictly zero look-ahead bias.

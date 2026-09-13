@@ -2,7 +2,15 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import { MarketDataService } from '../market-data/market-data.service';
-import { ICandle, MarketDataSourceMode, REDIS_KEYS, Timeframe, toPrismaTimeframe } from '@quant/shared';
+import {
+  ICandle,
+  MarketDataSourceMode,
+  MarketDataSourcePolicy,
+  REDIS_KEYS,
+  Timeframe,
+  toPrismaTimeframe,
+  getTimeframeDurationMs,
+} from '@quant/shared';
 import {
   calculateEMA,
   calculateSMA,
@@ -18,9 +26,9 @@ export interface ICandlesResponse {
   symbol: string;
   timeframe: string;
   count: number;
+  dataProvenance: string;
   candles: ICandle[];
   formingCandle?: ICandle | null;
-  dataProvenance?: import('@quant/shared').DataProvenance;
 }
 
 export interface IChartDataResponse {
@@ -31,7 +39,7 @@ export interface IChartDataResponse {
     tickSize: number;
   };
   timeframe: string;
-  dataProvenance?: import('@quant/shared').DataProvenance;
+  dataProvenance: string;
   closedThrough?: Date;
   isDegraded?: boolean;
   candles: Array<{
@@ -67,97 +75,7 @@ export interface IChartDataResponse {
   };
   fvgs: any[];
   orderBlocks: any[];
-  activeSignal: any | null;
-}
-
-export function getTimeframeDurationMs(timeframe: string): number {
-  const norm = (timeframe || '15m').toUpperCase().replace('MIN', 'M').replace('MINUTES', 'M');
-  switch (norm) {
-    case '1M':
-    case 'M1':
-      return 60 * 1000;
-    case '3M':
-    case 'M3':
-      return 3 * 60 * 1000;
-    case '5M':
-    case 'M5':
-      return 5 * 60 * 1000;
-    case '15M':
-    case 'M15':
-    case '15':
-      return 15 * 60 * 1000;
-    case '30M':
-    case 'M30':
-    case '30':
-      return 30 * 60 * 1000;
-    case '1H':
-    case 'H1':
-    case '60M':
-    case '60':
-      return 60 * 60 * 1000;
-    case '4H':
-    case 'H4':
-    case '240M':
-    case '240':
-      return 4 * 60 * 60 * 1000;
-    case '1D':
-    case 'D1':
-    case 'D':
-      return 24 * 60 * 60 * 1000;
-    default:
-      return 15 * 60 * 1000;
-  }
-}
-
-export class MarketDataSourcePolicy {
-  static resolveSource(
-    mode: MarketDataSourceMode,
-    context: { hasLiveFeed: boolean; symbol: string; isRangeQuery?: boolean },
-  ): {
-    useLiveFeed: boolean;
-    useDatabase: boolean;
-    dataProvenance: import('@quant/shared').DataProvenance;
-  } {
-    if (mode === MarketDataSourceMode.LIVE_DECISION) {
-      if (context.isRangeQuery) {
-        throw new Error(
-          `[MARKET DATA FAIL-CLOSED] Range queries ('from' / 'to') are incompatible with LIVE_DECISION mode for '${context.symbol}'. Use HISTORICAL or BACKTEST mode for historical intervals.`,
-        );
-      }
-      if (!context.hasLiveFeed) {
-        throw new Error(
-          `[MARKET DATA FAIL-CLOSED] Authoritative live exchange stream unavailable for '${context.symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
-        );
-      }
-      return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
-    }
-    if (mode === MarketDataSourceMode.CHART) {
-      if (context.isRangeQuery) {
-        return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
-      }
-      if (context.hasLiveFeed) {
-        return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
-      }
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'DELAYED' };
-    }
-    if (mode === MarketDataSourceMode.BACKTEST) {
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'BACKTEST' };
-    }
-    if (mode === MarketDataSourceMode.LEARNING) {
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'LEARNING' };
-    }
-    return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
-  }
-
-  static validate(mode: MarketDataSourceMode, hasLiveFeed: boolean, symbol: string) {
-    return this.resolveSource(mode, { hasLiveFeed, symbol });
-  }
-
-  static assertAllowedSource(mode: MarketDataSourceMode, source: string) {
-    if (mode === MarketDataSourceMode.LIVE_DECISION && source !== 'LIVE') {
-      throw new Error(`[MARKET DATA FAIL-CLOSED] Source '${source}' is prohibited under LIVE_DECISION.`);
-    }
-  }
+  activeSignal: any;
 }
 
 @Injectable()
@@ -172,7 +90,7 @@ export class CandlesService {
   ) {}
 
   /**
-   * Fetches real live exchange candlestick history (Yahoo Finance for NSE, Binance for Crypto)
+   * Fetches real live exchange candlestick history (Yahoo Finance for NSE/COMEX, Binance for Crypto)
    */
   private async fetchRealExchangeCandles(
     symbol: string,
@@ -196,9 +114,10 @@ export class CandlesService {
       const durationMs = getTimeframeDurationMs(timeframe);
       const serverNow = Date.now();
 
-      if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'XAUUSD' || sym === 'GOLD' || sym === 'PAXGUSDT') {
+      // Binance Crypto routing
+      if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
         const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
-        const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym === 'XAUUSD' || sym === 'GOLD' ? 'PAXGUSDT' : sym;
+        const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym;
         const res = await fetch(
           `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
         );
@@ -227,15 +146,30 @@ export class CandlesService {
         }
       }
 
+      // Yahoo Finance routing for NSE, COMEX Gold, MCX
       const isNifty = sym === 'NIFTY' || sym === 'NIFTY50' || sym === '^NSEI';
       const isBankNifty = sym === 'BANKNIFTY' || sym === '^NSEBANK';
+      const isGold = sym === 'XAUUSD' || sym === 'GOLD' || sym === 'GOLD_MCX';
+      const isReliance = sym === 'RELIANCE';
+      const isHdfc = sym === 'HDFCBANK';
+      const isInfy = sym === 'INFY';
 
-      if (isNifty || isBankNifty) {
-        const ySymbol = isNifty ? '^NSEI' : '^NSEBANK';
-        const yInterval = is1m ? '1m' : is5m ? '5m' : '15m';
-        const yRange = is1m ? '1d' : is5m ? '5d' : '1mo';
+      if (isNifty || isBankNifty || isGold || isReliance || isHdfc || isInfy) {
+        const ySymbol = isNifty
+          ? '^NSEI'
+          : isBankNifty
+            ? '^NSEBANK'
+            : isGold
+              ? 'GC=F'
+              : isReliance
+                ? 'RELIANCE.NS'
+                : isHdfc
+                  ? 'HDFCBANK.NS'
+                  : 'INFY.NS';
+        const yInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '60m' : is4h ? '60m' : '1d';
+        const yRange = is1m ? '1d' : is5m ? '5d' : is15m ? '1mo' : is1h ? '3mo' : is4h ? '3mo' : '1y';
         const res = await fetch(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=${yInterval}&range=${yRange}`,
+          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySymbol)}?interval=${yInterval}&range=${yRange}`,
           { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } },
         );
         if (res.ok) {

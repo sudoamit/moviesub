@@ -5,14 +5,17 @@ import {
   CandleValidator,
   ICandle,
   IMarketDataProvider,
+  MarketDataSourceMode,
+  MarketDataSourcePolicy,
   RealLiveMarketDataProvider,
   REDIS_KEYS,
   Timeframe,
   toPrismaTimeframe,
+  getTimeframeDurationMs,
   WS_EVENTS,
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
-import { getTimeframeDurationMs } from '../candles/candles.service';
+import { CanonicalMarketSnapshotBuilder } from '@quant/trading-engine';
 
 export interface IIngestionSummary {
   symbol: string;
@@ -247,5 +250,103 @@ export class MarketDataService {
       limit,
     );
     return this.ingestCandles(symbol, timeframe, rawCandles);
+  }
+
+  /**
+   * Authoritative Canonical Snapshot Resolution for production scanner, backtests, and AI learning.
+   * STRICT FAIL-CLOSED:
+   * - LIVE_DECISION invokes live provider only, rejects historical asOfTimestamp, zero DB fallback
+   * - BACKTEST / LEARNING / HISTORICAL queries DB dataset only, never invokes live provider
+   */
+  async getCanonicalSnapshot(options: {
+    symbol: string;
+    timeframe: Timeframe | string;
+    sourceMode: MarketDataSourceMode;
+    asOfTimestamp?: Date;
+    limit?: number;
+  }): Promise<import('@quant/trading-engine').ICanonicalMarketSnapshot> {
+    const sym = options.symbol.toUpperCase();
+    const timeframe = options.timeframe || Timeframe.M15;
+    const limit = options.limit || 200;
+    const durationMs = getTimeframeDurationMs(timeframe as string);
+
+    const inst = await this.prisma.instrument.findUnique({
+      where: { symbol: sym },
+    });
+
+    if (!inst) {
+      throw new NotFoundException(`[SNAPSHOT FAIL-CLOSED] Instrument '${sym}' not registered in database.`);
+    }
+
+    if (inst.isActive === false) {
+      throw new Error(`[SNAPSHOT FAIL-CLOSED] Instrument '${sym}' is marked inactive.`);
+    }
+
+    const resolution = MarketDataSourcePolicy.resolveSource(options.sourceMode, {
+      hasLiveFeed: Boolean(this.provider),
+      symbol: sym,
+      asOfTimestamp: options.asOfTimestamp,
+      timeframeDurationMs: durationMs,
+    });
+
+    MarketDataSourcePolicy.assertAllowedSource(options.sourceMode, resolution.dataProvenance);
+
+    if (options.sourceMode === MarketDataSourceMode.LIVE_DECISION) {
+      // Live exchange fetch only
+      const rawCandles = await this.provider.getHistoricalCandles(
+        sym,
+        timeframe as Timeframe,
+        limit,
+      );
+
+      if (!rawCandles || rawCandles.length === 0) {
+        throw new Error(
+          `[MARKET DATA FAIL-CLOSED] Authoritative live exchange stream returned no candles for '${sym}'. LIVE_DECISION fails closed.`,
+        );
+      }
+
+      return CanonicalMarketSnapshotBuilder.build({
+        symbol: sym,
+        executionCandles: rawCandles,
+        executionTimeframe: timeframe,
+        dataProvenance: 'LIVE',
+      });
+    }
+
+    // Historical / Backtest / Learning database path
+    const tfEnum = toPrismaTimeframe(timeframe);
+    const whereClause: any = {
+      instrumentId: inst.id,
+      timeframe: tfEnum as any,
+    };
+
+    if (options.asOfTimestamp) {
+      whereClause.timestamp = { lte: options.asOfTimestamp };
+    }
+
+    const rows = await this.prisma.candle.findMany({
+      where: whereClause,
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+    });
+
+    const dbCandles: ICandle[] = rows.reverse().map((r) => ({
+      timestamp: r.timestamp,
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+      isClosed: r.isClosed,
+      provenance: resolution.dataProvenance,
+    }));
+
+    return CanonicalMarketSnapshotBuilder.build({
+      symbol: sym,
+      executionCandles: dbCandles,
+      executionTimeframe: timeframe,
+      asOfTimestamp: options.asOfTimestamp,
+      dataProvenance: resolution.dataProvenance as any,
+    });
   }
 }

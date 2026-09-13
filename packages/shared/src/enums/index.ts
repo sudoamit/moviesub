@@ -28,7 +28,10 @@ export enum Timeframe {
 }
 
 export function toPrismaTimeframe(tf: string | Timeframe): string {
-  const s = String(tf).toLowerCase();
+  if (!tf || typeof tf !== 'string') {
+    throw new Error('INVALID_TIMEFRAME: Timeframe must be a non-empty string');
+  }
+  const s = String(tf).toLowerCase().trim();
   switch (s) {
     case '1m':
     case 'm1':
@@ -52,7 +55,52 @@ export function toPrismaTimeframe(tf: string | Timeframe): string {
     case 'd1':
       return 'D1';
     default:
-      return 'M15';
+      throw new Error(`INVALID_TIMEFRAME: Unsupported timeframe '${tf}'. Supported timeframes: 1m, 5m, 15m, 30m, 1h, 4h, 1d`);
+  }
+}
+
+export function toPrismaTimeframeOrDefault(
+  tf: string | Timeframe | null | undefined,
+  defaultTf: string | Timeframe = Timeframe.M15,
+): string {
+  if (!tf) {
+    return toPrismaTimeframe(defaultTf);
+  }
+  try {
+    return toPrismaTimeframe(tf);
+  } catch {
+    return toPrismaTimeframe(defaultTf);
+  }
+}
+
+export function getTimeframeDurationMs(tf: string | Timeframe): number {
+  const norm = String(tf).toLowerCase().trim();
+  switch (norm) {
+    case '1m':
+    case 'm1':
+      return 60 * 1000;
+    case '5m':
+    case 'm5':
+      return 5 * 60 * 1000;
+    case '15m':
+    case 'm15':
+      return 15 * 60 * 1000;
+    case '30m':
+    case 'm30':
+      return 30 * 60 * 1000;
+    case '1h':
+    case 'h1':
+    case '60m':
+      return 60 * 60 * 1000;
+    case '4h':
+    case 'h4':
+    case '240m':
+      return 4 * 60 * 60 * 1000;
+    case '1d':
+    case 'd1':
+      return 24 * 60 * 60 * 1000;
+    default:
+      return 15 * 60 * 1000;
   }
 }
 
