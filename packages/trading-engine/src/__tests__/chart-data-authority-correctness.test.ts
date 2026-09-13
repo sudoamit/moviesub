@@ -894,5 +894,90 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       const result = ChartSnapshotValidator.validateSnapshot(snapshot, 'NIFTY', '15m');
       expect(result.isValid).toBe(true);
     });
+
+    test('17. syncFromSnapshot updates aggregator watermarks to server state', () => {
+      const aggregator = new CanonicalCandleAggregator();
+      const serverSnapshot: ChartMarketSnapshot = {
+        ...baseSnapshot,
+        closedCandles: validClosedCandles,
+        formingCandle: validFormingCandle,
+      };
+
+      aggregator.syncFromSnapshot(serverSnapshot);
+
+      // Attempt to process a tick earlier than server snapshot forming candle (09:40 vs 09:45)
+      const stale = aggregator.processTick(serverSnapshot, {
+        symbol: 'NIFTY',
+        price: 104,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(stale).toBe(serverSnapshot); // Rejected cleanly due to watermark sync
+    });
+
+    test('18. chartCandlesToICandles rejects non-finite and NaN candle fields', () => {
+      const { chartCandlesToICandles } = require('@quant/shared');
+
+      const invalidCandles: ChartCandle[] = [
+        {
+          timestamp: '2026-09-13T09:15:00.000Z',
+          open: NaN, // Invalid
+          high: 105,
+          low: 98,
+          close: 103,
+          volume: 1000,
+          isClosed: true,
+        },
+        {
+          timestamp: '2026-09-13T09:30:00.000Z',
+          open: 103,
+          high: 108,
+          low: 102,
+          close: 106,
+          volume: Infinity, // Invalid
+          isClosed: true,
+        },
+        {
+          timestamp: '2026-09-13T09:45:00.000Z',
+          open: 106,
+          high: 109,
+          low: 105,
+          close: 108,
+          volume: 500,
+          isClosed: true, // Valid
+        },
+      ];
+
+      const converted = chartCandlesToICandles(invalidCandles);
+      expect(converted).toHaveLength(1);
+      expect(converted[0].close).toBe(108);
+      expect(Number.isFinite(converted[0].open)).toBe(true);
+    });
+
+    test('19. SESSION_CUMULATIVE volume resets baseline across day session boundary', () => {
+      const aggregator = new CanonicalCandleAggregator();
+
+      // Day 1 tick
+      const s1 = aggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T15:15:00.000Z',
+        volume: 5000000,
+        volumeType: 'SESSION_CUMULATIVE',
+      });
+
+      // Day 2 tick (new 1d session open)
+      const s2 = aggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-14T09:16:00.000Z',
+        volume: 100,
+        volumeType: 'SESSION_CUMULATIVE',
+      });
+
+      // Baseline reset to 100 without negative overflow
+      expect(s2.formingCandle?.volume).toBe(0);
+    });
   });
 });

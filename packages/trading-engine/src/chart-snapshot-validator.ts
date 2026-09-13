@@ -110,9 +110,9 @@ export class ChartSnapshotValidator {
         const lastClosedTimeSec = Math.floor(
           new Date(closedCandles[closedCandles.length - 1].timestamp).getTime() / 1000,
         );
-        if (fTimeSec < lastClosedTimeSec) {
+        if (fTimeSec <= lastClosedTimeSec) {
           errors.push(
-            `Forming candle timestamp ${formingCandle.timestamp} is strictly before the latest closed candle timestamp ${closedCandles[closedCandles.length - 1].timestamp}.`,
+            `Forming candle timestamp ${formingCandle.timestamp} must be strictly after the latest closed candle timestamp ${closedCandles[closedCandles.length - 1].timestamp}.`,
           );
         }
       }

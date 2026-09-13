@@ -8,7 +8,7 @@ import { NormalizedTick, ProviderTick, TickVolumeType } from './chart-snapshot.i
  * 2. Non-finite or <= 0 price -> returns null (REJECTS tick).
  * 3. Missing symbol -> returns null.
  */
-export function normalizeProviderTick(raw: ProviderTick | any): NormalizedTick | null {
+export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): NormalizedTick | null {
   if (!raw || typeof raw !== 'object') {
     return null;
   }
@@ -43,13 +43,14 @@ export function normalizeProviderTick(raw: ProviderTick | any): NormalizedTick |
 
   // 5. Volume Semantics Resolution
   let volumeType: TickVolumeType = 'UNKNOWN';
+  const rawVolType = raw.volumeType as string | undefined;
   if (
-    raw.volumeType === 'INCREMENTAL' ||
-    raw.volumeType === 'BUCKET_CUMULATIVE' ||
-    raw.volumeType === 'SESSION_CUMULATIVE'
+    rawVolType === 'INCREMENTAL' ||
+    rawVolType === 'BUCKET_CUMULATIVE' ||
+    rawVolType === 'SESSION_CUMULATIVE'
   ) {
-    volumeType = raw.volumeType;
-  } else if (raw.volumeType === 'CUMULATIVE') {
+    volumeType = rawVolType as TickVolumeType;
+  } else if (rawVolType === 'CUMULATIVE') {
     // Backwards compatibility alias for BUCKET_CUMULATIVE
     volumeType = 'BUCKET_CUMULATIVE';
   }

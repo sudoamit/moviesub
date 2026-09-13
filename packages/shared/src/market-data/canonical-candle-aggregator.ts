@@ -12,7 +12,12 @@ import { normalizeProviderTick } from './provider-tick-normalizer';
  * Canonical Live Candle Aggregator State Machine (Instance Scoped)
  *
  * Encapsulates bounded idempotency, fail-closed out-of-order tick rejection,
- * session cumulative volume delta tracking, and deterministic timeframe rollover.
+ * venue-specific session cumulative volume delta tracking, server snapshot synchronization,
+ * and deterministic timeframe rollover.
+ *
+ * Duplicate Tick Identity Policy:
+ * 1. Primary: Uses provider `tickId` when present for 100% deterministic duplicate detection.
+ * 2. Fallback: When `tickId` is absent, generates best-effort signature from `${symbol}_${timestamp}_${price}_${volume}`.
  */
 export class CanonicalCandleAggregator {
   private processedTickSignatures = new Set<string>();
@@ -20,6 +25,9 @@ export class CanonicalCandleAggregator {
   private readonly maxQueueSize = 500;
   private lastAcceptedEventTimeMs = -1;
   private lastSessionVolume = -1;
+  private lastSessionKey = '';
+  private currentSymbol = '';
+  private currentTimeframe = '';
 
   /**
    * Resets internal aggregator state (useful for symbol switches or fresh streams).
@@ -29,18 +37,49 @@ export class CanonicalCandleAggregator {
     this.signatureQueue = [];
     this.lastAcceptedEventTimeMs = -1;
     this.lastSessionVolume = -1;
+    this.lastSessionKey = '';
+    this.currentSymbol = '';
+    this.currentTimeframe = '';
+  }
+
+  /**
+   * Synchronizes internal aggregator watermarks with a fresh authoritative server snapshot
+   * (e.g., after REST fetch, socket reconnect, or source failover).
+   */
+  syncFromSnapshot(snapshot: ChartMarketSnapshot): void {
+    if (!snapshot) return;
+
+    if (
+      this.currentSymbol !== snapshot.symbol ||
+      this.currentTimeframe !== snapshot.timeframe
+    ) {
+      this.reset();
+      this.currentSymbol = snapshot.symbol;
+      this.currentTimeframe = snapshot.timeframe;
+    }
+
+    if (snapshot.formingCandle) {
+      this.lastAcceptedEventTimeMs = new Date(
+        snapshot.formingCandle.timestamp,
+      ).getTime();
+    } else if (snapshot.closedCandles && snapshot.closedCandles.length > 0) {
+      this.lastAcceptedEventTimeMs = new Date(
+        snapshot.closedCandles[snapshot.closedCandles.length - 1].timestamp,
+      ).getTime();
+    }
   }
 
   /**
    * Processes an incoming raw or normalized live tick and produces an updated ChartMarketSnapshot.
+   * Strictly typed without any `any` parameters.
    */
   processTick(
     snapshot: ChartMarketSnapshot,
-    rawTick: ProviderTick | NormalizedTick | any,
+    rawTick: ProviderTick | NormalizedTick,
   ): ChartMarketSnapshot {
     if (!snapshot) return snapshot;
 
-    // 1. Strict Provider Tick Normalization & Fail-Closed Validation
+    // 1. Strict Provider Tick Normalization & Fail-Closed Validation (No any, No new Date() synthesis)
     const tick = normalizeProviderTick(rawTick);
     if (!tick) {
       return snapshot; // Reject tick with missing timestamp or invalid price
@@ -81,12 +120,18 @@ export class CanonicalCandleAggregator {
     if (currentForming && tickTimeMs < currentFormingMs) {
       return snapshot; // Reject tick belonging to a past candle bucket
     }
-    if (this.lastAcceptedEventTimeMs > 0 && tickTimeMs < this.lastAcceptedEventTimeMs) {
+    if (
+      this.lastAcceptedEventTimeMs > 0 &&
+      tickTimeMs < this.lastAcceptedEventTimeMs
+    ) {
       return snapshot; // Reject out-of-order tick earlier than latest accepted event
     }
 
     // 6. Bounded Idempotency Check (A -> B -> A Duplicate Replay Protection)
-    const tickSig = `${tick.symbol}_${tickTimeMs}_${tick.price}_${tick.volume ?? 'nv'}_${tick.tickId ?? ''}`;
+    const tickSig = tick.tickId
+      ? `${tick.symbol}_id_${tick.tickId}`
+      : `${tick.symbol}_sig_${tickTimeMs}_${tick.price}_${tick.volume ?? 'nv'}`;
+
     if (this.processedTickSignatures.has(tickSig)) {
       return snapshot; // Bounded duplicate tick hit -> no-op
     }
@@ -127,9 +172,22 @@ export class CanonicalCandleAggregator {
       }
     }
 
-    // 8. Volume Aggregation & Forming Candle Construction
-    let nextForming: ChartFormingCandle;
+    // 8. Session Boundary Reset Logic for SESSION_CUMULATIVE Volume
+    const sessionKey = TimeframeRegistry.getBucketOpenTime(
+      tick.timestamp,
+      '1d',
+    ).toISOString();
+    const isNewSession = Boolean(
+      this.lastSessionKey && this.lastSessionKey !== sessionKey,
+    );
+
     const safeVol = tick.volume ?? 0;
+    if (isNewSession) {
+      this.lastSessionVolume = safeVol; // Reset cumulative volume baseline for new session
+    }
+
+    // 9. Volume Aggregation & Forming Candle Construction
+    let nextForming: ChartFormingCandle;
 
     if (currentForming && !isRollover) {
       let newVol = currentForming.volume;
@@ -139,7 +197,7 @@ export class CanonicalCandleAggregator {
         newVol = Math.max(currentForming.volume, safeVol);
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
         const delta =
-          this.lastSessionVolume >= 0
+          this.lastSessionVolume >= 0 && !isNewSession
             ? Math.max(0, safeVol - this.lastSessionVolume)
             : 0;
         newVol = currentForming.volume + delta;
@@ -186,7 +244,9 @@ export class CanonicalCandleAggregator {
       };
     }
 
-    // 9. Snapshot Metadata & Live Observation Timestamp Consistency
+    this.lastSessionKey = sessionKey;
+
+    // 10. Snapshot Metadata & Live Observation Timestamp Consistency
     const observationIso = new Date(tickTimeMs).toISOString();
     const closedThrough =
       closedCandles.length > 0

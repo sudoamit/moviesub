@@ -205,17 +205,20 @@ function DashboardContent() {
               provenance: data.dataProvenance || 'LIVE',
             }));
 
-        const validation = ChartSnapshotValidator.validateSnapshot({
+        const snapshotObj: ChartMarketSnapshot = {
           symbol: data.symbol || sym,
           timeframe: data.timeframe || tf,
           closedCandles: closed,
           formingCandle: data.formingCandle || null,
           livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
+          closedThrough: data.closedThrough || (closed.length > 0 ? closed[closed.length - 1].timestamp : undefined),
           asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
           dataProvenance: data.dataProvenance || 'LIVE',
           sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
           smcSnapshot: data.smcSnapshot || null,
-        });
+        };
+
+        const validation = ChartSnapshotValidator.validateSnapshot(snapshotObj);
 
         if (!validation.isValid) {
           console.warn(`Chart snapshot validation rejected: ${validation.error}`);
@@ -224,17 +227,10 @@ function DashboardContent() {
           return;
         }
 
-        setChartSnapshot({
-          symbol: data.symbol || sym,
-          timeframe: data.timeframe || tf,
-          closedCandles: closed,
-          formingCandle: data.formingCandle || null,
-          livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
-          asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
-          dataProvenance: data.dataProvenance || 'LIVE',
-          sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
-          smcSnapshot: data.smcSnapshot || null,
-        });
+        // Synchronize live aggregator watermarks with fresh server snapshot
+        aggregatorRef.current.syncFromSnapshot(snapshotObj);
+
+        setChartSnapshot(snapshotObj);
       } else {
         setChartSnapshot(null);
         setIsDataUnavailable(true);
