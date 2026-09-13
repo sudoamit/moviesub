@@ -5,3 +5,5 @@ export * from './execution-price-resolver';
 export * from './market-data-source-policy';
 export * from './chart-snapshot.interface';
 export * from './canonical-candle-aggregator';
+export * from './provider-tick-normalizer';
+export * from './chart-candle-adapter';

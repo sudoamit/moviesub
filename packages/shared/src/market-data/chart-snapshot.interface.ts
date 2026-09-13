@@ -10,7 +10,16 @@ import {
 } from '../interfaces';
 
 export type ChartProvenance = 'LIVE' | 'HISTORICAL' | 'DELAYED' | 'BACKTEST' | 'LEARNING' | 'CACHED' | 'SYNTHETIC';
-export type TickVolumeType = 'INCREMENTAL' | 'CUMULATIVE' | 'UNKNOWN';
+export type TickVolumeType = 'INCREMENTAL' | 'BUCKET_CUMULATIVE' | 'SESSION_CUMULATIVE' | 'UNKNOWN';
+
+export interface ProviderTick {
+  readonly symbol?: string;
+  readonly price?: number;
+  readonly timestamp?: Date | string | number;
+  readonly volume?: number;
+  readonly volumeType?: TickVolumeType;
+  readonly tickId?: string;
+}
 
 export interface NormalizedTick {
   readonly symbol: string;

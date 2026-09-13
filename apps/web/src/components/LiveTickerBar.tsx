@@ -12,6 +12,9 @@ export interface ITickerInfo {
   low: number;
   volume: number;
   lastTickDir?: 'UP' | 'DOWN';
+  timestamp?: Date | string | number;
+  volumeType?: import('@quant/shared').TickVolumeType;
+  tickId?: string;
 }
 
 interface LiveTickerBarProps {

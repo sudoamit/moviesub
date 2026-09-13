@@ -13,6 +13,7 @@ import {
   Timeframe,
   toPrismaTimeframe,
   getTimeframeDurationMs,
+  chartCandlesToICandles,
 } from '@quant/shared';
 import {
   calculateEMA,
@@ -371,7 +372,7 @@ export class CandlesService {
     const latestClosedCandle = closedCandles[closedCandles.length - 1];
     const latestClosedTimestamp = latestClosedCandle.timestamp;
 
-    const smcAnalysis = SMCAnalyzer.analyze(closedCandles as any, {
+    const smcAnalysis = SMCAnalyzer.analyze(chartCandlesToICandles(closedCandles), {
       asOfTimestamp: new Date(latestClosedTimestamp),
       timeframe,
     });

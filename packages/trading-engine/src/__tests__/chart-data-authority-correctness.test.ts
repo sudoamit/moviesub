@@ -558,10 +558,6 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
   describe('CanonicalCandleAggregator State Machine Rules', () => {
     const { CanonicalCandleAggregator } = require('@quant/shared');
 
-    beforeEach(() => {
-      CanonicalCandleAggregator.clearState();
-    });
-
     const baseSnapshot: ChartMarketSnapshot = {
       symbol: 'NIFTY',
       timeframe: '15m',
@@ -576,7 +572,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     };
 
     test('1. First forming candle creation initialized at bucket open timestamp', () => {
-      const updated = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const updated = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:42:15.000Z',
@@ -595,7 +592,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('2. INCREMENTAL volume adds tick volume delta', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -603,7 +601,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         volumeType: 'INCREMENTAL',
       });
 
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 108,
         timestamp: '2026-09-13T09:41:00.000Z',
@@ -614,28 +612,30 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       expect(s2.formingCandle?.volume).toBe(150);
     });
 
-    test('3. CUMULATIVE volume uses Math.max', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+    test('3. BUCKET_CUMULATIVE volume uses Math.max', () => {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
         volume: 500,
-        volumeType: 'CUMULATIVE',
+        volumeType: 'BUCKET_CUMULATIVE',
       });
 
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 108,
         timestamp: '2026-09-13T09:41:00.000Z',
         volume: 750,
-        volumeType: 'CUMULATIVE',
+        volumeType: 'BUCKET_CUMULATIVE',
       });
 
       expect(s2.formingCandle?.volume).toBe(750);
     });
 
     test('4. UNKNOWN or missing volumeType fails closed without changing volume', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -643,7 +643,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         volumeType: 'INCREMENTAL',
       });
 
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 108,
         timestamp: '2026-09-13T09:41:00.000Z',
@@ -655,7 +655,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('5. Rollover into next bucket closes previous forming candle exactly once', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -664,7 +665,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       });
 
       // Tick in next bucket (09:45)
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 110,
         timestamp: '2026-09-13T09:46:00.000Z',
@@ -679,7 +680,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('6. Duplicate tick does not double-count volume', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -689,7 +691,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       });
 
       // Duplicate tick re-entry
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -702,7 +704,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('7. Old/stale tick cannot mutate current forming candle', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -711,7 +714,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       });
 
       // Stale tick from 09:20
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 95,
         timestamp: '2026-09-13T09:20:00.000Z',
@@ -723,7 +726,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('8. Gap Policy: omit missing empty buckets when ticks jump across intervals', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -732,7 +736,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       });
 
       // Jump from 09:40 to 11:15 (skips 10:00, 10:15, 10:30, 10:45, 11:00)
-      const s2 = CanonicalCandleAggregator.processTick(s1, {
+      const s2 = aggregator.processTick(s1, {
         symbol: 'NIFTY',
         price: 120,
         timestamp: '2026-09-13T11:17:00.000Z',
@@ -746,7 +750,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('9. Invalid price is rejected', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: -50,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -757,7 +762,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('10. Invalid timestamp is rejected', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 108,
         timestamp: 'invalid-date-string',
@@ -768,7 +774,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('11. livePrice strictly equals formingCandle.close', () => {
-      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+      const aggregator = new CanonicalCandleAggregator();
+      const s1 = aggregator.processTick(baseSnapshot, {
         symbol: 'NIFTY',
         price: 112.5,
         timestamp: '2026-09-13T09:40:00.000Z',
@@ -777,6 +784,115 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
 
       expect(s1.livePrice).toBe(112.5);
       expect(s1.livePrice).toBe(s1.formingCandle?.close);
+    });
+
+    test('12. A -> B -> A duplicate tick pattern handled via bounded idempotency queue', () => {
+      const aggregator = new CanonicalCandleAggregator();
+
+      const tickA = {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL' as const,
+        tickId: 'tick-A',
+      };
+
+      const tickB = {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 50,
+        volumeType: 'INCREMENTAL' as const,
+        tickId: 'tick-B',
+      };
+
+      const s1 = aggregator.processTick(baseSnapshot, tickA);
+      const s2 = aggregator.processTick(s1, tickB);
+      // Re-emit tickA (A -> B -> A)
+      const s3 = aggregator.processTick(s2, tickA);
+
+      expect(s3).toBe(s2); // Re-emitted tickA is ignored by bounded idempotency set
+      expect(s3.formingCandle?.volume).toBe(150);
+    });
+
+    test('13. Out-of-order tick (09:42 -> 09:41) is rejected within forming candle bucket', () => {
+      const aggregator = new CanonicalCandleAggregator();
+
+      const s1 = aggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 105,
+        timestamp: '2026-09-13T09:42:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      // Out-of-order tick arriving at 09:41
+      const s2 = aggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 95,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 50,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s2).toBe(s1);
+      expect(s2.formingCandle?.close).toBe(105); // Price not corrupted by late tick
+    });
+
+    test('14. Missing timestamp tick is rejected without browser wall-clock fallback', () => {
+      const aggregator = new CanonicalCandleAggregator();
+
+      const s1 = aggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: undefined as any,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s1).toBe(baseSnapshot); // Rejected cleanly
+      expect(s1.formingCandle).toBeNull();
+    });
+
+    test('15. SESSION_CUMULATIVE volume calculates exact session delta', () => {
+      const aggregator = new CanonicalCandleAggregator();
+
+      const s1 = aggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 1000,
+        volumeType: 'SESSION_CUMULATIVE',
+      });
+
+      const s2 = aggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 1250,
+        volumeType: 'SESSION_CUMULATIVE',
+      });
+
+      // Session volume jumped 1000 -> 1250 (delta = 250)
+      expect(s2.formingCandle?.volume).toBe(250);
+    });
+
+    test('16. Snapshot closedThrough matches latest closed candle timestamp and passes validator', () => {
+      const snapshot: ChartMarketSnapshot = {
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        closedCandles: validClosedCandles,
+        formingCandle: validFormingCandle,
+        smcSnapshot: validSMCSnapshot,
+        dataProvenance: 'LIVE',
+        sourceIdentity: 'NSE_LIVE',
+        livePrice: 108,
+        asOfTimestamp: '2026-09-13T09:45:00.000Z',
+        closedThrough: '2026-09-13T09:30:00.000Z',
+      };
+
+      const result = ChartSnapshotValidator.validateSnapshot(snapshot, 'NIFTY', '15m');
+      expect(result.isValid).toBe(true);
     });
   });
 });

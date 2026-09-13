@@ -166,6 +166,16 @@ export class ChartSnapshotValidator {
       }
     }
 
+    if (snapshot.closedThrough && closedCandles && closedCandles.length > 0) {
+      const closedThroughMs = new Date(snapshot.closedThrough).getTime();
+      const lastClosedMs = new Date(closedCandles[closedCandles.length - 1].timestamp).getTime();
+      if (!isNaN(closedThroughMs) && !isNaN(lastClosedMs) && closedThroughMs !== lastClosedMs) {
+        errors.push(
+          `snapshot closedThrough (${snapshot.closedThrough}) does not match latest closed candle timestamp (${closedCandles[closedCandles.length - 1].timestamp}).`,
+        );
+      }
+    }
+
     return {
       isValid: errors.length === 0,
       errors,

@@ -253,20 +253,19 @@ function DashboardContent() {
     subscribeToSymbol(selectedSymbol);
   }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
 
-  // Single Authoritative Live Tick Update Pipeline (Delegated to CanonicalCandleAggregator)
+  const aggregatorRef = useRef(new CanonicalCandleAggregator());
+
+  useEffect(() => {
+    aggregatorRef.current.reset();
+  }, [selectedSymbol, selectedTimeframe]);
+
+  // Single Authoritative Live Tick Update Pipeline (Delegated to instance-scoped CanonicalCandleAggregator)
   useEffect(() => {
     const rawTick = tickers[selectedSymbol];
-    if (rawTick && typeof rawTick.price === 'number' && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
+    if (rawTick && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
       setChartSnapshot((prev) => {
         if (!prev || prev.symbol !== selectedSymbol) return prev;
-        const normalizedTick: NormalizedTick = {
-          symbol: selectedSymbol,
-          price: rawTick.price,
-          timestamp: (rawTick as any).timestamp || new Date(),
-          volume: rawTick.volume,
-          volumeType: (rawTick as any).volumeType || 'UNKNOWN',
-        };
-        return CanonicalCandleAggregator.processTick(prev, normalizedTick);
+        return aggregatorRef.current.processTick(prev, rawTick);
       });
     }
   }, [tickers, selectedSymbol]);

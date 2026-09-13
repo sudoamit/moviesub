@@ -4,70 +4,56 @@ import {
   ChartFormingCandle,
   ChartMarketSnapshot,
   NormalizedTick,
+  ProviderTick,
 } from './chart-snapshot.interface';
+import { normalizeProviderTick } from './provider-tick-normalizer';
 
 /**
- * Canonical Live Candle Aggregator State Machine
+ * Canonical Live Candle Aggregator State Machine (Instance Scoped)
  *
- * Implements the single authoritative logic for transforming normalized live market ticks
- * into closed candles and forming candle snapshots.
- *
- * Gap Policy:
- * If ticks skip across one or more timeframe buckets (e.g., 09:30 bucket followed by 10:30 tick on 15m),
- * the aggregator fails closed by omitting missing buckets. Synthetic empty candles with fabricated OHLC
- * values are strictly prohibited.
+ * Encapsulates bounded idempotency, fail-closed out-of-order tick rejection,
+ * session cumulative volume delta tracking, and deterministic timeframe rollover.
  */
 export class CanonicalCandleAggregator {
-  private static lastProcessedTicks = new Map<string, string>();
+  private processedTickSignatures = new Set<string>();
+  private signatureQueue: string[] = [];
+  private readonly maxQueueSize = 500;
+  private lastAcceptedEventTimeMs = -1;
+  private lastSessionVolume = -1;
 
   /**
-   * Clears internal state tracking (useful for unit testing deterministic scenarios).
+   * Resets internal aggregator state (useful for symbol switches or fresh streams).
    */
-  static clearState(): void {
-    this.lastProcessedTicks.clear();
+  reset(): void {
+    this.processedTickSignatures.clear();
+    this.signatureQueue = [];
+    this.lastAcceptedEventTimeMs = -1;
+    this.lastSessionVolume = -1;
   }
 
   /**
-   * Processes an incoming normalized live tick and produces the updated ChartMarketSnapshot.
+   * Processes an incoming raw or normalized live tick and produces an updated ChartMarketSnapshot.
    */
-  static processTick(
+  processTick(
     snapshot: ChartMarketSnapshot,
-    tick: NormalizedTick,
+    rawTick: ProviderTick | NormalizedTick | any,
   ): ChartMarketSnapshot {
-    if (!snapshot || !tick) return snapshot;
+    if (!snapshot) return snapshot;
 
-    // 1. Symbol Validation
-    if (
-      !tick.symbol ||
-      snapshot.symbol.toUpperCase() !== tick.symbol.toUpperCase()
-    ) {
+    // 1. Strict Provider Tick Normalization & Fail-Closed Validation
+    const tick = normalizeProviderTick(rawTick);
+    if (!tick) {
+      return snapshot; // Reject tick with missing timestamp or invalid price
+    }
+
+    // 2. Symbol Match Verification
+    if (snapshot.symbol.toUpperCase() !== tick.symbol.toUpperCase()) {
       return snapshot;
     }
 
-    // 2. Price Validation (Fail-closed on non-finite, NaN, or <= 0 prices)
-    if (
-      typeof tick.price !== 'number' ||
-      isNaN(tick.price) ||
-      !isFinite(tick.price) ||
-      tick.price <= 0
-    ) {
-      return snapshot;
-    }
-
-    // 3. Timestamp Validation
     const tickTimeMs = new Date(tick.timestamp).getTime();
-    if (isNaN(tickTimeMs)) {
-      return snapshot;
-    }
 
-    // 4. Volume Sanitization
-    const rawVol = tick.volume;
-    const safeVol =
-      typeof rawVol === 'number' && !isNaN(rawVol) && isFinite(rawVol) && rawVol >= 0
-        ? rawVol
-        : undefined;
-
-    // 5. Stale / Out-of-Order Check against Closed Candles
+    // 3. Stale Tick Check against Closed Candles
     let closedCandles = snapshot.closedCandles || [];
     if (closedCandles.length > 0) {
       const lastClosedMs = new Date(
@@ -78,7 +64,7 @@ export class CanonicalCandleAggregator {
       }
     }
 
-    // 6. Timeframe Bucket Calculation via TimeframeRegistry (Never new Date())
+    // 4. Timeframe Bucket Calculation via TimeframeRegistry (Never new Date())
     const bucketOpenDate = TimeframeRegistry.getBucketOpenTime(
       tick.timestamp,
       snapshot.timeframe,
@@ -91,21 +77,32 @@ export class CanonicalCandleAggregator {
       ? new Date(currentForming.timestamp).getTime()
       : -1;
 
-    // 7. Stale / Out-of-Order Check against Current Forming Candle
+    // 5. Fail-Closed Out-of-Order Tick Rejection
     if (currentForming && tickTimeMs < currentFormingMs) {
-      return snapshot; // Ignore tick older than current forming candle bucket
+      return snapshot; // Reject tick belonging to a past candle bucket
+    }
+    if (this.lastAcceptedEventTimeMs > 0 && tickTimeMs < this.lastAcceptedEventTimeMs) {
+      return snapshot; // Reject out-of-order tick earlier than latest accepted event
     }
 
-    // 8. Idempotency & Duplicate Tick Handling
+    // 6. Bounded Idempotency Check (A -> B -> A Duplicate Replay Protection)
     const tickSig = `${tick.symbol}_${tickTimeMs}_${tick.price}_${tick.volume ?? 'nv'}_${tick.tickId ?? ''}`;
-    const stateKey = `${snapshot.symbol}_${snapshot.timeframe}`;
-    const lastSig = this.lastProcessedTicks.get(stateKey);
-
-    if (lastSig === tickSig) {
-      return snapshot; // Exact duplicate tick re-entry -> no-op
+    if (this.processedTickSignatures.has(tickSig)) {
+      return snapshot; // Bounded duplicate tick hit -> no-op
     }
 
-    // 9. Timeframe Rollover Check
+    // Update bounded queue
+    this.processedTickSignatures.add(tickSig);
+    this.signatureQueue.push(tickSig);
+    if (this.signatureQueue.length > this.maxQueueSize) {
+      const oldest = this.signatureQueue.shift();
+      if (oldest) this.processedTickSignatures.delete(oldest);
+    }
+
+    // Record last accepted event timestamp
+    this.lastAcceptedEventTimeMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
+
+    // 7. Timeframe Rollover Transition
     const isRollover = Boolean(currentForming && bucketOpenMs > currentFormingMs);
 
     if (isRollover && currentForming) {
@@ -120,7 +117,6 @@ export class CanonicalCandleAggregator {
         provenance: currentForming.provenance || snapshot.dataProvenance,
       };
 
-      // Append to closed candles if not already present
       const alreadyClosed = closedCandles.some(
         (c) =>
           new Date(c.timestamp).getTime() ===
@@ -131,18 +127,25 @@ export class CanonicalCandleAggregator {
       }
     }
 
-    // 10. Forming Candle Assembly / Volume Aggregation
+    // 8. Volume Aggregation & Forming Candle Construction
     let nextForming: ChartFormingCandle;
+    const safeVol = tick.volume ?? 0;
 
     if (currentForming && !isRollover) {
-      // Same candle bucket update
       let newVol = currentForming.volume;
       if (tick.volumeType === 'INCREMENTAL') {
-        newVol = currentForming.volume + (safeVol ?? 0);
-      } else if (tick.volumeType === 'CUMULATIVE') {
-        newVol = Math.max(currentForming.volume, safeVol ?? 0);
+        newVol = currentForming.volume + safeVol;
+      } else if (tick.volumeType === 'BUCKET_CUMULATIVE') {
+        newVol = Math.max(currentForming.volume, safeVol);
+      } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
+        const delta =
+          this.lastSessionVolume >= 0
+            ? Math.max(0, safeVol - this.lastSessionVolume)
+            : 0;
+        newVol = currentForming.volume + delta;
+        this.lastSessionVolume = safeVol;
       } else {
-        // UNKNOWN / missing volumeType: fail-closed, keep volume unchanged
+        // UNKNOWN: fail-closed, keep volume unchanged
         newVol = currentForming.volume;
       }
 
@@ -162,9 +165,12 @@ export class CanonicalCandleAggregator {
       let initialVol = 0;
       if (
         tick.volumeType === 'INCREMENTAL' ||
-        tick.volumeType === 'CUMULATIVE'
+        tick.volumeType === 'BUCKET_CUMULATIVE'
       ) {
-        initialVol = safeVol ?? 0;
+        initialVol = safeVol;
+      } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
+        initialVol = 0;
+        this.lastSessionVolume = safeVol;
       }
 
       nextForming = {
@@ -180,17 +186,20 @@ export class CanonicalCandleAggregator {
       };
     }
 
-    // Record processed tick signature
-    this.lastProcessedTicks.set(stateKey, tickSig);
-
-    // 11. Single Live Price Authority
-    const livePrice = nextForming.close;
+    // 9. Snapshot Metadata & Live Observation Timestamp Consistency
+    const observationIso = new Date(tickTimeMs).toISOString();
+    const closedThrough =
+      closedCandles.length > 0
+        ? closedCandles[closedCandles.length - 1].timestamp
+        : snapshot.closedThrough;
 
     return {
       ...snapshot,
       closedCandles,
       formingCandle: nextForming,
-      livePrice,
+      livePrice: nextForming.close,
+      closedThrough,
+      asOfTimestamp: observationIso,
     };
   }
 }

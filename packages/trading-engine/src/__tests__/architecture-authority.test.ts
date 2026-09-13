@@ -8,9 +8,9 @@ describe('Architectural Data Authority & Single Aggregation Implementation Test'
   test('P0 Authority: page.tsx delegates live tick aggregation exclusively to CanonicalCandleAggregator', () => {
     const pageContent = fs.readFileSync(pagePath, 'utf8');
 
-    // Assert CanonicalCandleAggregator is imported and invoked in page.tsx
+    // Assert CanonicalCandleAggregator is imported and invoked via aggregatorRef in page.tsx
     expect(pageContent).toContain('CanonicalCandleAggregator');
-    expect(pageContent).toContain('CanonicalCandleAggregator.processTick');
+    expect(pageContent).toContain('aggregatorRef.current.processTick');
 
     // Assert page.tsx does NOT independently perform bucket calculation or manual forming candle construction
     expect(pageContent).not.toContain('isRollover');
