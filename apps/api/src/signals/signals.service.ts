@@ -553,7 +553,8 @@ export class SignalsService implements OnModuleInit {
         requestedEntryPrice: outcome.requestedEntryPrice !== undefined ? Number(outcome.requestedEntryPrice) : Number(t.entryPrice),
         actualEntryPrice,
         actualEntryPriceCurrency,
-        // Backward-compatible non-authoritative alias (deprecated: use actualEntryPrice)
+        // [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
+        // Legacy compatibility alias only. Canonical execution price is `actualEntryPrice`.
         entryPrice: Number(t.entryPrice),
         entryPriceCurrency: quoteCurrency,
         entryTimeUtc,

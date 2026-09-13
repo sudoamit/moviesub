@@ -57,10 +57,29 @@ export interface ITradeJournalRecord {
   readonly isLegacyExecutionData?: boolean;
   readonly executionDataComplete?: boolean;
 
-  // Backward-compatible semantic aliases (Deprecated: non-authoritative compatibility aliases; do not use for execution accounting)
+  /**
+   * @deprecated
+   * [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
+   * Legacy compatibility field. Use `actualEntryPrice` for authoritative execution price.
+   */
   readonly entryPrice?: number | null;
+  /**
+   * @deprecated
+   * [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
+   * Legacy compatibility field. Use `actualEntryPriceCurrency` or `quoteCurrency`.
+   */
   readonly entryPriceCurrency?: string | null;
+  /**
+   * @deprecated
+   * [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
+   * Legacy compatibility field. Use `actualExitPrice`.
+   */
   readonly exitPrice?: number | null;
+  /**
+   * @deprecated
+   * [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
+   * Legacy compatibility field. Use `actualExitPriceCurrency`.
+   */
   readonly exitPriceCurrency?: string | null;
   readonly durationMs?: number | null;
   readonly durationMinutes?: number | null;
