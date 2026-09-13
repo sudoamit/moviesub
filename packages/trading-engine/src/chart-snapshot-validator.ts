@@ -24,6 +24,11 @@ export class ChartSnapshotValidator {
     for (let i = 0; i < closedCandles.length; i++) {
       const c = closedCandles[i];
 
+      if (!c) {
+        errors.push(`Candle at index ${i} is null or undefined.`);
+        continue;
+      }
+
       if (c.provenance === 'SYNTHETIC_FALLBACK') {
         errors.push(`Candle ${i} has invalid provenance: SYNTHETIC_FALLBACK. Synthetic data is prohibited.`);
       }
@@ -47,12 +52,25 @@ export class ChartSnapshotValidator {
         prevTime = timeSec;
       }
 
-      // OHLC Invariants
-      if (c.high < Math.max(c.open, c.close) || c.low > Math.min(c.open, c.close)) {
-        errors.push(`Candle ${i} has invalid OHLC relationship: open=${c.open}, high=${c.high}, low=${c.low}, close=${c.close}`);
-      }
-      if (c.volume < 0) {
-        errors.push(`Volume < 0 at index ${i}: volume=${c.volume}`);
+      // OHLC Invariants & Finite Numeric Checks
+      if (
+        !Number.isFinite(c.open) ||
+        !Number.isFinite(c.high) ||
+        !Number.isFinite(c.low) ||
+        !Number.isFinite(c.close) ||
+        !Number.isFinite(c.volume)
+      ) {
+        errors.push(`Candle ${i} contains non-finite numeric OHLCV values.`);
+      } else {
+        if (c.open <= 0 || c.high <= 0 || c.low <= 0 || c.close <= 0) {
+          errors.push(`Candle ${i} contains non-positive price values: open=${c.open}, high=${c.high}, low=${c.low}, close=${c.close}`);
+        }
+        if (c.high < Math.max(c.open, c.close) || c.low > Math.min(c.open, c.close)) {
+          errors.push(`Candle ${i} has invalid OHLC relationship: open=${c.open}, high=${c.high}, low=${c.low}, close=${c.close}`);
+        }
+        if (c.volume < 0) {
+          errors.push(`Volume < 0 at index ${i}: volume=${c.volume}`);
+        }
       }
     }
 
@@ -78,6 +96,14 @@ export class ChartSnapshotValidator {
       errors.push('Snapshot missing symbol or timeframe');
     }
 
+    if (!snapshot.sourceIdentity || snapshot.sourceIdentity.trim() === '') {
+      errors.push('Snapshot missing valid sourceIdentity');
+    }
+
+    if (!snapshot.dataProvenance) {
+      errors.push('Snapshot missing valid dataProvenance');
+    }
+
     if (targetSymbol && snapshot.symbol.toUpperCase() !== targetSymbol.toUpperCase()) {
       errors.push(`Snapshot symbol ${snapshot.symbol} does not match target symbol ${targetSymbol}.`);
     }
@@ -87,7 +113,7 @@ export class ChartSnapshotValidator {
     }
 
     if (snapshot.livePrice !== null && snapshot.livePrice !== undefined) {
-      if (typeof snapshot.livePrice !== 'number' || isNaN(snapshot.livePrice) || snapshot.livePrice < 0) {
+      if (typeof snapshot.livePrice !== 'number' || !Number.isFinite(snapshot.livePrice) || snapshot.livePrice <= 0) {
         errors.push(`Snapshot livePrice is invalid: ${snapshot.livePrice}`);
       }
     }
@@ -117,14 +143,24 @@ export class ChartSnapshotValidator {
         }
       }
 
-      if (formingCandle.high < Math.max(formingCandle.open, formingCandle.close)) {
-        errors.push('Forming candle OHLC violation: high < max(open, close)');
-      }
-      if (formingCandle.low > Math.min(formingCandle.open, formingCandle.close)) {
-        errors.push('Forming candle OHLC violation: low > min(open, close)');
-      }
-      if (formingCandle.volume < 0) {
-        errors.push('Forming candle volume < 0');
+      if (
+        !Number.isFinite(formingCandle.open) ||
+        !Number.isFinite(formingCandle.high) ||
+        !Number.isFinite(formingCandle.low) ||
+        !Number.isFinite(formingCandle.close) ||
+        !Number.isFinite(formingCandle.volume)
+      ) {
+        errors.push('Forming candle contains non-finite numeric OHLCV values');
+      } else {
+        if (formingCandle.high < Math.max(formingCandle.open, formingCandle.close)) {
+          errors.push('Forming candle OHLC violation: high < max(open, close)');
+        }
+        if (formingCandle.low > Math.min(formingCandle.open, formingCandle.close)) {
+          errors.push('Forming candle OHLC violation: low > min(open, close)');
+        }
+        if (formingCandle.volume < 0) {
+          errors.push('Forming candle volume < 0');
+        }
       }
     }
 
@@ -137,7 +173,7 @@ export class ChartSnapshotValidator {
       }
     }
 
-    // Validate SMC snapshot identity match if present
+    // Validate SMC snapshot identity match & timestamp invariants if present
     if (smcSnapshot) {
       if (!this.validateSMCSnapshot(smcSnapshot, snapshot.symbol, snapshot.timeframe)) {
         errors.push(
@@ -210,4 +246,3 @@ export class ChartSnapshotValidator {
     return true;
   }
 }
-

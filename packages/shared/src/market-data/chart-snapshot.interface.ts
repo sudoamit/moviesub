@@ -11,6 +11,7 @@ import {
 
 export type ChartProvenance = 'LIVE' | 'HISTORICAL' | 'DELAYED' | 'BACKTEST' | 'LEARNING' | 'CACHED' | 'SYNTHETIC';
 export type TickVolumeType = 'INCREMENTAL' | 'BUCKET_CUMULATIVE' | 'SESSION_CUMULATIVE' | 'UNKNOWN';
+export type CandleClosureType = 'TIME_BOUNDARY_INFERRED' | 'PROVIDER_CONFIRMED';
 
 export interface ProviderTick {
   readonly symbol?: string;
@@ -19,6 +20,9 @@ export interface ProviderTick {
   readonly volume?: number;
   readonly volumeType?: TickVolumeType;
   readonly tickId?: string;
+  readonly sequenceNumber?: number;
+  readonly providerId?: string;
+  readonly isReconnect?: boolean;
 }
 
 export interface NormalizedTick {
@@ -28,6 +32,9 @@ export interface NormalizedTick {
   readonly volume?: number;
   readonly volumeType: TickVolumeType;
   readonly tickId?: string;
+  readonly sequenceNumber?: number;
+  readonly providerId?: string;
+  readonly isReconnect?: boolean;
 }
 
 export interface ChartCandle {
@@ -39,6 +46,7 @@ export interface ChartCandle {
   readonly volume: number;
   readonly isClosed: true;
   readonly provenance?: ChartProvenance;
+  readonly closureType?: CandleClosureType;
 }
 
 export interface ChartFormingCandle {
@@ -60,6 +68,7 @@ export interface ChartSMCSnapshot {
   readonly provenance: ChartProvenance;
   readonly computedAt?: Date | string | number;
   readonly structureAsOf?: Date | string | number;
+  readonly marketAsOf?: Date | string | number;
   readonly structures?: {
     swings?: ISwingPoint[];
     bos?: IBreakOfStructure[];
@@ -83,6 +92,8 @@ export interface ChartMarketSnapshot {
   readonly livePrice: number | null;
   readonly closedThrough?: Date | string | number;
   readonly asOfTimestamp: Date | string | number;
+  readonly marketAsOf?: Date | string | number;
+  readonly sessionKey?: string;
   readonly dataProvenance: ChartProvenance;
   readonly sourceIdentity: string;
   readonly smcSnapshot?: ChartSMCSnapshot | null;

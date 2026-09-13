@@ -14,6 +14,8 @@ import {
   toPrismaTimeframe,
   getTimeframeDurationMs,
   chartCandlesToICandles,
+  chartCandlesToICandlesResult,
+  VenueSessionCalendar,
 } from '@quant/shared';
 import {
   calculateEMA,
@@ -368,14 +370,17 @@ export class CandlesService {
       throw new NotFoundException(`No closed candles found for symbol '${sym}' on timeframe '${timeframe}'`);
     }
 
-    // 2. Pure SMC Analysis from trading-engine consuming ONLY closed candles
+    // 2. Pure SMC Analysis from trading-engine consuming ONLY closed candles via fail-closed adapter
     const latestClosedCandle = closedCandles[closedCandles.length - 1];
     const latestClosedTimestamp = latestClosedCandle.timestamp;
 
-    const smcAnalysis = SMCAnalyzer.analyze(chartCandlesToICandles(closedCandles), {
-      asOfTimestamp: new Date(latestClosedTimestamp),
-      timeframe,
-    });
+    const convResult = chartCandlesToICandlesResult(closedCandles);
+    const smcAnalysis = convResult.isDegraded
+      ? { swingPoints: [], breaksOfStructure: [], changesOfCharacter: [], marketRegime: undefined, dealingRange: null, liquidityPools: [], liquiditySweeps: [], fairValueGaps: [], orderBlocks: [], isDegraded: true }
+      : SMCAnalyzer.analyze(convResult.candles, {
+          asOfTimestamp: new Date(latestClosedTimestamp),
+          timeframe,
+        });
 
     // 3. Multi-Timeframe Signal Setup Generation (100% matched with SignalsService)
     let activeSignal: any = null;
@@ -407,6 +412,10 @@ export class CandlesService {
     const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
+    const marketAsOf = candlesResp.formingCandle
+      ? new Date(candlesResp.formingCandle.timestamp).toISOString()
+      : new Date(latestClosedTimestamp).toISOString();
+    const sessionKey = VenueSessionCalendar.getSessionKey(sym, latestClosedTimestamp);
 
     return {
       symbol: inst.symbol,
@@ -427,6 +436,8 @@ export class CandlesService {
       livePrice,
       closedThrough: latestClosedTimestamp,
       asOfTimestamp: observationTime,
+      marketAsOf,
+      sessionKey,
       dataProvenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
       sourceIdentity,
       smcSnapshot: {
@@ -435,6 +446,7 @@ export class CandlesService {
         asOfTimestamp: observationTime,
         computedAt: observationTime,
         structureAsOf: latestClosedTimestamp,
+        marketAsOf,
         provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
         structures: {
           swings: smcAnalysis.swingPoints || [],
@@ -450,7 +462,7 @@ export class CandlesService {
         fvgs: smcAnalysis.fairValueGaps || [],
         orderBlocks: smcAnalysis.orderBlocks || [],
       },
-      isDegraded: smcAnalysis.isDegraded || false,
+      isDegraded: convResult.isDegraded || smcAnalysis.isDegraded || false,
     };
   }
 

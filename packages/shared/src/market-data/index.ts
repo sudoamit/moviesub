@@ -7,3 +7,4 @@ export * from './chart-snapshot.interface';
 export * from './canonical-candle-aggregator';
 export * from './provider-tick-normalizer';
 export * from './chart-candle-adapter';
+export * from './venue-session-calendar';

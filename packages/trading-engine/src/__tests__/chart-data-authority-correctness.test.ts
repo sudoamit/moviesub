@@ -207,8 +207,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
 
     const validation = ChartSnapshotValidator.validateSnapshot(snapshot, 'NIFTY', '15m');
     expect(validation.isValid).toBe(false);
-    expect(validation.errors).toContain(
-      'Forming candle timestamp 2026-09-13T09:00:00.000Z is strictly before the latest closed candle timestamp 2026-09-13T09:30:00.000Z.',
+    expect(validation.errors[0]).toContain(
+      'must be strictly after the latest closed candle timestamp',
     );
   });
 
@@ -917,7 +917,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     });
 
     test('18. chartCandlesToICandles rejects non-finite and NaN candle fields', () => {
-      const { chartCandlesToICandles } = require('@quant/shared');
+      const { chartCandlesToICandles, chartCandlesToICandlesResult } = require('@quant/shared');
 
       const invalidCandles: ChartCandle[] = [
         {
@@ -949,10 +949,13 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         },
       ];
 
-      const converted = chartCandlesToICandles(invalidCandles);
-      expect(converted).toHaveLength(1);
-      expect(converted[0].close).toBe(108);
-      expect(Number.isFinite(converted[0].open)).toBe(true);
+      const res = chartCandlesToICandlesResult(invalidCandles);
+      expect(res.isDegraded).toBe(true);
+      expect(res.isValid).toBe(false);
+      expect(res.candles).toHaveLength(1);
+      expect(res.candles[0].close).toBe(108);
+
+      expect(() => chartCandlesToICandles(invalidCandles)).toThrow();
     });
 
     test('19. SESSION_CUMULATIVE volume resets baseline across day session boundary', () => {
