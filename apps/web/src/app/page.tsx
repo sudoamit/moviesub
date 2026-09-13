@@ -56,50 +56,22 @@ const TradingChart = dynamic(
   },
 );
 
-function getInitialCandlesForSymbol(symbol: string): ICandle[] {
-  const basePrice =
-    symbol === 'BTCUSDT'
-      ? 79200
-      : symbol === 'XAUUSD' || symbol === 'GOLD'
-        ? 2885.5
-        : symbol === 'BANKNIFTY'
-          ? 57450
-          : symbol === 'RELIANCE'
-            ? 1285
-            : symbol === 'HDFCBANK'
-              ? 720
-              : symbol === 'INFY'
-                ? 1140
-                : 24150;
-
-  // Fixed deterministic epoch anchor to guarantee 100% deterministic SSR/client hydration match
-  const anchorTime = 1756972800000;
-  const stepMs = 15 * 60 * 1000;
-  const count = 120;
-  const result: ICandle[] = [];
-  let price = basePrice * 0.985;
-
-  for (let i = count; i >= 0; i--) {
-    const timestamp = new Date(anchorTime - i * stepMs);
-    const change = (Math.sin(i / 6) * 0.0025 + ((i % 5) - 2) * 0.001) * price;
-    const open = Number(price.toFixed(2));
-    const close = Number((price + change).toFixed(2));
-    const high = Number((Math.max(open, close) + 0.0015 * price).toFixed(2));
-    const low = Number((Math.min(open, close) - 0.0015 * price).toFixed(2));
-    const volume = Math.floor(25000 + ((i * 137) % 30000));
-    price = close;
-    result.push({ timestamp, open, high, low, close, volume, isClosed: true });
-  }
-  return result;
-}
-
 function DashboardContent() {
   const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>('terminal');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('NIFTY');
   const [selectedTimeframe, setSelectedTimeframe] = useState<string>('15m');
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyMode>('SMC');
-  const [candles, setCandles] = useState<ICandle[]>(() => getInitialCandlesForSymbol('NIFTY'));
+  const [candles, setCandles] = useState<ICandle[]>([]);
+  const [formingCandle, setFormingCandle] = useState<ICandle | null>(null);
+  const [dataProvenance, setDataProvenance] = useState<string>('LIVE');
+  const [isDataUnavailable, setIsDataUnavailable] = useState<boolean>(false);
+  const [serverSMC, setServerSMC] = useState<{
+    structures?: any;
+    liquidity?: any;
+    fvgs?: any[];
+    orderBlocks?: any[];
+  } | null>(null);
   const [signals, setSignals] = useState<ISignalSetup[]>([]);
   const [selectedSignal, setSelectedSignal] = useState<ISignalSetup | null>(null);
   const [isOptionChainModalOpen, setIsOptionChainModalOpen] = useState<boolean>(false);
@@ -151,7 +123,6 @@ function DashboardContent() {
       const savedSymbol = localStorage.getItem('quant_selected_symbol');
       if (savedSymbol) {
         setSelectedSymbol(savedSymbol);
-        setCandles(getInitialCandlesForSymbol(savedSymbol));
       }
 
       const savedStrat = localStorage.getItem('quant_selected_strategy') as StrategyMode | null;
@@ -209,25 +180,60 @@ function DashboardContent() {
   };
 
   const fetchCandles = async (sym: string, tf: string) => {
+    setIsDataUnavailable(false);
     try {
       const res = await fetch(
         `http://localhost:3001/api/candles/chart-data?symbol=${sym}&timeframe=${tf}&limit=200`,
       );
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
-      if (data && Array.isArray(data.candles)) {
+      if (data && Array.isArray(data.candles) && data.candles.length > 0) {
         const parsedCandles: ICandle[] = data.candles.map((c: any) => ({
           timestamp: new Date(c.time * 1000),
           open: c.open,
           high: c.high,
           low: c.low,
           close: c.close,
-          volume: c.volume,
+          volume: c.volume ?? 0,
           isClosed: true,
+          provenance: data.dataProvenance || 'LIVE',
         }));
         setCandles(parsedCandles);
+        setDataProvenance(data.dataProvenance || 'LIVE');
+        if (data.formingCandle) {
+          setFormingCandle({
+            timestamp: new Date((data.formingCandle.time || data.formingCandle.timestamp) * 1000),
+            open: data.formingCandle.open,
+            high: data.formingCandle.high,
+            low: data.formingCandle.low,
+            close: data.formingCandle.close,
+            volume: data.formingCandle.volume ?? 0,
+            isClosed: false,
+            provenance: data.dataProvenance || 'LIVE',
+          });
+        } else {
+          setFormingCandle(null);
+        }
+        setServerSMC({
+          structures: data.structures,
+          liquidity: data.liquidity,
+          fvgs: data.fvgs,
+          orderBlocks: data.orderBlocks,
+        });
+      } else {
+        setCandles([]);
+        setFormingCandle(null);
+        setServerSMC(null);
+        setIsDataUnavailable(true);
       }
     } catch (e) {
       console.error('Failed to fetch chart data:', e);
+      setCandles([]);
+      setFormingCandle(null);
+      setServerSMC(null);
+      setIsDataUnavailable(true);
     }
   };
 
@@ -249,7 +255,6 @@ function DashboardContent() {
     if (typeof window !== 'undefined') {
       localStorage.setItem('quant_selected_symbol', sym);
     }
-    setCandles(getInitialCandlesForSymbol(sym)); // Immediate rich fallback to prevent blank chart
     const signalForSymbol = signals.find((item) => item.symbol === sym);
     setSelectedSignal(signalForSymbol || null);
     fetchCandles(sym, selectedTimeframe);
@@ -271,33 +276,15 @@ function DashboardContent() {
     fetchSignals(selectedTimeframe);
   };
 
-  const defaultPrice =
-    selectedSymbol === 'BTCUSDT'
-      ? 79230.0
-      : selectedSymbol === 'XAUUSD' || selectedSymbol === 'GOLD'
-        ? 2885.5
-        : selectedSymbol === 'BANKNIFTY'
-          ? 57496.3
-          : 24175.65;
   const currentTicker = tickers[selectedSymbol] || {
     symbol: selectedSymbol,
-    price:
-      candles.length > 0 &&
-      ((selectedSymbol === 'BTCUSDT' && candles[candles.length - 1].close > 50000) ||
-        (selectedSymbol === 'XAUUSD' &&
-          candles[candles.length - 1].close > 2000 &&
-          candles[candles.length - 1].close < 4000) ||
-        (selectedSymbol !== 'BTCUSDT' &&
-          selectedSymbol !== 'XAUUSD' &&
-          candles[candles.length - 1].close < 60000))
-        ? candles[candles.length - 1].close
-        : defaultPrice,
+    price: candles.length > 0 ? candles[candles.length - 1].close : undefined,
     changePercent: 0,
     changeAmount: 0,
     high: 0,
     low: 0,
     volume: 0,
-    isRealTime: true,
+    isRealTime: isConnected,
   };
 
   const isPositionActive = useMemo(() => {
@@ -447,7 +434,14 @@ function DashboardContent() {
                   symbol={selectedSymbol}
                   timeframe={selectedTimeframe}
                   candles={candles}
+                  formingCandle={formingCandle}
+                  dataProvenance={dataProvenance}
+                  isDataUnavailable={isDataUnavailable}
                   signal={selectedSignal}
+                  structures={serverSMC?.structures}
+                  liquidity={serverSMC?.liquidity}
+                  fvgs={serverSMC?.fvgs}
+                  orderBlocks={serverSMC?.orderBlocks}
                   livePrice={currentTicker.price}
                   liveChangePercent={currentTicker.changePercent}
                   isTradeActive={isPositionActive}

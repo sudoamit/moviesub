@@ -46,11 +46,15 @@ import {
   LiquidityHeatmapEngine,
   MTFFlowRadarEngine,
 } from '@quant/trading-engine';
+import { TimeframeRegistry } from '@quant/shared';
 
 interface TradingChartProps {
   symbol: string;
   timeframe: string;
   candles: any[];
+  formingCandle?: any | null;
+  dataProvenance?: string;
+  isDataUnavailable?: boolean;
   signal?: any;
   structures?: {
     swings?: any[];
@@ -76,6 +80,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   symbol,
   timeframe,
   candles,
+  formingCandle,
+  dataProvenance = 'LIVE',
+  isDataUnavailable = false,
   signal,
   structures,
   liquidity,
@@ -92,6 +99,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const chartApiRef = useRef<IChartApi | null>(null);
   const mainSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
+  const timeToVolumeMapRef = useRef<Map<number, number>>(new Map());
 
   // Indicator Series Refs
   const ema20SeriesRef = useRef<ISeriesApi<any> | null>(null);
@@ -226,7 +234,24 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
   }, [symbol]);
 
-  const currentPrice = livePrice || (candles.length > 0 ? candles[candles.length - 1].close : 0);
+  // Combine immutable closed historical candles with the forming candle
+  const allCandles = useMemo(() => {
+    const list = [...(candles || [])];
+    if (formingCandle) {
+      const formingTime = new Date(formingCandle.timestamp).getTime();
+      const existingIdx = list.findIndex(
+        (c) => new Date(c.timestamp).getTime() === formingTime,
+      );
+      if (existingIdx >= 0) {
+        list[existingIdx] = formingCandle;
+      } else {
+        list.push(formingCandle);
+      }
+    }
+    return list;
+  }, [candles, formingCandle]);
+
+  const currentPrice = livePrice || (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
   const timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
   // 1. Canonical SMC Structures (Server-provided when available, fallback to deterministic closed-candle analysis)
@@ -267,9 +292,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // 2. Client-Side Volume Profile & Cumulative Volume Delta Computation
   const clientVP = useMemo(() => {
-    if (!candles || candles.length < 5) return null;
+    if (!allCandles || allCandles.length < 5) return null;
     try {
-      const cleanCandles = candles.map((c, idx) => ({
+      const cleanCandles = allCandles.map((c, idx) => ({
         timestamp:
           c.timestamp instanceof Date
             ? c.timestamp.toISOString()
@@ -281,7 +306,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 1),
-        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
+        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < allCandles.length - 1,
         provenance: c.provenance,
       }));
       return VolumeProfileAnalyzer.compute(cleanCandles as any, 28, 0.7);
@@ -289,7 +314,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       console.error('Volume profile computation error:', e);
       return null;
     }
-  }, [candles]);
+  }, [allCandles]);
 
   // 3. ICT Session & Kill Zone Info
   const clientSession = useMemo(() => {
@@ -516,7 +541,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     vwapSeriesRef.current = chart.addSeries(LineSeries, {
       color: '#F97316',
       lineWidth: 2,
-      title: 'VWAP',
+      title: 'Session VWAP',
       priceScaleId: 'right',
     });
     sma20SeriesRef.current = chart.addSeries(LineSeries, {
@@ -526,7 +551,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       priceScaleId: 'right',
     });
 
-    // 5. Crosshair Move Listener for OHLC Display
+    // 5. Crosshair Move Listener for OHLC & Real Volume Display
     chart.subscribeCrosshairMove((param) => {
       if (!param || !param.time || !param.seriesData || !mainSeriesRef.current) {
         setOhlcData(null);
@@ -534,14 +559,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       }
       const data: any = param.seriesData.get(mainSeriesRef.current);
       if (data) {
-        const timeVal = typeof param.time === 'number' ? param.time * 1000 : Date.now();
+        const timeSec = typeof param.time === 'number' ? param.time : 0;
+        const timeVal = timeSec * 1000;
+        const realVol = timeToVolumeMapRef.current.get(timeSec) ?? data.volume ?? 0;
         setOhlcData({
           time: new Date(timeVal).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           open: data.open ?? data.value ?? 0,
           high: data.high ?? data.value ?? 0,
           low: data.low ?? data.value ?? 0,
           close: data.close ?? data.value ?? 0,
-          volume: 0,
+          volume: realVol,
         });
       }
     });
@@ -619,13 +646,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // 2. Populate Candlestick, Volume & Indicator Series Data
   useEffect(() => {
-    if (!mainSeriesRef.current || !candles || candles.length === 0) return;
+    if (!mainSeriesRef.current || !allCandles || allCandles.length === 0) return;
 
     const formattedCandles: CandlestickData<Time>[] = [];
     const formattedVolume: HistogramData<Time>[] = [];
     const linePrices: LineData<Time>[] = [];
+    const timeToVolumeMap = new Map<number, number>();
 
-    const sorted = [...candles].sort(
+    const sorted = [...allCandles].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
     const seenTimes = new Set<number>();
@@ -635,6 +663,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       const numTime = Number(timeSec);
       if (seenTimes.has(numTime)) return;
       seenTimes.add(numTime);
+      const vol = c.volume ?? 0;
+      timeToVolumeMap.set(numTime, vol);
 
       const isUp = c.close >= c.open;
       formattedCandles.push({
@@ -647,7 +677,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
       formattedVolume.push({
         time: timeSec,
-        value: c.volume,
+        value: vol,
         color: isUp ? 'rgba(16, 185, 129, 0.4)' : 'rgba(244, 63, 94, 0.4)',
       });
 
@@ -656,6 +686,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         value: c.close,
       });
     });
+
+    timeToVolumeMapRef.current = timeToVolumeMap;
 
     if (chartType === 'Candles' || chartType === 'Bar') {
       mainSeriesRef.current.setData(formattedCandles);
@@ -697,15 +729,25 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           .filter((item): item is { time: Time; value: number } => item !== null);
       };
 
-      const calcVWAP = () => {
+      // Session VWAP: resets cumulative volume & typical volume on UTC daily session boundaries
+      const calcSessionVWAP = () => {
         let cumVol = 0;
         let cumTypVol = 0;
+        let lastDateStr = '';
         return sorted.map((c) => {
+          const d = new Date(c.timestamp);
+          const dateStr = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+          if (dateStr !== lastDateStr) {
+            cumVol = 0;
+            cumTypVol = 0;
+            lastDateStr = dateStr;
+          }
           const typ = (c.high + c.low + c.close) / 3;
-          cumVol += c.volume;
-          cumTypVol += typ * c.volume;
+          const vol = c.volume ?? 1;
+          cumVol += vol;
+          cumTypVol += typ * vol;
           return {
-            time: Math.floor(new Date(c.timestamp).getTime() / 1000) as unknown as Time,
+            time: Math.floor(d.getTime() / 1000) as unknown as Time,
             value: cumVol > 0 ? Number((cumTypVol / cumVol).toFixed(2)) : c.close,
           };
         });
@@ -714,10 +756,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       if (ema20SeriesRef.current) ema20SeriesRef.current.setData(showEMA20 ? calcEMA(20) : []);
       if (ema50SeriesRef.current) ema50SeriesRef.current.setData(showEMA50 ? calcEMA(50) : []);
       if (ema200SeriesRef.current) ema200SeriesRef.current.setData(showEMA200 ? calcEMA(200) : []);
-      if (vwapSeriesRef.current) vwapSeriesRef.current.setData(showVWAP ? calcVWAP() : []);
+      if (vwapSeriesRef.current) vwapSeriesRef.current.setData(showVWAP ? calcSessionVWAP() : []);
       if (sma20SeriesRef.current) sma20SeriesRef.current.setData(showSMA20 ? calcSMA(20) : []);
     }
-  }, [candles, chartType, showVolume, showEMA20, showEMA50, showEMA200, showVWAP, showSMA20]);
+  }, [allCandles, chartType, showVolume, showEMA20, showEMA50, showEMA200, showVWAP, showSMA20]);
 
   // Fit content strictly when symbol or timeframe changes so manual pan/drag is never interrupted
   const prevSymbolTfRef = useRef<string>('');
@@ -729,19 +771,31 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
   }, [symbol, timeframe, candles.length]);
 
-  // 3. Real-Time Incremental Tick Updates
+  // 3. Real-Time Incremental Tick Updates (Forming Candle Only, Never Mutating Closed Candles)
   useEffect(() => {
-    if (!mainSeriesRef.current || !candles || candles.length === 0 || !currentPrice) return;
+    if (!mainSeriesRef.current || !allCandles || allCandles.length === 0 || !currentPrice) return;
 
-    const lastCandle = candles[candles.length - 1];
-    const timeSec = Math.floor(new Date(lastCandle.timestamp).getTime() / 1000) as unknown as Time;
+    let durationMs = 15 * 60 * 1000;
+    try {
+      durationMs = TimeframeRegistry.getDurationMs(timeframe);
+    } catch (e) {}
+
+    const now = Date.now();
+    const currentBucketMs = Math.floor(now / durationMs) * durationMs;
+
+    const lastCandle = allCandles[allCandles.length - 1];
+    const lastCandleMs = new Date(lastCandle.timestamp).getTime();
+
+    const isSameBucket = Math.abs(currentBucketMs - lastCandleMs) < durationMs;
+    const updateTimeMs = isSameBucket ? lastCandleMs : currentBucketMs;
+    const timeSec = Math.floor(updateTimeMs / 1000) as unknown as Time;
 
     if (chartType === 'Candles' || chartType === 'Bar') {
       mainSeriesRef.current.update({
         time: timeSec,
-        open: lastCandle.open,
-        high: Math.max(lastCandle.high, currentPrice),
-        low: Math.min(lastCandle.low, currentPrice),
+        open: isSameBucket ? lastCandle.open : currentPrice,
+        high: isSameBucket ? Math.max(lastCandle.high, currentPrice) : currentPrice,
+        low: isSameBucket ? Math.min(lastCandle.low, currentPrice) : currentPrice,
         close: currentPrice,
       });
     } else {
@@ -750,7 +804,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         value: currentPrice,
       });
     }
-  }, [currentPrice, chartType, candles]);
+  }, [currentPrice, chartType, allCandles, timeframe]);
 
   // 4. Trade Setup Calculation & Guaranteed Native Price Lines
   const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
@@ -776,6 +830,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const tp3Price = Number((effSignal?.takeProfits?.tp3 || 0).toFixed(2));
 
   const rrRatio = effSignal?.riskRewardRatios?.rr2 || effSignal?.riskRewardRatio || 2.5;
+
+  // Dynamic R-Multiples Calculation
+  const riskDist = Math.abs(entryPrice - slPrice);
+  const isBullSignal = effSignal?.direction === 'BULLISH';
+  const calcRVal = (targetP: number) => {
+    if (!riskDist || !targetP || !entryPrice) return null;
+    const dist = isBullSignal ? targetP - entryPrice : entryPrice - targetP;
+    return Number((dist / riskDist).toFixed(1));
+  };
+  const tp1RText = calcRVal(tp1Price) ?? 1.5;
+  const tp2RText = calcRVal(tp2Price) ?? 2.5;
+  const tp3RText = calcRVal(tp3Price) ?? 4.0;
 
   // Synchronize Native Lightweight Charts PriceLines (Guarantees Y-axis visibility & scale pills)
   useEffect(() => {
@@ -818,7 +884,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         lineWidth: 2,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: 'TP1 (1.5R)',
+        title: `TP1 (${tp1RText}R)`,
       });
 
       const tp2Line = series.createPriceLine({
@@ -827,7 +893,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         lineWidth: 2,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: 'TP2 (2.5R)',
+        title: `TP2 (${tp2RText}R)`,
       });
 
       const newLines = [entryLine, slLine, tp1Line, tp2Line];
@@ -839,7 +905,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           lineWidth: 2,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: 'TP3 (4.0R)',
+          title: `TP3 (${tp3RText}R)`,
         });
         newLines.push(tp3Line);
       }
@@ -1310,10 +1376,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
     // H. Institutional Volume Profile (POC, VAH, VAL & Distribution Bins)
     if (showVolumeProfile && clientVP && clientVP.bins.length > 0) {
-      const maxBinVolume = Math.max(...clientVP.bins.map((b) => b.totalVolume));
+      const maxBinVolume = Math.max(...clientVP.bins.map((b: any) => b.totalVolume));
       const maxHistogramWidth = 110;
 
-      clientVP.bins.forEach((bin) => {
+      clientVP.bins.forEach((bin: any) => {
         const y = priceToY(bin.priceLevel);
         if (y !== null && maxBinVolume > 0) {
           const binWidth = (bin.totalVolume / maxBinVolume) * maxHistogramWidth;
@@ -1380,7 +1446,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
     // I. Institutional Stop-Loss Liquidity Heatmap Density Overlay
     if (showLiquidityHeatmap && clientHeatmap && clientHeatmap.heatBands.length > 0) {
-      clientHeatmap.heatBands.forEach((band) => {
+      clientHeatmap.heatBands.forEach((band: any) => {
         const topY = priceToY(band.maxPrice);
         const botY = priceToY(band.minPrice);
         if (topY !== null && botY !== null) {
@@ -1438,17 +1504,27 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     effSignal,
   ]);
 
-  // Hook drawing loop into timeScale changes and continuous animation loop
+  // Event-Driven Overlay Canvas Redraw (Viewport Pan/Zoom, Resize & State Changes)
   useEffect(() => {
-    let animId: number;
-    const loop = () => {
+    drawSMCOverlays();
+    const chart = chartApiRef.current;
+    if (!chart) return;
+
+    const timeScale = chart.timeScale();
+    const handleRangeChange = () => {
       drawSMCOverlays();
-      animId = requestAnimationFrame(loop);
     };
-    animId = requestAnimationFrame(loop);
+
+    try {
+      timeScale.subscribeVisibleLogicalRangeChange(handleRangeChange);
+      timeScale.subscribeVisibleTimeRangeChange(handleRangeChange);
+    } catch (e) {}
 
     return () => {
-      cancelAnimationFrame(animId);
+      try {
+        timeScale.unsubscribeVisibleLogicalRangeChange(handleRangeChange);
+        timeScale.unsubscribeVisibleTimeRangeChange(handleRangeChange);
+      } catch (e) {}
     };
   }, [drawSMCOverlays]);
 
@@ -1576,9 +1652,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               {liveChangePercent >= 0 ? '+' : ''}
               {liveChangePercent}%
             </span>
-            <span className="flex items-center gap-1 text-[10px] text-cyan-400 bg-cyan-950/40 border border-cyan-800/40 px-2 py-0.5 rounded font-mono">
+            <span className="flex items-center gap-1 text-[10px] text-cyan-400 bg-cyan-950/40 border border-cyan-800/40 px-2 py-0.5 rounded font-mono uppercase">
               <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
-              LIVE TICK
+              {dataProvenance} TICK
             </span>
           </div>
         </div>
@@ -1889,7 +1965,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 bg-emerald-950/40 border border-emerald-500/40 px-2 py-1 rounded-lg">
-            <span className="text-[10px] text-emerald-300 font-bold uppercase">TP1 (2.0R):</span>
+            <span className="text-[10px] text-emerald-300 font-bold uppercase">TP1 ({tp1RText}R):</span>
             <span className="text-emerald-400 font-black">
               {currSymbol}
               {tp1Price.toFixed(2)}
@@ -1897,16 +1973,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 bg-teal-950/40 border border-teal-500/40 px-2 py-1 rounded-lg">
-            <span className="text-[10px] text-teal-300 font-bold uppercase">TP2 (3.5R):</span>
+            <span className="text-[10px] text-teal-300 font-bold uppercase">TP2 ({tp2RText}R):</span>
             <span className="text-teal-400 font-black">
               {currSymbol}
               {tp2Price.toFixed(2)}
             </span>
           </div>
 
-          {tp3Price && (
+          {tp3Price > 0 && (
             <div className="hidden sm:flex items-center gap-1.5 bg-purple-950/40 border border-purple-500/40 px-2 py-1 rounded-lg">
-              <span className="text-[10px] text-purple-300 font-bold uppercase">TP3 (6.0R):</span>
+              <span className="text-[10px] text-purple-300 font-bold uppercase">TP3 ({tp3RText}R):</span>
               <span className="text-purple-300 font-black">
                 {currSymbol}
                 {tp3Price.toFixed(2)}
@@ -1920,14 +1996,18 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
             <span className="text-[10px] text-slate-400 font-bold uppercase">SMC:</span>
             <strong className="text-cyan-300 font-black">
-              {aiPredictionInfo?.deterministicScore || effSignal?.score || 85}/100
+              {effSignal?.score !== undefined
+                ? `${effSignal.score}/100`
+                : aiPredictionInfo?.deterministicScore
+                  ? `${aiPredictionInfo.deterministicScore}/100`
+                  : 'N/A'}
             </strong>
           </div>
 
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
             <span className="text-[10px] text-slate-400 font-bold uppercase">AI PROB:</span>
             <strong className="text-emerald-400 font-black">
-              {aiPredictionInfo ? `${(aiPredictionInfo.winProbability * 100).toFixed(0)}%` : '78%'}
+              {aiPredictionInfo ? `${(aiPredictionInfo.winProbability * 100).toFixed(0)}%` : 'N/A'}
             </strong>
           </div>
 
@@ -1936,20 +2016,20 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             <strong className="text-cyan-300 font-black">
               {aiPredictionInfo
                 ? `${aiPredictionInfo.expectedValueR >= 0 ? '+' : ''}${aiPredictionInfo.expectedValueR.toFixed(2)}R`
-                : '+1.45R'}
+                : 'N/A'}
             </strong>
           </div>
 
           <span
             className={`px-3 py-1 rounded-lg font-black border text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-sm ${
-              (aiPredictionInfo?.recommendation || 'HIGH_CONFIDENCE') === 'HIGH_CONFIDENCE'
+              (aiPredictionInfo?.recommendation) === 'HIGH_CONFIDENCE'
                 ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50 shadow-emerald-500/10'
                 : aiPredictionInfo?.recommendation === 'MODERATE_CONFIDENCE'
                   ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
                   : 'bg-slate-850 text-slate-300 border-slate-700'
             }`}
           >
-            ⚡ {aiPredictionInfo?.recommendation || 'HIGH_CONFIDENCE'}
+            ⚡ {aiPredictionInfo?.recommendation || 'N/A'}
           </span>
         </div>
       </div>
@@ -2135,6 +2215,20 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
       {/* 6. Chart Viewport Container (Lightweight Charts + Canvas Overlay + SMC HUD + MTF Permission) */}
       <div className="relative flex-1 w-full min-h-[420px] h-full overflow-hidden">
+        {(isDataUnavailable || !allCandles || allCandles.length === 0) && (
+          <div className="absolute inset-0 z-30 bg-[#0A0E17]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-3">
+            <Shield className="w-10 h-10 text-amber-400 animate-pulse" />
+            <h4 className="text-sm font-bold uppercase tracking-wider text-slate-200">
+              Market Data Unavailable
+            </h4>
+            <p className="text-xs text-slate-400 max-w-md font-mono">
+              Unable to load historical OHLC candles for <span className="text-cyan-400">{symbol}</span> [{timeframe}]. Data authority enforced: synthetic fallback candles disabled.
+            </p>
+            <span className="text-[10px] text-amber-400 bg-amber-950/50 border border-amber-800/60 px-2.5 py-1 rounded font-mono">
+              FAIL-CLOSED MARKET POLICY
+            </span>
+          </div>
+        )}
         <div ref={chartContainerRef} className="w-full h-full min-h-[420px]" />
         <canvas
           ref={overlayCanvasRef}
