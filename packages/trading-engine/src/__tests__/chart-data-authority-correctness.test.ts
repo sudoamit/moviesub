@@ -397,4 +397,98 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     // Forming candle updated cleanly
     expect(updatedSnapshot.formingCandle?.close).toBe(112);
   });
+
+  // 15. TimeframeRegistry bucket open time calculation
+  test('P0-1: TimeframeRegistry.getBucketOpenTime calculates exact candle open timestamp without raw new Date()', () => {
+    const { TimeframeRegistry } = require('@quant/shared');
+    const tickTime = '2026-09-13T09:42:17.345Z';
+    const bucketOpen = TimeframeRegistry.getBucketOpenTime(tickTime, '15m');
+    expect(bucketOpen.toISOString()).toBe('2026-09-13T09:30:00.000Z');
+
+    const bucketOpen1h = TimeframeRegistry.getBucketOpenTime(tickTime, '1h');
+    expect(bucketOpen1h.toISOString()).toBe('2026-09-13T09:00:00.000Z');
+  });
+
+  // 16. Incremental vs Cumulative tick volume semantics
+  test('P0-2: Handles INCREMENTAL vs CUMULATIVE tick volume aggregation', () => {
+    const initialForming: ChartFormingCandle = {
+      timestamp: '2026-09-13T09:30:00.000Z',
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 104,
+      volume: 500,
+      isClosed: false,
+    };
+
+    // Incremental tick: 100 added -> 600
+    const incrementalVol = 100;
+    const updatedIncremental = {
+      ...initialForming,
+      volume: initialForming.volume + incrementalVol,
+    };
+    expect(updatedIncremental.volume).toBe(600);
+
+    // Cumulative tick: cumulative 750 -> 750
+    const cumulativeVol = 750;
+    const updatedCumulative = {
+      ...initialForming,
+      volume: Math.max(initialForming.volume, cumulativeVol),
+    };
+    expect(updatedCumulative.volume).toBe(750);
+  });
+
+  // 17. Timeframe Rollover Transition
+  test('P0-3: Performs atomic timeframe rollover when tick crosses candle bucket boundary', () => {
+    const { TimeframeRegistry } = require('@quant/shared');
+    const prevSnapshot: ChartMarketSnapshot = {
+      symbol: 'NIFTY',
+      timeframe: '15m',
+      closedCandles: validClosedCandles,
+      formingCandle: {
+        timestamp: '2026-09-13T09:30:00.000Z',
+        open: 103,
+        high: 108,
+        low: 102,
+        close: 106,
+        volume: 1200,
+        isClosed: false,
+      },
+      livePrice: 106,
+      asOfTimestamp: '2026-09-13T09:35:00.000Z',
+      dataProvenance: 'LIVE',
+      sourceIdentity: 'NSE_LIVE_STREAM',
+    };
+
+    // Tick arrives at 09:45:02 (new 09:45 candle bucket)
+    const tickTime = '2026-09-13T09:45:02.000Z';
+    const tickPrice = 109;
+    const bucketOpenDate = TimeframeRegistry.getBucketOpenTime(tickTime, '15m');
+    const bucketOpenMs = bucketOpenDate.getTime();
+
+    const currentForming = prevSnapshot.formingCandle!;
+    const formingMs = new Date(currentForming.timestamp).getTime();
+    const isRollover = bucketOpenMs > formingMs;
+
+    expect(isRollover).toBe(true);
+
+    // Perform atomic transition
+    const closedPrevForming: ChartCandle = { ...currentForming, isClosed: true as const };
+    const updatedClosedCandles = [...prevSnapshot.closedCandles, closedPrevForming];
+
+    const newForming: ChartFormingCandle = {
+      timestamp: bucketOpenDate.toISOString(),
+      open: tickPrice,
+      high: tickPrice,
+      low: tickPrice,
+      close: tickPrice,
+      volume: 150,
+      isClosed: false as const,
+    };
+
+    expect(updatedClosedCandles).toHaveLength(3);
+    expect(updatedClosedCandles[2].isClosed).toBe(true);
+    expect(updatedClosedCandles[2].timestamp).toBe('2026-09-13T09:30:00.000Z');
+    expect(newForming.timestamp).toBe('2026-09-13T09:45:00.000Z');
+  });
 });

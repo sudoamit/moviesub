@@ -210,6 +210,16 @@ export class TimeframeRegistry {
     return this.get(tf).yahooInterval;
   }
 
+  static getBucketOpenTime(timestamp: Date | string | number, tf: string | Timeframe): Date {
+    const durationMs = this.getDurationMs(tf);
+    const timeMs = new Date(timestamp).getTime();
+    if (isNaN(timeMs)) {
+      throw new Error(`INVALID_TIMESTAMP: Cannot parse timestamp '${timestamp}'`);
+    }
+    const bucketMs = Math.floor(timeMs / durationMs) * durationMs;
+    return new Date(bucketMs);
+  }
+
   static isHigherTimeframe(htf: string | Timeframe, ltf: string | Timeframe): boolean {
     return this.getDurationMs(htf) > this.getDurationMs(ltf);
   }

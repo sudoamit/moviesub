@@ -1,4 +1,5 @@
-export type ChartProvenance = 'LIVE' | 'HISTORICAL' | 'DELAYED' | 'BACKTEST' | 'LEARNING';
+export type ChartProvenance = 'LIVE' | 'HISTORICAL' | 'DELAYED' | 'BACKTEST' | 'LEARNING' | 'CACHED' | 'SYNTHETIC';
+export type TickVolumeType = 'INCREMENTAL' | 'CUMULATIVE';
 
 export interface ChartCandle {
   readonly timestamp: Date | string | number;
@@ -20,6 +21,7 @@ export interface ChartFormingCandle {
   readonly volume: number;
   readonly isClosed: false;
   readonly provenance?: ChartProvenance;
+  readonly volumeType?: TickVolumeType;
 }
 
 export interface ChartSMCSnapshot {
@@ -48,6 +50,7 @@ export interface ChartMarketSnapshot {
   readonly closedCandles: ChartCandle[];
   readonly formingCandle: ChartFormingCandle | null;
   readonly livePrice: number | null;
+  readonly closedThrough?: Date | string | number;
   readonly asOfTimestamp: Date | string | number;
   readonly dataProvenance: ChartProvenance;
   readonly sourceIdentity: string;

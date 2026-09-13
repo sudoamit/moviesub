@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot } from '@quant/shared';
+import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot, TimeframeRegistry, ChartCandle, ChartFormingCandle } from '@quant/shared';
 import { ChartSnapshotValidator } from '@quant/trading-engine';
 import { MarketStreamProvider, useMarketStream } from '../context/MarketStreamContext';
 import { Header, NavTab, StrategyMode } from '../components/Header';
@@ -253,40 +253,71 @@ function DashboardContent() {
     subscribeToSymbol(selectedSymbol);
   }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
 
-  // Single Authoritative Live Tick Update Pipeline (P0-1 & P0-3)
+  // Single Authoritative Live Tick Update Pipeline (P0-1, P0-3, Volume & Timeframe Rollover)
   useEffect(() => {
     const tick = tickers[selectedSymbol];
     if (tick && typeof tick.price === 'number' && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
       setChartSnapshot((prev) => {
         if (!prev || prev.symbol !== selectedSymbol) return prev;
         const liveP = tick.price;
+        const tickTime = (tick as any).timestamp ? new Date((tick as any).timestamp) : new Date();
+        const bucketOpenDate = TimeframeRegistry.getBucketOpenTime(tickTime, selectedTimeframe);
+        const bucketOpenIso = bucketOpenDate.toISOString();
+        const bucketOpenMs = bucketOpenDate.getTime();
+
         const currentForming = prev.formingCandle;
-        const nextForming = currentForming
-          ? {
-              ...currentForming,
-              high: Math.max(currentForming.high, liveP),
-              low: Math.min(currentForming.low, liveP),
-              close: liveP,
-              volume: currentForming.volume + (tick.volume || 0),
-            }
-          : {
-              timestamp: new Date(),
-              open: liveP,
-              high: liveP,
-              low: liveP,
-              close: liveP,
-              volume: tick.volume || 0,
-              isClosed: false as const,
-              provenance: prev.dataProvenance,
-            };
+        const formingMs = currentForming ? new Date(currentForming.timestamp).getTime() : -1;
+
+        const isRollover = currentForming && bucketOpenMs > formingMs;
+        let closedCandles = prev.closedCandles;
+
+        if (isRollover && currentForming) {
+          const closedPrevForming: ChartCandle = {
+            ...currentForming,
+            isClosed: true as const,
+          };
+          closedCandles = [...closedCandles, closedPrevForming];
+        }
+
+        let nextForming: ChartFormingCandle;
+        const isIncremental = (tick as any).volumeType === 'INCREMENTAL' || (tick as any).isIncremental !== false;
+
+        if (currentForming && !isRollover) {
+          const addVol = tick.volume ?? 0;
+          const newVol = isIncremental
+            ? currentForming.volume + addVol
+            : Math.max(currentForming.volume, addVol);
+
+          nextForming = {
+            ...currentForming,
+            high: Math.max(currentForming.high, liveP),
+            low: Math.min(currentForming.low, liveP),
+            close: liveP,
+            volume: newVol,
+          };
+        } else {
+          // Initialize forming candle anchored strictly to calculated bucket open timestamp
+          nextForming = {
+            timestamp: bucketOpenIso,
+            open: liveP,
+            high: liveP,
+            low: liveP,
+            close: liveP,
+            volume: tick.volume ?? 0,
+            isClosed: false as const,
+            provenance: prev.dataProvenance,
+          };
+        }
+
         return {
           ...prev,
-          livePrice: liveP,
+          closedCandles,
           formingCandle: nextForming,
+          livePrice: liveP,
         };
       });
     }
-  }, [tickers, selectedSymbol]);
+  }, [tickers, selectedSymbol, selectedTimeframe]);
 
   const handleSelectSymbol = (rawSym: string) => {
     const s = (rawSym || '').toUpperCase();
@@ -482,7 +513,6 @@ function DashboardContent() {
                   snapshot={chartSnapshot}
                   isDataUnavailable={isDataUnavailable}
                   signal={selectedSignal}
-                  livePrice={currentTicker.price}
                   liveChangePercent={currentTicker.changePercent}
                   isTradeActive={isPositionActive}
                   onTimeframeChange={setSelectedTimeframe}

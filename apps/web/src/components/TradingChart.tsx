@@ -55,7 +55,6 @@ interface TradingChartProps {
   snapshot?: ChartMarketSnapshot | null;
   isDataUnavailable?: boolean;
   signal?: any;
-  livePrice?: number;
   liveChangePercent?: number;
   isTradeActive?: boolean;
   onTimeframeChange?: (tf: string) => void;
@@ -68,7 +67,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   snapshot,
   isDataUnavailable = false,
   signal,
-  livePrice: propLivePrice,
   liveChangePercent = 0,
   isTradeActive = true,
   onTimeframeChange,
@@ -242,7 +240,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     return list;
   }, [candles, formingCandle]);
 
-  const currentPrice = propLivePrice || (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
+  const currentPrice = snapshot?.livePrice ?? (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
   const timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
   // 1. Canonical SMC Structures (Server-provided when available, fallback to deterministic closed-candle analysis)

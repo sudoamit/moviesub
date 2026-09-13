@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Query, Body, UsePipes, ValidationPipe } from '@nestjs/common';
-import { CandlesService, ICandlesResponse, IChartDataResponse } from './candles.service';
+import { CandlesService, ICandlesResponse } from './candles.service';
 import { GetCandlesDto, IngestCandlesDto } from './dto/get-candles.dto';
-import { ICandle, Timeframe } from '@quant/shared';
+import { ChartMarketSnapshot, ICandle, Timeframe } from '@quant/shared';
 
 @Controller('api/candles')
 export class CandlesController {
@@ -18,7 +18,7 @@ export class CandlesController {
     @Query('symbol') symbol: string = 'NIFTY',
     @Query('timeframe') timeframe: Timeframe = Timeframe.M15,
     @Query('limit') limit?: number,
-  ): Promise<IChartDataResponse> {
+  ): Promise<ChartMarketSnapshot> {
     return this.candlesService.getChartData(symbol, timeframe, limit ? Number(limit) : 200);
   }
 

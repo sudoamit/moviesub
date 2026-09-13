@@ -30,6 +30,7 @@ export interface ICandlesResponse {
   timeframe: string;
   count: number;
   dataProvenance: string;
+  sourceIdentity: string;
   candles: ICandle[];
   formingCandle?: ICandle | null;
 }
@@ -253,6 +254,7 @@ export class CandlesService {
         candles: liveCandles,
         formingCandle: forming,
         dataProvenance: resolution.dataProvenance,
+        sourceIdentity: resolution.sourceIdentity,
       };
     }
 
@@ -306,6 +308,7 @@ export class CandlesService {
       candles,
       formingCandle: forming,
       dataProvenance: resolution.dataProvenance,
+      sourceIdentity: resolution.sourceIdentity,
     };
   }
 
@@ -313,7 +316,7 @@ export class CandlesService {
     symbol: string,
     timeframe: Timeframe = Timeframe.M15,
     limit = 200,
-  ): Promise<ChartMarketSnapshot | any> {
+  ): Promise<ChartMarketSnapshot> {
     const sym = symbol.toUpperCase();
     const inst = await this.prisma.instrument.findUnique({
       where: { symbol: sym },
@@ -348,51 +351,15 @@ export class CandlesService {
     const bbRaw = calculateBollingerBands(candles, 20, 2);
 
     const formattedCandles = candles.map((c) => ({
-      time: Math.floor(new Date(c.timestamp).getTime() / 1000),
+      timestamp: c.timestamp,
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
       volume: c.volume,
-      isClosed: c.isClosed,
+      isClosed: true as const,
+      provenance: (c.provenance as DataProvenance) || 'LIVE',
     }));
-
-    const buildSeries = (series: (number | null)[]) =>
-      candles
-        .map((c, i) => {
-          const val = series[i];
-          return {
-            time: Math.floor(new Date(c.timestamp).getTime() / 1000),
-            value: val !== null && val !== undefined && !isNaN(val) ? Number(val.toFixed(2)) : null,
-          };
-        })
-        .filter((item): item is { time: number; value: number } => item.value !== null);
-
-    const ema20 = buildSeries(ema20Raw);
-    const ema50 = buildSeries(ema50Raw);
-    const ema200 = buildSeries(ema200Raw);
-    const sma20 = buildSeries(sma20Raw);
-    const vwap = buildSeries(vwapRaw);
-    const rsi14 = buildSeries(rsi14Raw);
-    const atr14 = buildSeries(atr14Raw);
-
-    const bollinger = candles
-      .map((c, i) => {
-        const up = bbRaw.upper[i];
-        const mid = bbRaw.middle[i];
-        const low = bbRaw.lower[i];
-        if (up === null || mid === null || low === null || isNaN(up) || isNaN(low)) return null;
-        return {
-          time: Math.floor(new Date(c.timestamp).getTime() / 1000),
-          upper: Number(up.toFixed(2)),
-          middle: Number(mid.toFixed(2)),
-          lower: Number(low.toFixed(2)),
-        };
-      })
-      .filter(
-        (item): item is { time: number; upper: number; middle: number; lower: number } =>
-          item !== null,
-      );
 
     // 2. Pure SMC Analysis from trading-engine with explicit latest closed candle boundary
     const closedCandlesList = candles.filter((c) => c.isClosed !== false);
@@ -430,20 +397,15 @@ export class CandlesService {
       this.logger.debug(`Signal generation: ${(e as Error).message}`);
     }
 
-    const sourceIdentity =
-      inst.assetType === AssetType.CRYPTO
-        ? 'BINANCE_SPOT'
-        : inst.assetType === AssetType.INDEX || inst.assetType === AssetType.EQUITY
-          ? 'NSE_FEED'
-          : 'YAHOO_HISTORICAL';
-
+    const sourceIdentity = candlesResp.sourceIdentity;
     const lastCandleClose = formattedCandles.length > 0 ? formattedCandles[formattedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
+    const observationTime = new Date().toISOString();
 
     return {
       symbol: inst.symbol,
       timeframe,
-      closedCandles: formattedCandles.map((c) => ({ ...c, isClosed: true })),
+      closedCandles: formattedCandles,
       formingCandle: candlesResp.formingCandle
         ? {
             timestamp: candlesResp.formingCandle.timestamp,
@@ -452,19 +414,20 @@ export class CandlesService {
             low: candlesResp.formingCandle.low,
             close: candlesResp.formingCandle.close,
             volume: candlesResp.formingCandle.volume ?? 0,
-            isClosed: false,
+            isClosed: false as const,
             provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
           }
         : null,
       livePrice,
-      asOfTimestamp: latestClosedTimestamp || new Date().toISOString(),
-      dataProvenance: candlesResp.dataProvenance || 'LIVE',
+      closedThrough: latestClosedTimestamp,
+      asOfTimestamp: observationTime,
+      dataProvenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
       sourceIdentity,
       smcSnapshot: {
         symbol: inst.symbol,
         timeframe,
-        asOfTimestamp: latestClosedTimestamp || new Date().toISOString(),
-        provenance: candlesResp.dataProvenance || 'LIVE',
+        asOfTimestamp: observationTime,
+        provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
         structures: {
           swings: smcAnalysis.swingPoints || [],
           bos: smcAnalysis.breaksOfStructure || [],
@@ -479,39 +442,7 @@ export class CandlesService {
         fvgs: smcAnalysis.fairValueGaps || [],
         orderBlocks: smcAnalysis.orderBlocks || [],
       },
-      instrument: {
-        symbol: inst.symbol,
-        name: inst.name,
-        currency: inst.currency,
-        tickSize: Number(inst.tickSize),
-      },
-      closedThrough: latestClosedTimestamp,
       isDegraded: smcAnalysis.isDegraded || false,
-      candles: formattedCandles,
-      indicators: {
-        ema20,
-        ema50,
-        ema200,
-        sma20,
-        vwap,
-        rsi14,
-        atr14,
-        bollinger,
-      },
-      structures: {
-        swings: smcAnalysis.swingPoints || [],
-        bos: smcAnalysis.breaksOfStructure || [],
-        choch: smcAnalysis.changesOfCharacter || [],
-        marketRegime: smcAnalysis.marketRegime,
-        dealingRange: smcAnalysis.dealingRange,
-      },
-      liquidity: {
-        pools: smcAnalysis.liquidityPools || [],
-        sweeps: smcAnalysis.liquiditySweeps || [],
-      },
-      fvgs: smcAnalysis.fairValueGaps || [],
-      orderBlocks: smcAnalysis.orderBlocks || [],
-      activeSignal,
     };
   }
 

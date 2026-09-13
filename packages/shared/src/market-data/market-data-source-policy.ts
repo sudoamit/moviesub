@@ -7,12 +7,14 @@ export interface ISourceResolutionContext {
   isRangeQuery?: boolean;
   asOfTimestamp?: Date;
   timeframeDurationMs?: number;
+  providerId?: string;
 }
 
 export interface ISourceResolutionResult {
   useLiveFeed: boolean;
   useDatabase: boolean;
   dataProvenance: DataProvenance;
+  sourceIdentity: string;
 }
 
 export class MarketDataSourcePolicy {
@@ -25,6 +27,11 @@ export class MarketDataSourcePolicy {
     context: ISourceResolutionContext,
   ): ISourceResolutionResult {
     const symbol = context.symbol.toUpperCase();
+    const getIdentity = (defaultLive: string, defaultDb: string): string => {
+      if (context.providerId) return context.providerId;
+      if (context.hasLiveFeed) return defaultLive;
+      return defaultDb;
+    };
 
     if (mode === MarketDataSourceMode.LIVE_DECISION) {
       if (context.isRangeQuery) {
@@ -50,29 +57,31 @@ export class MarketDataSourcePolicy {
         );
       }
 
-      return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
+      const liveIdentity = symbol.includes('USDT') ? 'BINANCE_SPOT' : symbol === 'XAUUSD' || symbol === 'GOLD' ? 'COMEX_GOLD_STREAM' : 'NSE_LIVE_STREAM';
+      return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE', sourceIdentity: getIdentity(liveIdentity, 'DB_CANONICAL_STORE') };
     }
 
     if (mode === MarketDataSourceMode.CHART) {
       if (context.isRangeQuery) {
-        return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
+        return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL', sourceIdentity: getIdentity('NSE_LIVE_STREAM', 'DB_HISTORICAL_STORE') };
       }
       if (context.hasLiveFeed) {
-        return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
+        const liveIdentity = symbol.includes('USDT') ? 'BINANCE_SPOT' : symbol === 'XAUUSD' || symbol === 'GOLD' ? 'COMEX_GOLD_STREAM' : 'NSE_LIVE_STREAM';
+        return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE', sourceIdentity: getIdentity(liveIdentity, 'DB_CANONICAL_STORE') };
       }
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'DELAYED' };
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'DELAYED', sourceIdentity: getIdentity('LIVE_STREAM', 'DB_DELAYED_CACHE') };
     }
 
     if (mode === MarketDataSourceMode.BACKTEST) {
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'BACKTEST' };
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'BACKTEST', sourceIdentity: getIdentity('SIMULATION_STREAM', 'BACKTEST_ENGINE_DB') };
     }
 
     if (mode === MarketDataSourceMode.LEARNING) {
-      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'LEARNING' };
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'LEARNING', sourceIdentity: getIdentity('LEARNING_STREAM', 'LEARNING_ENGINE_DB') };
     }
 
     // Default to HISTORICAL
-    return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
+    return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL', sourceIdentity: getIdentity('HISTORICAL_FEED', 'DB_HISTORICAL_STORE') };
   }
 
   static validate(

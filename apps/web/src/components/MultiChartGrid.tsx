@@ -179,7 +179,6 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
               asOfTimestamp: new Date().toISOString(),
             }}
             signal={signals.find((s) => s.symbol === pane1Symbol)}
-            livePrice={tickers[pane1Symbol]?.price}
             onTimeframeChange={setPane1Tf}
           />
         </div>
@@ -230,7 +229,6 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
               asOfTimestamp: new Date().toISOString(),
             }}
             signal={signals.find((s) => s.symbol === pane2Symbol)}
-            livePrice={tickers[pane2Symbol]?.price}
             onTimeframeChange={setPane2Tf}
           />
         </div>
@@ -282,7 +280,6 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
                 asOfTimestamp: new Date().toISOString(),
               }}
               signal={signals.find((s) => s.symbol === pane3Symbol)}
-              livePrice={tickers[pane3Symbol]?.price}
               onTimeframeChange={setPane3Tf}
             />
           </div>
@@ -335,7 +332,6 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
                 asOfTimestamp: new Date().toISOString(),
               }}
               signal={signals.find((s) => s.symbol === pane4Symbol)}
-              livePrice={tickers[pane4Symbol]?.price}
               onTimeframeChange={setPane4Tf}
             />
           </div>
