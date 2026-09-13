@@ -1,5 +1,5 @@
 import { ChartSnapshotValidator } from '../chart-snapshot-validator';
-import { ChartMarketSnapshot, ChartCandle, ChartFormingCandle, ChartSMCSnapshot } from '@quant/shared';
+import { ChartMarketSnapshot, ChartCandle, ChartFormingCandle, ChartSMCSnapshot, Direction, StructureType } from '@quant/shared';
 
 describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () => {
   const validClosedCandles: ChartCandle[] = [
@@ -42,10 +42,10 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     provenance: 'LIVE',
     asOfTimestamp: '2026-09-13T09:45:00.000Z',
     structures: {
-      swings: [{ price: 108, timestamp: '2026-09-13T09:45:00.000Z', type: 'HIGH' }],
+      swings: [{ price: 108, timestamp: new Date('2026-09-13T09:45:00.000Z'), type: StructureType.SWING_HIGH, index: 0, isConfirmed: true }] as any,
       bos: [],
       choch: [],
-      marketRegime: 'BULLISH_CONTINUATION',
+      marketRegime: 'BULLISH_CONTINUATION' as any,
     },
     liquidity: { pools: [], sweeps: [] },
     fvgs: [
@@ -53,27 +53,27 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         id: 'fvg-1',
         symbol: 'NIFTY',
         timeframe: '15m',
-        direction: 'BULLISH',
+        direction: Direction.BULLISH,
         upperBound: 106,
         lowerBound: 103,
-        timestamp: '2026-09-13T09:30:00.000Z',
+        timestamp: new Date('2026-09-13T09:30:00.000Z'),
         isFilled: false,
-      },
+      } as any,
     ],
     orderBlocks: [
       {
         id: 'ob-1',
         symbol: 'NIFTY',
         timeframe: '15m',
-        direction: 'BULLISH',
+        direction: Direction.BULLISH,
         high: 103,
         low: 100,
         openPrice: 101,
         closePrice: 103,
         volume: 1200,
-        timestamp: '2026-09-13T09:15:00.000Z',
+        timestamp: new Date('2026-09-13T09:15:00.000Z'),
         status: 'ACTIVE',
-      },
+      } as any,
     ],
   };
 
@@ -263,15 +263,15 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
           id: 'ob-invalid',
           symbol: 'NIFTY',
           timeframe: '15m',
-          direction: 'BULLISH',
+          direction: Direction.BULLISH,
           high: 103,
           low: 100,
           openPrice: 101,
           closePrice: 103,
           volume: 1200,
-          timestamp: '', // Empty timestamp violates coordinate anchoring requirement
+          timestamp: '' as any, // Empty timestamp violates coordinate anchoring requirement
           status: 'ACTIVE',
-        },
+        } as any,
       ],
     };
 
@@ -552,5 +552,231 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     expect(smcWithDualTimestamps.computedAt).toBe('2026-09-13T09:45:10.000Z');
     expect(smcWithDualTimestamps.structureAsOf).toBe('2026-09-13T09:30:00.000Z');
     expect(ChartSnapshotValidator.validateSMCSnapshot(smcWithDualTimestamps, 'NIFTY', '15m')).toBe(true);
+  });
+
+  // 20. Comprehensive CanonicalCandleAggregator Suite (P0 20 Required Tests)
+  describe('CanonicalCandleAggregator State Machine Rules', () => {
+    const { CanonicalCandleAggregator } = require('@quant/shared');
+
+    beforeEach(() => {
+      CanonicalCandleAggregator.clearState();
+    });
+
+    const baseSnapshot: ChartMarketSnapshot = {
+      symbol: 'NIFTY',
+      timeframe: '15m',
+      closedCandles: [validClosedCandles[0]],
+      formingCandle: null,
+      smcSnapshot: validSMCSnapshot,
+      dataProvenance: 'LIVE',
+      sourceIdentity: 'NSE_LIVE',
+      livePrice: 103,
+      asOfTimestamp: '2026-09-13T09:15:00.000Z',
+      closedThrough: '2026-09-13T09:15:00.000Z',
+    };
+
+    test('1. First forming candle creation initialized at bucket open timestamp', () => {
+      const updated = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:42:15.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(updated.formingCandle).not.toBeNull();
+      expect(updated.formingCandle?.timestamp).toBe('2026-09-13T09:30:00.000Z');
+      expect(updated.formingCandle?.open).toBe(107);
+      expect(updated.formingCandle?.high).toBe(107);
+      expect(updated.formingCandle?.low).toBe(107);
+      expect(updated.formingCandle?.close).toBe(107);
+      expect(updated.formingCandle?.volume).toBe(100);
+      expect(updated.livePrice).toBe(107);
+    });
+
+    test('2. INCREMENTAL volume adds tick volume delta', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 50,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s2.formingCandle?.volume).toBe(150);
+    });
+
+    test('3. CUMULATIVE volume uses Math.max', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 500,
+        volumeType: 'CUMULATIVE',
+      });
+
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 750,
+        volumeType: 'CUMULATIVE',
+      });
+
+      expect(s2.formingCandle?.volume).toBe(750);
+    });
+
+    test('4. UNKNOWN or missing volumeType fails closed without changing volume', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 500,
+        volumeType: 'INCREMENTAL',
+      });
+
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: '2026-09-13T09:41:00.000Z',
+        volume: 300,
+        volumeType: 'UNKNOWN',
+      });
+
+      expect(s2.formingCandle?.volume).toBe(500);
+    });
+
+    test('5. Rollover into next bucket closes previous forming candle exactly once', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 500,
+        volumeType: 'INCREMENTAL',
+      });
+
+      // Tick in next bucket (09:45)
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 110,
+        timestamp: '2026-09-13T09:46:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s2.closedCandles).toHaveLength(2);
+      expect(s2.closedCandles[1].timestamp).toBe('2026-09-13T09:30:00.000Z');
+      expect(s2.closedCandles[1].isClosed).toBe(true);
+      expect(s2.formingCandle?.timestamp).toBe('2026-09-13T09:45:00.000Z');
+    });
+
+    test('6. Duplicate tick does not double-count volume', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+        tickId: 'tick-1',
+      });
+
+      // Duplicate tick re-entry
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+        tickId: 'tick-1',
+      });
+
+      expect(s2.formingCandle?.volume).toBe(100);
+    });
+
+    test('7. Old/stale tick cannot mutate current forming candle', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      // Stale tick from 09:20
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 95,
+        timestamp: '2026-09-13T09:20:00.000Z',
+        volume: 500,
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s2).toBe(s1);
+    });
+
+    test('8. Gap Policy: omit missing empty buckets when ticks jump across intervals', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 107,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volume: 100,
+        volumeType: 'INCREMENTAL',
+      });
+
+      // Jump from 09:40 to 11:15 (skips 10:00, 10:15, 10:30, 10:45, 11:00)
+      const s2 = CanonicalCandleAggregator.processTick(s1, {
+        symbol: 'NIFTY',
+        price: 120,
+        timestamp: '2026-09-13T11:17:00.000Z',
+        volume: 200,
+        volumeType: 'INCREMENTAL',
+      });
+
+      // 09:30 forming closed cleanly, missing intermediate buckets omitted (no fake candles inserted)
+      expect(s2.closedCandles).toHaveLength(2);
+      expect(s2.formingCandle?.timestamp).toBe('2026-09-13T11:15:00.000Z');
+    });
+
+    test('9. Invalid price is rejected', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: -50,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s1).toBe(baseSnapshot);
+    });
+
+    test('10. Invalid timestamp is rejected', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 108,
+        timestamp: 'invalid-date-string',
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s1).toBe(baseSnapshot);
+    });
+
+    test('11. livePrice strictly equals formingCandle.close', () => {
+      const s1 = CanonicalCandleAggregator.processTick(baseSnapshot, {
+        symbol: 'NIFTY',
+        price: 112.5,
+        timestamp: '2026-09-13T09:40:00.000Z',
+        volumeType: 'INCREMENTAL',
+      });
+
+      expect(s1.livePrice).toBe(112.5);
+      expect(s1.livePrice).toBe(s1.formingCandle?.close);
+    });
   });
 });

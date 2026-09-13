@@ -4,3 +4,4 @@ export * from './real-live-market-provider';
 export * from './execution-price-resolver';
 export * from './market-data-source-policy';
 export * from './chart-snapshot.interface';
+export * from './canonical-candle-aggregator';

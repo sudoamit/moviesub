@@ -1,5 +1,25 @@
+import {
+  ISwingPoint,
+  IBreakOfStructure,
+  IChangeOfCharacter,
+  IMarketRegime,
+  IDealingRange,
+  ILiquidityPool,
+  IFairValueGap,
+  IOrderBlock,
+} from '../interfaces';
+
 export type ChartProvenance = 'LIVE' | 'HISTORICAL' | 'DELAYED' | 'BACKTEST' | 'LEARNING' | 'CACHED' | 'SYNTHETIC';
-export type TickVolumeType = 'INCREMENTAL' | 'CUMULATIVE';
+export type TickVolumeType = 'INCREMENTAL' | 'CUMULATIVE' | 'UNKNOWN';
+
+export interface NormalizedTick {
+  readonly symbol: string;
+  readonly price: number;
+  readonly timestamp: Date | string | number;
+  readonly volume?: number;
+  readonly volumeType: TickVolumeType;
+  readonly tickId?: string;
+}
 
 export interface ChartCandle {
   readonly timestamp: Date | string | number;
@@ -32,18 +52,18 @@ export interface ChartSMCSnapshot {
   readonly computedAt?: Date | string | number;
   readonly structureAsOf?: Date | string | number;
   readonly structures?: {
-    swings?: any[];
-    bos?: any[];
-    choch?: any[];
-    marketRegime?: any;
-    dealingRange?: any;
+    swings?: ISwingPoint[];
+    bos?: IBreakOfStructure[];
+    choch?: IChangeOfCharacter[];
+    marketRegime?: IMarketRegime;
+    dealingRange?: IDealingRange | null;
   };
   readonly liquidity?: {
-    pools?: any[];
-    sweeps?: any[];
+    pools?: ILiquidityPool[];
+    sweeps?: ILiquidityPool[];
   };
-  readonly fvgs?: any[];
-  readonly orderBlocks?: any[];
+  readonly fvgs?: IFairValueGap[];
+  readonly orderBlocks?: IOrderBlock[];
 }
 
 export interface ChartMarketSnapshot {

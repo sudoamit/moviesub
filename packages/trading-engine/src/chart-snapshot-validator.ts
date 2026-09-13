@@ -128,12 +128,41 @@ export class ChartSnapshotValidator {
       }
     }
 
+    // Single live price authority check when formingCandle exists
+    if (formingCandle && snapshot.livePrice !== null && snapshot.livePrice !== undefined) {
+      if (snapshot.livePrice !== formingCandle.close) {
+        errors.push(
+          `Snapshot livePrice (${snapshot.livePrice}) does not match formingCandle close (${formingCandle.close}).`,
+        );
+      }
+    }
+
     // Validate SMC snapshot identity match if present
     if (smcSnapshot) {
       if (!this.validateSMCSnapshot(smcSnapshot, snapshot.symbol, snapshot.timeframe)) {
         errors.push(
           `SMC snapshot identity mismatch: expected ${snapshot.symbol}/${snapshot.timeframe}, got ${smcSnapshot.symbol}/${smcSnapshot.timeframe}`,
         );
+      }
+
+      if (smcSnapshot.structureAsOf && smcSnapshot.computedAt) {
+        const structMs = new Date(smcSnapshot.structureAsOf).getTime();
+        const compMs = new Date(smcSnapshot.computedAt).getTime();
+        if (!isNaN(structMs) && !isNaN(compMs) && structMs > compMs) {
+          errors.push(
+            `smcSnapshot structureAsOf (${smcSnapshot.structureAsOf}) is strictly after computedAt (${smcSnapshot.computedAt}).`,
+          );
+        }
+      }
+
+      if (smcSnapshot.structureAsOf && snapshot.closedThrough) {
+        const structMs = new Date(smcSnapshot.structureAsOf).getTime();
+        const closedThroughMs = new Date(snapshot.closedThrough).getTime();
+        if (!isNaN(structMs) && !isNaN(closedThroughMs) && structMs !== closedThroughMs) {
+          errors.push(
+            `smcSnapshot structureAsOf (${smcSnapshot.structureAsOf}) does not match snapshot closedThrough (${snapshot.closedThrough}).`,
+          );
+        }
       }
     }
 

@@ -363,12 +363,16 @@ export class CandlesService {
         provenance: (c.provenance as DataProvenance) || 'LIVE',
       }));
 
-    // 2. Pure SMC Analysis from trading-engine with explicit latest closed candle boundary
-    const latestClosedCandle = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : candles[candles.length - 1];
+    if (closedCandles.length === 0) {
+      throw new NotFoundException(`No closed candles found for symbol '${sym}' on timeframe '${timeframe}'`);
+    }
+
+    // 2. Pure SMC Analysis from trading-engine consuming ONLY closed candles
+    const latestClosedCandle = closedCandles[closedCandles.length - 1];
     const latestClosedTimestamp = latestClosedCandle.timestamp;
 
-    const smcAnalysis = SMCAnalyzer.analyze(candles, {
-      asOfTimestamp: latestClosedTimestamp,
+    const smcAnalysis = SMCAnalyzer.analyze(closedCandles as any, {
+      asOfTimestamp: new Date(latestClosedTimestamp),
       timeframe,
     });
 

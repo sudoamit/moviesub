@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import dynamic from 'next/dynamic';
-import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot, TimeframeRegistry, ChartCandle, ChartFormingCandle } from '@quant/shared';
+import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot, TimeframeRegistry, ChartCandle, ChartFormingCandle, CanonicalCandleAggregator, NormalizedTick } from '@quant/shared';
 import { ChartSnapshotValidator } from '@quant/trading-engine';
 import { MarketStreamProvider, useMarketStream } from '../context/MarketStreamContext';
 import { Header, NavTab, StrategyMode } from '../components/Header';
@@ -253,81 +253,23 @@ function DashboardContent() {
     subscribeToSymbol(selectedSymbol);
   }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
 
-  // Single Authoritative Live Tick Update Pipeline (P0-1, P0-3, Volume & Timeframe Rollover)
+  // Single Authoritative Live Tick Update Pipeline (Delegated to CanonicalCandleAggregator)
   useEffect(() => {
-    const tick = tickers[selectedSymbol];
-    if (tick && typeof tick.price === 'number' && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
+    const rawTick = tickers[selectedSymbol];
+    if (rawTick && typeof rawTick.price === 'number' && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
       setChartSnapshot((prev) => {
         if (!prev || prev.symbol !== selectedSymbol) return prev;
-        const liveP = tick.price;
-        const tickTime = (tick as any).timestamp ? new Date((tick as any).timestamp) : new Date();
-        const bucketOpenDate = TimeframeRegistry.getBucketOpenTime(tickTime, selectedTimeframe);
-        const bucketOpenIso = bucketOpenDate.toISOString();
-        const bucketOpenMs = bucketOpenDate.getTime();
-
-        const currentForming = prev.formingCandle;
-        const formingMs = currentForming ? new Date(currentForming.timestamp).getTime() : -1;
-
-        const isRollover = currentForming && bucketOpenMs > formingMs;
-        let closedCandles = prev.closedCandles;
-
-        if (isRollover && currentForming) {
-          const closedPrevForming: ChartCandle = {
-            ...currentForming,
-            isClosed: true as const,
-          };
-          closedCandles = [...closedCandles, closedPrevForming];
-        }
-
-        let nextForming: ChartFormingCandle;
-        const volType = (tick as any).volumeType;
-
-        if (currentForming && !isRollover) {
-          let newVol = currentForming.volume;
-          if (volType === 'INCREMENTAL') {
-            newVol = currentForming.volume + (tick.volume ?? 0);
-          } else if (volType === 'CUMULATIVE') {
-            newVol = Math.max(currentForming.volume, tick.volume ?? 0);
-          } else {
-            // Fail-closed: missing or UNKNOWN volumeType does not aggregate volume blindly
-            newVol = currentForming.volume;
-          }
-
-          nextForming = {
-            ...currentForming,
-            high: Math.max(currentForming.high, liveP),
-            low: Math.min(currentForming.low, liveP),
-            close: liveP,
-            volume: newVol,
-          };
-        } else {
-          // Initialize forming candle anchored strictly to calculated bucket open timestamp
-          let initialVol = 0;
-          if (volType === 'INCREMENTAL' || volType === 'CUMULATIVE') {
-            initialVol = tick.volume ?? 0;
-          }
-
-          nextForming = {
-            timestamp: bucketOpenIso,
-            open: liveP,
-            high: liveP,
-            low: liveP,
-            close: liveP,
-            volume: initialVol,
-            isClosed: false as const,
-            provenance: prev.dataProvenance,
-          };
-        }
-
-        return {
-          ...prev,
-          closedCandles,
-          formingCandle: nextForming,
-          livePrice: liveP,
+        const normalizedTick: NormalizedTick = {
+          symbol: selectedSymbol,
+          price: rawTick.price,
+          timestamp: (rawTick as any).timestamp || new Date(),
+          volume: rawTick.volume,
+          volumeType: (rawTick as any).volumeType || 'UNKNOWN',
         };
+        return CanonicalCandleAggregator.processTick(prev, normalizedTick);
       });
     }
-  }, [tickers, selectedSymbol, selectedTimeframe]);
+  }, [tickers, selectedSymbol]);
 
   const handleSelectSymbol = (rawSym: string) => {
     const s = (rawSym || '').toUpperCase();
