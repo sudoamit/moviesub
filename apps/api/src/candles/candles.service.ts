@@ -16,6 +16,7 @@ import {
   chartCandlesToICandles,
   chartCandlesToICandlesResult,
   VenueSessionCalendar,
+  CanonicalStreamState,
 } from '@quant/shared';
 import {
   calculateEMA,
@@ -412,10 +413,22 @@ export class CandlesService {
     const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
-    const marketAsOf = candlesResp.formingCandle
-      ? new Date(candlesResp.formingCandle.timestamp).toISOString()
-      : new Date(latestClosedTimestamp).toISOString();
+    // Actual latest market event observation time (must be >= formingCandle.timestamp and >= latestClosedTimestamp)
+    const formingTimeMs = candlesResp.formingCandle ? new Date(candlesResp.formingCandle.timestamp).getTime() : 0;
+    const closedTimeMs = new Date(latestClosedTimestamp).getTime();
+    const latestEventMs = Math.max(Date.now(), formingTimeMs, closedTimeMs);
+    const marketAsOf = new Date(latestEventMs).toISOString();
     const sessionKey = VenueSessionCalendar.getSessionKey(sym, latestClosedTimestamp);
+    const sessionVolumeWatermark = candlesResp.formingCandle?.volume ?? 0;
+
+    const streamState: CanonicalStreamState = {
+      marketAsOf,
+      sessionKey,
+      providerId: sourceIdentity,
+      connectionEpoch: 'initial',
+      lastSequenceNumber: null,
+      sessionVolumeWatermark,
+    };
 
     return {
       symbol: inst.symbol,
@@ -438,6 +451,8 @@ export class CandlesService {
       asOfTimestamp: observationTime,
       marketAsOf,
       sessionKey,
+      sessionVolumeWatermark,
+      streamState,
       dataProvenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
       sourceIdentity,
       smcSnapshot: {

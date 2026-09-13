@@ -1,5 +1,6 @@
 import { TimeframeRegistry } from '../timeframe/timeframe-registry';
 import {
+  CanonicalStreamState,
   ChartCandle,
   ChartFormingCandle,
   ChartMarketSnapshot,
@@ -12,13 +13,15 @@ import { VenueSessionCalendar } from './venue-session-calendar';
 /**
  * Canonical Live Candle Aggregator State Machine (Instance Scoped)
  *
- * Encapsulates:
- * 1. Venue & Exchange Session Calendar Identity (`VenueSessionCalendar`).
- * 2. Monotonic event sequence verification & sequence watermark restoration on reconnect.
- * 3. Latest event watermark tracking (`marketAsOf`) separate from candle bucket open time (`formingCandle.timestamp`).
- * 4. Bounded duplicate tick protection window (500-item FIFO cache) with provider-namespaced IDs.
- * 5. Timeframe rollover transition with explicit `closureType: 'TIME_BOUNDARY_INFERRED'`.
- * 6. Session cumulative volume baseline tracking and reset across session boundaries.
+ * Guarantees:
+ * 1. Transactional Watermark Commits: `lastSequenceNumber`, `sessionVolumeWatermark`, and `lastAcceptedEventTimeMs`
+ *    are ONLY committed at the very end of processing when the tick successfully passes all validations.
+ * 2. Reconnect Stream Epoch Boundaries: Sequence identity is scoped as `providerId + connectionEpoch + sequenceNumber`.
+ *    Reconnecting establishes a new epoch, resetting sequence watermarks while rejecting stale ticks from older epochs.
+ * 3. Canonical Session Volume Watermark: `sessionVolumeWatermark` represents the provider's latest `SESSION_CUMULATIVE` reading.
+ *    `syncFromSnapshot()` restores it directly.
+ * 4. Venue & Exchange Session Identity: `VenueSessionCalendar` provides deterministic session keys.
+ * 5. Bounded FIFO Idempotency Cache (500 items): Provides secondary duplicate replay protection.
  */
 export class CanonicalCandleAggregator {
   private processedTickSignatures = new Set<string>();
@@ -26,7 +29,9 @@ export class CanonicalCandleAggregator {
   private readonly maxQueueSize = 500;
   private lastAcceptedEventTimeMs = -1;
   private lastSequenceNumber: number | null = null;
-  private lastSessionVolume = -1;
+  private sessionVolumeWatermark: number | null = null;
+  private connectionEpoch = '';
+  private providerId = 'default';
   private lastSessionKey = '';
   private currentSymbol = '';
   private currentTimeframe = '';
@@ -39,10 +44,20 @@ export class CanonicalCandleAggregator {
     this.signatureQueue = [];
     this.lastAcceptedEventTimeMs = -1;
     this.lastSequenceNumber = null;
-    this.lastSessionVolume = -1;
+    this.sessionVolumeWatermark = null;
+    this.connectionEpoch = '';
+    this.providerId = 'default';
     this.lastSessionKey = '';
     this.currentSymbol = '';
     this.currentTimeframe = '';
+  }
+
+  /**
+   * Explicitly sets current stream connection epoch.
+   */
+  setConnectionEpoch(epoch: string): void {
+    this.connectionEpoch = epoch || '';
+    this.lastSequenceNumber = null;
   }
 
   /**
@@ -53,8 +68,7 @@ export class CanonicalCandleAggregator {
   }
 
   /**
-   * Fully synchronizes internal aggregator watermarks with a fresh authoritative server snapshot
-   * (e.g., after REST fetch, socket reconnect, or source failover).
+   * Fully synchronizes internal aggregator watermarks with an authoritative server snapshot.
    */
   syncFromSnapshot(snapshot: ChartMarketSnapshot): void {
     if (!snapshot) return;
@@ -68,8 +82,20 @@ export class CanonicalCandleAggregator {
       this.currentTimeframe = snapshot.timeframe;
     }
 
-    // 1. Restore Latest Event Watermark (marketAsOf)
-    if (snapshot.marketAsOf) {
+    const state = snapshot.streamState;
+
+    // 1. Restore Provider ID & Connection Epoch
+    if (state?.providerId) {
+      this.providerId = state.providerId;
+    }
+    if (state?.connectionEpoch) {
+      this.connectionEpoch = state.connectionEpoch;
+    }
+
+    // 2. Restore Latest Event Watermark (marketAsOf)
+    if (state?.marketAsOf) {
+      this.lastAcceptedEventTimeMs = new Date(state.marketAsOf).getTime();
+    } else if (snapshot.marketAsOf) {
       this.lastAcceptedEventTimeMs = new Date(snapshot.marketAsOf).getTime();
     } else if (snapshot.formingCandle) {
       this.lastAcceptedEventTimeMs = new Date(snapshot.formingCandle.timestamp).getTime();
@@ -79,8 +105,10 @@ export class CanonicalCandleAggregator {
       ).getTime();
     }
 
-    // 2. Restore Venue Session Key
-    if (snapshot.sessionKey) {
+    // 3. Restore Venue Session Key
+    if (state?.sessionKey) {
+      this.lastSessionKey = state.sessionKey;
+    } else if (snapshot.sessionKey) {
       this.lastSessionKey = snapshot.sessionKey;
     } else if (this.lastAcceptedEventTimeMs > 0) {
       this.lastSessionKey = VenueSessionCalendar.getSessionKey(
@@ -89,20 +117,28 @@ export class CanonicalCandleAggregator {
       );
     }
 
-    // 3. Restore Session Cumulative Volume Baseline from forming or closed candles
-    if (snapshot.formingCandle && snapshot.formingCandle.volumeType === 'SESSION_CUMULATIVE') {
-      this.lastSessionVolume = snapshot.formingCandle.volume;
+    // 4. Restore Session Cumulative Volume Watermark directly
+    if (state?.sessionVolumeWatermark !== undefined && state.sessionVolumeWatermark !== null) {
+      this.sessionVolumeWatermark = state.sessionVolumeWatermark;
+    } else if (snapshot.sessionVolumeWatermark !== undefined && snapshot.sessionVolumeWatermark !== null) {
+      this.sessionVolumeWatermark = snapshot.sessionVolumeWatermark;
+    } else if (snapshot.formingCandle && snapshot.formingCandle.volumeType === 'SESSION_CUMULATIVE') {
+      this.sessionVolumeWatermark = snapshot.formingCandle.volume;
     } else {
-      this.lastSessionVolume = -1;
+      this.sessionVolumeWatermark = null;
     }
 
-    // 4. Reset sequence watermark on snapshot resync
-    this.lastSequenceNumber = null;
+    // 5. Restore Sequence Watermark if present on streamState
+    if (state?.lastSequenceNumber !== undefined && state.lastSequenceNumber !== null) {
+      this.lastSequenceNumber = state.lastSequenceNumber;
+    } else {
+      this.lastSequenceNumber = null;
+    }
   }
 
   /**
    * Processes an incoming raw or normalized live tick and produces an updated ChartMarketSnapshot.
-   * Strictly typed without any `any` parameters.
+   * Transactional: If tick processing fails or is rejected at any stage, no watermarks advance.
    */
   processTick(
     snapshot: ChartMarketSnapshot,
@@ -110,30 +146,43 @@ export class CanonicalCandleAggregator {
   ): ChartMarketSnapshot {
     if (!snapshot) return snapshot;
 
-    // 1. Strict Provider Tick Normalization & Fail-Closed Validation
+    // 1. Normalize Tick (Fail closed on invalid timestamp or non-positive price)
     const tick = normalizeProviderTick(rawTick);
     if (!tick) {
-      return snapshot; // Reject tick with missing timestamp or invalid price
+      return snapshot; // Reject invalid tick -> watermarks UNCHANGED
     }
 
     // 2. Symbol Match Verification
     if (snapshot.symbol.toUpperCase() !== tick.symbol.toUpperCase()) {
-      return snapshot;
+      return snapshot; // Reject symbol mismatch -> watermarks UNCHANGED
     }
 
     const tickTimeMs = new Date(tick.timestamp).getTime();
-    const providerId = (rawTick as ProviderTick).providerId || 'default';
+    const tickProviderId = (rawTick as ProviderTick).providerId || this.providerId || 'default';
+    const tickEpoch = (rawTick as ProviderTick).connectionEpoch;
     const isReconnect = Boolean((rawTick as ProviderTick).isReconnect);
     const seqNum = (rawTick as ProviderTick).sequenceNumber;
 
-    // 3. Sequence Monotonicity Verification (where provider supports it)
-    if (isReconnect) {
-      this.lastSequenceNumber = seqNum ?? null;
-    } else if (seqNum !== undefined && seqNum !== null) {
-      if (this.lastSequenceNumber !== null && seqNum <= this.lastSequenceNumber) {
-        return snapshot; // Reject stale or out-of-order sequence number
+    let candidateEpoch = this.connectionEpoch;
+    let candidateSequenceNum = this.lastSequenceNumber;
+
+    // 3. Connection Epoch & Sequence Monotonicity Verification
+    if (tickEpoch && tickEpoch !== this.connectionEpoch) {
+      if (isReconnect || this.connectionEpoch === '') {
+        // Accept new connection epoch
+        candidateEpoch = tickEpoch;
+        candidateSequenceNum = seqNum ?? null;
+      } else {
+        // Reject tick from old / mismatched connection epoch
+        return snapshot;
       }
-      this.lastSequenceNumber = seqNum;
+    } else if (isReconnect) {
+      candidateSequenceNum = seqNum ?? null;
+    } else if (seqNum !== undefined && seqNum !== null) {
+      if (candidateSequenceNum !== null && seqNum <= candidateSequenceNum) {
+        return snapshot; // Reject stale or out-of-order sequence number -> watermarks UNCHANGED
+      }
+      candidateSequenceNum = seqNum;
     }
 
     // 4. Stale Tick Check against Closed Candles
@@ -143,7 +192,7 @@ export class CanonicalCandleAggregator {
         closedCandles[closedCandles.length - 1].timestamp,
       ).getTime();
       if (tickTimeMs < lastClosedMs) {
-        return snapshot; // Ignore tick older than latest closed candle
+        return snapshot; // Ignore tick older than latest closed candle -> watermarks UNCHANGED
       }
     }
 
@@ -162,34 +211,24 @@ export class CanonicalCandleAggregator {
 
     // 6. Fail-Closed Out-of-Order Tick Rejection
     if (currentForming && tickTimeMs < currentFormingMs) {
-      return snapshot; // Reject tick belonging to a past candle bucket
+      return snapshot; // Reject tick belonging to a past candle bucket -> watermarks UNCHANGED
     }
     if (
       this.lastAcceptedEventTimeMs > 0 &&
       tickTimeMs < this.lastAcceptedEventTimeMs
     ) {
-      return snapshot; // Reject out-of-order tick earlier than latest accepted event
+      return snapshot; // Reject out-of-order tick earlier than latest accepted event -> watermarks UNCHANGED
     }
 
-    // 7. Bounded Window Idempotency Check (500-Item FIFO Cache for Bounded Protection)
+    // 7. Bounded Window Idempotency Check (500-Item FIFO Cache)
+    const epochPrefix = candidateEpoch ? `${candidateEpoch}_` : '';
     const tickSig = tick.tickId
-      ? `${providerId}_${tick.symbol}_id_${tick.tickId}`
-      : `${providerId}_${tick.symbol}_sig_${tickTimeMs}_${tick.price}_${tick.volume ?? 'nv'}`;
+      ? `${tickProviderId}_${epochPrefix}${tick.symbol}_id_${tick.tickId}`
+      : `${tickProviderId}_${epochPrefix}${tick.symbol}_sig_${tickTimeMs}_${tick.price}_${tick.volume ?? 'nv'}`;
 
     if (this.processedTickSignatures.has(tickSig)) {
-      return snapshot; // Duplicate tick within bounded window -> no-op
+      return snapshot; // Duplicate tick within bounded window -> no-op -> watermarks UNCHANGED
     }
-
-    // Update bounded FIFO queue
-    this.processedTickSignatures.add(tickSig);
-    this.signatureQueue.push(tickSig);
-    if (this.signatureQueue.length > this.maxQueueSize) {
-      const oldest = this.signatureQueue.shift();
-      if (oldest) this.processedTickSignatures.delete(oldest);
-    }
-
-    // Record latest event watermark
-    this.lastAcceptedEventTimeMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
 
     // 8. Timeframe Rollover Transition with Closure Semantics
     const isRollover = Boolean(currentForming && bucketOpenMs > currentFormingMs);
@@ -226,12 +265,15 @@ export class CanonicalCandleAggregator {
       this.lastSessionKey && this.lastSessionKey !== sessionKey,
     );
 
+    // 10. Explicit Session Volume Watermark Calculation
     const safeVol = tick.volume ?? 0;
+    const tickCumVol = (rawTick as ProviderTick).sessionVolume ?? safeVol;
+    let candidateSessionVolumeWatermark = this.sessionVolumeWatermark;
+
     if (isNewSession) {
-      this.lastSessionVolume = safeVol; // Reset cumulative volume baseline for new session
+      candidateSessionVolumeWatermark = tickCumVol; // Reset session cumulative baseline for new session
     }
 
-    // 10. Volume Aggregation & Forming Candle Construction
     let nextForming: ChartFormingCandle;
 
     if (currentForming && !isRollover) {
@@ -241,12 +283,13 @@ export class CanonicalCandleAggregator {
       } else if (tick.volumeType === 'BUCKET_CUMULATIVE') {
         newVol = Math.max(currentForming.volume, safeVol);
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
+        const baseline = candidateSessionVolumeWatermark;
         const delta =
-          this.lastSessionVolume >= 0 && !isNewSession
-            ? Math.max(0, safeVol - this.lastSessionVolume)
+          baseline !== null && baseline >= 0 && !isNewSession
+            ? Math.max(0, tickCumVol - baseline)
             : 0;
         newVol = currentForming.volume + delta;
-        this.lastSessionVolume = safeVol;
+        candidateSessionVolumeWatermark = tickCumVol;
       } else {
         // UNKNOWN: fail-closed, keep volume unchanged
         newVol = currentForming.volume;
@@ -273,7 +316,7 @@ export class CanonicalCandleAggregator {
         initialVol = safeVol;
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
         initialVol = 0;
-        this.lastSessionVolume = safeVol;
+        candidateSessionVolumeWatermark = tickCumVol;
       }
 
       nextForming = {
@@ -289,17 +332,24 @@ export class CanonicalCandleAggregator {
       };
     }
 
-    this.lastSessionKey = sessionKey;
-
-    // 11. Metadata, Market Watermark & Observation Timestamps
-    const marketAsOfIso = new Date(this.lastAcceptedEventTimeMs).toISOString();
+    // 11. Construct Candidate Snapshot & Stream State
+    const marketAsOfIso = new Date(Math.max(this.lastAcceptedEventTimeMs, tickTimeMs)).toISOString();
     const observationIso = new Date().toISOString();
     const closedThrough =
       closedCandles.length > 0
         ? closedCandles[closedCandles.length - 1].timestamp
         : snapshot.closedThrough;
 
-    return {
+    const candidateStreamState: CanonicalStreamState = {
+      marketAsOf: marketAsOfIso,
+      sessionKey,
+      providerId: tickProviderId,
+      connectionEpoch: candidateEpoch,
+      lastSequenceNumber: candidateSequenceNum,
+      sessionVolumeWatermark: candidateSessionVolumeWatermark,
+    };
+
+    const nextSnapshot: ChartMarketSnapshot = {
       ...snapshot,
       closedCandles,
       formingCandle: nextForming,
@@ -307,7 +357,27 @@ export class CanonicalCandleAggregator {
       closedThrough,
       marketAsOf: marketAsOfIso,
       sessionKey,
+      sessionVolumeWatermark: candidateSessionVolumeWatermark ?? undefined,
+      streamState: candidateStreamState,
       asOfTimestamp: observationIso,
     };
+
+    // 12. TRANSACTIONAL COMMIT: Only update internal state AFTER tick processing succeeds
+    this.providerId = tickProviderId;
+    this.connectionEpoch = candidateEpoch;
+    this.lastSequenceNumber = candidateSequenceNum;
+    this.sessionVolumeWatermark = candidateSessionVolumeWatermark;
+    this.lastAcceptedEventTimeMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
+    this.lastSessionKey = sessionKey;
+
+    // Update bounded FIFO duplicate cache
+    this.processedTickSignatures.add(tickSig);
+    this.signatureQueue.push(tickSig);
+    if (this.signatureQueue.length > this.maxQueueSize) {
+      const oldest = this.signatureQueue.shift();
+      if (oldest) this.processedTickSignatures.delete(oldest);
+    }
+
+    return nextSnapshot;
   }
 }

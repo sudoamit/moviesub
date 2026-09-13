@@ -22,6 +22,8 @@ export interface ProviderTick {
   readonly tickId?: string;
   readonly sequenceNumber?: number;
   readonly providerId?: string;
+  readonly connectionEpoch?: string;
+  readonly sessionVolume?: number;
   readonly isReconnect?: boolean;
 }
 
@@ -34,6 +36,8 @@ export interface NormalizedTick {
   readonly tickId?: string;
   readonly sequenceNumber?: number;
   readonly providerId?: string;
+  readonly connectionEpoch?: string;
+  readonly sessionVolume?: number;
   readonly isReconnect?: boolean;
 }
 
@@ -59,6 +63,15 @@ export interface ChartFormingCandle {
   readonly isClosed: false;
   readonly provenance?: ChartProvenance;
   readonly volumeType?: TickVolumeType;
+}
+
+export interface CanonicalStreamState {
+  readonly marketAsOf: Date | string | number;
+  readonly sessionKey: string;
+  readonly providerId?: string;
+  readonly connectionEpoch?: string;
+  readonly lastSequenceNumber?: number | null;
+  readonly sessionVolumeWatermark?: number | null;
 }
 
 export interface ChartSMCSnapshot {
@@ -94,6 +107,8 @@ export interface ChartMarketSnapshot {
   readonly asOfTimestamp: Date | string | number;
   readonly marketAsOf?: Date | string | number;
   readonly sessionKey?: string;
+  readonly sessionVolumeWatermark?: number;
+  readonly streamState?: CanonicalStreamState;
   readonly dataProvenance: ChartProvenance;
   readonly sourceIdentity: string;
   readonly smcSnapshot?: ChartSMCSnapshot | null;

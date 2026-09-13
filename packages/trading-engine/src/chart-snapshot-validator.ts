@@ -173,6 +173,37 @@ export class ChartSnapshotValidator {
       }
     }
 
+    // Temporal Invariant Checks: marketAsOf, closedThrough, formingCandle, structureAsOf, asOfTimestamp
+    const marketAsOfMs = snapshot.marketAsOf ? new Date(snapshot.marketAsOf).getTime() : NaN;
+    const closedThroughMs = snapshot.closedThrough ? new Date(snapshot.closedThrough).getTime() : NaN;
+    const asOfMs = snapshot.asOfTimestamp ? new Date(snapshot.asOfTimestamp).getTime() : NaN;
+
+    if (!isNaN(marketAsOfMs) && !isNaN(closedThroughMs) && marketAsOfMs < closedThroughMs) {
+      errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be before closedThrough (${snapshot.closedThrough}).`);
+    }
+
+    if (formingCandle && !isNaN(marketAsOfMs)) {
+      const fTimeMs = new Date(formingCandle.timestamp).getTime();
+      if (!isNaN(fTimeMs) && marketAsOfMs < fTimeMs) {
+        errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be before formingCandle timestamp (${formingCandle.timestamp}).`);
+      }
+    }
+
+    if (!isNaN(marketAsOfMs) && !isNaN(asOfMs) && marketAsOfMs > asOfMs + 1000) {
+      errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be strictly after server observation asOfTimestamp (${snapshot.asOfTimestamp}).`);
+    }
+
+    // Validate Stream State Watermarks & Epoch Invariants if present
+    if (snapshot.streamState) {
+      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch } = snapshot.streamState;
+      if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && sessionVolumeWatermark < 0) {
+        errors.push(`streamState sessionVolumeWatermark < 0: ${sessionVolumeWatermark}`);
+      }
+      if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !connectionEpoch) {
+        errors.push('streamState sequence number specified without connectionEpoch');
+      }
+    }
+
     // Validate SMC snapshot identity match & timestamp invariants if present
     if (smcSnapshot) {
       if (!this.validateSMCSnapshot(smcSnapshot, snapshot.symbol, snapshot.timeframe)) {
@@ -193,7 +224,7 @@ export class ChartSnapshotValidator {
 
       if (smcSnapshot.structureAsOf && snapshot.closedThrough) {
         const structMs = new Date(smcSnapshot.structureAsOf).getTime();
-        const closedThroughMs = new Date(snapshot.closedThrough).getTime();
+
         if (!isNaN(structMs) && !isNaN(closedThroughMs) && structMs !== closedThroughMs) {
           errors.push(
             `smcSnapshot structureAsOf (${smcSnapshot.structureAsOf}) does not match snapshot closedThrough (${snapshot.closedThrough}).`,
@@ -203,7 +234,6 @@ export class ChartSnapshotValidator {
     }
 
     if (snapshot.closedThrough && closedCandles && closedCandles.length > 0) {
-      const closedThroughMs = new Date(snapshot.closedThrough).getTime();
       const lastClosedMs = new Date(closedCandles[closedCandles.length - 1].timestamp).getTime();
       if (!isNaN(closedThroughMs) && !isNaN(lastClosedMs) && closedThroughMs !== lastClosedMs) {
         errors.push(
