@@ -413,19 +413,21 @@ export class CandlesService {
     const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
-    // Actual latest market event observation time (must be >= formingCandle.timestamp and >= latestClosedTimestamp)
+    // Actual latest provider market event timestamp (strictly derived from market event timestamps, NEVER Date.now())
     const formingTimeMs = candlesResp.formingCandle ? new Date(candlesResp.formingCandle.timestamp).getTime() : 0;
     const closedTimeMs = new Date(latestClosedTimestamp).getTime();
-    const latestEventMs = Math.max(Date.now(), formingTimeMs, closedTimeMs);
+    const latestEventMs = Math.max(formingTimeMs, closedTimeMs);
     const marketAsOf = new Date(latestEventMs).toISOString();
     const sessionKey = VenueSessionCalendar.getSessionKey(sym, latestClosedTimestamp);
-    const sessionVolumeWatermark = candlesResp.formingCandle?.volume ?? 0;
+    // REST initial snapshot does not claim session cumulative watermark unless provider gave explicit reading
+    const sessionVolumeWatermark: number | null = null;
 
     const streamState: CanonicalStreamState = {
       marketAsOf,
+      observedAt: observationTime,
       sessionKey,
       providerId: sourceIdentity,
-      connectionEpoch: 'initial',
+      connectionEpoch: 'REST_BOOTSTRAP',
       lastSequenceNumber: null,
       sessionVolumeWatermark,
     };
@@ -450,6 +452,7 @@ export class CandlesService {
       closedThrough: latestClosedTimestamp,
       asOfTimestamp: observationTime,
       marketAsOf,
+      observedAt: observationTime,
       sessionKey,
       sessionVolumeWatermark,
       streamState,

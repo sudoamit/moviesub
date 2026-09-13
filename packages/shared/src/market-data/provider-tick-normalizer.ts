@@ -41,6 +41,12 @@ export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): Norma
       ? rawVol
       : undefined;
 
+  const rawSessVol = Number(raw.sessionVolume);
+  const safeSessionVol =
+    typeof rawSessVol === 'number' && !isNaN(rawSessVol) && isFinite(rawSessVol) && rawSessVol >= 0
+      ? rawSessVol
+      : undefined;
+
   // 5. Volume Semantics Resolution
   let volumeType: TickVolumeType = 'UNKNOWN';
   const rawVolType = raw.volumeType as string | undefined;
@@ -62,5 +68,10 @@ export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): Norma
     volume: safeVol,
     volumeType,
     tickId: raw.tickId ? String(raw.tickId) : undefined,
+    sequenceNumber: raw.sequenceNumber,
+    providerId: raw.providerId,
+    connectionEpoch: raw.connectionEpoch,
+    sessionVolume: safeSessionVol,
+    isReconnect: raw.isReconnect,
   };
 }

@@ -67,9 +67,10 @@ export interface ChartFormingCandle {
 
 export interface CanonicalStreamState {
   readonly marketAsOf: Date | string | number;
+  readonly observedAt?: Date | string | number;
   readonly sessionKey: string;
   readonly providerId?: string;
-  readonly connectionEpoch?: string;
+  readonly connectionEpoch?: string | null;
   readonly lastSequenceNumber?: number | null;
   readonly sessionVolumeWatermark?: number | null;
 }
@@ -82,6 +83,7 @@ export interface ChartSMCSnapshot {
   readonly computedAt?: Date | string | number;
   readonly structureAsOf?: Date | string | number;
   readonly marketAsOf?: Date | string | number;
+  readonly observedAt?: Date | string | number;
   readonly structures?: {
     swings?: ISwingPoint[];
     bos?: IBreakOfStructure[];
@@ -106,8 +108,9 @@ export interface ChartMarketSnapshot {
   readonly closedThrough?: Date | string | number;
   readonly asOfTimestamp: Date | string | number;
   readonly marketAsOf?: Date | string | number;
+  readonly observedAt?: Date | string | number;
   readonly sessionKey?: string;
-  readonly sessionVolumeWatermark?: number;
+  readonly sessionVolumeWatermark?: number | null;
   readonly streamState?: CanonicalStreamState;
   readonly dataProvenance: ChartProvenance;
   readonly sourceIdentity: string;

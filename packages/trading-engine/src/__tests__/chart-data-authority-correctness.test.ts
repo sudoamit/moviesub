@@ -861,7 +861,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         symbol: 'NIFTY',
         price: 107,
         timestamp: '2026-09-13T09:40:00.000Z',
-        volume: 1000,
+        sessionVolume: 1000,
         volumeType: 'SESSION_CUMULATIVE',
       });
 
@@ -869,7 +869,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         symbol: 'NIFTY',
         price: 108,
         timestamp: '2026-09-13T09:41:00.000Z',
-        volume: 1250,
+        sessionVolume: 1250,
         volumeType: 'SESSION_CUMULATIVE',
       });
 

@@ -173,10 +173,11 @@ export class ChartSnapshotValidator {
       }
     }
 
-    // Temporal Invariant Checks: marketAsOf, closedThrough, formingCandle, structureAsOf, asOfTimestamp
+    // Temporal Invariant Checks: marketAsOf, closedThrough, formingCandle, structureAsOf, observedAt
     const marketAsOfMs = snapshot.marketAsOf ? new Date(snapshot.marketAsOf).getTime() : NaN;
     const closedThroughMs = snapshot.closedThrough ? new Date(snapshot.closedThrough).getTime() : NaN;
     const asOfMs = snapshot.asOfTimestamp ? new Date(snapshot.asOfTimestamp).getTime() : NaN;
+    const observedAtMs = snapshot.observedAt ? new Date(snapshot.observedAt).getTime() : asOfMs;
 
     if (!isNaN(marketAsOfMs) && !isNaN(closedThroughMs) && marketAsOfMs < closedThroughMs) {
       errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be before closedThrough (${snapshot.closedThrough}).`);
@@ -189,18 +190,37 @@ export class ChartSnapshotValidator {
       }
     }
 
-    if (!isNaN(marketAsOfMs) && !isNaN(asOfMs) && marketAsOfMs > asOfMs + 1000) {
-      errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be strictly after server observation asOfTimestamp (${snapshot.asOfTimestamp}).`);
+    if (!isNaN(marketAsOfMs) && !isNaN(observedAtMs) && marketAsOfMs > observedAtMs + 1000) {
+      errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be strictly after server observation observedAt (${snapshot.observedAt || snapshot.asOfTimestamp}).`);
     }
 
-    // Validate Stream State Watermarks & Epoch Invariants if present
+    // Validate Stream State Watermarks & Consistency Invariants if present
     if (snapshot.streamState) {
-      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch } = snapshot.streamState;
+      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch, marketAsOf, sessionKey, providerId } = snapshot.streamState;
+
       if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && sessionVolumeWatermark < 0) {
         errors.push(`streamState sessionVolumeWatermark < 0: ${sessionVolumeWatermark}`);
       }
+      if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && (!snapshot.sessionKey || snapshot.sessionKey.trim() === '')) {
+        errors.push('streamState sessionVolumeWatermark specified without sessionKey');
+      }
       if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !connectionEpoch) {
         errors.push('streamState sequence number specified without connectionEpoch');
+      }
+
+      if (marketAsOf && snapshot.marketAsOf) {
+        const sMarketMs = new Date(marketAsOf).getTime();
+        if (!isNaN(sMarketMs) && !isNaN(marketAsOfMs) && sMarketMs !== marketAsOfMs) {
+          errors.push(`streamState.marketAsOf (${marketAsOf}) does not match snapshot.marketAsOf (${snapshot.marketAsOf})`);
+        }
+      }
+
+      if (sessionKey && snapshot.sessionKey && sessionKey !== snapshot.sessionKey) {
+        errors.push(`streamState.sessionKey (${sessionKey}) does not match snapshot.sessionKey (${snapshot.sessionKey})`);
+      }
+
+      if (providerId && providerId !== 'UNKNOWN_PROVIDER' && snapshot.sourceIdentity && snapshot.sourceIdentity !== 'UNKNOWN_SOURCE' && providerId !== snapshot.sourceIdentity) {
+        errors.push(`streamState.providerId (${providerId}) does not match snapshot.sourceIdentity (${snapshot.sourceIdentity})`);
       }
     }
 
