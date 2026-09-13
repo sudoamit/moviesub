@@ -562,7 +562,16 @@ export class AILearningService implements OnModuleInit {
       take: 200,
     });
 
-    if (completedTrades.length === 0) {
+    const verifiedTrades = completedTrades.filter(
+      (t) =>
+        t.realizedR !== null &&
+        t.entryPrice !== null &&
+        t.entryTime !== null &&
+        (t.outcomeSnapshotJson as any)?.executionDataComplete !== false &&
+        (t.outcomeSnapshotJson as any)?.isLegacyExecutionData !== true,
+    );
+
+    if (verifiedTrades.length === 0) {
       return {
         status: 'NO_DATA',
         modelVersion: activeModel.modelVersion,
@@ -576,9 +585,9 @@ export class AILearningService implements OnModuleInit {
       };
     }
 
-    // Compute real performance by asset from actual database records
+    // Compute real performance by asset from verified database records
     const assetMap = new Map<string, { wins: number; total: number; totalR: number }>();
-    for (const t of completedTrades) {
+    for (const t of verifiedTrades) {
       const entry = assetMap.get(t.symbol) || { wins: 0, total: 0, totalR: 0 };
       entry.total += 1;
       const r = Number(t.realizedR);
@@ -593,9 +602,9 @@ export class AILearningService implements OnModuleInit {
       avgR: `${data.totalR >= 0 ? '+' : ''}${(data.totalR / data.total).toFixed(2)}R`,
     }));
 
-    // Compute real performance by outcome classification from actual database records
+    // Compute real performance by outcome classification from verified database records
     const regimeMap = new Map<string, { wins: number; total: number; totalR: number }>();
-    for (const t of completedTrades) {
+    for (const t of verifiedTrades) {
       const regime = t.outcomeClassification || 'STANDARD';
       const entry = regimeMap.get(regime) || { wins: 0, total: 0, totalR: 0 };
       entry.total += 1;
@@ -631,15 +640,27 @@ export class AILearningService implements OnModuleInit {
    */
   public async getRecentPostMortems(): Promise<any[]> {
     const trades = await this.prisma.paperTrade.findMany({
+      where: {
+        entryPrice: { not: null },
+        entryTime: { not: null },
+        realizedPnL: { not: null },
+        realizedR: { not: null },
+      },
       take: 20,
       orderBy: { exitTime: 'desc' },
     });
 
-    if (trades.length === 0) {
+    const verifiedTrades = trades.filter(
+      (t) =>
+        (t.outcomeSnapshotJson as any)?.executionDataComplete !== false &&
+        (t.outcomeSnapshotJson as any)?.isLegacyExecutionData !== true,
+    );
+
+    if (verifiedTrades.length === 0) {
       return [];
     }
 
-    return trades.map((t) => {
+    return verifiedTrades.map((t) => {
       const entryPrice = Number(t.entryPrice);
       const exitPrice = Number(t.exitPrice);
       const realizedR = Number(t.realizedR);
@@ -649,7 +670,7 @@ export class AILearningService implements OnModuleInit {
       return {
         symbol: t.symbol,
         direction: t.direction,
-        entryPrice: t.entryPrice !== null ? Number(t.entryPrice) : null,
+        entryPrice,
         exitPrice,
         outcome: t.outcomeClassification || (realizedR > 0 ? 'TP_HIT' : 'SL_HIT'),
         realizedRMultiple: realizedR,
@@ -671,35 +692,51 @@ export class AILearningService implements OnModuleInit {
   public async recordTradeOutcomeAndOnlineUpdate(trade: {
     symbol: string;
     direction: 'BUY' | 'SELL' | 'BULLISH' | 'BEARISH';
-    entryPrice: number;
+    entryPrice: number | null;
     exitPrice: number;
-    stopLoss?: number;
-    target?: number;
-    entryTimestamp: Date;
+    stopLoss?: number | null;
+    target?: number | null;
+    entryTimestamp: Date | null;
     exitTimestamp: Date;
     exitReason?: string;
-    realizedR?: number;
+    realizedR?: number | null;
     featureSnapshotJson?: any;
     outcomeSnapshotJson?: any;
   }): Promise<{ updateResult: any; postMortem: any; skippedReason?: string }> {
     const isBull = trade.direction === 'BUY' || trade.direction === 'BULLISH';
     const sym = trade.symbol.toUpperCase();
 
+    // Strict guard: NEVER learn from incomplete or legacy execution data
+    const outcome = trade.outcomeSnapshotJson || {};
+    const isIncompleteExecution =
+      trade.entryPrice === null ||
+      trade.entryPrice === undefined ||
+      trade.entryTimestamp === null ||
+      trade.entryTimestamp === undefined ||
+      trade.realizedR === null ||
+      trade.realizedR === undefined ||
+      outcome.executionDataComplete === false ||
+      outcome.isLegacyExecutionData === true;
+
+    if (isIncompleteExecution) {
+      const skippedReason = 'INCOMPLETE_OR_LEGACY_EXECUTION_DATA';
+      this.logger.warn(
+        `[OnlineLearning] Skipped online learning update for ${sym}: ${skippedReason} (entryPrice=${trade.entryPrice}, entryTime=${trade.entryTimestamp}, realizedR=${trade.realizedR})`,
+      );
+      return { updateResult: null, postMortem: null, skippedReason };
+    }
+
     const activeModel = this.registry.getActiveModel() || new TradePredictionModel('v1.0.0-PROD');
 
-    // 1. Consume persisted feature snapshot directly without lookahead bias
+    // Consume persisted feature snapshot directly without lookahead bias
     const features: any = trade.featureSnapshotJson;
     let updateResult: any = null;
     let skippedReason: string | undefined = undefined;
 
     const isWin =
-      trade.outcomeSnapshotJson?.realizedPnL !== undefined
+      trade.outcomeSnapshotJson?.realizedPnL !== undefined && trade.outcomeSnapshotJson?.realizedPnL !== null
         ? trade.outcomeSnapshotJson.realizedPnL > 0
-        : trade.realizedR !== undefined
-          ? trade.realizedR > 0
-          : isBull
-            ? trade.exitPrice > trade.entryPrice
-            : trade.entryPrice > trade.exitPrice;
+        : trade.realizedR! > 0;
 
     if (!features) {
       skippedReason = 'ONLINE_LEARNING_SKIPPED_MISSING_FEATURE_SNAPSHOT';
@@ -728,7 +765,7 @@ export class AILearningService implements OnModuleInit {
       direction: isBull ? 'BULLISH' : 'BEARISH',
       entryPrice: trade.entryPrice,
       exitPrice: trade.exitPrice,
-      realizedR: trade.realizedR ?? trade.outcomeSnapshotJson?.realizedR ?? 0.0,
+      realizedR: trade.realizedR,
       outcome: isWin ? 'WIN_TP' : 'LOSS_SL',
       classification:
         trade.outcomeSnapshotJson?.outcomeClassification ||
@@ -751,7 +788,7 @@ export class AILearningService implements OnModuleInit {
   /**
    * Loads a PaperTrade by ID and directly learns from its persisted snapshots without querying candles.
    */
-  public async learnFromPersistedTrade(tradeId: string): Promise<{ updateResult: any; postMortem: any }> {
+  public async learnFromPersistedTrade(tradeId: string): Promise<{ updateResult: any; postMortem: any; skippedReason?: string }> {
     const trade = await this.prisma.paperTrade.findUnique({
       where: { id: tradeId },
     });
@@ -759,15 +796,30 @@ export class AILearningService implements OnModuleInit {
       throw new NotFoundException(`PaperTrade '${tradeId}' not found`);
     }
 
+    const outcome = (trade.outcomeSnapshotJson as any) || {};
+    if (
+      trade.entryPrice === null ||
+      trade.entryTime === null ||
+      trade.realizedR === null ||
+      outcome.executionDataComplete === false ||
+      outcome.isLegacyExecutionData === true
+    ) {
+      const skippedReason = 'INCOMPLETE_OR_LEGACY_EXECUTION_DATA';
+      this.logger.warn(
+        `[AI LEARNING SKIPPED] Trade '${tradeId}' has incomplete/legacy execution data; excluding from model updates`,
+      );
+      return { updateResult: null, postMortem: null, skippedReason };
+    }
+
     return this.recordTradeOutcomeAndOnlineUpdate({
       symbol: trade.symbol,
       direction: trade.direction === 'BULLISH' ? 'BUY' : 'SELL',
-      entryPrice: Number(trade.entryPrice || 0),
+      entryPrice: Number(trade.entryPrice),
       exitPrice: Number(trade.exitPrice),
-      entryTimestamp: trade.entryTime || trade.exitTime,
+      entryTimestamp: trade.entryTime,
       exitTimestamp: trade.exitTime,
       exitReason: trade.exitReason,
-      realizedR: Number(trade.realizedR || 0),
+      realizedR: Number(trade.realizedR),
       featureSnapshotJson: trade.featureSnapshotJson,
       outcomeSnapshotJson: trade.outcomeSnapshotJson,
     });

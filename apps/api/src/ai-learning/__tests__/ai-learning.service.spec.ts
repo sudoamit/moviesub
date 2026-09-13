@@ -198,4 +198,101 @@ describe('AILearningService Snapshot-Driven Learning & Prediction Safety', () =>
     expect(prediction.aiPrediction.confidenceStatus).toBe('INSUFFICIENT_DATA');
     expect(prediction.aiPrediction.recommendation).toBe('WAIT');
   });
+
+  it('13. learnFromPersistedTrade strictly skips learning for legacy/incomplete trades (entryPrice=null, entryTime=null, or executionDataComplete=false)', async () => {
+    mockPrisma.paperTrade.findUnique.mockImplementation((args: any) => {
+      if (args.where.id === 'legacy-trade-1') {
+        return Promise.resolve({
+          id: 'legacy-trade-1',
+          symbol: 'NIFTY',
+          direction: 'BULLISH',
+          entryPrice: null,
+          exitPrice: new Decimal(24200.0),
+          realizedPnL: null,
+          realizedR: null,
+          holdingDurationSeconds: null,
+          entryTime: null,
+          exitTime: new Date(),
+          exitReason: 'MANUAL',
+          featureSnapshotJson: { smcScore: 0.8 },
+          outcomeSnapshotJson: {
+            executionDataComplete: false,
+            isLegacyExecutionData: true,
+            realizedPnL: null,
+            realizedR: null,
+          },
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const result = await service.learnFromPersistedTrade('legacy-trade-1');
+
+    expect(result.updateResult).toBeNull();
+    expect(result.postMortem).toBeNull();
+    expect(result.skippedReason).toBe('INCOMPLETE_OR_LEGACY_EXECUTION_DATA');
+  });
+
+  it('14. recordTradeOutcomeAndOnlineUpdate skips learning when entryPrice, entryTimestamp, or realizedR is null', async () => {
+    const incompleteTrade = {
+      symbol: 'NIFTY',
+      direction: 'BULLISH' as const,
+      entryPrice: null,
+      exitPrice: 24200.0,
+      entryTimestamp: null,
+      exitTimestamp: new Date(),
+      exitReason: 'MANUAL',
+      realizedR: null,
+      featureSnapshotJson: { smcScore: 0.8 },
+      outcomeSnapshotJson: {
+        executionDataComplete: false,
+        isLegacyExecutionData: true,
+      },
+    };
+
+    const result = await service.recordTradeOutcomeAndOnlineUpdate(incompleteTrade);
+
+    expect(result.updateResult).toBeNull();
+    expect(result.postMortem).toBeNull();
+    expect(result.skippedReason).toBe('INCOMPLETE_OR_LEGACY_EXECUTION_DATA');
+  });
+
+  it('15. getRecentPostMortems excludes incomplete/legacy records from post-mortem audit', async () => {
+    mockPrisma.paperTrade.findMany.mockResolvedValue([
+      {
+        id: 'legacy-trade',
+        symbol: 'NIFTY',
+        direction: 'BULLISH',
+        entryPrice: null,
+        exitPrice: new Decimal(24200.0),
+        realizedPnL: null,
+        realizedR: null,
+        holdingDurationSeconds: null,
+        entryTime: null,
+        exitTime: new Date(),
+        outcomeSnapshotJson: { executionDataComplete: false, isLegacyExecutionData: true },
+      },
+      {
+        id: 'valid-trade',
+        symbol: 'NIFTY',
+        direction: 'BULLISH',
+        entryPrice: new Decimal(24100.0),
+        exitPrice: new Decimal(24200.0),
+        realizedPnL: new Decimal(5000.0),
+        realizedR: new Decimal(2.0),
+        holdingDurationSeconds: 1800,
+        entryTime: new Date(Date.now() - 1800000),
+        exitTime: new Date(),
+        outcomeClassification: 'WIN_TP1',
+        exitReason: 'TP1_HIT',
+        outcomeSnapshotJson: { executionDataComplete: true, isLegacyExecutionData: false },
+      },
+    ]);
+
+    const postMortems = await service.getRecentPostMortems();
+
+    expect(postMortems.length).toBe(1);
+    expect(postMortems[0].entryPrice).toBe(24100.0);
+    expect(postMortems[0].realizedRMultiple).toBe(2.0);
+  });
 });
