@@ -268,6 +268,112 @@ describe('SignalsService Journal Validation & Integrity', () => {
       expect(trade.executionDataComplete).toBe(true);
       expect(trade.isLegacyExecutionData).toBe(false);
     });
+
+    it('should correctly distinguish requestedEntryPrice from actualEntryPrice when slippage occurs', async () => {
+      const slippedTrade = {
+        id: 'pt-slippage-1',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        quantity: 0.1,
+        entryPrice: 95005.0, // actual fill
+        entryTime: new Date('2026-09-12T10:00:00.000Z'),
+        exitPrice: 96000.0,
+        exitTime: new Date('2026-09-12T11:00:00.000Z'),
+        realizedPnL: 8955.0,
+        realizedR: 1.9,
+        outcomeClassification: 'TP2_HIT',
+        exitReason: 'Target 2 Completed',
+        chargesJson: { totalCharges: 50.0 },
+        outcomeSnapshotJson: {
+          executionPriceSource: 'PAPER_FILL',
+          entryFillCount: 1,
+          exitFillCount: 1,
+          executionDataComplete: true,
+          isLegacyExecutionData: false,
+          requestedEntryPrice: 95000.0, // original requested order price
+          actualEntryPrice: 95005.0, // actual execution price from fill
+          actualEntryPriceCurrency: 'USDT',
+          entryTimeUtc: '2026-09-12T10:00:00.000Z',
+          actualExitPrice: 96000.0,
+          actualExitPriceCurrency: 'USDT',
+          exitTimeUtc: '2026-09-12T11:00:00.000Z',
+          durationMs: 3600000,
+          netPnlAccount: 8955.0,
+          quotePnl: 99.5,
+          accountingSnapshot: {
+            accountCurrency: 'INR',
+            quoteCurrency: 'USDT',
+            rate: 90.0,
+          },
+        },
+      };
+
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      mockPrisma.paperTrade.findMany.mockResolvedValue([slippedTrade]);
+
+      const response = await service.getCompletedTrades(10, 'VERIFIED');
+
+      expect(response.trades).toHaveLength(1);
+      const trade = response.trades[0];
+      expect(trade.requestedEntryPrice).toBe(95000.0);
+      expect(trade.actualEntryPrice).toBe(95005.0);
+      expect(trade.requestedEntryPrice).not.toEqual(trade.actualEntryPrice);
+    });
+
+    it('should never fallback to legacy Signal records in VERIFIED mode when paper trades are empty', async () => {
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+      mockPrisma.paperTrade.findMany.mockResolvedValue([]);
+      mockPrisma.signal.findMany.mockResolvedValue([
+        {
+          id: 'legacy-sig-1',
+          instrument: { symbol: 'NIFTY', name: 'Nifty 50', currency: 'INR' },
+          direction: 'BULLISH',
+          state: 'TP1_HIT',
+          entryPrice: 24000,
+          exitPrice: 24200,
+          closedAt: new Date(),
+        },
+      ]);
+
+      const response = await service.getCompletedTrades(50, 'VERIFIED');
+
+      expect(response.trades).toEqual([]);
+      expect(mockPrisma.signal.findMany).not.toHaveBeenCalled();
+    });
+
+    it('should not assume INR when instrument currency is missing and fail closed by marking execution incomplete', async () => {
+      const unknownSymbolTrade = {
+        id: 'pt-unknown-1',
+        symbol: 'UNKNOWN_TICKER',
+        direction: 'BULLISH',
+        quantity: 10,
+        entryPrice: 100.0,
+        entryTime: new Date('2026-09-12T10:00:00.000Z'),
+        exitPrice: 110.0,
+        exitTime: new Date('2026-09-12T10:30:00.000Z'),
+        realizedPnL: 100.0,
+        realizedR: 1.0,
+        outcomeSnapshotJson: {
+          executionPriceSource: 'PAPER_FILL',
+          executionDataComplete: true,
+          actualEntryPrice: 100.0,
+          // Missing quoteCurrency and accountingSnapshot
+        },
+      };
+
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+      mockPrisma.paperTrade.findMany.mockResolvedValue([unknownSymbolTrade]);
+
+      const response = await service.getCompletedTrades(10, 'ALL');
+
+      expect(response.trades).toHaveLength(1);
+      const trade = response.trades[0];
+      // Must not default missing currency to INR
+      expect(trade.currency).toBeNull();
+      expect(trade.executionDataComplete).toBe(false);
+      expect(trade.isLegacyExecutionData).toBe(true);
+      expect(trade.actualEntryPrice).toBeNull();
+    });
   });
 
   it('should record completed trade with valid immutable entry and exit data', async () => {

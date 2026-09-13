@@ -486,54 +486,90 @@ export class SignalsService implements OnModuleInit {
       ],
     };
 
-    const queryWhere =
-      executionData === 'LEGACY'
-        ? legacyWhere
-        : executionData === 'ALL'
-          ? {}
-          : verifiedWhere;
-
-    const [totalVerifiedTrades, legacyTradeCount, rawPaperTrades] = await Promise.all([
+    const [totalVerifiedTrades, legacyTradeCount] = await Promise.all([
       this.prisma.paperTrade?.count
         ? this.prisma.paperTrade.count({ where: verifiedWhere })
         : Promise.resolve(0),
       this.prisma.paperTrade?.count
         ? this.prisma.paperTrade.count({ where: legacyWhere })
         : Promise.resolve(0),
-      this.prisma.paperTrade?.findMany
-        ? this.prisma.paperTrade.findMany({
-            where: queryWhere,
-            orderBy: {
-              exitTime: 'desc',
-            },
-            take: limit,
-          })
-        : Promise.resolve([]),
     ]);
 
-    // Secondary in-memory filter to guarantee complete execution data for VERIFIED mode
-    const paperTrades =
-      executionData === 'VERIFIED'
-        ? rawPaperTrades.filter((t) => {
-            const outcome = (t.outcomeSnapshotJson as any) || {};
-            return (
-              t.entryPrice !== null &&
-              t.entryTime !== null &&
-              t.realizedPnL !== null &&
-              t.realizedR !== null &&
-              outcome.executionDataComplete !== false &&
-              outcome.isLegacyExecutionData !== true
-            );
+    let paperTrades: any[] = [];
+    if (executionData === 'VERIFIED') {
+      let collected: any[] = [];
+      let cursorId: string | undefined = undefined;
+      const batchSize = limit;
+
+      while (collected.length < limit && this.prisma.paperTrade?.findMany) {
+        const batch: any[] = await this.prisma.paperTrade.findMany({
+          where: verifiedWhere,
+          orderBy: { exitTime: 'desc' },
+          take: batchSize,
+          ...(cursorId ? { skip: 1, cursor: { id: cursorId } } : {}),
+        });
+
+        if (!batch || batch.length === 0) break;
+        cursorId = batch[batch.length - 1].id;
+
+        for (const t of batch) {
+          const outcome = (t.outcomeSnapshotJson as any) || {};
+          let inst: any = null;
+          try {
+            inst = getAuthoritativeInstrument(t.symbol);
+          } catch {
+            inst = null;
+          }
+          const quoteCurrency =
+            outcome.accountingSnapshot?.quoteCurrency || inst?.quoteCurrency || inst?.currency || null;
+          const accountCurrency =
+            outcome.accountingSnapshot?.accountCurrency || inst?.accountingCurrency || null;
+          const hasAuthoritativeCurrency = quoteCurrency !== null && accountCurrency !== null;
+
+          const isVerified =
+            t.entryPrice !== null &&
+            t.entryTime !== null &&
+            t.realizedPnL !== null &&
+            t.realizedR !== null &&
+            outcome.executionDataComplete !== false &&
+            outcome.isLegacyExecutionData !== true &&
+            hasAuthoritativeCurrency;
+
+          if (isVerified) {
+            collected.push(t);
+            if (collected.length >= limit) break;
+          }
+        }
+
+        if (batch.length < batchSize) break;
+      }
+      paperTrades = collected;
+    } else {
+      const queryWhere = executionData === 'LEGACY' ? legacyWhere : {};
+      paperTrades = this.prisma.paperTrade?.findMany
+        ? await this.prisma.paperTrade.findMany({
+            where: queryWhere,
+            orderBy: { exitTime: 'desc' },
+            take: limit,
           })
-        : rawPaperTrades;
+        : [];
+    }
 
     const mappedPaperTrades = paperTrades.map((t) => {
       const outcome = (t.outcomeSnapshotJson as any) || {};
       const charges = (t.chargesJson as any) || { totalCharges: 0 };
       const snapshot = outcome.accountingSnapshot || {};
-      const inst = getAuthoritativeInstrument(t.symbol);
-      const quoteCurrency = snapshot.quoteCurrency || inst.currency || 'INR';
-      const accountCurrency = snapshot.accountCurrency || 'INR';
+      let inst: any = null;
+      try {
+        inst = getAuthoritativeInstrument(t.symbol);
+      } catch {
+        inst = null;
+      }
+      const quoteCurrency =
+        snapshot.quoteCurrency || inst?.quoteCurrency || inst?.currency || null;
+      const accountCurrency =
+        snapshot.accountCurrency || inst?.accountingCurrency || null;
+      const hasAuthoritativeCurrency = quoteCurrency !== null && accountCurrency !== null;
 
       const isOption = t.instrumentType === 'OPTION';
       const contractSymbol =
@@ -554,22 +590,39 @@ export class SignalsService implements OnModuleInit {
                 ? 'TP1_HIT'
                 : 'SL_HIT');
 
-      const isLegacy = outcome.isLegacyExecutionData ?? (t.entryPrice === null || t.entryTime === null || t.realizedPnL === null);
-      const executionDataComplete = outcome.executionDataComplete ?? (!isLegacy);
+      const isLegacy =
+        outcome.isLegacyExecutionData === true ||
+        !hasAuthoritativeCurrency ||
+        t.entryPrice === null ||
+        t.entryTime === null ||
+        t.realizedPnL === null ||
+        t.realizedR === null ||
+        outcome.executionDataComplete === false;
 
-      const actualEntryPrice = executionDataComplete && outcome.actualEntryPrice !== undefined
-        ? (outcome.actualEntryPrice !== null ? Number(outcome.actualEntryPrice) : null)
-        : (executionDataComplete && t.entryPrice !== null ? Number(t.entryPrice) : null);
-      const actualEntryPriceCurrency = executionDataComplete
-        ? (outcome.actualEntryPriceCurrency || quoteCurrency)
-        : null;
-      const entryTimeUtc = executionDataComplete
-        ? (outcome.entryTimeUtc || (t.entryTime ? new Date(t.entryTime).toISOString() : null))
-        : null;
+      const executionDataComplete = !isLegacy && (outcome.executionDataComplete !== false);
 
-      const actualExitPrice = outcome.actualExitPrice !== undefined
-        ? (outcome.actualExitPrice !== null ? Number(outcome.actualExitPrice) : null)
-        : Number(t.exitPrice);
+      const requestedEntryPrice =
+        outcome.requestedEntryPrice !== undefined && outcome.requestedEntryPrice !== null
+          ? Number(outcome.requestedEntryPrice)
+          : null;
+
+      const actualEntryPrice =
+        executionDataComplete && outcome.actualEntryPrice !== undefined && outcome.actualEntryPrice !== null
+          ? Number(outcome.actualEntryPrice)
+          : null;
+      const actualEntryPriceCurrency =
+        executionDataComplete && actualEntryPrice !== null
+          ? (outcome.actualEntryPriceCurrency || quoteCurrency)
+          : null;
+      const entryTimeUtc =
+        executionDataComplete
+          ? (outcome.entryTimeUtc || (t.entryTime ? new Date(t.entryTime).toISOString() : null))
+          : null;
+
+      const actualExitPrice =
+        outcome.actualExitPrice !== undefined && outcome.actualExitPrice !== null
+          ? Number(outcome.actualExitPrice)
+          : (t.exitPrice !== null ? Number(t.exitPrice) : null);
       const actualExitPriceCurrency = outcome.actualExitPriceCurrency || quoteCurrency;
       const exitTimeUtc = outcome.exitTimeUtc || (t.exitTime ? new Date(t.exitTime).toISOString() : null);
 
@@ -601,7 +654,7 @@ export class SignalsService implements OnModuleInit {
         score: 90,
         timeframe: '15m',
         quantity: Number(t.quantity),
-        requestedEntryPrice: outcome.requestedEntryPrice !== undefined ? Number(outcome.requestedEntryPrice) : Number(t.entryPrice || 0),
+        requestedEntryPrice,
         actualEntryPrice,
         actualEntryPriceCurrency,
         // [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
@@ -611,7 +664,7 @@ export class SignalsService implements OnModuleInit {
         entryTimeUtc,
         actualExitPrice,
         actualExitPriceCurrency,
-        exitPrice: Number(t.exitPrice),
+        exitPrice: t.exitPrice !== null ? Number(t.exitPrice) : null,
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
         stopLoss: t.entryPrice !== null ? Number(t.entryPrice) * 0.99 : null,
@@ -619,7 +672,7 @@ export class SignalsService implements OnModuleInit {
         target2: t.entryPrice !== null ? Number(t.entryPrice) * 1.025 : null,
         pnlAmount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
         netPnlAccount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
-        accountCurrency,
+        accountCurrency: executionDataComplete ? (accountCurrency || 'INR') : null,
         quotePnl: executionDataComplete && outcome.quotePnl !== undefined && outcome.quotePnl !== null ? Number(outcome.quotePnl) : null,
         quoteCurrency: executionDataComplete ? quoteCurrency : null,
         chargesAccount: Number(charges.totalCharges || 0),
@@ -648,7 +701,7 @@ export class SignalsService implements OnModuleInit {
       };
     });
 
-    // 2. Query legacy Signal records ONLY if paper trades are empty AND mode allows legacy data
+    // 2. Query legacy Signal records ONLY if mode is NOT VERIFIED and paper trades are empty
     let finalTrades: any[] = mappedPaperTrades;
     if (finalTrades.length === 0 && executionData !== 'VERIFIED') {
       const closedSignals = await this.prisma.signal.findMany({
@@ -676,8 +729,14 @@ export class SignalsService implements OnModuleInit {
 
       finalTrades = dedupedSignals.map((s) => {
         const reasons = (s.reasonsJson as any) || {};
-        const inst = getAuthoritativeInstrument(s.instrument.symbol);
-        const quoteCurrency = s.instrument.currency || inst.currency || 'INR';
+        let inst: any = null;
+        try {
+          inst = getAuthoritativeInstrument(s.instrument.symbol);
+        } catch {
+          inst = null;
+        }
+        const quoteCurrency = s.instrument.currency || inst?.quoteCurrency || inst?.currency || null;
+        const accountCurrency = inst?.accountingCurrency || null;
         const isOption =
           reasons.instrumentType === 'OPTION' ||
           (Number(s.entryPrice) < 500 &&
@@ -706,7 +765,7 @@ export class SignalsService implements OnModuleInit {
           score: s.score,
           timeframe: s.timeframe,
           quantity: reasons.quantity || 1,
-          requestedEntryPrice: Number(s.entryPrice),
+          requestedEntryPrice: null,
           actualEntryPrice: null,
           actualEntryPriceCurrency: null,
           entryPrice: Number(s.entryPrice),
@@ -722,7 +781,7 @@ export class SignalsService implements OnModuleInit {
           target2: Number(s.target2),
           pnlAmount: null,
           netPnlAccount: null,
-          accountCurrency: 'INR',
+          accountCurrency: accountCurrency,
           quotePnl: null,
           quoteCurrency: null,
           chargesAccount: 0,
