@@ -491,4 +491,66 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
     expect(updatedClosedCandles[2].timestamp).toBe('2026-09-13T09:30:00.000Z');
     expect(newForming.timestamp).toBe('2026-09-13T09:45:00.000Z');
   });
+
+  // 18. Fail-closed volumeType aggregation and initial forming volume (Defect Fix #1 & #2)
+  test('P0-1: Fail-closed volumeType behavior for UNKNOWN or missing volumeType', () => {
+    const currentForming: ChartFormingCandle = {
+      timestamp: '2026-09-13T09:30:00.000Z',
+      open: 100,
+      high: 105,
+      low: 99,
+      close: 104,
+      volume: 500,
+      isClosed: false,
+    };
+
+    const processTickVolume = (forming: ChartFormingCandle | null, tick: { volume?: number; volumeType?: string }) => {
+      const volType = tick.volumeType;
+      if (forming) {
+        let newVol = forming.volume;
+        if (volType === 'INCREMENTAL') {
+          newVol = forming.volume + (tick.volume ?? 0);
+        } else if (volType === 'CUMULATIVE') {
+          newVol = Math.max(forming.volume, tick.volume ?? 0);
+        } else {
+          // Fail-closed
+          newVol = forming.volume;
+        }
+        return newVol;
+      } else {
+        let initialVol = 0;
+        if (volType === 'INCREMENTAL' || volType === 'CUMULATIVE') {
+          initialVol = tick.volume ?? 0;
+        }
+        return initialVol;
+      }
+    };
+
+    // 1. Missing / UNKNOWN volumeType does NOT aggregate volume blindly (fail-closed)
+    expect(processTickVolume(currentForming, { volume: 150 })).toBe(500);
+    expect(processTickVolume(currentForming, { volume: 150, volumeType: 'UNKNOWN' })).toBe(500);
+
+    // 2. INCREMENTAL volumeType adds delta
+    expect(processTickVolume(currentForming, { volume: 150, volumeType: 'INCREMENTAL' })).toBe(650);
+
+    // 3. CUMULATIVE volumeType replaces with Math.max
+    expect(processTickVolume(currentForming, { volume: 750, volumeType: 'CUMULATIVE' })).toBe(750);
+
+    // 4. Initial forming candle volume assignment without volumeType starts at 0 (fail-closed)
+    expect(processTickVolume(null, { volume: 200 })).toBe(0);
+    expect(processTickVolume(null, { volume: 200, volumeType: 'INCREMENTAL' })).toBe(200);
+  });
+
+  // 19. SMC snapshot dual timestamps (Defect Fix #4)
+  test('P1-4: Preserves computedAt and structureAsOf in ChartSMCSnapshot', () => {
+    const smcWithDualTimestamps: ChartSMCSnapshot = {
+      ...validSMCSnapshot,
+      computedAt: '2026-09-13T09:45:10.000Z',
+      structureAsOf: '2026-09-13T09:30:00.000Z',
+    };
+
+    expect(smcWithDualTimestamps.computedAt).toBe('2026-09-13T09:45:10.000Z');
+    expect(smcWithDualTimestamps.structureAsOf).toBe('2026-09-13T09:30:00.000Z');
+    expect(ChartSnapshotValidator.validateSMCSnapshot(smcWithDualTimestamps, 'NIFTY', '15m')).toBe(true);
+  });
 });

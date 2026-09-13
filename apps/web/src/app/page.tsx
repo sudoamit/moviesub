@@ -280,13 +280,18 @@ function DashboardContent() {
         }
 
         let nextForming: ChartFormingCandle;
-        const isIncremental = (tick as any).volumeType === 'INCREMENTAL' || (tick as any).isIncremental !== false;
+        const volType = (tick as any).volumeType;
 
         if (currentForming && !isRollover) {
-          const addVol = tick.volume ?? 0;
-          const newVol = isIncremental
-            ? currentForming.volume + addVol
-            : Math.max(currentForming.volume, addVol);
+          let newVol = currentForming.volume;
+          if (volType === 'INCREMENTAL') {
+            newVol = currentForming.volume + (tick.volume ?? 0);
+          } else if (volType === 'CUMULATIVE') {
+            newVol = Math.max(currentForming.volume, tick.volume ?? 0);
+          } else {
+            // Fail-closed: missing or UNKNOWN volumeType does not aggregate volume blindly
+            newVol = currentForming.volume;
+          }
 
           nextForming = {
             ...currentForming,
@@ -297,13 +302,18 @@ function DashboardContent() {
           };
         } else {
           // Initialize forming candle anchored strictly to calculated bucket open timestamp
+          let initialVol = 0;
+          if (volType === 'INCREMENTAL' || volType === 'CUMULATIVE') {
+            initialVol = tick.volume ?? 0;
+          }
+
           nextForming = {
             timestamp: bucketOpenIso,
             open: liveP,
             high: liveP,
             low: liveP,
             close: liveP,
-            volume: tick.volume ?? 0,
+            volume: initialVol,
             isClosed: false as const,
             provenance: prev.dataProvenance,
           };

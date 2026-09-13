@@ -29,6 +29,8 @@ export interface ChartSMCSnapshot {
   readonly timeframe: string;
   readonly asOfTimestamp: Date | string | number;
   readonly provenance: ChartProvenance;
+  readonly computedAt?: Date | string | number;
+  readonly structureAsOf?: Date | string | number;
   readonly structures?: {
     swings?: any[];
     bos?: any[];

@@ -350,20 +350,21 @@ export class CandlesService {
     const atr14Raw = calculateATR(candles, 14);
     const bbRaw = calculateBollingerBands(candles, 20, 2);
 
-    const formattedCandles = candles.map((c) => ({
-      timestamp: c.timestamp,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-      volume: c.volume,
-      isClosed: true as const,
-      provenance: (c.provenance as DataProvenance) || 'LIVE',
-    }));
+    const closedCandles = candles
+      .filter((c) => c.isClosed !== false)
+      .map((c) => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume,
+        isClosed: true as const,
+        provenance: (c.provenance as DataProvenance) || 'LIVE',
+      }));
 
     // 2. Pure SMC Analysis from trading-engine with explicit latest closed candle boundary
-    const closedCandlesList = candles.filter((c) => c.isClosed !== false);
-    const latestClosedCandle = closedCandlesList.length > 0 ? closedCandlesList[closedCandlesList.length - 1] : candles[candles.length - 1];
+    const latestClosedCandle = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : candles[candles.length - 1];
     const latestClosedTimestamp = latestClosedCandle.timestamp;
 
     const smcAnalysis = SMCAnalyzer.analyze(candles, {
@@ -398,14 +399,14 @@ export class CandlesService {
     }
 
     const sourceIdentity = candlesResp.sourceIdentity;
-    const lastCandleClose = formattedCandles.length > 0 ? formattedCandles[formattedCandles.length - 1].close : null;
+    const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
 
     return {
       symbol: inst.symbol,
       timeframe,
-      closedCandles: formattedCandles,
+      closedCandles,
       formingCandle: candlesResp.formingCandle
         ? {
             timestamp: candlesResp.formingCandle.timestamp,
@@ -427,6 +428,8 @@ export class CandlesService {
         symbol: inst.symbol,
         timeframe,
         asOfTimestamp: observationTime,
+        computedAt: observationTime,
+        structureAsOf: latestClosedTimestamp,
         provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
         structures: {
           swings: smcAnalysis.swingPoints || [],
