@@ -60,14 +60,27 @@ export class SignalsController {
   }
 
   @Get('completed-trades')
-  async getCompletedTrades(@Query('limit') limit = 50) {
-    return this.signalsService.getCompletedTrades(Number(limit) || 50);
+  async getCompletedTrades(
+    @Query('limit') limit = 50,
+    @Query('executionData') executionData?: 'VERIFIED' | 'LEGACY' | 'ALL',
+    @Query('includeLegacy') includeLegacy?: string | boolean,
+  ) {
+    let mode: 'VERIFIED' | 'LEGACY' | 'ALL' = executionData || 'VERIFIED';
+    if (!executionData && (includeLegacy === 'true' || includeLegacy === true)) {
+      mode = 'ALL';
+    }
+    return this.signalsService.getCompletedTrades(Number(limit) || 50, mode);
   }
 
   @Get('export-csv')
-  async exportTradesCsv(@Query('limit') limit: string, @Res() res: Response) {
+  async exportTradesCsv(
+    @Query('limit') limit: string,
+    @Query('executionData') executionData: 'VERIFIED' | 'LEGACY' | 'ALL' = 'ALL',
+    @Res() res: Response,
+  ) {
     const { filename, csvContent } = await this.signalsService.exportTradesToCsv(
       Number(limit) || 200,
+      executionData,
     );
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

@@ -17,6 +17,7 @@ import {
   Direction,
   toPrismaTimeframe,
   ICandle,
+  getAuthoritativeInstrument,
 } from '@quant/shared';
 
 export interface IRecordTradeDto {
@@ -462,26 +463,76 @@ export class SignalsService implements OnModuleInit {
   }
 
   /**
-   * Retrieves all completed/recorded trades with win rate and P&L analytics
+   * Retrieves completed/recorded trades with win rate and P&L analytics.
+   * By default, queries strictly VERIFIED trades (complete execution data).
    */
-  async getCompletedTrades(limit = 50): Promise<any> {
-    // 1. Query Primary Source of Truth: PaperTrade records
-    const paperTrades = this.prisma.paperTrade?.findMany
-      ? await this.prisma.paperTrade.findMany({
-          orderBy: {
-            exitTime: 'desc',
-          },
-          take: limit,
-        })
-      : [];
+  async getCompletedTrades(
+    limit = 50,
+    executionData: 'VERIFIED' | 'LEGACY' | 'ALL' = 'VERIFIED',
+  ): Promise<any> {
+    const verifiedWhere = {
+      entryPrice: { not: null },
+      entryTime: { not: null },
+      realizedPnL: { not: null },
+      realizedR: { not: null },
+    };
+
+    const legacyWhere = {
+      OR: [
+        { entryPrice: null },
+        { entryTime: null },
+        { realizedPnL: null },
+        { realizedR: null },
+      ],
+    };
+
+    const queryWhere =
+      executionData === 'LEGACY'
+        ? legacyWhere
+        : executionData === 'ALL'
+          ? {}
+          : verifiedWhere;
+
+    const [totalVerifiedTrades, legacyTradeCount, rawPaperTrades] = await Promise.all([
+      this.prisma.paperTrade?.count
+        ? this.prisma.paperTrade.count({ where: verifiedWhere })
+        : Promise.resolve(0),
+      this.prisma.paperTrade?.count
+        ? this.prisma.paperTrade.count({ where: legacyWhere })
+        : Promise.resolve(0),
+      this.prisma.paperTrade?.findMany
+        ? this.prisma.paperTrade.findMany({
+            where: queryWhere,
+            orderBy: {
+              exitTime: 'desc',
+            },
+            take: limit,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    // Secondary in-memory filter to guarantee complete execution data for VERIFIED mode
+    const paperTrades =
+      executionData === 'VERIFIED'
+        ? rawPaperTrades.filter((t) => {
+            const outcome = (t.outcomeSnapshotJson as any) || {};
+            return (
+              t.entryPrice !== null &&
+              t.entryTime !== null &&
+              t.realizedPnL !== null &&
+              t.realizedR !== null &&
+              outcome.executionDataComplete !== false &&
+              outcome.isLegacyExecutionData !== true
+            );
+          })
+        : rawPaperTrades;
 
     const mappedPaperTrades = paperTrades.map((t) => {
       const outcome = (t.outcomeSnapshotJson as any) || {};
       const charges = (t.chargesJson as any) || { totalCharges: 0 };
       const snapshot = outcome.accountingSnapshot || {};
-      const isCrypto = t.symbol === 'BTCUSDT';
-      const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
-      const quoteCurrency = snapshot.quoteCurrency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
+      const inst = getAuthoritativeInstrument(t.symbol);
+      const quoteCurrency = snapshot.quoteCurrency || inst.currency || 'INR';
       const accountCurrency = snapshot.accountCurrency || 'INR';
 
       const isOption = t.instrumentType === 'OPTION';
@@ -503,12 +554,12 @@ export class SignalsService implements OnModuleInit {
                 ? 'TP1_HIT'
                 : 'SL_HIT');
 
-      const isLegacy = outcome.isLegacyExecutionData ?? false;
+      const isLegacy = outcome.isLegacyExecutionData ?? (t.entryPrice === null || t.entryTime === null || t.realizedPnL === null);
       const executionDataComplete = outcome.executionDataComplete ?? (!isLegacy);
 
       const actualEntryPrice = executionDataComplete && outcome.actualEntryPrice !== undefined
         ? (outcome.actualEntryPrice !== null ? Number(outcome.actualEntryPrice) : null)
-        : (executionDataComplete ? Number(t.entryPrice) : null);
+        : (executionDataComplete && t.entryPrice !== null ? Number(t.entryPrice) : null);
       const actualEntryPriceCurrency = executionDataComplete
         ? (outcome.actualEntryPriceCurrency || quoteCurrency)
         : null;
@@ -550,12 +601,12 @@ export class SignalsService implements OnModuleInit {
         score: 90,
         timeframe: '15m',
         quantity: Number(t.quantity),
-        requestedEntryPrice: outcome.requestedEntryPrice !== undefined ? Number(outcome.requestedEntryPrice) : Number(t.entryPrice),
+        requestedEntryPrice: outcome.requestedEntryPrice !== undefined ? Number(outcome.requestedEntryPrice) : Number(t.entryPrice || 0),
         actualEntryPrice,
         actualEntryPriceCurrency,
         // [DEPRECATED | NON-AUTHORITATIVE | DO NOT USE FOR EXECUTION ACCOUNTING]
         // Legacy compatibility alias only. Canonical execution price is `actualEntryPrice`.
-        entryPrice: Number(t.entryPrice),
+        entryPrice: t.entryPrice !== null ? Number(t.entryPrice) : null,
         entryPriceCurrency: quoteCurrency,
         entryTimeUtc,
         actualExitPrice,
@@ -563,9 +614,9 @@ export class SignalsService implements OnModuleInit {
         exitPrice: Number(t.exitPrice),
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
-        stopLoss: Number(t.entryPrice) * 0.99,
-        target1: Number(t.entryPrice) * 1.015,
-        target2: Number(t.entryPrice) * 1.025,
+        stopLoss: t.entryPrice !== null ? Number(t.entryPrice) * 0.99 : null,
+        target1: t.entryPrice !== null ? Number(t.entryPrice) * 1.015 : null,
+        target2: t.entryPrice !== null ? Number(t.entryPrice) * 1.025 : null,
         pnlAmount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
         netPnlAccount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
         accountCurrency,
@@ -597,9 +648,9 @@ export class SignalsService implements OnModuleInit {
       };
     });
 
-    // 2. Query legacy Signal records if paper trades are empty
+    // 2. Query legacy Signal records ONLY if paper trades are empty AND mode allows legacy data
     let finalTrades: any[] = mappedPaperTrades;
-    if (finalTrades.length === 0) {
+    if (finalTrades.length === 0 && executionData !== 'VERIFIED') {
       const closedSignals = await this.prisma.signal.findMany({
         where: {
           state: { in: ['TP1_HIT', 'TP2_HIT', 'TP3_HIT', 'SL_HIT'] },
@@ -625,9 +676,8 @@ export class SignalsService implements OnModuleInit {
 
       finalTrades = dedupedSignals.map((s) => {
         const reasons = (s.reasonsJson as any) || {};
-        const isCrypto = s.instrument.symbol === 'BTCUSDT';
-        const isGold = s.instrument.symbol === 'XAUUSD' || s.instrument.symbol === 'GOLD';
-        const quoteCurrency = s.instrument.currency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
+        const inst = getAuthoritativeInstrument(s.instrument.symbol);
+        const quoteCurrency = s.instrument.currency || inst.currency || 'INR';
         const isOption =
           reasons.instrumentType === 'OPTION' ||
           (Number(s.entryPrice) < 500 &&
@@ -670,15 +720,15 @@ export class SignalsService implements OnModuleInit {
           stopLoss: Number(s.stopLoss),
           target1: Number(s.target1),
           target2: Number(s.target2),
-          pnlAmount: Number(s.pnlAmount || 0),
-          netPnlAccount: Number(s.pnlAmount || 0),
+          pnlAmount: null,
+          netPnlAccount: null,
           accountCurrency: 'INR',
-          quotePnl: undefined,
-          quoteCurrency,
+          quotePnl: null,
+          quoteCurrency: null,
           chargesAccount: 0,
           totalChargesAccount: 0,
-          pnlRMultiple: Number(s.pnlRMultiple || 0),
-          realizedR: Number(s.pnlRMultiple || 0),
+          pnlRMultiple: null,
+          realizedR: null,
           tradeReason:
             reasons.tradeReason || `Institutional ${s.direction} order flow on ${contractSymbol}`,
           checklist: reasons.checklist || [
@@ -704,11 +754,12 @@ export class SignalsService implements OnModuleInit {
     }
 
     const totalTrades = finalTrades.length;
-    const wins = finalTrades.filter((t) => t.state !== 'SL_HIT' && Number(t.pnlAmount) > 0);
-    const losses = finalTrades.filter((t) => t.state === 'SL_HIT' || Number(t.pnlAmount) <= 0);
-    const winRate = totalTrades > 0 ? Number(((wins.length / totalTrades) * 100).toFixed(1)) : 0;
+    const wins = finalTrades.filter((t) => t.state !== 'SL_HIT' && t.pnlAmount !== null && Number(t.pnlAmount) > 0);
+    const losses = finalTrades.filter((t) => t.pnlAmount !== null && (t.state === 'SL_HIT' || Number(t.pnlAmount) <= 0));
+    const scoredTrades = wins.length + losses.length;
+    const winRate = scoredTrades > 0 ? Number(((wins.length / scoredTrades) * 100).toFixed(1)) : 0;
 
-    const totalPnl = finalTrades.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0);
+    const totalPnl = finalTrades.reduce((acc, curr) => acc + (curr.pnlAmount !== null ? Number(curr.pnlAmount) : 0), 0);
     const totalWinsPnl = wins.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0);
     const totalLossesPnl = Math.abs(
       losses.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0),
@@ -720,11 +771,11 @@ export class SignalsService implements OnModuleInit {
           ? 5.0
           : 0;
     const averageR =
-      totalTrades > 0
+      scoredTrades > 0
         ? Number(
             (
-              finalTrades.reduce((acc, curr) => acc + Number(curr.pnlRMultiple || 0), 0) /
-              totalTrades
+              finalTrades.reduce((acc, curr) => acc + (curr.pnlRMultiple !== null ? Number(curr.pnlRMultiple) : 0), 0) /
+              scoredTrades
             ).toFixed(2),
           )
         : 0;
@@ -732,6 +783,9 @@ export class SignalsService implements OnModuleInit {
     return {
       stats: {
         totalTrades,
+        totalVerifiedTrades,
+        legacyTradeCount,
+        executionDataFilter: executionData,
         winningTrades: wins.length,
         losingTrades: losses.length,
         winRate,
@@ -748,8 +802,11 @@ export class SignalsService implements OnModuleInit {
   /**
    * Generates a tax-compliant CSV export of completed trades with STT, turnover, GST, and SEBI fee breakdown.
    */
-  async exportTradesToCsv(limit = 200): Promise<{ filename: string; csvContent: string }> {
-    const data = await this.getCompletedTrades(limit);
+  async exportTradesToCsv(
+    limit = 200,
+    executionData: 'VERIFIED' | 'LEGACY' | 'ALL' = 'ALL',
+  ): Promise<{ filename: string; csvContent: string }> {
+    const data = await this.getCompletedTrades(limit, executionData);
     const trades = data.trades || [];
 
     const headers = [

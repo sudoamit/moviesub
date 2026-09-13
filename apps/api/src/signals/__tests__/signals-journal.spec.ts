@@ -28,6 +28,7 @@ describe('SignalsService Journal Validation & Integrity', () => {
       },
       paperTrade: {
         findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
       },
     };
 
@@ -44,6 +45,229 @@ describe('SignalsService Journal Validation & Integrity', () => {
     }).compile();
 
     service = module.get<SignalsService>(SignalsService);
+  });
+
+  describe('AI FIX 109: Verified vs Legacy Journal Data Selection', () => {
+    const buildDataset = () => {
+      const trades: any[] = [];
+      // 60 legacy trades (missing entry fills / entry price / realized pnl)
+      const baseLegacyTs = new Date('2026-09-10T10:00:00.000Z').getTime();
+      for (let i = 1; i <= 60; i++) {
+        trades.push({
+          id: `legacy-pt-${i}`,
+          symbol: i % 2 === 0 ? 'BTCUSDT' : 'NIFTY',
+          direction: 'BULLISH',
+          quantity: 1,
+          entryPrice: null,
+          entryTime: null,
+          exitPrice: 95000,
+          exitTime: new Date(baseLegacyTs + i * 60000),
+          realizedPnL: null,
+          realizedR: null,
+          outcomeSnapshotJson: {
+            isLegacyExecutionData: true,
+            executionDataComplete: false,
+            actualEntryPrice: null,
+            entryTimeUtc: null,
+            durationMs: null,
+            netPnlAccount: null,
+          },
+        });
+      }
+      // 40 verified trades (complete authoritative fills, prices, timestamps, pnl)
+      const baseVerifiedTs = new Date('2026-09-11T10:00:00.000Z').getTime();
+      for (let i = 1; i <= 40; i++) {
+        const symbol = i % 2 === 0 ? 'BTCUSDT' : 'NIFTY';
+        const entryPrice = symbol === 'BTCUSDT' ? 95000 + i * 10 : 24000 + i * 5;
+        const exitPrice = symbol === 'BTCUSDT' ? 95500 + i * 10 : 24200 + i * 5;
+        const entryTime = new Date(baseVerifiedTs + i * 60000);
+        const exitTime = new Date(baseVerifiedTs + (i + 15) * 60000);
+
+        trades.push({
+          id: `verified-pt-${i}`,
+          symbol,
+          direction: 'BULLISH',
+          quantity: symbol === 'BTCUSDT' ? 0.05 : 50,
+          entryPrice,
+          entryTime,
+          exitPrice,
+          exitTime,
+          realizedPnL: 500 * i,
+          realizedR: 2.5,
+          outcomeClassification: 'TP2_HIT',
+          exitReason: 'Target 2 Completed (2.5R Full TP)',
+          chargesJson: { totalCharges: 15.0 },
+          outcomeSnapshotJson: {
+            executionPriceSource: 'PAPER_FILL',
+            entryFillCount: 1,
+            exitFillCount: 1,
+            executionDataComplete: true,
+            isLegacyExecutionData: false,
+            actualEntryPrice: entryPrice,
+            actualEntryPriceCurrency: symbol === 'BTCUSDT' ? 'USDT' : 'INR',
+            entryTimeUtc: entryTime.toISOString(),
+            actualExitPrice: exitPrice,
+            actualExitPriceCurrency: symbol === 'BTCUSDT' ? 'USDT' : 'INR',
+            exitTimeUtc: exitTime.toISOString(),
+            durationMs: exitTime.getTime() - entryTime.getTime(),
+            netPnlAccount: 500 * i,
+            quotePnl: symbol === 'BTCUSDT' ? 25 : 500 * i,
+            accountingSnapshot: {
+              accountCurrency: 'INR',
+              quoteCurrency: symbol === 'BTCUSDT' ? 'USDT' : 'INR',
+              rate: symbol === 'BTCUSDT' ? 90.0 : 1.0,
+            },
+          },
+        });
+      }
+      return trades;
+    };
+
+    it('should query only verified trades at database level with limit=20', async () => {
+      const dataset = buildDataset();
+      const verifiedTrades = dataset.filter((t) => t.entryPrice !== null && t.realizedPnL !== null);
+      const legacyTrades = dataset.filter((t) => t.entryPrice === null || t.realizedPnL === null);
+
+      mockPrisma.paperTrade.count.mockImplementation((args: any) => {
+        if (args?.where?.entryPrice?.not !== undefined) {
+          return Promise.resolve(verifiedTrades.length); // 40
+        }
+        return Promise.resolve(legacyTrades.length); // 60
+      });
+
+      mockPrisma.paperTrade.findMany.mockImplementation((args: any) => {
+        let rows = dataset;
+        if (args?.where?.entryPrice?.not !== undefined) {
+          rows = verifiedTrades;
+        } else if (args?.where?.OR) {
+          rows = legacyTrades;
+        }
+        // sort exitTime desc
+        const sorted = [...rows].sort((a, b) => b.exitTime.getTime() - a.exitTime.getTime());
+        return Promise.resolve(sorted.slice(0, args.take || 50));
+      });
+
+      const response = await service.getCompletedTrades(20, 'VERIFIED');
+
+      expect(mockPrisma.paperTrade.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            entryPrice: { not: null },
+            entryTime: { not: null },
+            realizedPnL: { not: null },
+            realizedR: { not: null },
+          }),
+          take: 20,
+          orderBy: { exitTime: 'desc' },
+        }),
+      );
+
+      expect(response.trades).toHaveLength(20);
+      expect(response.trades.every((t: any) => t.executionDataComplete === true)).toBe(true);
+      expect(response.trades.every((t: any) => t.isLegacyExecutionData === false)).toBe(true);
+      expect(response.stats.totalTrades).toBe(20);
+      expect(response.stats.totalVerifiedTrades).toBe(40);
+      expect(response.stats.legacyTradeCount).toBe(60);
+    });
+
+    it('should return all 40 verified trades when limit=50', async () => {
+      const dataset = buildDataset();
+      const verifiedTrades = dataset.filter((t) => t.entryPrice !== null && t.realizedPnL !== null);
+
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(40).mockResolvedValueOnce(60);
+      mockPrisma.paperTrade.findMany.mockImplementation((args: any) => {
+        const sorted = [...verifiedTrades].sort((a, b) => b.exitTime.getTime() - a.exitTime.getTime());
+        return Promise.resolve(sorted.slice(0, args.take || 50));
+      });
+
+      const response = await service.getCompletedTrades(50, 'VERIFIED');
+
+      expect(response.trades).toHaveLength(40);
+      expect(response.trades.every((t: any) => t.executionDataComplete === true)).toBe(true);
+      expect(response.trades.every((t: any) => t.actualEntryPrice !== null)).toBe(true);
+      expect(response.trades.every((t: any) => t.entryTimeUtc !== null)).toBe(true);
+    });
+
+    it('should return legacy records when executionData is LEGACY or ALL', async () => {
+      const dataset = buildDataset();
+      const legacyTrades = dataset.filter((t) => t.entryPrice === null || t.realizedPnL === null);
+
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(40).mockResolvedValueOnce(60);
+      mockPrisma.paperTrade.findMany.mockImplementation((args: any) => {
+        return Promise.resolve(legacyTrades.slice(0, args.take || 50));
+      });
+
+      const response = await service.getCompletedTrades(20, 'LEGACY');
+
+      expect(response.trades).toHaveLength(20);
+      expect(response.trades.every((t: any) => t.isLegacyExecutionData === true)).toBe(true);
+      expect(response.trades.every((t: any) => t.executionDataComplete === false)).toBe(true);
+      // Assert legacy trades have null execution values
+      expect(response.trades.every((t: any) => t.actualEntryPrice === null)).toBe(true);
+      expect(response.trades.every((t: any) => t.entryTimeUtc === null)).toBe(true);
+      expect(response.trades.every((t: any) => t.netPnlAccount === null)).toBe(true);
+      expect(response.trades.every((t: any) => t.pnlAmount === null)).toBe(true);
+      expect(response.trades.every((t: any) => t.durationMs === null)).toBe(true);
+    });
+
+    it('should correctly format multi-currency for verified BTCUSDT trades (USDT price, INR P&L)', async () => {
+      const btcVerifiedTrade = {
+        id: 'pt-btc-verified',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        quantity: 0.1,
+        entryPrice: 95000.0,
+        entryTime: new Date('2026-09-12T10:00:00.000Z'),
+        exitPrice: 96000.0,
+        exitTime: new Date('2026-09-12T11:00:00.000Z'),
+        realizedPnL: 9000.0, // INR
+        realizedR: 2.0,
+        outcomeClassification: 'TP2_HIT',
+        exitReason: 'Target 2 Completed',
+        chargesJson: { totalCharges: 50.0 },
+        outcomeSnapshotJson: {
+          executionPriceSource: 'PAPER_FILL',
+          entryFillCount: 1,
+          exitFillCount: 1,
+          executionDataComplete: true,
+          isLegacyExecutionData: false,
+          actualEntryPrice: 95000.0,
+          actualEntryPriceCurrency: 'USDT',
+          entryTimeUtc: '2026-09-12T10:00:00.000Z',
+          actualExitPrice: 96000.0,
+          actualExitPriceCurrency: 'USDT',
+          exitTimeUtc: '2026-09-12T11:00:00.000Z',
+          durationMs: 3600000,
+          netPnlAccount: 9000.0,
+          quotePnl: 100.0,
+          accountingSnapshot: {
+            accountCurrency: 'INR',
+            quoteCurrency: 'USDT',
+            rate: 90.0,
+          },
+        },
+      };
+
+      mockPrisma.paperTrade.count.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      mockPrisma.paperTrade.findMany.mockResolvedValue([btcVerifiedTrade]);
+
+      const response = await service.getCompletedTrades(10, 'VERIFIED');
+
+      expect(response.trades).toHaveLength(1);
+      const trade = response.trades[0];
+      expect(trade.symbol).toBe('BTCUSDT');
+      expect(trade.actualEntryPrice).toBe(95000.0);
+      expect(trade.actualEntryPriceCurrency).toBe('USDT');
+      expect(trade.actualExitPrice).toBe(96000.0);
+      expect(trade.actualExitPriceCurrency).toBe('USDT');
+      expect(trade.accountCurrency).toBe('INR');
+      expect(trade.netPnlAccount).toBe(9000.0);
+      expect(trade.quoteCurrency).toBe('USDT');
+      expect(trade.quotePnl).toBe(100.0);
+      expect(trade.entryTimeUtc).toBe('2026-09-12T10:00:00.000Z');
+      expect(trade.executionDataComplete).toBe(true);
+      expect(trade.isLegacyExecutionData).toBe(false);
+    });
   });
 
   it('should record completed trade with valid immutable entry and exit data', async () => {
@@ -226,6 +450,7 @@ describe('SignalsService Journal Validation & Integrity', () => {
     expect(csvContent).toContain('STT (INR)');
     expect(csvContent).toContain('GST 18% (INR)');
     expect(csvContent).toContain('NIFTY 24100 PE');
-    expect(csvContent).toContain('3840.00');
+    expect(csvContent).toContain('10400.00');
+    expect(csvContent).toContain('40.00');
   });
 });

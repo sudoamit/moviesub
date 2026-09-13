@@ -88,6 +88,9 @@ export interface ITradeJournalRecord {
 
 export interface IJournalStatsSummary {
   readonly totalTrades: number;
+  readonly totalVerifiedTrades?: number;
+  readonly legacyTradeCount?: number;
+  readonly executionDataFilter?: 'VERIFIED' | 'LEGACY' | 'ALL';
   readonly winningTrades: number;
   readonly losingTrades: number;
   readonly winRate: number;
