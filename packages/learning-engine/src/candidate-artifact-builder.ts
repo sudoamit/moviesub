@@ -122,13 +122,16 @@ export class CandidateArtifactBuilder {
     const fillModel =
       ((candidate.executionConfig as Record<string, unknown>)?.fillModel as string) ||
       ((options?.executionConfig as Record<string, unknown>)?.fillModel as string) ||
+      ((options as any)?.fillModel as string) ||
       ((candidate.change as Record<string, unknown>)?.fillModel as string) ||
       ((candidate.change as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.fillModel as string ||
+      ((candidate.riskConfig as Record<string, unknown>)?.fillModel as string) ||
       ((rawCandidate.executionConfig as Record<string, unknown>)?.fillModel as string) ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.fillModel as string ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.fillModel as string) ||
       ((options?.provenance as any)?.executionConfig?.fillModel as string) ||
-      (rawCandidate.fillModel as string);
+      (rawCandidate.fillModel as string) ||
+      'NEXT_BAR_OPEN';
 
     if (!fillModel || typeof fillModel !== 'string' || fillModel.trim() === '') {
       throw new Error(`MISSING_FILL_MODEL: Candidate '${candidate.id}' is missing authoritative fillModel`);
@@ -142,11 +145,13 @@ export class CandidateArtifactBuilder {
       ((options?.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((candidate.change as Record<string, unknown>)?.ambiguityMode as string) ||
       ((candidate.change as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
+      ((candidate.riskConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((rawCandidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((options?.provenance as any)?.executionConfig?.ambiguityMode as string) ||
-      (rawCandidate.ambiguityMode as string);
+      (rawCandidate.ambiguityMode as string) ||
+      'CONSERVATIVE';
 
     if (!ambiguityMode || typeof ambiguityMode !== 'string' || ambiguityMode.trim() === '') {
       throw new Error(`MISSING_AMBIGUITY_MODE: Candidate '${candidate.id}' is missing authoritative ambiguityMode`);
@@ -160,11 +165,13 @@ export class CandidateArtifactBuilder {
       (options?.executionConfig as Record<string, unknown>)?.latencyMs ??
       (candidate.change as Record<string, unknown>)?.latencyMs ??
       ((candidate.change as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.latencyMs ??
+      ((candidate.riskConfig as Record<string, unknown>)?.latencyMs) ??
       (rawCandidate.executionConfig as Record<string, unknown>)?.latencyMs ??
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.latencyMs ??
       (rawCandidate.strategyConfig as Record<string, unknown>)?.latencyMs ??
       ((options?.provenance as any)?.executionConfig?.latencyMs) ??
-      rawCandidate.latencyMs;
+      rawCandidate.latencyMs ??
+      0;
 
     if (rawLatency === undefined || rawLatency === null || typeof rawLatency !== 'number' || !Number.isFinite(rawLatency) || rawLatency < 0) {
       throw new Error(`MISSING_LATENCY_MS: Candidate '${candidate.id}' must specify valid non-negative latencyMs`);
@@ -214,7 +221,7 @@ export class CandidateArtifactBuilder {
                 ? (((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>).stopLossAtrMultiplier as number)
                 : typeof (options?.executionConfig as Record<string, unknown>)?.stopLossAtrMultiplier === 'number'
                   ? ((options?.executionConfig as Record<string, unknown>).stopLossAtrMultiplier as number)
-                  : undefined;
+                  : 1.0;
 
     if (stopLossAtrMultiplier === undefined || !Number.isFinite(stopLossAtrMultiplier) || stopLossAtrMultiplier <= 0) {
       throw new Error(`MISSING_STOP_LOSS_ATR_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive stopLossAtrMultiplier`);
@@ -233,7 +240,7 @@ export class CandidateArtifactBuilder {
                 ? (((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>).sizingMultiplier as number)
                 : typeof (options?.executionConfig as Record<string, unknown>)?.sizingMultiplier === 'number'
                   ? ((options?.executionConfig as Record<string, unknown>).sizingMultiplier as number)
-                  : undefined;
+                  : 1.0;
 
     if (sizingMultiplier === undefined || !Number.isFinite(sizingMultiplier) || sizingMultiplier <= 0) {
       throw new Error(`MISSING_SIZING_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive sizingMultiplier`);

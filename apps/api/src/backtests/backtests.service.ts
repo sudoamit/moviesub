@@ -51,7 +51,7 @@ export class BacktestsService {
     const savedRun = await this.prisma.backtest.create({
       data: {
         instrumentId: inst.id,
-        timeframe: prismaTf,
+        timeframe: prismaTf as any,
         startDate,
         endDate,
         initialCapital: new Decimal(simulation.initialCapital),

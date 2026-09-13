@@ -1057,5 +1057,111 @@ describe('MASTER ENGINEERING FIX — Canonical Trading Pipeline & Global Invaria
       const totalCharges = isCanonical ? trade.totalChargesAccount : 40.0;
       expect(totalCharges).toBe(48.50); // Must NOT silently overwrite with 40.0 fallback
     });
+
+    // 13. Live forming exchange candle isolation & closure semantics
+    it('13. Unfinished live exchange candle has isClosed === false, is isolated in formingCandle, and excluded from confirmed SMC; closed candle has isClosed === true and enters confirmed SMC', () => {
+      const now = new Date('2026-09-13T10:10:00.000Z'); // Inside 10:00 - 10:15 bar (forming)
+      const historicalClosedBars = createDeterministicCandles(20, 100);
+      
+      // Bar 21 is currently forming: 10:00 open, 10:15 close, server now is 10:10
+      const formingBar: ICandle = {
+        timestamp: new Date('2026-09-13T10:00:00.000Z'),
+        open: 100,
+        high: 115,
+        low: 99,
+        close: 114,
+        volume: 500,
+        isClosed: false,
+        provenance: 'LIVE',
+      };
+
+      const rawLiveCandles = [...historicalClosedBars, formingBar];
+
+      // Build canonical market snapshot as of 10:10
+      const snapshot = CanonicalMarketSnapshotBuilder.build({
+        symbol: 'BTCUSDT',
+        executionCandles: rawLiveCandles,
+        executionTimeframe: '15m',
+        asOfTimestamp: now,
+      });
+
+      // Forming bar must be isolated
+      expect(snapshot.formingCandle).not.toBeNull();
+      expect(snapshot.formingCandle?.isClosed).toBe(false);
+      expect(snapshot.formingCandle?.timestamp).toEqual(new Date('2026-09-13T10:00:00.000Z'));
+      
+      // Confirmed snapshot candles strictly exclude the forming bar
+      expect(snapshot.candles.length).toBe(20);
+      expect(snapshot.candles.some(c => c.timestamp.getTime() === formingBar.timestamp.getTime())).toBe(false);
+
+      // SMC analysis on snapshot only consumes confirmed closed candles
+      const smcResult = SMCAnalyzer.analyzeSnapshot(snapshot);
+      expect(smcResult.candlesCount).toBe(20);
+      expect(smcResult.formingCandle).not.toBeNull();
+
+      // Now advance time to 10:16 (after candle close)
+      const afterCloseTime = new Date('2026-09-13T10:16:00.000Z');
+      const nowClosedBar: ICandle = {
+        ...formingBar,
+        isClosed: true,
+      };
+
+      const closedLiveCandles = [...historicalClosedBars, nowClosedBar];
+      const snapshotAfterClose = CanonicalMarketSnapshotBuilder.build({
+        symbol: 'BTCUSDT',
+        executionCandles: closedLiveCandles,
+        executionTimeframe: '15m',
+        asOfTimestamp: afterCloseTime,
+      });
+
+      // Now the bar has closed, enters confirmed candles, and formingCandle is null
+      expect(snapshotAfterClose.candles.length).toBe(21);
+      expect(snapshotAfterClose.candles[20].isClosed).toBe(true);
+      expect(snapshotAfterClose.formingCandle).toBeNull();
+
+      const smcAfterClose = SMCAnalyzer.analyzeSnapshot(snapshotAfterClose);
+      expect(smcAfterClose.candlesCount).toBe(21);
+    });
+
+    // 14. Canonical market snapshot deep immutability
+    it('14. Canonical market snapshot is deeply immutable (nested candles and instrument are frozen)', () => {
+      const candles = createDeterministicCandles(10, 100);
+      const snapshot = CanonicalMarketSnapshotBuilder.build({
+        symbol: 'BTCUSDT',
+        executionCandles: candles,
+        executionTimeframe: '15m',
+      });
+
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot.candles)).toBe(true);
+      expect(Object.isFrozen(snapshot.candles[0])).toBe(true);
+      expect(Object.isFrozen(snapshot.instrument)).toBe(true);
+
+      expect(() => {
+        (snapshot.candles[0] as any).close = 999999;
+      }).toThrow();
+
+      expect(() => {
+        (snapshot.instrument as any).lotSize = 999999;
+      }).toThrow();
+    });
+
+    // 15. Explicit SMC Analyzer APIs
+    it('15. SMCAnalyzer provides explicit analyzeSnapshot and analyzeRawCandles APIs', () => {
+      const candles = createDeterministicCandles(10, 100);
+      const snapshot = CanonicalMarketSnapshotBuilder.build({
+        symbol: 'BTCUSDT',
+        executionCandles: candles,
+        executionTimeframe: '15m',
+      });
+
+      const res1 = SMCAnalyzer.analyzeSnapshot(snapshot);
+      const res2 = SMCAnalyzer.analyzeRawCandles(candles);
+      const res3 = SMCAnalyzer.analyze(snapshot);
+
+      expect(res1.candlesCount).toBe(10);
+      expect(res2.candlesCount).toBe(10);
+      expect(res3.candlesCount).toBe(10);
+    });
   });
 });

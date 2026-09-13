@@ -1,5 +1,5 @@
 import { IsEnum, IsNumber, IsOptional, IsString, IsDateString, Min, Max } from 'class-validator';
-import { Timeframe } from '@quant/shared';
+import { MarketDataSourceMode, Timeframe } from '@quant/shared';
 import { Type } from 'class-transformer';
 
 export class GetCandlesDto {
@@ -26,8 +26,8 @@ export class GetCandlesDto {
   to?: string;
 
   @IsOptional()
-  @IsString()
-  sourceMode?: 'LIVE_DECISION' | 'BACKTEST' | 'LEARNING' | 'CHART' | 'HISTORICAL';
+  @IsEnum(MarketDataSourceMode)
+  sourceMode?: MarketDataSourceMode;
 }
 
 export class IngestCandlesDto {

@@ -37,7 +37,6 @@ export class BOSEngine {
     const atr = calculateATR(candles, 14);
     const bosEvents: IBreakOfStructure[] = [];
 
-    // Track active unbroken swing levels
     let activeHighs = swings.filter(
       (s) =>
         s.type === StructureType.SWING_HIGH ||
@@ -51,6 +50,9 @@ export class BOSEngine {
         s.type === StructureType.HIGHER_LOW ||
         s.type === StructureType.LOWER_LOW,
     );
+
+    let activeProtectedHigh: ISwingPoint | null = null;
+    let activeProtectedLow: ISwingPoint | null = null;
 
     for (let i = 0; i < candles.length; i++) {
       const candle = candles[i];
@@ -66,12 +68,26 @@ export class BOSEngine {
           ? priorVolumes.reduce((a, b) => a + b, 0) / priorVolumes.length
           : undefined;
 
-      // 1. Check for Bullish BOS (Targeting active protected structural high)
+      // Update active protected high state if a new protected swing high has been confirmed
+      const newlyConfirmedHighs = activeHighs.filter((h) => h.confirmedAtIndex === i && h.isProtected === true);
+      if (newlyConfirmedHighs.length > 0) {
+        activeProtectedHigh = newlyConfirmedHighs[newlyConfirmedHighs.length - 1];
+      }
+
+      // Update active protected low state if a new protected swing low has been confirmed
+      const newlyConfirmedLows = activeLows.filter((l) => l.confirmedAtIndex === i && l.isProtected === true);
+      if (newlyConfirmedLows.length > 0) {
+        activeProtectedLow = newlyConfirmedLows[newlyConfirmedLows.length - 1];
+      }
+
+      // 1. Check for Bullish BOS (Targeting single active protected structural high)
       const eligibleHighs = activeHighs.filter((h) => i > h.confirmedAtIndex);
       if (eligibleHighs.length > 0) {
-        // Explicit structural-level selection: Target active protected structural pivot if present, else latest structural high
-        const protectedHigh = eligibleHighs.filter((h) => h.isProtected === true).pop();
-        const targetHigh = protectedHigh || eligibleHighs[eligibleHighs.length - 1];
+        // Explicit structural-level selection: Target the single active protected pivot state if eligible, else latest structural high
+        const targetHigh =
+          activeProtectedHigh && eligibleHighs.some((h) => h.index === activeProtectedHigh?.index)
+            ? activeProtectedHigh
+            : eligibleHighs[eligibleHighs.length - 1];
 
         const dispMetrics = DisplacementEngine.calculate(
           candle,
@@ -106,17 +122,23 @@ export class BOSEngine {
             confirmationType: confType,
           });
 
+          if (activeProtectedHigh && activeProtectedHigh.index === targetHigh.index) {
+            activeProtectedHigh = null;
+          }
+
           // Retire targetHigh and any active highs with price <= break price that were confirmed prior
           activeHighs = activeHighs.filter((h) => h.index !== targetHigh.index && (h.price > candle.close || h.confirmedAtIndex >= i));
         }
       }
 
-      // 2. Check for Bearish BOS (Targeting active protected structural low)
+      // 2. Check for Bearish BOS (Targeting single active protected structural low)
       const eligibleLows = activeLows.filter((l) => i > l.confirmedAtIndex);
       if (eligibleLows.length > 0) {
-        // Explicit structural-level selection: Target active protected structural pivot if present, else latest structural low
-        const protectedLow = eligibleLows.filter((l) => l.isProtected === true).pop();
-        const targetLow = protectedLow || eligibleLows[eligibleLows.length - 1];
+        // Explicit structural-level selection: Target the single active protected pivot state if eligible, else latest structural low
+        const targetLow =
+          activeProtectedLow && eligibleLows.some((l) => l.index === activeProtectedLow?.index)
+            ? activeProtectedLow
+            : eligibleLows[eligibleLows.length - 1];
 
         const dispMetrics = DisplacementEngine.calculate(
           candle,
@@ -150,6 +172,10 @@ export class BOSEngine {
             displacementScore: dispMetrics.compositeScore,
             confirmationType: confType,
           });
+
+          if (activeProtectedLow && activeProtectedLow.index === targetLow.index) {
+            activeProtectedLow = null;
+          }
 
           // Retire targetLow and any active lows with price >= break price that were confirmed prior
           activeLows = activeLows.filter((l) => l.index !== targetLow.index && (l.price < candle.close || l.confirmedAtIndex >= i));

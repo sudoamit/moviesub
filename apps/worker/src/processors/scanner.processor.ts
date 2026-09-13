@@ -73,17 +73,17 @@ export class ScannerProcessor extends WorkerHost {
     // Fetch multi-timeframe candles
     const [db15m, db1h, db4h] = await Promise.all([
       this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma15m },
+        where: { instrumentId, timeframe: prisma15m as any },
         orderBy: { timestamp: 'desc' },
         take: 200,
       }),
       this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma1h },
+        where: { instrumentId, timeframe: prisma1h as any },
         orderBy: { timestamp: 'desc' },
         take: 150,
       }),
       this.prisma.candle.findMany({
-        where: { instrumentId, timeframe: prisma4h },
+        where: { instrumentId, timeframe: prisma4h as any },
         orderBy: { timestamp: 'desc' },
         take: 100,
       }),
@@ -127,7 +127,7 @@ export class ScannerProcessor extends WorkerHost {
     const existing = await this.prisma.signal.findFirst({
       where: {
         instrumentId,
-        timeframe: tfPrisma,
+        timeframe: tfPrisma as any,
         direction: signal.direction as any,
         state: { in: ['PENDING', 'ACTIVE'] as any },
         createdAt: { gte: fortyFiveMinutesAgo },
@@ -162,7 +162,7 @@ export class ScannerProcessor extends WorkerHost {
           state: signal.state as any,
           grade: signal.grade as any,
           score: signal.score,
-          timeframe: tfPrisma,
+          timeframe: tfPrisma as any,
           entryPrice: new Decimal(signal.entryZone.optimal),
           stopLoss: new Decimal(signal.stopLoss),
           target1: new Decimal(signal.takeProfits.tp1),

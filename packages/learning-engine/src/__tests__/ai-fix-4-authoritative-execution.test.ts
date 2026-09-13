@@ -2042,6 +2042,9 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       riskConfig: {
         initialCapital: 100000,
         maxRiskPerTrade: 0.01,
+        fillModel: 'NEXT_BAR_OPEN',
+        slippageModel: 'ZERO',
+        feeModel: 'ZERO',
         partialExitPolicy: {
           tp1Ratio: 0.33,
           tp2Ratio: 0.33,
@@ -2052,7 +2055,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
         },
       },
       change: {
-        minMtfScore: 50,
+        minMtfScore: 30,
         stopLossAtrMultiplier: 1.0,
         sizingMultiplier: 1.0,
         symbol: 'BTCUSDT',

@@ -42,6 +42,8 @@ export class CHOCHEngine {
     // Track active unbroken swing levels
     const brokenSwingIndices = new Set<number>();
 
+    let lastChochIndex = -1;
+
     for (let i = 0; i < candles.length; i++) {
       const candle = candles[i];
       const candleAtr = atr[i] || Math.max(1, candle.high - candle.low);
@@ -95,7 +97,10 @@ export class CHOCHEngine {
       const protectedHL = validHigherLows.filter((l) => l.isProtected).pop() || validHigherLows[validHigherLows.length - 1];
 
       // 1. Bullish CHOCH: In a Bearish trend, price breaks above protected Lower High
-      if (currentTrend === Direction.BEARISH && protectedLH && i > protectedLH.confirmedAtIndex) {
+      // Invariant: If a previous CHoCH occurred, require at least one newly confirmed swing since lastChochIndex
+      const hasStructureSinceLastChoch = lastChochIndex < 0 || visibleSwings.some((s) => s.confirmedAtIndex > lastChochIndex);
+
+      if (currentTrend === Direction.BEARISH && protectedLH && i > protectedLH.confirmedAtIndex && hasStructureSinceLastChoch) {
         const dispMetrics = DisplacementEngine.calculate(
           candle,
           Direction.BULLISH,
@@ -129,11 +134,12 @@ export class CHOCHEngine {
           });
           brokenSwingIndices.add(protectedLH.index);
           currentTrend = Direction.BULLISH; // Trend flips to Bullish
+          lastChochIndex = i;
         }
       }
 
       // 2. Bearish CHOCH: In a Bullish trend, price breaks below protected Higher Low
-      if (currentTrend === Direction.BULLISH && protectedHL && i > protectedHL.confirmedAtIndex) {
+      if (currentTrend === Direction.BULLISH && protectedHL && i > protectedHL.confirmedAtIndex && hasStructureSinceLastChoch) {
         const dispMetrics = DisplacementEngine.calculate(
           candle,
           Direction.BEARISH,
@@ -167,6 +173,7 @@ export class CHOCHEngine {
           });
           brokenSwingIndices.add(protectedHL.index);
           currentTrend = Direction.BEARISH; // Trend flips to Bearish
+          lastChochIndex = i;
         }
       }
     }

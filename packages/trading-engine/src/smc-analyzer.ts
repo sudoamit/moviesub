@@ -13,10 +13,37 @@ import { ICanonicalMarketSnapshot } from './canonical-market-snapshot';
 
 export class SMCAnalyzer {
   /**
-   * Performs full deterministic Smart Money Concepts (SMC) analysis on candle series
-   * or a CanonicalMarketSnapshot with strict point-in-time correctness.
+   * Primary Authoritative SMC Analysis API for production pipelines consuming ICanonicalMarketSnapshot.
+   */
+  static analyzeSnapshot(
+    snapshot: ICanonicalMarketSnapshot,
+    config: ISMCAnalysisConfig = {},
+  ): ISMCAnalysisResult {
+    return this.analyzeInternal(snapshot, config);
+  }
+
+  /**
+   * Compatibility / Test SMC Analysis API for raw candle inputs.
+   * Partitions raw candles and excludes forming/unclosed bars from confirmed structure.
+   */
+  static analyzeRawCandles(
+    candles: ICandle[],
+    config: ISMCAnalysisConfig = {},
+  ): ISMCAnalysisResult {
+    return this.analyzeInternal(candles, config);
+  }
+
+  /**
+   * Polymorphic SMC Analysis API delegating to authoritative snapshot or raw candle analysis.
    */
   static analyze(
+    input: ICandle[] | ICanonicalMarketSnapshot,
+    config: ISMCAnalysisConfig = {},
+  ): ISMCAnalysisResult {
+    return this.analyzeInternal(input, config);
+  }
+
+  private static analyzeInternal(
     input: ICandle[] | ICanonicalMarketSnapshot,
     config: ISMCAnalysisConfig = {},
   ): ISMCAnalysisResult {

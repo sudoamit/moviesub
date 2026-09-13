@@ -27,6 +27,35 @@ export enum Timeframe {
   D1 = '1d',
 }
 
+export function toPrismaTimeframe(tf: string | Timeframe): string {
+  const s = String(tf).toLowerCase();
+  switch (s) {
+    case '1m':
+    case 'm1':
+      return 'M1';
+    case '5m':
+    case 'm5':
+      return 'M5';
+    case '15m':
+    case 'm15':
+      return 'M15';
+    case '30m':
+    case 'm30':
+      return 'M30';
+    case '1h':
+    case 'h1':
+      return 'H1';
+    case '4h':
+    case 'h4':
+      return 'H4';
+    case '1d':
+    case 'd1':
+      return 'D1';
+    default:
+      return 'M15';
+  }
+}
+
 export enum Direction {
   BULLISH = 'BULLISH',
   BEARISH = 'BEARISH',
@@ -202,31 +231,10 @@ export enum RiskRejectionReason {
   INSUFFICIENT_MARGIN = 'INSUFFICIENT_MARGIN',
 }
 
-export function toPrismaTimeframe(tf: string | Timeframe): any {
-  const str = String(tf).toLowerCase();
-  switch (str) {
-    case '1m':
-    case 'm1':
-      return 'M1';
-    case '5m':
-    case 'm5':
-      return 'M5';
-    case '15m':
-    case 'm15':
-      return 'M15';
-    case '30m':
-    case 'm30':
-      return 'M30';
-    case '1h':
-    case 'h1':
-      return 'H1';
-    case '4h':
-    case 'h4':
-      return 'H4';
-    case '1d':
-    case 'd1':
-      return 'D1';
-    default:
-      return 'M15';
-  }
+export enum MarketDataSourceMode {
+  LIVE_DECISION = 'LIVE_DECISION',
+  BACKTEST = 'BACKTEST',
+  LEARNING = 'LEARNING',
+  CHART = 'CHART',
+  HISTORICAL = 'HISTORICAL',
 }

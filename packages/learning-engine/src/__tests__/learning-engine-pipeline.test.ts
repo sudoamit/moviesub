@@ -91,7 +91,7 @@ describe('LearningEngine Pipeline', () => {
 
     const baseTs = 1700000000000;
     const candles = Array.from({ length: 100 }, (_, i) => ({
-      timestamp: new Date(baseTs + i * 1800000),
+      timestamp: new Date(baseTs + i * 900000),
       open: 24000 + Math.sin(i * 0.2) * 200,
       high: 24000 + Math.sin(i * 0.2) * 200 + 50,
       low: 24000 + Math.sin(i * 0.2) * 200 - 50,

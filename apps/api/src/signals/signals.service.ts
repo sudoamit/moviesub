@@ -295,7 +295,7 @@ export class SignalsService implements OnModuleInit {
     const existing = await this.prisma.signal.findFirst({
       where: {
         instrumentId: inst.id,
-        timeframe: toPrismaTimeframe(data.timeframe || '15m'),
+        timeframe: toPrismaTimeframe(data.timeframe || '15m') as any,
         OR: [
           // 1. Same activation timestamp within 45 min
           {
@@ -343,7 +343,7 @@ export class SignalsService implements OnModuleInit {
         state: data.state as any,
         grade: (data.grade === 'A+' ? 'A_PLUS' : data.grade || 'A_PLUS') as any,
         score: data.score || 90,
-        timeframe: tfEnum,
+        timeframe: tfEnum as any,
         entryPrice,
         stopLoss: data.stopLoss,
         target1: data.target1,

@@ -12,6 +12,7 @@ import {
   WS_EVENTS,
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
+import { getTimeframeDurationMs } from '../candles/candles.service';
 
 export interface IIngestionSummary {
   symbol: string;
@@ -74,19 +75,25 @@ export class MarketDataService {
     }
 
     const tfEnum = toPrismaTimeframe(timeframe);
+    const durationMs = getTimeframeDurationMs(timeframe as string);
+    const serverNow = Date.now();
 
     // High-Throughput Batch Persistence to PostgreSQL
-    const candleData = validCandles.map((c) => ({
-      instrumentId: inst.id,
-      timeframe: tfEnum,
-      timestamp: c.timestamp,
-      open: new Decimal(c.open),
-      high: new Decimal(c.high),
-      low: new Decimal(c.low),
-      close: new Decimal(c.close),
-      volume: new Decimal(c.volume),
-      isClosed: c.isClosed ?? true,
-    }));
+    const candleData = validCandles.map((c) => {
+      const openTimeMs = new Date(c.timestamp).getTime();
+      const isClosed = c.isClosed !== undefined ? c.isClosed : serverNow >= openTimeMs + durationMs;
+      return {
+        instrumentId: inst.id,
+        timeframe: tfEnum as any,
+        timestamp: c.timestamp,
+        open: new Decimal(c.open),
+        high: new Decimal(c.high),
+        low: new Decimal(c.low),
+        close: new Decimal(c.close),
+        volume: new Decimal(c.volume),
+        isClosed,
+      };
+    });
 
     // Perform batch insert skipping duplicates
     if (this.prisma.candle?.createMany) {
@@ -96,11 +103,13 @@ export class MarketDataService {
       });
     } else {
       for (const candle of validCandles) {
+        const openTimeMs = new Date(candle.timestamp).getTime();
+        const isClosed = candle.isClosed !== undefined ? candle.isClosed : serverNow >= openTimeMs + durationMs;
         await this.prisma.candle.upsert({
           where: {
             instrumentId_timeframe_timestamp: {
               instrumentId: inst.id,
-              timeframe: tfEnum,
+              timeframe: tfEnum as any,
               timestamp: candle.timestamp,
             },
           },
@@ -110,18 +119,18 @@ export class MarketDataService {
             low: new Decimal(candle.low),
             close: new Decimal(candle.close),
             volume: new Decimal(candle.volume),
-            isClosed: candle.isClosed ?? true,
+            isClosed,
           },
           create: {
             instrumentId: inst.id,
-            timeframe: tfEnum,
+            timeframe: tfEnum as any,
             timestamp: candle.timestamp,
             open: new Decimal(candle.open),
             high: new Decimal(candle.high),
             low: new Decimal(candle.low),
             close: new Decimal(candle.close),
             volume: new Decimal(candle.volume),
-            isClosed: candle.isClosed ?? true,
+            isClosed,
           },
         });
       }
@@ -130,11 +139,13 @@ export class MarketDataService {
     // Update the most recent candle in case of in-progress candle updates
     if (validCandles.length > 0) {
       const latest = validCandles[validCandles.length - 1];
+      const openTimeMs = new Date(latest.timestamp).getTime();
+      const isClosed = latest.isClosed !== undefined ? latest.isClosed : serverNow >= openTimeMs + durationMs;
       await this.prisma.candle.upsert({
         where: {
           instrumentId_timeframe_timestamp: {
             instrumentId: inst.id,
-            timeframe: tfEnum,
+            timeframe: tfEnum as any,
             timestamp: latest.timestamp,
           },
         },
@@ -144,18 +155,18 @@ export class MarketDataService {
           low: new Decimal(latest.low),
           close: new Decimal(latest.close),
           volume: new Decimal(latest.volume),
-          isClosed: latest.isClosed ?? true,
+          isClosed,
         },
         create: {
           instrumentId: inst.id,
-          timeframe: tfEnum,
+          timeframe: tfEnum as any,
           timestamp: latest.timestamp,
           open: new Decimal(latest.open),
           high: new Decimal(latest.high),
           low: new Decimal(latest.low),
           close: new Decimal(latest.close),
           volume: new Decimal(latest.volume),
-          isClosed: latest.isClosed ?? true,
+          isClosed,
         },
       });
     }

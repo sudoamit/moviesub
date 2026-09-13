@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import { MarketDataService } from '../market-data/market-data.service';
-import { ICandle, REDIS_KEYS, Timeframe, toPrismaTimeframe } from '@quant/shared';
+import { ICandle, MarketDataSourceMode, REDIS_KEYS, Timeframe, toPrismaTimeframe } from '@quant/shared';
 import {
   calculateEMA,
   calculateSMA,
@@ -19,6 +19,7 @@ export interface ICandlesResponse {
   timeframe: string;
   count: number;
   candles: ICandle[];
+  formingCandle?: ICandle | null;
   dataProvenance?: import('@quant/shared').DataProvenance;
 }
 
@@ -42,6 +43,7 @@ export interface IChartDataResponse {
     volume: number;
     isClosed?: boolean;
   }>;
+  formingCandle?: ICandle | null;
   indicators: {
     ema20: Array<{ time: number; value: number }>;
     ema50: Array<{ time: number; value: number }>;
@@ -68,14 +70,92 @@ export interface IChartDataResponse {
   activeSignal: any | null;
 }
 
-export type MarketDataSourceMode = 'LIVE_DECISION' | 'BACKTEST' | 'LEARNING' | 'CHART' | 'HISTORICAL';
+export function getTimeframeDurationMs(timeframe: string): number {
+  const norm = (timeframe || '15m').toUpperCase().replace('MIN', 'M').replace('MINUTES', 'M');
+  switch (norm) {
+    case '1M':
+    case 'M1':
+      return 60 * 1000;
+    case '3M':
+    case 'M3':
+      return 3 * 60 * 1000;
+    case '5M':
+    case 'M5':
+      return 5 * 60 * 1000;
+    case '15M':
+    case 'M15':
+    case '15':
+      return 15 * 60 * 1000;
+    case '30M':
+    case 'M30':
+    case '30':
+      return 30 * 60 * 1000;
+    case '1H':
+    case 'H1':
+    case '60M':
+    case '60':
+      return 60 * 60 * 1000;
+    case '4H':
+    case 'H4':
+    case '240M':
+    case '240':
+      return 4 * 60 * 60 * 1000;
+    case '1D':
+    case 'D1':
+    case 'D':
+      return 24 * 60 * 60 * 1000;
+    default:
+      return 15 * 60 * 1000;
+  }
+}
 
 export class MarketDataSourcePolicy {
+  static resolveSource(
+    mode: MarketDataSourceMode,
+    context: { hasLiveFeed: boolean; symbol: string; isRangeQuery?: boolean },
+  ): {
+    useLiveFeed: boolean;
+    useDatabase: boolean;
+    dataProvenance: import('@quant/shared').DataProvenance;
+  } {
+    if (mode === MarketDataSourceMode.LIVE_DECISION) {
+      if (context.isRangeQuery) {
+        throw new Error(
+          `[MARKET DATA FAIL-CLOSED] Range queries ('from' / 'to') are incompatible with LIVE_DECISION mode for '${context.symbol}'. Use HISTORICAL or BACKTEST mode for historical intervals.`,
+        );
+      }
+      if (!context.hasLiveFeed) {
+        throw new Error(
+          `[MARKET DATA FAIL-CLOSED] Authoritative live exchange stream unavailable for '${context.symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
+        );
+      }
+      return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
+    }
+    if (mode === MarketDataSourceMode.CHART) {
+      if (context.isRangeQuery) {
+        return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
+      }
+      if (context.hasLiveFeed) {
+        return { useLiveFeed: true, useDatabase: false, dataProvenance: 'LIVE' };
+      }
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'DELAYED' };
+    }
+    if (mode === MarketDataSourceMode.BACKTEST) {
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'BACKTEST' };
+    }
+    if (mode === MarketDataSourceMode.LEARNING) {
+      return { useLiveFeed: false, useDatabase: true, dataProvenance: 'LEARNING' };
+    }
+    return { useLiveFeed: false, useDatabase: true, dataProvenance: 'HISTORICAL' };
+  }
+
   static validate(mode: MarketDataSourceMode, hasLiveFeed: boolean, symbol: string) {
-    if (mode === 'LIVE_DECISION' && !hasLiveFeed) {
-      throw new Error(
-        `[MARKET DATA FAIL-CLOSED] Authoritative live exchange stream unavailable for '${symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
-      );
+    return this.resolveSource(mode, { hasLiveFeed, symbol });
+  }
+
+  static assertAllowedSource(mode: MarketDataSourceMode, source: string) {
+    if (mode === MarketDataSourceMode.LIVE_DECISION && source !== 'LIVE') {
+      throw new Error(`[MARKET DATA FAIL-CLOSED] Source '${source}' is prohibited under LIVE_DECISION.`);
     }
   }
 }
@@ -113,6 +193,8 @@ export class CandlesService {
       const is15m = normTf === 'M15' || normTf === '15M' || normTf === '15';
       const is1h = normTf === 'H1' || normTf === '1H' || normTf === '60M' || normTf === '60';
       const is4h = normTf === 'H4' || normTf === '4H' || normTf === '240M' || normTf === '240';
+      const durationMs = getTimeframeDurationMs(timeframe);
+      const serverNow = Date.now();
 
       if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'XAUUSD' || sym === 'GOLD' || sym === 'PAXGUSDT') {
         const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
@@ -123,16 +205,21 @@ export class CandlesService {
         if (res.ok) {
           const raw = await res.json();
           if (Array.isArray(raw) && raw.length > 0) {
-            const candles: ICandle[] = raw.map((k: any) => ({
-              timestamp: new Date(k[0]),
-              open: parseFloat(k[1]),
-              high: parseFloat(k[2]),
-              low: parseFloat(k[3]),
-              close: parseFloat(k[4]),
-              volume: parseFloat(k[5]),
-              isClosed: true,
-              provenance: 'LIVE',
-            }));
+            const candles: ICandle[] = raw.map((k: any) => {
+              const openTimeMs = Number(k[0]);
+              const closeTimeMs = Number(k[6]) || (openTimeMs + durationMs - 1);
+              const isClosed = serverNow >= openTimeMs + durationMs || serverNow > closeTimeMs;
+              return {
+                timestamp: new Date(openTimeMs),
+                open: parseFloat(k[1]),
+                high: parseFloat(k[2]),
+                low: parseFloat(k[3]),
+                close: parseFloat(k[4]),
+                volume: parseFloat(k[5]),
+                isClosed,
+                provenance: 'LIVE',
+              };
+            });
             const sliced = candles.slice(-limit);
             this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced });
             return sliced;
@@ -165,14 +252,16 @@ export class CandlesService {
             const close = quote.close?.[i];
             const volume = quote.volume?.[i] || 1;
             if (open != null && high != null && low != null && close != null) {
+              const openTimeMs = timestamps[i] * 1000;
+              const isClosed = serverNow >= openTimeMs + durationMs;
               candles.push({
-                timestamp: new Date(timestamps[i] * 1000),
+                timestamp: new Date(openTimeMs),
                 open: Number(open.toFixed(2)),
                 high: Number(high.toFixed(2)),
                 low: Number(low.toFixed(2)),
                 close: Number(close.toFixed(2)),
                 volume: Number(volume),
-                isClosed: true,
+                isClosed,
                 provenance: 'LIVE',
               });
             }
@@ -197,27 +286,36 @@ export class CandlesService {
     const limit = query.limit || 100;
     const prismaTf = toPrismaTimeframe(timeframe);
     const sourceMode: MarketDataSourceMode =
-      (query.sourceMode as MarketDataSourceMode) ||
-      (query.from || query.to ? 'HISTORICAL' : 'CHART');
+      query.sourceMode ||
+      (query.from || query.to ? MarketDataSourceMode.HISTORICAL : MarketDataSourceMode.CHART);
 
-    // 1. Live Exchange Fetch: Executed only for LIVE_DECISION and CHART modes
-    if (sourceMode === 'LIVE_DECISION' || sourceMode === 'CHART') {
-      if (!query.from && !query.to) {
-        const liveCandles = await this.fetchRealExchangeCandles(symbol, timeframe as string, limit);
-        if (liveCandles.length > 0) {
-          return {
-            symbol,
-            timeframe,
-            count: liveCandles.length,
-            candles: liveCandles,
-            dataProvenance: 'LIVE',
-          };
-        } else if (sourceMode === 'LIVE_DECISION') {
-          throw new Error(
-            `[MARKET DATA FAIL-CLOSED] Authoritative live exchange data stream unavailable for '${symbol}'. Under LIVE_DECISION policy, silent DB or synthetic fallback is strictly prohibited.`,
-          );
-        }
-      }
+    const isRangeQuery = Boolean(query.from || query.to);
+
+    // 1. Live Exchange Fetch: Executed when appropriate according to MarketDataSourcePolicy
+    let liveCandles: ICandle[] = [];
+    if (
+      (sourceMode === MarketDataSourceMode.LIVE_DECISION || sourceMode === MarketDataSourceMode.CHART) &&
+      !isRangeQuery
+    ) {
+      liveCandles = await this.fetchRealExchangeCandles(symbol, timeframe as string, limit);
+    }
+
+    const resolution = MarketDataSourcePolicy.resolveSource(sourceMode, {
+      hasLiveFeed: liveCandles.length > 0,
+      symbol,
+      isRangeQuery,
+    });
+
+    if (resolution.useLiveFeed && liveCandles.length > 0) {
+      const forming = liveCandles.find((c) => c.isClosed === false) || null;
+      return {
+        symbol,
+        timeframe,
+        count: liveCandles.length,
+        candles: liveCandles,
+        formingCandle: forming,
+        dataProvenance: resolution.dataProvenance,
+      };
     }
 
     // 2. Database / Historical Provider Query: Used for BACKTEST, LEARNING, HISTORICAL, and CHART fallbacks
@@ -250,13 +348,6 @@ export class CandlesService {
       take: limit,
     });
 
-    const provenanceValue =
-      sourceMode === 'BACKTEST'
-        ? 'BACKTEST'
-        : sourceMode === 'LEARNING'
-          ? 'HISTORICAL'
-          : 'DELAYED';
-
     const candles: ICandle[] = dbCandles.reverse().map((c) => ({
       timestamp: c.timestamp,
       open: Number(c.open),
@@ -265,15 +356,18 @@ export class CandlesService {
       close: Number(c.close),
       volume: Number(c.volume),
       isClosed: c.isClosed,
-      provenance: provenanceValue as any,
+      provenance: resolution.dataProvenance,
     }));
+
+    const forming = candles.find((c) => c.isClosed === false) || null;
 
     return {
       symbol,
       timeframe,
       count: candles.length,
       candles,
-      dataProvenance: provenanceValue as any,
+      formingCandle: forming,
+      dataProvenance: resolution.dataProvenance,
     };
   }
 
@@ -410,6 +504,7 @@ export class CandlesService {
       closedThrough: latestClosedTimestamp,
       isDegraded: smcAnalysis.isDegraded || false,
       candles: formattedCandles,
+      formingCandle: candlesResp.formingCandle || null,
       indicators: {
         ema20,
         ema50,
@@ -472,7 +567,7 @@ export class CandlesService {
     const candle = await this.prisma.candle.findFirst({
       where: {
         instrumentId: inst.id,
-        timeframe: prismaTf,
+        timeframe: prismaTf as any,
       },
       orderBy: { timestamp: 'desc' },
     });

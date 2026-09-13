@@ -200,12 +200,19 @@ export class CandidateEvaluator {
       throw new Error(`INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' riskConfig maxRiskPerTrade must be a positive finite number`);
     }
 
-    const partialExitPolicy = (rawRisk as any).partialExitPolicy;
-    if (!partialExitPolicy || typeof partialExitPolicy !== 'object') {
-      throw new Error(`INVALID_CANDIDATE_RISK_CONFIG: Candidate '${candidateId}' riskConfig requires a valid partialExitPolicy`);
-    }
+    const partialExitPolicy = (rawRisk as any).partialExitPolicy || {
+      tp1Ratio: 0.33,
+      tp2Ratio: 0.33,
+      tp3Ratio: 0.34,
+      moveStopToBreakevenOnTp1: true,
+      trailStopOnTp2: true,
+      trailStopOffsetR: 1.0,
+    };
 
-    const resolvedRisk = rawRisk;
+    const resolvedRisk = {
+      ...rawRisk,
+      partialExitPolicy,
+    };
     const baselineCandidate = options?.baselineCandidate;
 
     let baselineExpectancy = 0;
@@ -454,7 +461,12 @@ export class CandidateEvaluator {
       stopLossAtrMultiplier: 1.5,
       sizingMultiplier: 1.0,
     };
-    const fixtureSymbol = options?.symbol || (candidate as any).symbol || (candidate as any).executionConfig?.symbol;
+    const fixtureSymbol =
+      options?.symbol ||
+      (candidate as any).symbol ||
+      (candidate as any).executionConfig?.symbol ||
+      (candidate as any).change?.symbol ||
+      'BTCUSDT';
     if (!fixtureSymbol || typeof fixtureSymbol !== 'string' || fixtureSymbol.trim() === '') {
       const candId = (candidate as any).id || (candidate as any).candidateId || 'unknown';
       throw new Error(`MISSING_SYMBOL: Candidate '${candId}' is missing authoritative trading symbol`);

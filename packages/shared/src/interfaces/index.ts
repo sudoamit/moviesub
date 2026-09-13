@@ -9,7 +9,7 @@ import {
   Timeframe,
 } from '../enums';
 
-export type DataProvenance = 'LIVE' | 'CACHED' | 'DELAYED' | 'SYNTHETIC';
+export type DataProvenance = 'LIVE' | 'CACHED' | 'DELAYED' | 'SYNTHETIC' | 'HISTORICAL' | 'BACKTEST' | 'LEARNING';
 
 export interface ICandle {
   timestamp: Date;

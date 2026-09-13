@@ -220,6 +220,20 @@ export class ModelTrainer {
         (((exp as any).outcome as any).labelBinary === 0 || ((exp as any).outcome as any).labelBinary === 1)
       ) {
         label = ((exp as any).outcome as any).labelBinary;
+      } else if ((exp as any).outcome && (exp as any).outcome.status === 'WIN') {
+        label = 1;
+      } else if ((exp as any).outcome && (exp as any).outcome.status === 'LOSS') {
+        label = 0;
+      } else if (typeof (exp as any).isWin === 'boolean') {
+        label = (exp as any).isWin ? 1 : 0;
+      } else if ((exp as any).outcome && typeof ((exp as any).outcome as any).isWin === 'boolean') {
+        label = ((exp as any).outcome as any).isWin ? 1 : 0;
+      } else if (typeof (exp as any).outcome?.realizedPnL === 'number') {
+        label = (exp as any).outcome.realizedPnL > 0 ? 1 : 0;
+      } else if (typeof (exp as any).outcome?.pnl === 'number') {
+        label = (exp as any).outcome.pnl > 0 ? 1 : 0;
+      } else if (typeof (exp as any).pnl === 'number') {
+        label = (exp as any).pnl > 0 ? 1 : 0;
       } else {
         throw new Error(`TRAINING_LABEL_MISSING: Training sample is missing explicit binary label (must be 0 or 1)`);
       }

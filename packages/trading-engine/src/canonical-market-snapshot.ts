@@ -7,7 +7,7 @@ import {
 } from '@quant/shared';
 import { CandleNormalizer } from './candle-normalizer';
 
-export type MarketDataProvenance = 'LIVE' | 'BACKTEST' | 'SYNTHETIC' | 'HISTORICAL' | 'CACHED';
+export type MarketDataProvenance = 'LIVE' | 'BACKTEST' | 'SYNTHETIC' | 'HISTORICAL' | 'CACHED' | 'LEARNING' | 'DELAYED';
 
 export interface IDataGapDetail {
   expectedTime: Date;
@@ -126,21 +126,46 @@ export class CanonicalMarketSnapshotBuilder {
       missingCount: g.missingCount,
     }));
 
-    const snapshot: ICanonicalMarketSnapshot = Object.freeze({
+    const frozenCandles = closedCandles.map((c) => deepFreeze({ ...c }));
+    const frozenForming = formingCandle ? deepFreeze({ ...formingCandle }) : null;
+    const frozenGaps = gapDetails.map((g) => deepFreeze({ ...g }));
+    const frozenInstrument = deepFreeze({ ...instrument });
+    const frozenAccounting = options.accountingSnapshot
+      ? deepFreeze({ ...options.accountingSnapshot })
+      : undefined;
+
+    const snapshot: ICanonicalMarketSnapshot = deepFreeze({
       symbol,
       executionTimeframe: timeframe,
       decisionTimestamp,
       closedThroughTimestamp,
-      candles: Object.freeze([...closedCandles]),
-      formingCandle: formingCandle ? Object.freeze({ ...formingCandle }) : null,
+      candles: Object.freeze(frozenCandles),
+      formingCandle: frozenForming,
       dataProvenance: provenance,
       gapStatus,
-      gapDetails: Object.freeze(gapDetails),
-      instrument: Object.freeze({ ...instrument }),
-      accountingSnapshot: options.accountingSnapshot ? Object.freeze({ ...options.accountingSnapshot }) : undefined,
+      gapDetails: Object.freeze(frozenGaps),
+      instrument: frozenInstrument,
+      accountingSnapshot: frozenAccounting,
       isImmutable: true,
     });
 
     return snapshot;
   }
+}
+
+export function deepFreeze<T>(obj: T): Readonly<T> {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (obj instanceof Date) {
+    return obj;
+  }
+  Object.freeze(obj);
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    const val = (obj as any)[key];
+    if (val !== null && typeof val === 'object' && !Object.isFrozen(val)) {
+      deepFreeze(val);
+    }
+  }
+  return obj as Readonly<T>;
 }

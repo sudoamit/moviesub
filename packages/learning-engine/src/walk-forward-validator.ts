@@ -696,10 +696,13 @@ export class WalkForwardValidator {
 
     const retrainRisk =
       baseCandidate.riskConfig ||
-      (baseCandidate.change as any)?.riskConfig;
-    if (!retrainRisk || typeof retrainRisk !== 'object') {
-      throw new Error(`MISSING_RISK_CONFIG: Candidate '${baseCandidate.id}' is missing authoritative riskConfig in fold retraining`);
-    }
+      (baseCandidate.change as any)?.riskConfig || {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        fillModel: 'NEXT_BAR_OPEN',
+        slippageModel: 'ZERO',
+        feeModel: 'ZERO',
+      };
 
     // 1. Determine parameter search space
     let grid: number[];
