@@ -588,7 +588,6 @@ export class PositionMonitorProcessor extends WorkerHost {
       });
 
       // 7. Persist PaperTrade record with canonical execution facts
-      const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -600,14 +599,14 @@ export class PositionMonitorProcessor extends WorkerHost {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: pos.quantity,
-          entryPrice: new Decimal(effectiveEntryPrice),
+          entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? new Decimal(effectiveEntryPrice) : null,
           exitPrice: new Decimal(effectiveExitPrice),
-          realizedPnL: new Decimal(canonicalRealizedPnL),
-          realizedR: new Decimal(canonicalRealizedR),
+          realizedPnL: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedPnL) : null,
+          realizedR: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedR) : null,
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : 0,
-          entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
+          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
+          entryTime: hasAuthoritativeEntryFills && aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : null,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
@@ -621,7 +620,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             sourceTimestamp: tickSourceTime.toISOString(),
             livePrice: exitPrice,
             exitPrice: effectiveExitPrice,
-            entryPrice: effectiveEntryPrice,
+            entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? effectiveEntryPrice : Number(pos.entryPrice),
             requestedEntryPrice: Number(pos.entryPrice),
             actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
             actualEntryPriceCurrency: aggregated.entry ? snapshot.quoteCurrency : null,

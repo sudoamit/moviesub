@@ -1010,14 +1010,14 @@ model PaperTrade {
   optionType             String?
   direction              Direction
   quantity               Decimal       @db.Decimal(18, 4)
-  entryPrice             Decimal       @db.Decimal(18, 6)
+  entryPrice             Decimal?      @db.Decimal(18, 6)
   exitPrice              Decimal       @db.Decimal(18, 6)
-  realizedPnL            Decimal       @db.Decimal(18, 2)
-  realizedR              Decimal       @db.Decimal(6, 2)
+  realizedPnL            Decimal?      @db.Decimal(18, 2)
+  realizedR              Decimal?      @db.Decimal(6, 2)
   maxFavorableExcursion  Decimal       @default(0.0) @db.Decimal(18, 6)
   maxAdverseExcursion    Decimal       @default(0.0) @db.Decimal(18, 6)
-  holdingDurationSeconds Int           @default(0)
-  entryTime              DateTime
+  holdingDurationSeconds Int?          @default(0)
+  entryTime              DateTime?
   exitTime               DateTime      @default(now())
   exitReason             String
   chargesJson            Json?

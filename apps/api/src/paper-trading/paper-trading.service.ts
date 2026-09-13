@@ -328,16 +328,16 @@ export class PaperTradingService implements IExecutionProvider {
         optionType: (t.optionType as any) || undefined,
         direction: t.direction === Direction.BULLISH ? 'BUY' : 'SELL',
         quantity: Number(t.quantity),
-        entryPrice: Number(t.entryPrice),
+        entryPrice: t.entryPrice !== null ? Number(t.entryPrice) : null,
         exitPrice: Number(t.exitPrice),
-        realizedPnL: Number(t.realizedPnL),
-        realizedR: Number(t.realizedR),
+        realizedPnL: t.realizedPnL !== null ? Number(t.realizedPnL) : null,
+        realizedR: t.realizedR !== null ? Number(t.realizedR) : null,
         maxFavorableExcursion: Number(t.maxFavorableExcursion),
         maxAdverseExcursion: Number(t.maxAdverseExcursion),
-        holdingDurationSeconds: t.holdingDurationSeconds,
+        holdingDurationSeconds: t.holdingDurationSeconds !== null ? t.holdingDurationSeconds : null,
         exitReason: t.exitReason,
-        openedAt: t.entryTime.toISOString(),
-        closedAt: t.exitTime.toISOString(),
+        openedAt: t.entryTime ? t.entryTime.toISOString() : null,
+        closedAt: t.exitTime ? t.exitTime.toISOString() : new Date().toISOString(),
         totalCharges: charges.totalCharges || 0,
         featureSnapshotJson: (t.featureSnapshotJson as any) || undefined,
         outcomeSnapshotJson: (t.outcomeSnapshotJson as any) || undefined,
@@ -346,19 +346,22 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     const totalTrades = formattedHistory.length;
-    const winningTrades = formattedHistory.filter((t) => t.realizedPnL > 0).length;
-    const losingTrades = formattedHistory.filter((t) => t.realizedPnL <= 0).length;
+    const completedTrades = formattedHistory.filter((t) => t.realizedPnL !== null && t.realizedPnL !== undefined);
+    const winningTrades = completedTrades.filter((t) => (t.realizedPnL || 0) > 0).length;
+    const losingTrades = completedTrades.filter((t) => (t.realizedPnL || 0) <= 0).length;
     const winRate =
-      totalTrades > 0 ? Number(((winningTrades / totalTrades) * 100).toFixed(1)) : 0.0;
+      completedTrades.length > 0 ? Number(((winningTrades / completedTrades.length) * 100).toFixed(1)) : 0.0;
 
-    const grossWins = formattedHistory
-      .filter((t) => t.realizedPnL > 0)
-      .reduce((acc, t) => acc + t.realizedPnL, 0);
+    const grossWins = completedTrades
+      .filter((t) => (t.realizedPnL || 0) > 0)
+      .reduce((acc, t) => acc + (t.realizedPnL || 0), 0);
     const grossLosses = Math.abs(
-      formattedHistory.filter((t) => t.realizedPnL < 0).reduce((acc, t) => acc + t.realizedPnL, 0),
+      completedTrades
+        .filter((t) => (t.realizedPnL || 0) < 0)
+        .reduce((acc, t) => acc + (t.realizedPnL || 0), 0),
     );
     const profitFactor =
-      grossLosses > 0 ? Number((grossWins / grossLosses).toFixed(2)) : grossWins > 0 ? 99.9 : 0.0;
+      grossLosses > 0 ? Number((grossWins / grossLosses).toFixed(2)) : grossWins > 0 ? 99.99 : 0.0;
 
     return {
       accountId: account.id,
@@ -1318,7 +1321,6 @@ export class PaperTradingService implements IExecutionProvider {
       });
 
       // 7. Create PaperTrade Record with Canonical Execution Facts
-      const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -1330,14 +1332,14 @@ export class PaperTradingService implements IExecutionProvider {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: pos.quantity,
-          entryPrice: new Decimal(effectiveEntryPrice),
+          entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? new Decimal(effectiveEntryPrice) : null,
           exitPrice: new Decimal(effectiveExitPrice),
-          realizedPnL: new Decimal(canonicalRealizedPnL),
-          realizedR: new Decimal(canonicalRealizedR),
+          realizedPnL: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedPnL) : null,
+          realizedR: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedR) : null,
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : 0,
-          entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
+          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
+          entryTime: hasAuthoritativeEntryFills && aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : null,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
@@ -1351,7 +1353,7 @@ export class PaperTradingService implements IExecutionProvider {
             sourceTimestamp: sourceTimestamp.toISOString(),
             livePrice: exitPrice,
             exitPrice: effectiveExitPrice,
-            entryPrice: effectiveEntryPrice,
+            entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? effectiveEntryPrice : Number(pos.entryPrice),
             requestedEntryPrice: Number(pos.entryPrice),
             actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
             actualEntryPriceCurrency: aggregated.entry ? snapshot.quoteCurrency : null,

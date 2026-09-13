@@ -707,14 +707,14 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(trade.outcomeSnapshotJson.exitPrice).toBe(trade.exitPrice);
 
     // Verify P&L is calculated using exact fill prices
-    const expectedGrossPnL = (trade.exitPrice - trade.entryPrice) * 50;
+    const expectedGrossPnL = (trade.exitPrice - Number(trade.entryPrice!)) * 50;
     const expectedNetPnL = Number((expectedGrossPnL - trade.totalCharges).toFixed(2));
-    expect(trade.realizedPnL).toBeCloseTo(expectedNetPnL, 1);
+    expect(trade.realizedPnL!).toBeCloseTo(expectedNetPnL, 1);
 
     // Verify R multiple is calculated from initialStopLoss risk anchor
     const expectedRiskDistance = Math.abs(pos.entryPrice - 24050.0);
-    const expectedR = Number(((trade.exitPrice - trade.entryPrice) / expectedRiskDistance).toFixed(2));
-    expect(trade.realizedR).toBeCloseTo(expectedR, 1);
+    const expectedR = Number(((trade.exitPrice - Number(trade.entryPrice!)) / expectedRiskDistance).toFixed(2));
+    expect(trade.realizedR!).toBeCloseTo(expectedR, 1);
   });
 
   it('should reject close request if position is already in CLOSING state by worker', async () => {
@@ -787,10 +787,10 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     expect(Number(dbAccounts[0].usedMargin)).toBe(0.0);
 
     // b. Realized P&L matches trade realized P&L
-    expect(Number(dbAccounts[0].realizedPnL)).toBeCloseTo(trade.realizedPnL, 2);
+    expect(Number(dbAccounts[0].realizedPnL)).toBeCloseTo(Number(trade.realizedPnL!), 2);
 
     // c. Cash balance equals initial (500,000) + grossPnL - totalCharges
-    const expectedCashBalance = 500000.0 + trade.realizedPnL;
+    const expectedCashBalance = 500000.0 + Number(trade.realizedPnL!);
     expect(Number(dbAccounts[0].cashBalance)).toBeCloseTo(expectedCashBalance, 2);
 
     // d. Exactly 1 PaperTrade record created
