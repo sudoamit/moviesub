@@ -56,6 +56,16 @@ export class BOSEngine {
       const candle = candles[i];
       const candleAtr = atr[i] || Math.max(1, candle.high - candle.low);
 
+      // Point-in-time average volume over prior 20 closed candles (strictly observable at bar i)
+      const priorVolumes = candles
+        .slice(Math.max(0, i - 20), i)
+        .map((c) => Number(c.volume || 0))
+        .filter((v) => v > 0);
+      const avgVolume =
+        priorVolumes.length > 0
+          ? priorVolumes.reduce((a, b) => a + b, 0) / priorVolumes.length
+          : undefined;
+
       // 1. Check for Bullish BOS (Targeting the most recent confirmed active high)
       const eligibleHighs = activeHighs.filter((h) => i > h.confirmedAtIndex);
       if (eligibleHighs.length > 0) {
@@ -67,7 +77,7 @@ export class BOSEngine {
           Direction.BULLISH,
           candleAtr,
           targetHigh.price,
-          undefined,
+          avgVolume,
           { threshold: displacementThreshold },
         );
 
@@ -77,8 +87,8 @@ export class BOSEngine {
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
           isBroken = candle.close > targetHigh.price;
         } else {
-          // CANDLE_CLOSE_AND_DISPLACEMENT
-          isBroken = candle.close > targetHigh.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
+          // CANDLE_CLOSE_AND_DISPLACEMENT: Strictly requires close beyond pivot AND confirmed multi-factor displacement
+          isBroken = candle.close > targetHigh.price && dispMetrics.isDisplacement;
         }
 
         if (isBroken) {
@@ -110,7 +120,7 @@ export class BOSEngine {
           Direction.BEARISH,
           candleAtr,
           targetLow.price,
-          undefined,
+          avgVolume,
           { threshold: displacementThreshold },
         );
 
@@ -120,7 +130,8 @@ export class BOSEngine {
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
           isBroken = candle.close < targetLow.price;
         } else {
-          isBroken = candle.close < targetLow.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
+          // CANDLE_CLOSE_AND_DISPLACEMENT: Strictly requires close beyond pivot AND confirmed multi-factor displacement
+          isBroken = candle.close < targetLow.price && dispMetrics.isDisplacement;
         }
 
         if (isBroken) {

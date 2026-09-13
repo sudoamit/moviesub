@@ -16,10 +16,21 @@ export class SMCService {
       limit,
     });
 
-    const analysis = SMCAnalyzer.analyze(candlesRes.candles);
+    const candles = candlesRes.candles;
+    const closedList = candles.filter((c) => c.isClosed !== false);
+    const latestClosedCandle = closedList.length > 0 ? closedList[closedList.length - 1] : candles[candles.length - 1];
+    const latestClosedTimestamp = latestClosedCandle ? latestClosedCandle.timestamp : new Date();
+
+    const analysis = SMCAnalyzer.analyze(candles, {
+      asOfTimestamp: latestClosedTimestamp,
+      timeframe: String(timeframe),
+    });
+
     return {
       symbol: symbol.toUpperCase(),
       timeframe,
+      dataProvenance: candlesRes.dataProvenance || 'LIVE',
+      closedThrough: latestClosedTimestamp,
       ...analysis,
     };
   }

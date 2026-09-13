@@ -53,6 +53,19 @@ interface TradingChartProps {
   timeframe: string;
   candles: any[];
   signal?: any;
+  structures?: {
+    swings?: any[];
+    bos?: any[];
+    choch?: any[];
+    marketRegime?: any;
+    dealingRange?: any;
+  };
+  liquidity?: {
+    pools?: any[];
+    sweeps?: any[];
+  };
+  fvgs?: any[];
+  orderBlocks?: any[];
   livePrice?: number;
   liveChangePercent?: number;
   isTradeActive?: boolean;
@@ -65,6 +78,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   timeframe,
   candles,
   signal,
+  structures,
+  liquidity,
+  fvgs,
+  orderBlocks,
   livePrice,
   liveChangePercent = 0,
   isTradeActive = true,
@@ -213,8 +230,34 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const currentPrice = livePrice || (candles.length > 0 ? candles[candles.length - 1].close : 0);
   const timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
-  // 1. Instant Client-Side Pure SMC Pro Computation (0 network lag)
-  const clientSMC = useMemo(() => {
+  // 1. Canonical SMC Structures (Server-provided when available, fallback to deterministic closed-candle analysis)
+  const canonicalSMC = useMemo(() => {
+    if (structures && (orderBlocks || fvgs || liquidity)) {
+      return {
+        swingPoints: structures.swings || [],
+        breaksOfStructure: structures.bos || [],
+        changesOfCharacter: structures.choch || [],
+        marketRegime: structures.marketRegime,
+        dealingRange: structures.dealingRange,
+        liquidityPools: liquidity?.pools || [],
+        liquiditySweeps: liquidity?.sweeps || [],
+        fairValueGaps: fvgs || [],
+        activeFVGs: (fvgs || []).filter(
+          (f: any) => !f.isFilled && !f.isInvalidated && f.status !== 'FILLED' && f.status !== 'INVALIDATED',
+        ),
+        orderBlocks: orderBlocks || [],
+        activeOrderBlocks: (orderBlocks || []).filter(
+          (ob: any) => ob.status === 'ACTIVE' || ob.status === 'TOUCHED' || ob.status === 'PARTIALLY_MITIGATED',
+        ),
+        currentTrend:
+          (structures.bos && structures.bos.length > 0)
+            ? structures.bos[structures.bos.length - 1].direction
+            : (structures.choch && structures.choch.length > 0)
+              ? structures.choch[structures.choch.length - 1].direction
+              : 'NEUTRAL',
+      };
+    }
+
     if (!candles || candles.length < 5) return null;
     try {
       const cleanCandles = candles.map((c, idx) => ({
@@ -230,12 +273,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
         provenance: c.provenance,
       }));
-      return SMCAnalyzer.analyze(cleanCandles);
+      return SMCAnalyzer.analyze(cleanCandles, { timeframe });
     } catch (e) {
-      console.error('Client SMC calculation error:', e);
+      console.error('SMC calculation error:', e);
       return null;
     }
-  }, [candles]);
+  }, [candles, structures, orderBlocks, fvgs, liquidity, timeframe]);
+
+  const clientSMC = canonicalSMC;
 
   // 2. Client-Side Volume Profile & Cumulative Volume Delta Computation
   const clientVP = useMemo(() => {

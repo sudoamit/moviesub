@@ -46,6 +46,16 @@ export class CHOCHEngine {
       const candle = candles[i];
       const candleAtr = atr[i] || Math.max(1, candle.high - candle.low);
 
+      // Point-in-time average volume over prior 20 closed candles
+      const priorVolumes = candles
+        .slice(Math.max(0, i - 20), i)
+        .map((c) => Number(c.volume || 0))
+        .filter((v) => v > 0);
+      const avgVolume =
+        priorVolumes.length > 0
+          ? priorVolumes.reduce((a, b) => a + b, 0) / priorVolumes.length
+          : undefined;
+
       // Swings confirmed at or before candle i
       const visibleSwings = swings.filter((s) => s.confirmedAtIndex <= i);
       if (visibleSwings.length < 2) continue;
@@ -66,20 +76,23 @@ export class CHOCHEngine {
         }
       }
 
-      const recentHighs = visibleSwings.filter(
+      // Valid Lower Highs in a Bearish trend
+      const validLowerHighs = visibleSwings.filter(
         (s) =>
           (s.type === StructureType.LOWER_HIGH || s.type === StructureType.SWING_HIGH || s.isProtected) &&
           !brokenSwingIndices.has(s.index),
       );
-      const recentLows = visibleSwings.filter(
+
+      // Valid Higher Lows in a Bullish trend
+      const validHigherLows = visibleSwings.filter(
         (s) =>
           (s.type === StructureType.HIGHER_LOW || s.type === StructureType.SWING_LOW || s.isProtected) &&
           !brokenSwingIndices.has(s.index),
       );
 
-      // Prefer protected pivot if available, otherwise most recent confirmed structural swing
-      const protectedLH = recentHighs.filter((h) => h.isProtected).pop() || recentHighs[recentHighs.length - 1];
-      const protectedHL = recentLows.filter((l) => l.isProtected).pop() || recentLows[recentLows.length - 1];
+      // Target the active protected pivot (preferring isProtected)
+      const protectedLH = validLowerHighs.filter((h) => h.isProtected).pop() || validLowerHighs[validLowerHighs.length - 1];
+      const protectedHL = validHigherLows.filter((l) => l.isProtected).pop() || validHigherLows[validHigherLows.length - 1];
 
       // 1. Bullish CHOCH: In a Bearish trend, price breaks above protected Lower High
       if (currentTrend === Direction.BEARISH && protectedLH && i > protectedLH.confirmedAtIndex) {
@@ -88,7 +101,7 @@ export class CHOCHEngine {
           Direction.BULLISH,
           candleAtr,
           protectedLH.price,
-          undefined,
+          avgVolume,
           { threshold: displacementThreshold },
         );
 
@@ -98,8 +111,8 @@ export class CHOCHEngine {
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
           isBroken = candle.close > protectedLH.price;
         } else {
-          // CANDLE_CLOSE_AND_DISPLACEMENT
-          isBroken = candle.close > protectedLH.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
+          // CANDLE_CLOSE_AND_DISPLACEMENT: Strictly requires close beyond pivot AND multi-factor displacement
+          isBroken = candle.close > protectedLH.price && dispMetrics.isDisplacement;
         }
 
         if (isBroken) {
@@ -126,7 +139,7 @@ export class CHOCHEngine {
           Direction.BEARISH,
           candleAtr,
           protectedHL.price,
-          undefined,
+          avgVolume,
           { threshold: displacementThreshold },
         );
 
@@ -136,7 +149,8 @@ export class CHOCHEngine {
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
           isBroken = candle.close < protectedHL.price;
         } else {
-          isBroken = candle.close < protectedHL.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
+          // CANDLE_CLOSE_AND_DISPLACEMENT: Strictly requires close beyond pivot AND multi-factor displacement
+          isBroken = candle.close < protectedHL.price && dispMetrics.isDisplacement;
         }
 
         if (isBroken) {

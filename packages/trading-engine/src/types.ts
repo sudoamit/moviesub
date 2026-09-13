@@ -40,6 +40,11 @@ export interface ISMCAnalysisResult {
   symbol?: string;
   timeframe?: string;
   candlesCount: number;
+  closedThrough?: Date;
+  formingCandle?: ICandle | null;
+  isDegraded?: boolean;
+  gapCount?: number;
+  dataGaps?: Array<{ expectedTime: Date; actualTime: Date; missingCount: number }>;
   swingPoints: ISwingPoint[];
   confirmedSwingHighs: ISwingPoint[];
   confirmedSwingLows: ISwingPoint[];

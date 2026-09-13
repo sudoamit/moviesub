@@ -39,10 +39,13 @@ export class SMCAnalyzer {
           timestamp: new Date(),
         },
         currentTrend: Direction.NEUTRAL,
+        isDegraded: false,
+        gapCount: 0,
+        dataGaps: [],
       };
     }
 
-    const { closedCandles: candles } = CandleNormalizer.partitionCandles(rawCandles, {
+    const { closedCandles: candles, formingCandle } = CandleNormalizer.partitionCandles(rawCandles, {
       asOfTimestamp: config.asOfTimestamp,
       timeframe: config.timeframe,
     });
@@ -50,6 +53,7 @@ export class SMCAnalyzer {
     if (candles.length === 0) {
       return {
         candlesCount: 0,
+        formingCandle,
         swingPoints: [],
         confirmedSwingHighs: [],
         confirmedSwingLows: [],
@@ -70,8 +74,19 @@ export class SMCAnalyzer {
           timestamp: config.asOfTimestamp || new Date(),
         },
         currentTrend: Direction.NEUTRAL,
+        isDegraded: false,
+        gapCount: 0,
+        dataGaps: [],
       };
     }
+
+    const closedThrough = candles[candles.length - 1].timestamp;
+
+    // Detect data gaps
+    const gaps = config.timeframe
+      ? CandleNormalizer.detectGaps(candles, config.timeframe)
+      : [];
+    const isDegraded = gaps.length > 0;
 
     // 1. Detect Swings (Zero look-ahead bias)
     const swingPoints = SwingDetector.detectSwings(candles, {
@@ -160,6 +175,11 @@ export class SMCAnalyzer {
 
     return {
       candlesCount: candles.length,
+      closedThrough,
+      formingCandle,
+      isDegraded,
+      gapCount: gaps.length,
+      dataGaps: gaps,
       swingPoints,
       confirmedSwingHighs,
       confirmedSwingLows,

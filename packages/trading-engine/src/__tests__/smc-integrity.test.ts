@@ -358,9 +358,10 @@ describe('SMC & Candle Integrity Test Suite (22 Deterministic Fixtures)', () => 
 
       const candles = createBaseCandles(10, 80);
       // Candle 8 wicks to 103 (sweeps 100) but closes at 98 (reclaims)
-      candles[8].high = 103;
-      candles[8].close = 98;
       candles[8].open = 85;
+      candles[8].high = 103;
+      candles[8].low = 84;
+      candles[8].close = 98;
 
       const { pools, sweeps } = LiquidityEngine.detectLiquidity(candles, swingPoints);
       expect(sweeps.length).toBe(1);
@@ -503,6 +504,105 @@ describe('SMC & Candle Integrity Test Suite (22 Deterministic Fixtures)', () => 
       expect(bullOB?.status).toBe('INVALIDATED');
       expect(bullOB?.invalidatedAt).toBeDefined();
       expect(activeOrderBlocks.filter((ob) => ob.direction === Direction.BULLISH).length).toBe(0);
+    });
+  });
+
+  describe('9. Multi-Touch Liquidity Clustering (3+ Touches)', () => {
+    it('9.1 should group 3+ swing highs into a single cluster with touchCount >= 3', () => {
+      const base = new Date('2026-01-01T09:15:00.000Z').getTime();
+      const swingPoints = [
+        {
+          index: 2,
+          type: StructureType.SWING_HIGH,
+          price: 150.0,
+          timestamp: new Date(base + 30 * 60000),
+          confirmedAtIndex: 3,
+          confirmedAtTimestamp: new Date(base + 45 * 60000),
+        },
+        {
+          index: 5,
+          type: StructureType.SWING_HIGH,
+          price: 150.2,
+          timestamp: new Date(base + 75 * 60000),
+          confirmedAtIndex: 6,
+          confirmedAtTimestamp: new Date(base + 90 * 60000),
+        },
+        {
+          index: 8,
+          type: StructureType.SWING_HIGH,
+          price: 150.1,
+          timestamp: new Date(base + 120 * 60000),
+          confirmedAtIndex: 9,
+          confirmedAtTimestamp: new Date(base + 135 * 60000),
+        },
+      ];
+
+      const candles = createBaseCandles(12, 100);
+      const { pools } = LiquidityEngine.detectLiquidity(candles, swingPoints, { equalHighLowToleranceAtr: 0.5 });
+      expect(pools.length).toBe(1);
+      expect(pools[0].touchCount).toBe(3);
+      expect(pools[0].isSwept).toBe(false);
+    });
+  });
+
+  describe('10. SMC Analyzer Closed Boundary & Gap Degradation Gate', () => {
+    it('10.1 should mark isDegraded: true and list gaps when candle stream has missing bars', () => {
+      const base = new Date('2026-01-01T09:15:00.000Z').getTime();
+      const candles: ICandle[] = [
+        { timestamp: new Date(base), open: 100, high: 101, low: 99, close: 100.5, volume: 100, isClosed: true },
+        { timestamp: new Date(base + 15 * 60000), open: 100.5, high: 102, low: 100, close: 101.5, volume: 100, isClosed: true },
+        // 45m gap
+        { timestamp: new Date(base + 60 * 60000), open: 101.5, high: 103, low: 101, close: 102.5, volume: 100, isClosed: true },
+      ];
+
+      const result = SMCAnalyzer.analyze(candles, { timeframe: '15m' });
+      expect(result.isDegraded).toBe(true);
+      expect(result.gapCount).toBe(1);
+      expect(result.dataGaps?.length).toBe(1);
+      expect(result.closedThrough).toBeDefined();
+    });
+
+    it('10.2 should strictly require displacement when BOSConfirmationType is CANDLE_CLOSE_AND_DISPLACEMENT', () => {
+      const base = new Date('2026-01-01T09:15:00.000Z').getTime();
+      const swingPoints = [
+        {
+          index: 2,
+          type: StructureType.SWING_HIGH,
+          price: 105,
+          timestamp: new Date(base + 30 * 60000),
+          confirmedAtIndex: 3,
+          confirmedAtTimestamp: new Date(base + 45 * 60000),
+        },
+      ];
+
+      const candles: ICandle[] = [];
+      for (let i = 0; i <= 4; i++) {
+        candles.push({
+          timestamp: new Date(base + i * 15 * 60000),
+          open: 100,
+          high: 102,
+          low: 99,
+          close: 101,
+          volume: 500,
+          isClosed: true,
+        });
+      }
+      // Candle 4 closes at 105.1 (barely above 105, weak volume and small body -> NOT displacement)
+      candles[4].open = 104.9;
+      candles[4].high = 105.2;
+      candles[4].low = 104.8;
+      candles[4].close = 105.1;
+      candles[4].volume = 100;
+
+      const bosCloseOnly = BOSEngine.detectBOS(candles, swingPoints, {
+        confirmationType: BOSConfirmationType.CANDLE_CLOSE,
+      });
+      expect(bosCloseOnly.length).toBe(1);
+
+      const bosWithDisplacement = BOSEngine.detectBOS(candles, swingPoints, {
+        confirmationType: BOSConfirmationType.CANDLE_CLOSE_AND_DISPLACEMENT,
+      });
+      expect(bosWithDisplacement.length).toBe(0);
     });
   });
 });

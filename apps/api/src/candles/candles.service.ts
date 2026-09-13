@@ -31,6 +31,8 @@ export interface IChartDataResponse {
   };
   timeframe: string;
   dataProvenance?: import('@quant/shared').DataProvenance;
+  closedThrough?: Date;
+  isDegraded?: boolean;
   candles: Array<{
     time: number;
     open: number;
@@ -341,8 +343,15 @@ export class CandlesService {
           item !== null,
       );
 
-    // 2. Pure SMC Analysis from trading-engine
-    const smcAnalysis = SMCAnalyzer.analyze(candles);
+    // 2. Pure SMC Analysis from trading-engine with explicit latest closed candle boundary
+    const closedCandlesList = candles.filter((c) => c.isClosed !== false);
+    const latestClosedCandle = closedCandlesList.length > 0 ? closedCandlesList[closedCandlesList.length - 1] : candles[candles.length - 1];
+    const latestClosedTimestamp = latestClosedCandle.timestamp;
+
+    const smcAnalysis = SMCAnalyzer.analyze(candles, {
+      asOfTimestamp: latestClosedTimestamp,
+      timeframe,
+    });
 
     // 3. Multi-Timeframe Signal Setup Generation (100% matched with SignalsService)
     let activeSignal: any = null;
@@ -379,6 +388,8 @@ export class CandlesService {
       },
       timeframe,
       dataProvenance: candlesResp.dataProvenance || 'LIVE',
+      closedThrough: latestClosedTimestamp,
+      isDegraded: smcAnalysis.isDegraded || false,
       candles: formattedCandles,
       indicators: {
         ema20,

@@ -1,5 +1,6 @@
 import { ICandle, ILiquidityPool, ISwingPoint, LiquidityType, StructureType } from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
+import { CandleNormalizer } from './candle-normalizer';
 
 export interface ILiquidityEngineOptions {
   equalHighLowToleranceAtr?: number;
@@ -13,11 +14,20 @@ export class LiquidityEngine {
    * A pool is only eligible to be swept AFTER all of its constituent swing points have been fully confirmed.
    */
   static detectLiquidity(
-    candles: ICandle[],
+    rawCandles: ICandle[],
     swings: ISwingPoint[],
     options: ILiquidityEngineOptions = {},
   ): { pools: ILiquidityPool[]; sweeps: ILiquidityPool[] } {
-    if (!candles || candles.length === 0 || !swings || swings.length === 0) {
+    if (!rawCandles || rawCandles.length === 0 || !swings || swings.length === 0) {
+      return { pools: [], sweeps: [] };
+    }
+
+    const { closedCandles: candles } = CandleNormalizer.partitionCandles(rawCandles, {
+      asOfTimestamp: options.asOfTimestamp,
+      timeframe: options.timeframe,
+    });
+
+    if (candles.length === 0) {
       return { pools: [], sweeps: [] };
     }
 

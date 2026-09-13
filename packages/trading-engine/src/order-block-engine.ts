@@ -46,6 +46,16 @@ export class OrderBlockEngine {
       const isBearishCandle = candle.close < candle.open;
       const isBullishCandle = candle.close > candle.open;
 
+      // Point-in-time average volume over prior 20 closed candles
+      const priorVolumes = candles
+        .slice(Math.max(0, i - 20), i)
+        .map((c) => Number(c.volume || 0))
+        .filter((v) => v > 0);
+      const avgVolume =
+        priorVolumes.length > 0
+          ? priorVolumes.reduce((a, b) => a + b, 0) / priorVolumes.length
+          : undefined;
+
       // Check subsequent 3 candles for rapid expansion (displacement)
       const next1 = candles[i + 1];
       const next2 = candles[i + 2];
@@ -57,9 +67,9 @@ export class OrderBlockEngine {
         const hasAtrDisplacement = maxUpMove >= candleAtr * displacementThreshold;
 
         // Check displacement engine score on next candles
-        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr);
-        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr);
-        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr);
+        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr, avgVolume);
+        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr, avgVolume);
+        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr, avgVolume);
         const hasEngineDisplacement =
           (dScore1.score >= minDisplacementScore && dScore1.direction === Direction.BULLISH) ||
           (dScore2.score >= minDisplacementScore && dScore2.direction === Direction.BULLISH) ||
@@ -103,9 +113,9 @@ export class OrderBlockEngine {
         const maxDownMove = candle.high - Math.min(next1.low, next2.low, next3.low);
         const hasAtrDisplacement = maxDownMove >= candleAtr * displacementThreshold;
 
-        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr);
-        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr);
-        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr);
+        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr, avgVolume);
+        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr, avgVolume);
+        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr, avgVolume);
         const hasEngineDisplacement =
           (dScore1.score >= minDisplacementScore && dScore1.direction === Direction.BEARISH) ||
           (dScore2.score >= minDisplacementScore && dScore2.direction === Direction.BEARISH) ||
