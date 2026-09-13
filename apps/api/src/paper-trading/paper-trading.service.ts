@@ -802,11 +802,12 @@ export class PaperTradingService implements IExecutionProvider {
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
     // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
-    const entryTime = sourceTimestamp instanceof Date ? sourceTimestamp : new Date(sourceTimestamp);
+    const orderSubmittedAt = new Date();
+    const fillExecutionTime = new Date();
     const openingInst = getAuthoritativeInstrument(symbol);
     const openingQuoteCurrency = openingInst.currency;
     const openingConverter = PointInTimeCurrencyConverter.getInstance();
-    const openingFxRes = openingConverter.getRate(openingQuoteCurrency, 'INR', entryTime.getTime());
+    const openingFxRes = openingConverter.getRate(openingQuoteCurrency, 'INR', fillExecutionTime.getTime());
     const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
 
     const openingAccountingSnapshot = buildAccountingSnapshot({
@@ -816,7 +817,7 @@ export class PaperTradingService implements IExecutionProvider {
       contractSize: openingInst.contractSize ?? 1,
       lotSize: Number(req.quantity),
       resolvedMarginModel: openingMarginModel,
-      calculatedAt: entryTime.getTime(),
+      calculatedAt: fillExecutionTime.getTime(),
     });
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -868,7 +869,7 @@ export class PaperTradingService implements IExecutionProvider {
           idempotencyKey,
           signalId: req.signalId,
           correlationId,
-          submittedAt: entryTime,
+          submittedAt: orderSubmittedAt,
         },
       });
 
@@ -884,7 +885,7 @@ export class PaperTradingService implements IExecutionProvider {
           executionPriceSource: ExecutionPriceSource.LIVE_TICK,
           liquidityType: 'TAKER',
           sourceTimestamp,
-          fillTimestamp: entryTime,
+          fillTimestamp: fillExecutionTime,
           correlationId,
         },
       });
@@ -902,7 +903,7 @@ export class PaperTradingService implements IExecutionProvider {
           direction: this.toSignalDirection(req.direction),
           quantity: new Decimal(req.quantity),
           entryPrice: new Decimal(finalFillPrice),
-          entryTime,
+          entryTime: fillExecutionTime,
           currentPrice: new Decimal(finalFillPrice),
           stopLoss: new Decimal(stopLoss),
           initialStopLoss: new Decimal(stopLoss),
@@ -924,7 +925,7 @@ export class PaperTradingService implements IExecutionProvider {
           executionEventsJson: {
             accountingSnapshot: openingAccountingSnapshot as any,
           } as any,
-          openedAt: entryTime,
+          openedAt: fillExecutionTime,
           correlationId,
         },
       });
@@ -1240,44 +1241,27 @@ export class PaperTradingService implements IExecutionProvider {
       };
 
       const hasAuthoritativeEntryFills = entryFills.length > 0;
-      let aggregated: any;
+      let aggregated: {
+        entry: any;
+        exit: any;
+        durationMs: number;
+        durationMinutes: number;
+      };
       let isLegacyExecutionData = false;
       let executionDataComplete = true;
 
       if (hasAuthoritativeEntryFills) {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
-        // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
+        // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
         isLegacyExecutionData = true;
         executionDataComplete = false;
+        const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
         const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
         const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
-        const posEntryTimeIso = new Date(posEntryTimeMs).toISOString();
         aggregated = {
-          entry: {
-            weightedPrice: Number(pos.entryPrice),
-            totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: posEntryTimeIso,
-            earliestFillTimestamp: posEntryTimeMs,
-            latestFillTimeUtc: posEntryTimeIso,
-            latestFillTimestamp: posEntryTimeMs,
-            fillCount: 0,
-            totalFees: Number(entryCharges.totalCharges || 0),
-            totalSlippage: 0,
-            fills: [],
-          },
-          exit: {
-            weightedPrice: finalExitPrice,
-            totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: exitTime.toISOString(),
-            earliestFillTimestamp: exitTime.getTime(),
-            latestFillTimeUtc: exitTime.toISOString(),
-            latestFillTimestamp: exitTime.getTime(),
-            fillCount: 1,
-            totalFees: exitCharges.totalCharges,
-            totalSlippage: exitSlippage.slippageAmount,
-            fills: [exitFillRecord],
-          },
+          entry: null,
+          exit: exitLeg,
           durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
           durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
         };
@@ -1300,9 +1284,12 @@ export class PaperTradingService implements IExecutionProvider {
         calculatedAt: exitTime.getTime(),
       });
 
+      const effectiveEntryPrice = aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
+      const effectiveExitPrice = aggregated.exit.weightedPrice;
+
       const pnlCalc = TradeAccountingEngine.calculateTradePnl({
-        entryPrice: aggregated.entry.weightedPrice,
-        exitPrice: aggregated.exit.weightedPrice,
+        entryPrice: effectiveEntryPrice,
+        exitPrice: effectiveExitPrice,
         quantity: Number(pos.quantity),
         direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
         accountingSnapshot: snapshot,
@@ -1312,7 +1299,7 @@ export class PaperTradingService implements IExecutionProvider {
       const canonicalRealizedPnL = pnlCalc.netPnlAccount;
       const canonicalRealizedR =
         riskDistance > 0
-          ? Number(((isBuy ? aggregated.exit.weightedPrice - aggregated.entry.weightedPrice : aggregated.entry.weightedPrice - aggregated.exit.weightedPrice) / riskDistance).toFixed(2))
+          ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
           : 0;
 
       // 6. Mark Position CLOSED
@@ -1321,13 +1308,14 @@ export class PaperTradingService implements IExecutionProvider {
         data: {
           status: PositionState.CLOSED,
           closedAt: new Date(aggregated.exit.latestFillTimestamp),
-          currentPrice: new Decimal(aggregated.exit.weightedPrice),
+          currentPrice: new Decimal(effectiveExitPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
         },
       });
 
       // 7. Create PaperTrade Record with Canonical Execution Facts
+      const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -1339,14 +1327,14 @@ export class PaperTradingService implements IExecutionProvider {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: pos.quantity,
-          entryPrice: new Decimal(aggregated.entry.weightedPrice),
-          exitPrice: new Decimal(aggregated.exit.weightedPrice),
+          entryPrice: new Decimal(effectiveEntryPrice),
+          exitPrice: new Decimal(effectiveExitPrice),
           realizedPnL: new Decimal(canonicalRealizedPnL),
           realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
           holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
-          entryTime: new Date(aggregated.entry.earliestFillTimestamp),
+          entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
@@ -1359,11 +1347,12 @@ export class PaperTradingService implements IExecutionProvider {
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             livePrice: exitPrice,
-            exitPrice: aggregated.exit.weightedPrice,
-            entryPrice: aggregated.entry.weightedPrice,
-            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
-            actualEntryPriceCurrency: hasAuthoritativeEntryFills ? snapshot.quoteCurrency : null,
-            entryTimeUtc: hasAuthoritativeEntryFills ? aggregated.entry.earliestFillTimeUtc : null,
+            exitPrice: effectiveExitPrice,
+            entryPrice: effectiveEntryPrice,
+            requestedEntryPrice: Number(pos.entryPrice),
+            actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
+            actualEntryPriceCurrency: aggregated.entry ? snapshot.quoteCurrency : null,
+            entryTimeUtc: aggregated.entry ? aggregated.entry.earliestFillTimeUtc : null,
             actualExitPrice: aggregated.exit.weightedPrice,
             actualExitPriceCurrency: snapshot.quoteCurrency,
             exitTimeUtc: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
@@ -1381,7 +1370,7 @@ export class PaperTradingService implements IExecutionProvider {
             holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
-            entryFillCount: aggregated.entry.fillCount,
+            entryFillCount: aggregated.entry ? aggregated.entry.fillCount : 0,
             exitFillCount: aggregated.exit.fillCount,
             isLegacyExecutionData,
             executionDataComplete,
@@ -1417,9 +1406,9 @@ export class PaperTradingService implements IExecutionProvider {
           entityId: tradeRecord.id,
           payloadJson: {
             contractSymbol: pos.contractSymbol,
-            entryPrice: aggregated.entry.weightedPrice,
-            exitPrice: aggregated.exit.weightedPrice,
-            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
+            entryPrice: effectiveEntryPrice,
+            exitPrice: effectiveExitPrice,
+            actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
             actualExitPrice: aggregated.exit.weightedPrice,
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),

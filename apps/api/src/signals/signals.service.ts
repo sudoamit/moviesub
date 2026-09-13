@@ -545,6 +545,7 @@ export class SignalsService implements OnModuleInit {
         score: 90,
         timeframe: '15m',
         quantity: Number(t.quantity),
+        requestedEntryPrice: outcome.requestedEntryPrice !== undefined ? Number(outcome.requestedEntryPrice) : Number(t.entryPrice),
         actualEntryPrice,
         actualEntryPriceCurrency,
         entryPrice: Number(t.entryPrice),

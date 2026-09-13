@@ -513,44 +513,27 @@ export class PositionMonitorProcessor extends WorkerHost {
       };
 
       const hasAuthoritativeEntryFills = entryFills.length > 0;
-      let aggregated: any;
+      let aggregated: {
+        entry: any;
+        exit: any;
+        durationMs: number;
+        durationMinutes: number;
+      };
       let isLegacyExecutionData = false;
       let executionDataComplete = true;
 
       if (hasAuthoritativeEntryFills) {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
-        // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
+        // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
         isLegacyExecutionData = true;
         executionDataComplete = false;
+        const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
         const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
         const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
-        const posEntryTimeIso = new Date(posEntryTimeMs).toISOString();
         aggregated = {
-          entry: {
-            weightedPrice: Number(pos.entryPrice),
-            totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: posEntryTimeIso,
-            earliestFillTimestamp: posEntryTimeMs,
-            latestFillTimeUtc: posEntryTimeIso,
-            latestFillTimestamp: posEntryTimeMs,
-            fillCount: 0,
-            totalFees: Number(entryCharges.totalCharges || 0),
-            totalSlippage: 0,
-            fills: [],
-          },
-          exit: {
-            weightedPrice: finalExitPrice,
-            totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: exitTime.toISOString(),
-            earliestFillTimestamp: exitTime.getTime(),
-            latestFillTimeUtc: exitTime.toISOString(),
-            latestFillTimestamp: exitTime.getTime(),
-            fillCount: 1,
-            totalFees: exitCharges.totalCharges,
-            totalSlippage: slip.slippageAmount,
-            fills: [exitFillRecord],
-          },
+          entry: null,
+          exit: exitLeg,
           durationMs: Math.max(0, exitTime.getTime() - posEntryTimeMs),
           durationMinutes: Math.max(0, Math.round((exitTime.getTime() - posEntryTimeMs) / 60000)),
         };
@@ -573,9 +556,12 @@ export class PositionMonitorProcessor extends WorkerHost {
         calculatedAt: exitTime.getTime(),
       });
 
+      const effectiveEntryPrice = aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
+      const effectiveExitPrice = aggregated.exit.weightedPrice;
+
       const pnlCalc = TradeAccountingEngine.calculateTradePnl({
-        entryPrice: aggregated.entry.weightedPrice,
-        exitPrice: aggregated.exit.weightedPrice,
+        entryPrice: effectiveEntryPrice,
+        exitPrice: effectiveExitPrice,
         quantity: Number(pos.quantity),
         direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
         accountingSnapshot: snapshot,
@@ -585,7 +571,7 @@ export class PositionMonitorProcessor extends WorkerHost {
       const canonicalRealizedPnL = pnlCalc.netPnlAccount;
       const canonicalRealizedR =
         riskDistance > 0
-          ? Number(((isBuy ? aggregated.exit.weightedPrice - aggregated.entry.weightedPrice : aggregated.entry.weightedPrice - aggregated.exit.weightedPrice) / riskDistance).toFixed(2))
+          ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
           : 0;
 
       // 6. Mark position CLOSED
@@ -594,13 +580,14 @@ export class PositionMonitorProcessor extends WorkerHost {
         data: {
           status: PositionState.CLOSED,
           closedAt: new Date(aggregated.exit.latestFillTimestamp),
-          currentPrice: new Decimal(aggregated.exit.weightedPrice),
+          currentPrice: new Decimal(effectiveExitPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
         },
       });
 
       // 7. Persist PaperTrade record with canonical execution facts
+      const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -612,14 +599,14 @@ export class PositionMonitorProcessor extends WorkerHost {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: pos.quantity,
-          entryPrice: new Decimal(aggregated.entry.weightedPrice),
-          exitPrice: new Decimal(aggregated.exit.weightedPrice),
+          entryPrice: new Decimal(effectiveEntryPrice),
+          exitPrice: new Decimal(effectiveExitPrice),
           realizedPnL: new Decimal(canonicalRealizedPnL),
           realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
           holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
-          entryTime: new Date(aggregated.entry.earliestFillTimestamp),
+          entryTime: aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : posEntryDate,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
@@ -632,11 +619,12 @@ export class PositionMonitorProcessor extends WorkerHost {
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
             livePrice: exitPrice,
-            exitPrice: aggregated.exit.weightedPrice,
-            entryPrice: aggregated.entry.weightedPrice,
-            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
-            actualEntryPriceCurrency: hasAuthoritativeEntryFills ? snapshot.quoteCurrency : null,
-            entryTimeUtc: hasAuthoritativeEntryFills ? aggregated.entry.earliestFillTimeUtc : null,
+            exitPrice: effectiveExitPrice,
+            entryPrice: effectiveEntryPrice,
+            requestedEntryPrice: Number(pos.entryPrice),
+            actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
+            actualEntryPriceCurrency: aggregated.entry ? snapshot.quoteCurrency : null,
+            entryTimeUtc: aggregated.entry ? aggregated.entry.earliestFillTimeUtc : null,
             actualExitPrice: aggregated.exit.weightedPrice,
             actualExitPriceCurrency: snapshot.quoteCurrency,
             exitTimeUtc: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
@@ -654,7 +642,7 @@ export class PositionMonitorProcessor extends WorkerHost {
             holdingDurationSeconds: Math.max(0, Math.floor(aggregated.durationMs / 1000)),
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
-            entryFillCount: aggregated.entry.fillCount,
+            entryFillCount: aggregated.entry ? aggregated.entry.fillCount : 0,
             exitFillCount: aggregated.exit.fillCount,
             isLegacyExecutionData,
             executionDataComplete,
@@ -690,10 +678,10 @@ export class PositionMonitorProcessor extends WorkerHost {
           entityId: tradeRecord.id,
           payloadJson: {
             contractSymbol: pos.contractSymbol,
-            entryPrice: aggregated.entry.weightedPrice,
-            exitPrice: aggregated.exit.weightedPrice,
-            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
-            actualExitPrice: aggregated.exit.weightedPrice,
+            entryPrice: effectiveEntryPrice,
+            exitPrice: effectiveExitPrice,
+            actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
+            actualExitPrice: effectiveExitPrice,
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
             slippageBps: slip.slippageBps,

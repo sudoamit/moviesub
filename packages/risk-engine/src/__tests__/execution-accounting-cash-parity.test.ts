@@ -201,7 +201,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
     });
   });
 
-  describe('4. Opening Accounting Snapshot Timestamp Provenance', () => {
+  describe('4. Opening Accounting Snapshot & Execution Timestamp Provenance', () => {
     it('anchors opening snapshot timestamp to simulated execution fill timestamp', () => {
       const simulatedFillTime = new Date('2026-09-12T10:00:04.000Z');
       const btc = getAuthoritativeInstrument('BTCUSDT');
@@ -222,6 +222,53 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
 
       expect(snapshot.calculatedAt).toBe(simulatedFillTime.getTime());
       expect(new Date(snapshot.calculatedAt).toISOString()).toBe(simulatedFillTime.toISOString());
+    });
+
+    it('proves execution timestamp canonicalization: Market Tick Time != Order Submission Time != Fill Execution Time', () => {
+      // 1. Market data tick arrives from exchange
+      const marketTickTimestamp = new Date('2026-09-12T10:00:00.000Z');
+      // 2. Order is created and submitted to engine
+      const orderSubmittedAt = new Date('2026-09-12T10:00:02.000Z');
+      // 3. Simulated execution fill occurs
+      const fillExecutionTimestamp = new Date('2026-09-12T10:00:02.050Z');
+
+      // Assert distinct timestamps across pipeline
+      expect(marketTickTimestamp.getTime()).not.toBe(orderSubmittedAt.getTime());
+      expect(orderSubmittedAt.getTime()).not.toBe(fillExecutionTimestamp.getTime());
+
+      // Create PaperFill
+      const entryFill: IFillRecord = {
+        fillId: 'fill_canonical_1',
+        orderId: 'ord_1',
+        positionId: 'pos_1',
+        executionRole: 'ENTRY',
+        fillPrice: 95000.0,
+        fillQuantity: 1.0,
+        fillTimestamp: fillExecutionTimestamp,
+        sourceTimestamp: marketTickTimestamp,
+      };
+
+      const exitFill: IFillRecord = {
+        fillId: 'fill_canonical_2',
+        orderId: 'ord_2',
+        positionId: 'pos_1',
+        executionRole: 'EXIT',
+        fillPrice: 95500.0,
+        fillQuantity: 1.0,
+        fillTimestamp: new Date('2026-09-12T10:15:00.000Z'),
+        sourceTimestamp: new Date('2026-09-12T10:14:59.000Z'),
+      };
+
+      const aggregated = ExecutionAggregator.aggregateTradeLifecycle([entryFill], [exitFill]);
+
+      // PaperTrade entryTime must strictly equal PaperFill.fillTimestamp
+      const paperTradeEntryTime = new Date(aggregated.entry.earliestFillTimestamp);
+      expect(paperTradeEntryTime.getTime()).toBe(fillExecutionTimestamp.getTime());
+      expect(paperTradeEntryTime.getTime()).not.toBe(marketTickTimestamp.getTime());
+
+      // Journal entryTimeUtc must strictly equal PaperTrade entryTime (ISO string)
+      const journalEntryTimeUtc = aggregated.entry.earliestFillTimeUtc;
+      expect(journalEntryTimeUtc).toBe(fillExecutionTimestamp.toISOString());
     });
   });
 

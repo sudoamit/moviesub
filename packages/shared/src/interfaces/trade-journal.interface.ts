@@ -57,11 +57,11 @@ export interface ITradeJournalRecord {
   readonly isLegacyExecutionData?: boolean;
   readonly executionDataComplete?: boolean;
 
-  // Backward-compatible semantic aliases
-  readonly entryPrice: number;
-  readonly entryPriceCurrency: string;
-  readonly exitPrice: number;
-  readonly exitPriceCurrency: string;
+  // Backward-compatible semantic aliases (Deprecated: prefer requestedEntryPrice / actualEntryPrice)
+  readonly entryPrice?: number | null;
+  readonly entryPriceCurrency?: string | null;
+  readonly exitPrice?: number | null;
+  readonly exitPriceCurrency?: string | null;
   readonly durationMs: number;
   readonly durationMinutes: number;
   readonly totalChargesAccount: number;
