@@ -17,15 +17,15 @@ export interface ITradeJournalRecord {
   readonly quantity: number;
 
   // Execution Facts (Aggregated strictly from actual fills)
-  readonly requestedEntryPrice?: number;
-  readonly actualEntryPrice: number;
-  readonly actualEntryPriceCurrency: string;
+  readonly requestedEntryPrice?: number | null;
+  readonly actualEntryPrice: number | null;
+  readonly actualEntryPriceCurrency: string | null;
 
-  readonly actualExitPrice: number;
-  readonly actualExitPriceCurrency: string;
+  readonly actualExitPrice: number | null;
+  readonly actualExitPriceCurrency: string | null;
 
-  readonly entryTimeUtc: string;
-  readonly exitTimeUtc: string;
+  readonly entryTimeUtc: string | null;
+  readonly exitTimeUtc: string | null;
 
   readonly holdingDurationMs: number;
   readonly holdingDurationSeconds: number;

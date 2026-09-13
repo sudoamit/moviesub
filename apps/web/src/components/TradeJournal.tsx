@@ -530,15 +530,27 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     <div className="space-y-0.5">
                       <div className="flex items-center gap-1 text-[11px]">
                         <span className="text-slate-500 font-normal">Entry:</span>
-                        <span className="text-cyan-300 font-bold">
-                          {formatPriceWithCurrency(t.entryPrice, priceCurr)}
-                        </span>
+                        {t.actualEntryPrice != null && (t as any).executionDataComplete !== false ? (
+                          <span className="text-cyan-300 font-bold">
+                            {formatPriceWithCurrency(t.actualEntryPrice, (t as any).actualEntryPriceCurrency || priceCurr)}
+                          </span>
+                        ) : (
+                          <span className="text-amber-400/90 font-normal text-[10px] italic">
+                            Unavailable (Legacy)
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-1 text-[11px]">
                         <span className="text-slate-500 font-normal">Exit:</span>
-                        <span className="text-slate-200 font-bold">
-                          {formatPriceWithCurrency(t.exitPrice, priceCurr)}
-                        </span>
+                        {t.actualExitPrice != null ? (
+                          <span className="text-slate-200 font-bold">
+                            {formatPriceWithCurrency(t.actualExitPrice, (t as any).actualExitPriceCurrency || priceCurr)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 font-normal text-[10px] italic">
+                            {formatPriceWithCurrency(t.exitPrice, priceCurr)}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -640,15 +652,27 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                   <td className="py-3 px-3 text-slate-300 text-[10px] space-y-0.5">
                     <div className="flex items-center gap-1">
                       <span className="text-slate-500">In:</span>
-                      <span className="text-cyan-300 font-bold" suppressHydrationWarning>
-                        {formatDateTime((t as any).entryTimeUtc || t.activatedAt)}
-                      </span>
+                      {t.entryTimeUtc != null && (t as any).executionDataComplete !== false ? (
+                        <span className="text-cyan-300 font-bold" suppressHydrationWarning>
+                          {formatDateTime(t.entryTimeUtc)}
+                        </span>
+                      ) : (
+                        <span className="text-amber-400/90 font-normal italic text-[9px]">
+                          Unavailable (Legacy)
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1">
                       <span className="text-slate-500">Out:</span>
-                      <span className="text-emerald-400 font-bold" suppressHydrationWarning>
-                        {formatDateTime((t as any).exitTimeUtc || t.closedAt)}
-                      </span>
+                      {t.exitTimeUtc != null ? (
+                        <span className="text-emerald-400 font-bold" suppressHydrationWarning>
+                          {formatDateTime(t.exitTimeUtc)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-normal italic text-[9px]" suppressHydrationWarning>
+                          {formatDateTime(t.closedAt)}
+                        </span>
+                      )}
                     </div>
                   </td>
 
@@ -706,7 +730,28 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1">
-                    Entry: {formatPriceWithCurrency(selectedTradeReason.entryPrice, (selectedTradeReason as any).entryPriceCurrency || (selectedTradeReason as any).currency || 'INR')} • Exit: {formatPriceWithCurrency(selectedTradeReason.exitPrice, (selectedTradeReason as any).exitPriceCurrency || (selectedTradeReason as any).currency || 'INR')}
+                    Entry:{' '}
+                    {selectedTradeReason.actualEntryPrice != null &&
+                    (selectedTradeReason as any).executionDataComplete !== false
+                      ? formatPriceWithCurrency(
+                          selectedTradeReason.actualEntryPrice,
+                          (selectedTradeReason as any).actualEntryPriceCurrency ||
+                            (selectedTradeReason as any).currency ||
+                            'INR',
+                        )
+                      : 'Unavailable (Legacy)'}{' '}
+                    • Exit:{' '}
+                    {selectedTradeReason.actualExitPrice != null
+                      ? formatPriceWithCurrency(
+                          selectedTradeReason.actualExitPrice,
+                          (selectedTradeReason as any).actualExitPriceCurrency ||
+                            (selectedTradeReason as any).currency ||
+                            'INR',
+                        )
+                      : formatPriceWithCurrency(
+                          selectedTradeReason.exitPrice,
+                          (selectedTradeReason as any).currency || 'INR',
+                        )}
                   </p>
                 </div>
                 <div className="text-right">

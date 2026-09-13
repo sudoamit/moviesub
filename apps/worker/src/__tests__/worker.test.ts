@@ -96,8 +96,16 @@ describe('Worker Processors', () => {
           update: jest.fn().mockResolvedValue({}),
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         },
+        paperOrder: {
+          create: jest.fn().mockResolvedValue({ id: 'order-1' }),
+        },
+        paperFill: {
+          create: jest.fn().mockResolvedValue({ id: 'fill-1' }),
+          findMany: jest.fn().mockResolvedValue([]),
+        },
         paperTrade: {
           create: jest.fn().mockResolvedValue({ id: 'trade-1' }),
+          findFirst: jest.fn().mockResolvedValue(null),
         },
         paperAccount: {
           update: jest.fn().mockResolvedValue({}),

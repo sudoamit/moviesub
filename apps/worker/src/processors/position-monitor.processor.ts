@@ -266,17 +266,18 @@ export class PositionMonitorProcessor extends WorkerHost {
     );
 
     const posAgeMs = Date.now() - new Date(pos.openedAt).getTime();
-    const minAgeMs = 3000; // Minimum 3s to prevent race condition exits
+    const minAgeMs = 3000;
 
-    // Trailing stop evaluation: ONLY if all required persisted values exist (entry, initial SL, TP1, TP2)
+    // Evaluate Trailing Stops & Breakeven Lock via TrailingEngine
     let newStopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
-    let trailingStateJson: any = undefined;
+    let trailingStateJson = (pos.trailingStateJson as any) || undefined;
 
     if (
       initialStopLoss &&
+      Number(initialStopLoss) > 0 &&
       pos.initialTarget1 &&
-      pos.initialTarget2 &&
       Number(pos.initialTarget1) > 0 &&
+      pos.initialTarget2 &&
       Number(pos.initialTarget2) > 0 &&
       entryPrice > 0
     ) {
@@ -335,7 +336,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
 
     if (shouldClose) {
-      await this.executeFullClose(
+      const isClosed = await this.executeFullClose(
         pos,
         livePrice,
         exitReason,
@@ -343,7 +344,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         tickTimestamp,
         maxSlippageBps,
       );
-      return true;
+      return isClosed;
     }
 
     // Update ongoing unrealized P&L, MFE/MAE, and trailing stop in PostgreSQL
@@ -373,7 +374,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     outcomeClassification: string,
     sourceTimestamp?: Date,
     maxSlippageBps = 50,
-  ) {
+  ): Promise<boolean> {
     // Apply exit slippage simulation within configured maxSlippageBps
     const isBuy = pos.direction === Direction.BULLISH;
     const slip = ExecutionPriceResolver.calculateSlippage(
@@ -478,11 +479,11 @@ export class PositionMonitorProcessor extends WorkerHost {
         },
       });
 
-      // 4. Retrieve Entry Fills for Execution Aggregation
+      // 4. Retrieve Entry Fills for Execution Aggregation (Strict: No Fabricated Fills)
       let entryFills: IFillRecord[] = [];
-      if (pos.orderId) {
+      if (pos.orderId && tx.paperFill) {
         const rawFills = await tx.paperFill.findMany({ where: { orderId: pos.orderId } });
-        entryFills = rawFills.map((f) => ({
+        entryFills = (rawFills || []).map((f: any) => ({
           fillId: f.id,
           orderId: f.orderId,
           positionId: pos.id,
@@ -495,20 +496,6 @@ export class PositionMonitorProcessor extends WorkerHost {
           executionPriceSource: f.executionPriceSource,
           sourceTimestamp: f.sourceTimestamp,
         }));
-      }
-
-      if (entryFills.length === 0) {
-        entryFills = [
-          {
-            fillId: `fill_entry_${pos.id}`,
-            positionId: pos.id,
-            executionRole: 'ENTRY',
-            fillPrice: Number(pos.entryPrice),
-            fillQuantity: Number(pos.quantity),
-            fillTimestamp: pos.entryTime,
-            fee: Number(entryCharges.totalCharges || 0),
-          },
-        ];
       }
 
       const exitFillRecord: IFillRecord = {
@@ -536,14 +523,16 @@ export class PositionMonitorProcessor extends WorkerHost {
         // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
         isLegacyExecutionData = true;
         executionDataComplete = false;
-        const posEntryTimeMs = pos.entryTime instanceof Date ? pos.entryTime.getTime() : new Date(pos.entryTime).getTime();
+        const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
+        const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
+        const posEntryTimeIso = new Date(posEntryTimeMs).toISOString();
         aggregated = {
           entry: {
             weightedPrice: Number(pos.entryPrice),
             totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            earliestFillTimeUtc: posEntryTimeIso,
             earliestFillTimestamp: posEntryTimeMs,
-            latestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            latestFillTimeUtc: posEntryTimeIso,
             latestFillTimestamp: posEntryTimeMs,
             fillCount: 0,
             totalFees: Number(entryCharges.totalCharges || 0),
@@ -568,25 +557,19 @@ export class PositionMonitorProcessor extends WorkerHost {
       }
 
       // 5. Immutable Opening Accounting Snapshot & Canonical P&L
-      const inst = hasInstrument(pos.symbol) ? getAuthoritativeInstrument(pos.symbol) : null;
-      const quoteCurrency = inst?.currency ?? (pos.symbol === 'BTCUSDT' ? 'USDT' : 'INR');
-      const openingSnapshot = (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
+      const inst = getAuthoritativeInstrument(pos.symbol);
+      const quoteCurrency = inst.currency;
+      const openingSnapshot =
+        (pos.executionEventsJson as any)?.accountingSnapshot ??
+        (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
 
       const snapshot = openingSnapshot ?? buildAccountingSnapshot({
         accountCurrency: 'INR',
         quoteCurrency,
         fxResult: PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', exitTime.getTime()),
-        contractSize: inst?.contractSize ?? 1,
+        contractSize: inst.contractSize ?? 1,
         lotSize: Number(pos.quantity),
-        resolvedMarginModel: inst
-          ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
-          : {
-              marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
-              effectiveLeverage: Number(pos.leverage) || 1,
-              initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
-              maintenanceMarginRate: 0.05,
-              liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
-            },
+        resolvedMarginModel: resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) || 1 }),
         calculatedAt: exitTime.getTime(),
       });
 
@@ -596,6 +579,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         quantity: Number(pos.quantity),
         direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
         accountingSnapshot: snapshot,
+        fees: totalCharges,
       });
 
       const canonicalRealizedPnL = pnlCalc.netPnlAccount;
@@ -650,6 +634,12 @@ export class PositionMonitorProcessor extends WorkerHost {
             livePrice: exitPrice,
             exitPrice: aggregated.exit.weightedPrice,
             entryPrice: aggregated.entry.weightedPrice,
+            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
+            actualEntryPriceCurrency: hasAuthoritativeEntryFills ? snapshot.quoteCurrency : null,
+            entryTimeUtc: hasAuthoritativeEntryFills ? aggregated.entry.earliestFillTimeUtc : null,
+            actualExitPrice: aggregated.exit.weightedPrice,
+            actualExitPriceCurrency: snapshot.quoteCurrency,
+            exitTimeUtc: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             slippageBps: slip.slippageBps,
             slippageAmount: slip.slippageAmount,
             exitReason,
@@ -684,7 +674,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         where: { id: pos.accountId },
         data: {
           cashBalance: { increment: canonicalCashImpact },
-          usedMargin: { decrement: Number(pos.usedMargin) },
+          usedMargin: { decrement: Number(pos.usedMargin || 0) },
           realizedPnL: { increment: canonicalRealizedPnL },
           totalChargesPaid: { increment: exitCharges.totalCharges },
         },
@@ -702,6 +692,8 @@ export class PositionMonitorProcessor extends WorkerHost {
             contractSymbol: pos.contractSymbol,
             entryPrice: aggregated.entry.weightedPrice,
             exitPrice: aggregated.exit.weightedPrice,
+            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
+            actualExitPrice: aggregated.exit.weightedPrice,
             executionPriceSource: ExecutionPriceSource.LIVE_TICK,
             sourceTimestamp: tickSourceTime.toISOString(),
             slippageBps: slip.slippageBps,
@@ -713,6 +705,8 @@ export class PositionMonitorProcessor extends WorkerHost {
             snapshotHash: snapshot.snapshotHash,
             realizedR: canonicalRealizedR,
             durationMs: aggregated.durationMs,
+            isLegacyExecutionData,
+            executionDataComplete,
             exitReason,
           },
           correlationId: pos.correlationId || `corr_${Date.now()}`,
@@ -723,7 +717,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     });
 
     if (!closedSuccessfully) {
-      return;
+      return false;
     }
 
     this.logger.log(
@@ -746,6 +740,8 @@ export class PositionMonitorProcessor extends WorkerHost {
         }),
       );
     }
+
+    return true;
   }
 }
 

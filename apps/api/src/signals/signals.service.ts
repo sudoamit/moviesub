@@ -466,12 +466,14 @@ export class SignalsService implements OnModuleInit {
    */
   async getCompletedTrades(limit = 50): Promise<any> {
     // 1. Query Primary Source of Truth: PaperTrade records
-    const paperTrades = await this.prisma.paperTrade.findMany({
-      orderBy: {
-        exitTime: 'desc',
-      },
-      take: limit,
-    });
+    const paperTrades = this.prisma.paperTrade?.findMany
+      ? await this.prisma.paperTrade.findMany({
+          orderBy: {
+            exitTime: 'desc',
+          },
+          take: limit,
+        })
+      : [];
 
     const mappedPaperTrades = paperTrades.map((t) => {
       const outcome = (t.outcomeSnapshotJson as any) || {};
@@ -482,8 +484,6 @@ export class SignalsService implements OnModuleInit {
       const quoteCurrency = snapshot.quoteCurrency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
       const accountCurrency = snapshot.accountCurrency || 'INR';
 
-      const entryTimeUtc = new Date(t.entryTime).toISOString();
-      const exitTimeUtc = new Date(t.exitTime).toISOString();
       const durationMs =
         outcome.durationMs ??
         Math.max(0, new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime());
@@ -511,6 +511,22 @@ export class SignalsService implements OnModuleInit {
       const isLegacy = outcome.isLegacyExecutionData ?? false;
       const executionDataComplete = outcome.executionDataComplete ?? (!isLegacy);
 
+      const actualEntryPrice = executionDataComplete && outcome.actualEntryPrice !== undefined
+        ? (outcome.actualEntryPrice !== null ? Number(outcome.actualEntryPrice) : null)
+        : (executionDataComplete ? Number(t.entryPrice) : null);
+      const actualEntryPriceCurrency = executionDataComplete
+        ? (outcome.actualEntryPriceCurrency || quoteCurrency)
+        : null;
+      const entryTimeUtc = executionDataComplete
+        ? (outcome.entryTimeUtc || (t.entryTime ? new Date(t.entryTime).toISOString() : null))
+        : null;
+
+      const actualExitPrice = outcome.actualExitPrice !== undefined
+        ? (outcome.actualExitPrice !== null ? Number(outcome.actualExitPrice) : null)
+        : Number(t.exitPrice);
+      const actualExitPriceCurrency = outcome.actualExitPriceCurrency || quoteCurrency;
+      const exitTimeUtc = outcome.exitTimeUtc || (t.exitTime ? new Date(t.exitTime).toISOString() : null);
+
       return {
         id: t.id,
         tradeId: t.id,
@@ -529,13 +545,13 @@ export class SignalsService implements OnModuleInit {
         score: 90,
         timeframe: '15m',
         quantity: Number(t.quantity),
-        actualEntryPrice: Number(t.entryPrice),
-        actualEntryPriceCurrency: quoteCurrency,
+        actualEntryPrice,
+        actualEntryPriceCurrency,
         entryPrice: Number(t.entryPrice),
         entryPriceCurrency: quoteCurrency,
         entryTimeUtc,
-        actualExitPrice: Number(t.exitPrice),
-        actualExitPriceCurrency: quoteCurrency,
+        actualExitPrice,
+        actualExitPriceCurrency,
         exitPrice: Number(t.exitPrice),
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
@@ -637,16 +653,16 @@ export class SignalsService implements OnModuleInit {
           score: s.score,
           timeframe: s.timeframe,
           quantity: reasons.quantity || 1,
-          actualEntryPrice: Number(s.entryPrice),
-          actualEntryPriceCurrency: quoteCurrency,
+          actualEntryPrice: null,
+          actualEntryPriceCurrency: null,
           entryPrice: Number(s.entryPrice),
           entryPriceCurrency: quoteCurrency,
-          entryTimeUtc: s.activatedAt ? new Date(s.activatedAt).toISOString() : '',
-          actualExitPrice: Number(s.exitPrice),
-          actualExitPriceCurrency: quoteCurrency,
+          entryTimeUtc: null,
+          actualExitPrice: null,
+          actualExitPriceCurrency: null,
           exitPrice: Number(s.exitPrice),
           exitPriceCurrency: quoteCurrency,
-          exitTimeUtc: s.closedAt ? new Date(s.closedAt).toISOString() : '',
+          exitTimeUtc: null,
           stopLoss: Number(s.stopLoss),
           target1: Number(s.target1),
           target2: Number(s.target2),

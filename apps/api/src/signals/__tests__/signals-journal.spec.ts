@@ -26,6 +26,9 @@ describe('SignalsService Journal Validation & Integrity', () => {
           .fn()
           .mockImplementation((args) => Promise.resolve({ id: 'sig-rec-1', ...args.data })),
       },
+      paperTrade: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
     };
 
     mockCandlesService = {

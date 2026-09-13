@@ -802,27 +802,18 @@ export class PaperTradingService implements IExecutionProvider {
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
     // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
-    const entryTime = new Date();
-    const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
-    const openingInst = hasInstrument(symbol) ? getAuthoritativeInstrument(symbol) : null;
-    const openingQuoteCurrency = openingInst?.currency ?? (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
+    const entryTime = sourceTimestamp instanceof Date ? sourceTimestamp : new Date(sourceTimestamp);
+    const openingInst = getAuthoritativeInstrument(symbol);
+    const openingQuoteCurrency = openingInst.currency;
     const openingConverter = PointInTimeCurrencyConverter.getInstance();
     const openingFxRes = openingConverter.getRate(openingQuoteCurrency, 'INR', entryTime.getTime());
-    const openingMarginModel = openingInst
-      ? resolveMarginModel(openingInst, { requestedLeverage: effLeverage })
-      : {
-          marginMode: effLeverage > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
-          effectiveLeverage: effLeverage,
-          initialMarginRate: effLeverage > 1 ? 1 / effLeverage : 1.0,
-          maintenanceMarginRate: 0.05,
-          liquidationModel: effLeverage > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
-        };
+    const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
 
     const openingAccountingSnapshot = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: openingQuoteCurrency,
       fxResult: openingFxRes,
-      contractSize: openingInst?.contractSize ?? 1,
+      contractSize: openingInst.contractSize ?? 1,
       lotSize: Number(req.quantity),
       resolvedMarginModel: openingMarginModel,
       calculatedAt: entryTime.getTime(),
@@ -929,10 +920,10 @@ export class PaperTradingService implements IExecutionProvider {
           maxAdverseExcursion: new Decimal(0.0),
           status: PositionState.OPEN,
           chargesJson: charges,
-          featureSnapshotJson: {
-            ...((req.featureSnapshotJson as any) || {}),
-            accountingSnapshot: openingAccountingSnapshot,
-          },
+          featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
+          executionEventsJson: {
+            accountingSnapshot: openingAccountingSnapshot as any,
+          } as any,
           openedAt: entryTime,
           correlationId,
         },
@@ -1217,9 +1208,9 @@ export class PaperTradingService implements IExecutionProvider {
 
       // 4. Retrieve Entry Fills for Execution Aggregation (Strict: No Fabricated Fills)
       let entryFills: IFillRecord[] = [];
-      if (pos.orderId) {
+      if (pos.orderId && tx.paperFill && typeof tx.paperFill.findMany === 'function') {
         const rawFills = await tx.paperFill.findMany({ where: { orderId: pos.orderId } });
-        entryFills = rawFills.map((f) => ({
+        entryFills = (rawFills || []).map((f) => ({
           fillId: f.id,
           orderId: f.orderId,
           positionId: pos.id,
@@ -1259,14 +1250,16 @@ export class PaperTradingService implements IExecutionProvider {
         // STRICT: Zero fabricated fill records. Mark as legacy / incomplete execution data.
         isLegacyExecutionData = true;
         executionDataComplete = false;
-        const posEntryTimeMs = pos.entryTime instanceof Date ? pos.entryTime.getTime() : new Date(pos.entryTime).getTime();
+        const posEntryDate = pos.entryTime ? (pos.entryTime instanceof Date ? pos.entryTime : new Date(pos.entryTime)) : ((pos as any).openedAt ? (new Date((pos as any).openedAt)) : new Date());
+        const posEntryTimeMs = Number.isFinite(posEntryDate.getTime()) ? posEntryDate.getTime() : Date.now();
+        const posEntryTimeIso = new Date(posEntryTimeMs).toISOString();
         aggregated = {
           entry: {
             weightedPrice: Number(pos.entryPrice),
             totalQuantity: Number(pos.quantity),
-            earliestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            earliestFillTimeUtc: posEntryTimeIso,
             earliestFillTimestamp: posEntryTimeMs,
-            latestFillTimeUtc: pos.entryTime instanceof Date ? pos.entryTime.toISOString() : String(pos.entryTime),
+            latestFillTimeUtc: posEntryTimeIso,
             latestFillTimestamp: posEntryTimeMs,
             fillCount: 0,
             totalFees: Number(entryCharges.totalCharges || 0),
@@ -1291,25 +1284,19 @@ export class PaperTradingService implements IExecutionProvider {
       }
 
       // 5. Immutable Opening Accounting Snapshot & Canonical P&L
-      const inst = hasInstrument(symbol) ? getAuthoritativeInstrument(symbol) : null;
-      const quoteCurrency = inst?.currency ?? (symbol === 'BTCUSDT' ? 'USDT' : 'INR');
-      const openingSnapshot = (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
+      const inst = getAuthoritativeInstrument(symbol);
+      const quoteCurrency = inst.currency;
+      const openingSnapshot =
+        (pos.executionEventsJson as any)?.accountingSnapshot ??
+        (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
 
       const snapshot = openingSnapshot ?? buildAccountingSnapshot({
         accountCurrency: 'INR',
         quoteCurrency,
         fxResult: PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', exitTime.getTime()),
-        contractSize: inst?.contractSize ?? 1,
+        contractSize: inst.contractSize ?? 1,
         lotSize: Number(pos.quantity),
-        resolvedMarginModel: inst
-          ? resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) })
-          : {
-              marginMode: Number(pos.leverage) > 1 ? ('ISOLATED' as const) : ('SPOT' as const),
-              effectiveLeverage: Number(pos.leverage) || 1,
-              initialMarginRate: Number(pos.leverage) > 1 ? 1 / Number(pos.leverage) : 1.0,
-              maintenanceMarginRate: 0.05,
-              liquidationModel: Number(pos.leverage) > 1 ? ('ISOLATED_LINEAR' as const) : ('SPOT_NONE' as const),
-            },
+        resolvedMarginModel: resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) || 1 }),
         calculatedAt: exitTime.getTime(),
       });
 
@@ -1319,6 +1306,7 @@ export class PaperTradingService implements IExecutionProvider {
         quantity: Number(pos.quantity),
         direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
         accountingSnapshot: snapshot,
+        fees: totalCharges,
       });
 
       const canonicalRealizedPnL = pnlCalc.netPnlAccount;
@@ -1373,6 +1361,12 @@ export class PaperTradingService implements IExecutionProvider {
             livePrice: exitPrice,
             exitPrice: aggregated.exit.weightedPrice,
             entryPrice: aggregated.entry.weightedPrice,
+            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
+            actualEntryPriceCurrency: hasAuthoritativeEntryFills ? snapshot.quoteCurrency : null,
+            entryTimeUtc: hasAuthoritativeEntryFills ? aggregated.entry.earliestFillTimeUtc : null,
+            actualExitPrice: aggregated.exit.weightedPrice,
+            actualExitPriceCurrency: snapshot.quoteCurrency,
+            exitTimeUtc: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             slippageBps: exitSlippage.slippageBps,
             slippageAmount: exitSlippage.slippageAmount,
             exitReason,
@@ -1425,6 +1419,8 @@ export class PaperTradingService implements IExecutionProvider {
             contractSymbol: pos.contractSymbol,
             entryPrice: aggregated.entry.weightedPrice,
             exitPrice: aggregated.exit.weightedPrice,
+            actualEntryPrice: hasAuthoritativeEntryFills ? aggregated.entry.weightedPrice : null,
+            actualExitPrice: aggregated.exit.weightedPrice,
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             realizedPnL: canonicalRealizedPnL,
