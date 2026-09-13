@@ -42,10 +42,10 @@ export class SMCAnalyzer {
       };
     }
 
-    let candles = CandleNormalizer.normalize(rawCandles);
-    if (config.asOfTimestamp) {
-      candles = CandleNormalizer.getClosedCandlesAsOf(candles, config.timeframe, config.asOfTimestamp);
-    }
+    const { closedCandles: candles } = CandleNormalizer.partitionCandles(rawCandles, {
+      asOfTimestamp: config.asOfTimestamp,
+      timeframe: config.timeframe,
+    });
 
     if (candles.length === 0) {
       return {
@@ -78,6 +78,8 @@ export class SMCAnalyzer {
       leftBars: config.swingLeftBars,
       rightBars: config.swingRightBars,
       minDistanceAtrMultiplier: config.minSwingDistanceAtrMultiplier,
+      asOfTimestamp: config.asOfTimestamp,
+      timeframe: config.timeframe ? String(config.timeframe) : undefined,
     });
 
     const confirmedSwingHighs = swingPoints.filter(
@@ -97,10 +99,19 @@ export class SMCAnalyzer {
     // 2. Detect Breaks of Structure (BOS)
     const breaksOfStructure = BOSEngine.detectBOS(candles, swingPoints, {
       displacementThresholdAtr: config.displacementThresholdAtr,
+      confirmationType: config.bosConfirmationType,
+      minDisplacementScore: config.minDisplacementScore,
+      asOfTimestamp: config.asOfTimestamp,
+      timeframe: config.timeframe ? String(config.timeframe) : undefined,
     });
 
     // 3. Detect Change of Character (CHoCH)
-    const changesOfCharacter = CHOCHEngine.detectCHOCH(candles, swingPoints);
+    const changesOfCharacter = CHOCHEngine.detectCHOCH(candles, swingPoints, {
+      confirmationType: config.bosConfirmationType,
+      minDisplacementScore: config.minDisplacementScore,
+      asOfTimestamp: config.asOfTimestamp,
+      timeframe: config.timeframe ? String(config.timeframe) : undefined,
+    });
 
     // 4. Detect Liquidity Pools & Sweeps
     const { pools: liquidityPools, sweeps: liquiditySweeps } = LiquidityEngine.detectLiquidity(
@@ -108,6 +119,8 @@ export class SMCAnalyzer {
       swingPoints,
       {
         equalHighLowToleranceAtr: config.equalHighLowToleranceAtr,
+        asOfTimestamp: config.asOfTimestamp,
+        timeframe: config.timeframe ? String(config.timeframe) : undefined,
       },
     );
 
@@ -125,6 +138,7 @@ export class SMCAnalyzer {
       fairValueGaps,
       {
         displacementThresholdAtr: config.displacementThresholdAtr,
+        minDisplacementScore: config.minDisplacementScore,
         asOfTimestamp: config.asOfTimestamp,
         timeframe: String(config.timeframe || ''),
       },

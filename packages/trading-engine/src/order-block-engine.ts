@@ -1,11 +1,13 @@
 import { Direction, IBreakOfStructure, ICandle, IFairValueGap, IOrderBlock } from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
 import { CandleNormalizer } from './candle-normalizer';
+import { DisplacementEngine } from './displacement';
 
 export interface IOrderBlockOptions {
   displacementThresholdAtr?: number;
   asOfTimestamp?: Date;
   timeframe?: string;
+  minDisplacementScore?: number;
 }
 
 export class OrderBlockEngine {
@@ -23,20 +25,21 @@ export class OrderBlockEngine {
       return { allOrderBlocks: [], activeOrderBlocks: [] };
     }
 
-    let candles = CandleNormalizer.normalize(rawCandles);
-    if (options.asOfTimestamp) {
-      candles = CandleNormalizer.getClosedCandlesAsOf(candles, options.timeframe, options.asOfTimestamp);
-    }
+    const { closedCandles: candles } = CandleNormalizer.partitionCandles(rawCandles, {
+      asOfTimestamp: options.asOfTimestamp,
+      timeframe: options.timeframe,
+    });
 
     if (candles.length < 4) {
       return { allOrderBlocks: [], activeOrderBlocks: [] };
     }
 
     const displacementThreshold = options.displacementThresholdAtr ?? 1.2;
+    const minDisplacementScore = options.minDisplacementScore ?? 0.5;
     const atr = calculateATR(candles, 14);
     const orderBlocks: IOrderBlock[] = [];
 
-    // 1. Identify Order Block candidates and require confirmation window (i + 3)
+    // 1. Identify Order Block candidates and require confirmation window (i + 1 to i + 3)
     for (let i = 0; i <= candles.length - 4; i++) {
       const candle = candles[i];
       const candleAtr = atr[i] || Math.max(1, candle.high - candle.low);
@@ -51,7 +54,16 @@ export class OrderBlockEngine {
       // 1. Bullish Order Block candidate: Bearish candle followed by rapid upward impulse
       if (isBearishCandle) {
         const maxUpMove = Math.max(next1.high, next2.high, next3.high) - candle.low;
-        const hasDisplacement = maxUpMove >= candleAtr * displacementThreshold;
+        const hasAtrDisplacement = maxUpMove >= candleAtr * displacementThreshold;
+
+        // Check displacement engine score on next candles
+        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr);
+        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr);
+        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr);
+        const hasEngineDisplacement =
+          (dScore1.score >= minDisplacementScore && dScore1.direction === Direction.BULLISH) ||
+          (dScore2.score >= minDisplacementScore && dScore2.direction === Direction.BULLISH) ||
+          (dScore3.score >= minDisplacementScore && dScore3.direction === Direction.BULLISH);
 
         // Check if a BOS or FVG was created in this subsequent confirmation window
         const createdBOS = bosList.some(
@@ -63,8 +75,9 @@ export class OrderBlockEngine {
             f.direction === Direction.BULLISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
         );
 
-        if (hasDisplacement && (createdBOS || createdFVG || maxUpMove >= candleAtr * 1.5)) {
+        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG || maxUpMove >= candleAtr * 1.5)) {
           const confirmedAtIndex = i + 3;
+          const confirmedTime = new Date(next3.timestamp);
           orderBlocks.push({
             id: `ob-bull-${i}`,
             direction: Direction.BULLISH,
@@ -74,10 +87,12 @@ export class OrderBlockEngine {
             timestamp: new Date(candle.timestamp),
             createdAt: new Date(candle.timestamp),
             confirmedAtIndex,
-            confirmedAtTimestamp: new Date(next3.timestamp),
+            confirmedAtTimestamp: confirmedTime,
+            confirmedAt: confirmedTime,
             isMitigated: false,
             isInvalidated: false,
             status: 'ACTIVE',
+            mitigationDepthPercentage: 0,
             strength: createdBOS ? 2.0 : 1.5,
           });
         }
@@ -86,7 +101,15 @@ export class OrderBlockEngine {
       // 2. Bearish Order Block candidate: Bullish candle followed by rapid downward impulse
       if (isBullishCandle) {
         const maxDownMove = candle.high - Math.min(next1.low, next2.low, next3.low);
-        const hasDisplacement = maxDownMove >= candleAtr * displacementThreshold;
+        const hasAtrDisplacement = maxDownMove >= candleAtr * displacementThreshold;
+
+        const dScore1 = DisplacementEngine.evaluateDisplacement(next1, candleAtr);
+        const dScore2 = DisplacementEngine.evaluateDisplacement(next2, candleAtr);
+        const dScore3 = DisplacementEngine.evaluateDisplacement(next3, candleAtr);
+        const hasEngineDisplacement =
+          (dScore1.score >= minDisplacementScore && dScore1.direction === Direction.BEARISH) ||
+          (dScore2.score >= minDisplacementScore && dScore2.direction === Direction.BEARISH) ||
+          (dScore3.score >= minDisplacementScore && dScore3.direction === Direction.BEARISH);
 
         const createdBOS = bosList.some(
           (b) =>
@@ -97,8 +120,9 @@ export class OrderBlockEngine {
             f.direction === Direction.BEARISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
         );
 
-        if (hasDisplacement && (createdBOS || createdFVG || maxDownMove >= candleAtr * 1.5)) {
+        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG || maxDownMove >= candleAtr * 1.5)) {
           const confirmedAtIndex = i + 3;
+          const confirmedTime = new Date(next3.timestamp);
           orderBlocks.push({
             id: `ob-bear-${i}`,
             direction: Direction.BEARISH,
@@ -108,10 +132,12 @@ export class OrderBlockEngine {
             timestamp: new Date(candle.timestamp),
             createdAt: new Date(candle.timestamp),
             confirmedAtIndex,
-            confirmedAtTimestamp: new Date(next3.timestamp),
+            confirmedAtTimestamp: confirmedTime,
+            confirmedAt: confirmedTime,
             isMitigated: false,
             isInvalidated: false,
             status: 'ACTIVE',
+            mitigationDepthPercentage: 0,
             strength: createdBOS ? 2.0 : 1.5,
           });
         }
@@ -120,41 +146,81 @@ export class OrderBlockEngine {
 
     // 2. Track mitigation and invalidation incrementally over subsequent candles starting after confirmation window
     for (const ob of orderBlocks) {
+      const obHeight = Math.max(0.0001, ob.high - ob.low);
+
       for (let k = ob.candleIndex + 4; k < candles.length; k++) {
         const c = candles[k];
         const cTime = new Date(c.timestamp);
 
         if (ob.direction === Direction.BULLISH) {
-          // Bullish OB mitigated when price enters the OB zone
-          if (c.low <= ob.high && !ob.isMitigated) {
-            ob.isMitigated = true;
-            ob.status = 'MITIGATED';
-            ob.mitigatedAtIndex = k;
-            ob.mitigatedAtTimestamp = cTime;
-          }
           // Invalidated if price closes below OB low
           if (c.close < ob.low) {
             ob.isInvalidated = true;
             ob.status = 'INVALIDATED';
             ob.invalidatedAtIndex = k;
             ob.invalidatedAtTimestamp = cTime;
+            ob.invalidatedAt = cTime;
+            ob.mitigationDepthPercentage = 100;
             break;
           }
-        } else {
-          // Bearish OB mitigated when price enters the OB zone
-          if (c.high >= ob.low && !ob.isMitigated) {
-            ob.isMitigated = true;
-            ob.status = 'MITIGATED';
-            ob.mitigatedAtIndex = k;
-            ob.mitigatedAtTimestamp = cTime;
+
+          // Mitigation tracking
+          if (c.low <= ob.high) {
+            const penetration = Math.max(0, ob.high - c.low);
+            const depthPct = Math.min(100, Math.round((penetration / obHeight) * 100));
+            if (depthPct > (ob.mitigationDepthPercentage || 0)) {
+              ob.mitigationDepthPercentage = depthPct;
+            }
+
+            if (!ob.isMitigated) {
+              ob.isMitigated = true;
+              ob.mitigatedAtIndex = k;
+              ob.mitigatedAtTimestamp = cTime;
+              ob.mitigatedAt = cTime;
+            }
+
+            if (depthPct >= 100) {
+              ob.status = 'FULLY_MITIGATED';
+            } else if (depthPct >= 50) {
+              ob.status = 'PARTIALLY_MITIGATED';
+            } else {
+              ob.status = 'TOUCHED';
+            }
           }
-          // Invalidated if price closes above OB high
+        } else {
+          // Bearish OB: Invalidated if price closes above OB high
           if (c.close > ob.high) {
             ob.isInvalidated = true;
             ob.status = 'INVALIDATED';
             ob.invalidatedAtIndex = k;
             ob.invalidatedAtTimestamp = cTime;
+            ob.invalidatedAt = cTime;
+            ob.mitigationDepthPercentage = 100;
             break;
+          }
+
+          // Mitigation tracking
+          if (c.high >= ob.low) {
+            const penetration = Math.max(0, c.high - ob.low);
+            const depthPct = Math.min(100, Math.round((penetration / obHeight) * 100));
+            if (depthPct > (ob.mitigationDepthPercentage || 0)) {
+              ob.mitigationDepthPercentage = depthPct;
+            }
+
+            if (!ob.isMitigated) {
+              ob.isMitigated = true;
+              ob.mitigatedAtIndex = k;
+              ob.mitigatedAtTimestamp = cTime;
+              ob.mitigatedAt = cTime;
+            }
+
+            if (depthPct >= 100) {
+              ob.status = 'FULLY_MITIGATED';
+            } else if (depthPct >= 50) {
+              ob.status = 'PARTIALLY_MITIGATED';
+            } else {
+              ob.status = 'TOUCHED';
+            }
           }
         }
       }
@@ -164,3 +230,4 @@ export class OrderBlockEngine {
     return { allOrderBlocks: orderBlocks, activeOrderBlocks };
   }
 }
+

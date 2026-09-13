@@ -19,6 +19,7 @@ export interface ICandlesResponse {
   timeframe: string;
   count: number;
   candles: ICandle[];
+  dataProvenance?: import('@quant/shared').DataProvenance;
 }
 
 export interface IChartDataResponse {
@@ -29,6 +30,7 @@ export interface IChartDataResponse {
     tickSize: number;
   };
   timeframe: string;
+  dataProvenance?: import('@quant/shared').DataProvenance;
   candles: Array<{
     time: number;
     open: number;
@@ -36,6 +38,7 @@ export interface IChartDataResponse {
     low: number;
     close: number;
     volume: number;
+    isClosed?: boolean;
   }>;
   indicators: {
     ema20: Array<{ time: number; value: number }>;
@@ -199,6 +202,7 @@ export class CandlesService {
           timeframe,
           count: liveCandles.length,
           candles: liveCandles,
+          dataProvenance: 'LIVE',
         };
       }
     }
@@ -240,6 +244,7 @@ export class CandlesService {
       close: Number(c.close),
       volume: Number(c.volume),
       isClosed: c.isClosed,
+      provenance: 'DELAYED',
     }));
 
     return {
@@ -247,6 +252,7 @@ export class CandlesService {
       timeframe,
       count: candles.length,
       candles,
+      dataProvenance: 'DELAYED',
     };
   }
 
@@ -295,6 +301,7 @@ export class CandlesService {
       low: c.low,
       close: c.close,
       volume: c.volume,
+      isClosed: c.isClosed,
     }));
 
     const buildSeries = (series: (number | null)[]) =>
@@ -371,6 +378,7 @@ export class CandlesService {
         tickSize: Number(inst.tickSize),
       },
       timeframe,
+      dataProvenance: candlesResp.dataProvenance || 'LIVE',
       candles: formattedCandles,
       indicators: {
         ema20,

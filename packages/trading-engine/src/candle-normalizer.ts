@@ -37,29 +37,143 @@ export class CandleNormalizer {
     return new Date(openTime + durationMs);
   }
 
+  /**
+   * Partitions candle series into confirmed closed candles and forming candle.
+   * Forming candle is strictly isolated from confirmed structural analysis.
+   */
+  static partitionCandles(
+    candles: ICandle[],
+    options: { asOfTimestamp?: Date; timeframe?: string | number } = {},
+  ): { closedCandles: ICandle[]; formingCandle: ICandle | null } {
+    const normalized = CandleNormalizer.normalize(candles);
+    if (normalized.length === 0) {
+      return { closedCandles: [], formingCandle: null };
+    }
+
+    let durationMs: number;
+    if (options.timeframe) {
+      durationMs = CandleNormalizer.getTimeframeDurationMs(options.timeframe);
+    } else if (normalized.length >= 2) {
+      const diffs: number[] = [];
+      for (let i = 1; i < Math.min(normalized.length, 5); i++) {
+        const d = normalized[i].timestamp.getTime() - normalized[i - 1].timestamp.getTime();
+        if (d > 0) diffs.push(d);
+      }
+      durationMs = diffs.length > 0 ? Math.min(...diffs) : 15 * 60 * 1000;
+    } else {
+      durationMs = 15 * 60 * 1000;
+    }
+
+    const asOfTime = options.asOfTimestamp ? options.asOfTimestamp.getTime() : null;
+
+    let formingCandle: ICandle | null = null;
+    const closedCandles: ICandle[] = [];
+
+    for (let i = 0; i < normalized.length; i++) {
+      const c = normalized[i];
+      const cTime = c.timestamp.getTime();
+      const cClose = cTime + durationMs;
+
+      if (asOfTime !== null) {
+        if (cTime > asOfTime) {
+          // Future candle starting after asOfTimestamp
+          continue;
+        }
+        if (cClose > asOfTime) {
+          // Candle was in-progress / forming at asOfTimestamp
+          formingCandle = c;
+          continue;
+        }
+        // Candle was fully closed at or before asOfTimestamp
+        if (c.isClosed !== false) {
+          closedCandles.push(c);
+        } else {
+          formingCandle = c;
+        }
+      } else {
+        if (c.isClosed === false) {
+          formingCandle = c;
+        } else {
+          closedCandles.push(c);
+        }
+      }
+    }
+
+    // If last candle in list without asOfTimestamp is unclosed
+    if (asOfTime === null && normalized[normalized.length - 1].isClosed === false) {
+      formingCandle = normalized[normalized.length - 1];
+    }
+
+    return { closedCandles, formingCandle };
+  }
+
   static getClosedCandlesAsOf(
     candles: ICandle[],
     timeframe: string | number | undefined,
     asOfTimestamp: Date,
   ): ICandle[] {
-    const normalized = CandleNormalizer.normalize(candles);
-    const asOfTime = asOfTimestamp.getTime();
+    const { closedCandles } = CandleNormalizer.partitionCandles(candles, {
+      asOfTimestamp,
+      timeframe,
+    });
+    return closedCandles;
+  }
 
-    let durationMs: number;
-    if (timeframe) {
-      durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
-    } else if (normalized.length >= 2) {
-      const diff = normalized[1].timestamp.getTime() - normalized[0].timestamp.getTime();
-      durationMs = diff > 0 ? diff : 15 * 60 * 1000;
-    } else {
-      durationMs = 15 * 60 * 1000;
+  /**
+   * Detects missing historical intervals and returns list of gaps.
+   */
+  static detectGaps(
+    candles: ICandle[],
+    timeframe: string | number = '15m',
+  ): Array<{ expectedTime: Date; actualTime: Date; missingCount: number }> {
+    const normalized = CandleNormalizer.normalize(candles);
+    if (normalized.length < 2) return [];
+
+    const durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
+    const gaps: Array<{ startIndex: number; endIndex: number; expectedTime: Date; actualTime: Date; missingCount: number }> = [];
+
+    for (let i = 1; i < normalized.length; i++) {
+      const prevTime = normalized[i - 1].timestamp.getTime();
+      const currTime = normalized[i].timestamp.getTime();
+      const diffMs = currTime - prevTime;
+
+      if (diffMs > durationMs * 1.5) {
+        const missingCount = Math.round(diffMs / durationMs) - 1;
+        gaps.push({
+          startIndex: i - 1,
+          endIndex: i,
+          expectedTime: new Date(prevTime + durationMs),
+          actualTime: new Date(currTime),
+          missingCount,
+        });
+      }
     }
 
-    return normalized.filter((candle) => {
-      const candleTime = candle.timestamp.getTime();
-      const closeTime = candleTime + durationMs;
-      return candle.isClosed !== false && closeTime <= asOfTime;
-    });
+    return gaps;
+  }
+
+  /**
+   * Validates if candles strictly align to timeframe boundaries (e.g. 15m -> :00, :15, :30, :45).
+   */
+  static validateAlignment(
+    candles: ICandle[],
+    timeframe: string | number = '15m',
+  ): { isAligned: boolean; misalignedCandles: ICandle[] } {
+    const normalized = CandleNormalizer.normalize(candles);
+    const durationMs = CandleNormalizer.getTimeframeDurationMs(timeframe);
+    const misaligned: ICandle[] = [];
+
+    for (const c of normalized) {
+      const timeMs = c.timestamp.getTime();
+      if (timeMs % durationMs !== 0) {
+        misaligned.push(c);
+      }
+    }
+
+    return {
+      isAligned: misaligned.length === 0,
+      misalignedCandles: misaligned,
+    };
   }
 
   /**

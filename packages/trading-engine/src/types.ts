@@ -30,8 +30,10 @@ export interface ISMCAnalysisConfig {
   swingRightBars?: number;
   minSwingDistanceAtrMultiplier?: number;
   displacementThresholdAtr?: number;
+  minDisplacementScore?: number;
   equalHighLowToleranceAtr?: number;
   fvgMinGapAtr?: number;
+  bosConfirmationType?: import('@quant/shared').BOSConfirmationType;
 }
 
 export interface ISMCAnalysisResult {

@@ -1,5 +1,6 @@
 export * from './types';
 export * from './candle-normalizer';
+export * from './displacement';
 export * from './swing-detector';
 export * from './bos-engine';
 export * from './choch-engine';

@@ -103,6 +103,7 @@ export class FVGEngine {
               fvg.status = 'FILLED';
               fvg.filledAtIndex = k;
               fvg.filledAtTimestamp = cTime;
+              fvg.filledAt = cTime;
             }
           }
           // Invalidation: candle closes below the FVG lower bound
@@ -111,6 +112,7 @@ export class FVGEngine {
             fvg.status = 'INVALIDATED';
             fvg.invalidatedAtIndex = k;
             fvg.invalidatedAtTimestamp = cTime;
+            fvg.invalidatedAt = cTime;
             break;
           }
         } else {
@@ -129,6 +131,7 @@ export class FVGEngine {
               fvg.status = 'FILLED';
               fvg.filledAtIndex = k;
               fvg.filledAtTimestamp = cTime;
+              fvg.filledAt = cTime;
             }
           }
           // Invalidation: candle closes above the FVG upper bound
@@ -137,6 +140,7 @@ export class FVGEngine {
             fvg.status = 'INVALIDATED';
             fvg.invalidatedAtIndex = k;
             fvg.invalidatedAtTimestamp = cTime;
+            fvg.invalidatedAt = cTime;
             break;
           }
         }

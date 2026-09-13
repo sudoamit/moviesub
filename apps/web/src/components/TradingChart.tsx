@@ -217,7 +217,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const clientSMC = useMemo(() => {
     if (!candles || candles.length < 5) return null;
     try {
-      const cleanCandles = candles.map((c) => ({
+      const cleanCandles = candles.map((c, idx) => ({
         timestamp:
           c.timestamp instanceof Date
             ? c.timestamp
@@ -227,7 +227,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 1),
-        isClosed: true,
+        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
+        provenance: c.provenance,
       }));
       return SMCAnalyzer.analyze(cleanCandles);
     } catch (e) {
@@ -240,7 +241,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const clientVP = useMemo(() => {
     if (!candles || candles.length < 5) return null;
     try {
-      const cleanCandles = candles.map((c) => ({
+      const cleanCandles = candles.map((c, idx) => ({
         timestamp:
           c.timestamp instanceof Date
             ? c.timestamp.toISOString()
@@ -252,7 +253,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 1),
-        isClosed: true,
+        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
+        provenance: c.provenance,
       }));
       return VolumeProfileAnalyzer.compute(cleanCandles as any, 28, 0.7);
     } catch (e) {
@@ -270,7 +272,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const clientHeatmap = useMemo(() => {
     if (!candles || candles.length < 10) return null;
     try {
-      const cleanCandles = candles.map((c) => ({
+      const cleanCandles = candles.map((c, idx) => ({
         timestamp:
           c.timestamp instanceof Date
             ? c.timestamp
@@ -280,7 +282,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 1),
-        isClosed: true,
+        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
+        provenance: c.provenance,
       }));
       return LiquidityHeatmapEngine.compute(cleanCandles as any);
     } catch (e) {
@@ -292,7 +295,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const clientMTF = useMemo(() => {
     if (!candles || candles.length < 5) return null;
     try {
-      const cleanCandles = candles.map((c) => ({
+      const cleanCandles = candles.map((c, idx) => ({
         timestamp:
           c.timestamp instanceof Date
             ? c.timestamp
@@ -302,7 +305,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 1),
-        isClosed: true,
+        isClosed: c.isClosed !== undefined ? Boolean(c.isClosed) : idx < candles.length - 1,
+        provenance: c.provenance,
       }));
       return MTFFlowRadarEngine.analyze(symbol, [], [], cleanCandles as any, []);
     } catch (e) {

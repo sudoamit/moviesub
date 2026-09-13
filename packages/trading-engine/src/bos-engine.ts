@@ -7,15 +7,21 @@ import {
   StructureType,
 } from '@quant/shared';
 import { calculateATR } from '@quant/indicators';
+import { DisplacementEngine } from './displacement';
 
 export interface IBOSEngineOptions {
   confirmationType?: BOSConfirmationType;
   displacementThresholdAtr?: number;
+  minDisplacementScore?: number;
+  asOfTimestamp?: Date;
+  timeframe?: string;
 }
 
 export class BOSEngine {
   /**
-   * Detects valid Bullish and Bearish Breaks of Structure (BOS)
+   * Detects valid Bullish and Bearish Breaks of Structure (BOS).
+   * Guarantees at most ONE Bullish BOS and/or ONE Bearish BOS per candle by targeting
+   * the active structural pivot rather than emitting for all historical levels.
    */
   static detectBOS(
     candles: ICandle[],
@@ -31,85 +37,108 @@ export class BOSEngine {
     const atr = calculateATR(candles, 14);
     const bosEvents: IBreakOfStructure[] = [];
 
-    const swingHighs = swings.filter(
+    // Track active unbroken swing levels
+    let activeHighs = swings.filter(
       (s) =>
         s.type === StructureType.SWING_HIGH ||
         s.type === StructureType.HIGHER_HIGH ||
         s.type === StructureType.LOWER_HIGH,
     );
 
-    const swingLows = swings.filter(
+    let activeLows = swings.filter(
       (s) =>
         s.type === StructureType.SWING_LOW ||
         s.type === StructureType.HIGHER_LOW ||
         s.type === StructureType.LOWER_LOW,
     );
 
-    // Track active unbroken swing levels
-    const activeHighs = new Set<ISwingPoint>(swingHighs);
-    const activeLows = new Set<ISwingPoint>(swingLows);
-
     for (let i = 0; i < candles.length; i++) {
       const candle = candles[i];
       const candleAtr = atr[i] || Math.max(1, candle.high - candle.low);
-      const candleBody = Math.abs(candle.close - candle.open);
-      const displacementRatio = candleBody / candleAtr;
 
-      // 1. Check for Bullish BOS (Breaking Swing High)
-      for (const high of Array.from(activeHighs)) {
-        // Can only break AFTER the swing point was fully confirmed
-        if (i <= high.confirmedAtIndex) continue;
+      // 1. Check for Bullish BOS (Targeting the most recent confirmed active high)
+      const eligibleHighs = activeHighs.filter((h) => i > h.confirmedAtIndex);
+      if (eligibleHighs.length > 0) {
+        // Target the most recent confirmed structural high
+        const targetHigh = eligibleHighs[eligibleHighs.length - 1];
+
+        const dispMetrics = DisplacementEngine.calculate(
+          candle,
+          Direction.BULLISH,
+          candleAtr,
+          targetHigh.price,
+          undefined,
+          { threshold: displacementThreshold },
+        );
 
         let isBroken = false;
         if (confType === BOSConfirmationType.WICK_BREAK) {
-          isBroken = candle.high > high.price;
+          isBroken = candle.high > targetHigh.price;
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
-          isBroken = candle.close > high.price;
+          isBroken = candle.close > targetHigh.price;
         } else {
           // CANDLE_CLOSE_AND_DISPLACEMENT
-          isBroken = candle.close > high.price && displacementRatio >= displacementThreshold;
+          isBroken = candle.close > targetHigh.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
         }
 
         if (isBroken) {
           bosEvents.push({
             direction: Direction.BULLISH,
-            brokenLevel: high.price,
-            brokenSwingPoint: high,
+            brokenLevel: targetHigh.price,
+            brokenSwingPoint: targetHigh,
             breakPrice: candle.close,
             candleIndex: i,
             timestamp: candle.timestamp,
             isConfirmed: true,
-            displacementRatio,
+            displacementRatio: dispMetrics.rangeAtrRatio,
+            displacementScore: dispMetrics.compositeScore,
+            confirmationType: confType,
           });
-          activeHighs.delete(high); // Level is broken
+
+          // Retire targetHigh and any active highs with price <= break price that were confirmed prior
+          activeHighs = activeHighs.filter((h) => h.index !== targetHigh.index && (h.price > candle.close || h.confirmedAtIndex >= i));
         }
       }
 
-      // 2. Check for Bearish BOS (Breaking Swing Low)
-      for (const low of Array.from(activeLows)) {
-        if (i <= low.confirmedAtIndex) continue;
+      // 2. Check for Bearish BOS (Targeting the most recent confirmed active low)
+      const eligibleLows = activeLows.filter((l) => i > l.confirmedAtIndex);
+      if (eligibleLows.length > 0) {
+        const targetLow = eligibleLows[eligibleLows.length - 1];
+
+        const dispMetrics = DisplacementEngine.calculate(
+          candle,
+          Direction.BEARISH,
+          candleAtr,
+          targetLow.price,
+          undefined,
+          { threshold: displacementThreshold },
+        );
 
         let isBroken = false;
         if (confType === BOSConfirmationType.WICK_BREAK) {
-          isBroken = candle.low < low.price;
+          isBroken = candle.low < targetLow.price;
         } else if (confType === BOSConfirmationType.CANDLE_CLOSE) {
-          isBroken = candle.close < low.price;
+          isBroken = candle.close < targetLow.price;
         } else {
-          isBroken = candle.close < low.price && displacementRatio >= displacementThreshold;
+          isBroken = candle.close < targetLow.price && (dispMetrics.isDisplacement || dispMetrics.rangeAtrRatio >= displacementThreshold);
         }
 
         if (isBroken) {
           bosEvents.push({
             direction: Direction.BEARISH,
-            brokenLevel: low.price,
-            brokenSwingPoint: low,
+            brokenLevel: targetLow.price,
+            brokenSwingPoint: targetLow,
             breakPrice: candle.close,
             candleIndex: i,
             timestamp: candle.timestamp,
             isConfirmed: true,
-            displacementRatio,
+            displacementRatio: dispMetrics.rangeAtrRatio,
+            displacementScore: dispMetrics.compositeScore,
+            confirmationType: confType,
           });
-          activeLows.delete(low); // Level is broken
+
+          // Retire targetLow and any active lows with price >= break price that were confirmed prior
+          activeLows = activeLows.filter((l) => l.index !== targetLow.index && (l.price < candle.close || l.confirmedAtIndex >= i));
         }
       }
     }

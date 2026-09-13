@@ -5,6 +5,8 @@ export interface ISwingDetectorOptions {
   leftBars?: number;
   rightBars?: number;
   minDistanceAtrMultiplier?: number;
+  asOfTimestamp?: Date;
+  timeframe?: string;
 }
 
 export class SwingDetector {
@@ -26,6 +28,8 @@ export class SwingDetector {
 
     let lastConfirmedHigh: ISwingPoint | null = null;
     let lastConfirmedLow: ISwingPoint | null = null;
+    let protectedHigh: ISwingPoint | null = null;
+    let protectedLow: ISwingPoint | null = null;
 
     // Up to candle length - rightBars can be confirmed
     const maxEvalIndex = candles.length - rightBars;
@@ -35,6 +39,7 @@ export class SwingDetector {
       const currentLow = candles[i].low;
       const currentAtr = atr[i] || currentHigh - currentLow;
       const minDistance = currentAtr * minDistanceMult;
+      const externalDistance = currentAtr * (minDistanceMult * 1.8);
 
       // 1. Swing High evaluation
       let isSwingHigh = true;
@@ -57,11 +62,30 @@ export class SwingDetector {
         // Enforce minimum distance filter from previous low if available
         if (!lastConfirmedLow || Math.abs(currentHigh - lastConfirmedLow.price) >= minDistance) {
           let type = StructureType.SWING_HIGH;
+          const isExternal = !lastConfirmedLow || Math.abs(currentHigh - lastConfirmedLow.price) >= externalDistance;
+
           if (lastConfirmedHigh) {
-            type =
-              currentHigh > lastConfirmedHigh.price
-                ? StructureType.HIGHER_HIGH
-                : StructureType.LOWER_HIGH;
+            if (currentHigh > lastConfirmedHigh.price) {
+              type = StructureType.HIGHER_HIGH;
+              // Higher High confirms the preceding low as the new protected higher low
+              if (lastConfirmedLow) {
+                lastConfirmedLow.isProtected = true;
+                protectedLow = lastConfirmedLow;
+              }
+            } else {
+              type = StructureType.LOWER_HIGH;
+              // In a bearish regime, Lower High is the protected structural high
+              protectedHigh = {
+                index: i,
+                type,
+                price: currentHigh,
+                timestamp: candles[i].timestamp,
+                confirmedAtIndex: i + rightBars,
+                confirmedAtTimestamp: candles[i + rightBars].timestamp,
+                isProtected: true,
+                isExternal,
+              };
+            }
           }
 
           const confirmedAtIndex = i + rightBars;
@@ -72,6 +96,8 @@ export class SwingDetector {
             timestamp: candles[i].timestamp,
             confirmedAtIndex,
             confirmedAtTimestamp: candles[confirmedAtIndex].timestamp,
+            isProtected: protectedHigh?.index === i,
+            isExternal,
           };
 
           swings.push(swingPoint);
@@ -99,11 +125,30 @@ export class SwingDetector {
       if (isSwingLow) {
         if (!lastConfirmedHigh || Math.abs(currentLow - lastConfirmedHigh.price) >= minDistance) {
           let type = StructureType.SWING_LOW;
+          const isExternal = !lastConfirmedHigh || Math.abs(currentLow - lastConfirmedHigh.price) >= externalDistance;
+
           if (lastConfirmedLow) {
-            type =
-              currentLow < lastConfirmedLow.price
-                ? StructureType.LOWER_LOW
-                : StructureType.HIGHER_LOW;
+            if (currentLow < lastConfirmedLow.price) {
+              type = StructureType.LOWER_LOW;
+              // Lower Low confirms the preceding high as the new protected lower high
+              if (lastConfirmedHigh) {
+                lastConfirmedHigh.isProtected = true;
+                protectedHigh = lastConfirmedHigh;
+              }
+            } else {
+              type = StructureType.HIGHER_LOW;
+              // In a bullish regime, Higher Low is the protected structural low
+              protectedLow = {
+                index: i,
+                type,
+                price: currentLow,
+                timestamp: candles[i].timestamp,
+                confirmedAtIndex: i + rightBars,
+                confirmedAtTimestamp: candles[i + rightBars].timestamp,
+                isProtected: true,
+                isExternal,
+              };
+            }
           }
 
           const confirmedAtIndex = i + rightBars;
@@ -114,6 +159,8 @@ export class SwingDetector {
             timestamp: candles[i].timestamp,
             confirmedAtIndex,
             confirmedAtTimestamp: candles[confirmedAtIndex].timestamp,
+            isProtected: protectedLow?.index === i,
+            isExternal,
           };
 
           swings.push(swingPoint);

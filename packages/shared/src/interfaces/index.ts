@@ -9,6 +9,8 @@ import {
   Timeframe,
 } from '../enums';
 
+export type DataProvenance = 'LIVE' | 'CACHED' | 'DELAYED' | 'SYNTHETIC';
+
 export interface ICandle {
   timestamp: Date;
   open: number;
@@ -17,6 +19,7 @@ export interface ICandle {
   close: number;
   volume: number;
   isClosed?: boolean;
+  provenance?: DataProvenance;
 }
 
 export type CurrencyCode = 'INR' | 'USD' | 'USDT' | 'EUR' | string;
@@ -107,6 +110,8 @@ export interface ISwingPoint {
   timestamp: Date;
   confirmedAtIndex: number;
   confirmedAtTimestamp: Date;
+  isProtected?: boolean;
+  isExternal?: boolean;
 }
 
 export interface IBreakOfStructure {
@@ -118,16 +123,23 @@ export interface IBreakOfStructure {
   timestamp: Date;
   isConfirmed: boolean;
   displacementRatio: number;
+  displacementScore?: number;
+  confirmationType?: import('../enums').BOSConfirmationType;
 }
 
 export interface IChangeOfCharacter {
   direction: Direction;
   previousTrend: Direction;
   brokenLevel: number;
+  brokenSwingPoint?: ISwingPoint;
   candleIndex: number;
   timestamp: Date;
   strength: number;
+  confirmationType?: import('../enums').BOSConfirmationType;
+  displacementScore?: number;
 }
+
+export type LiquiditySweepState = 'UNSWEPT' | 'LIQUIDITY_TAKEN' | 'SWEEP_RECLAIMED' | 'ACCEPTED_BREAK';
 
 export interface ILiquidityPool {
   id: string;
@@ -137,6 +149,7 @@ export interface ILiquidityPool {
   lastTimestamp: Date;
   touchCount: number;
   isSwept: boolean;
+  sweepState?: LiquiditySweepState;
   sweptAtIndex?: number;
   sweptTimestamp?: Date;
   sweptPrice?: number;
@@ -155,7 +168,7 @@ export interface IFairValueGap {
   isFilled: boolean;
   fillPercentage: number;
   isInvalidated: boolean;
-  status?: 'ACTIVE' | 'PARTIALLY_FILLED' | 'FILLED' | 'INVALIDATED';
+  status?: 'ACTIVE' | 'PARTIAL' | 'PARTIALLY_FILLED' | 'FILLED' | 'INVALIDATED';
   createdAt?: Date;
   confirmedAt?: Date;
   filledAtIndex?: number;
@@ -177,7 +190,8 @@ export interface IOrderBlock {
   mitigatedAtIndex?: number;
   isInvalidated: boolean;
   strength: number;
-  status?: 'CANDIDATE' | 'CONFIRMED' | 'ACTIVE' | 'MITIGATED' | 'INVALIDATED';
+  status?: 'CANDIDATE' | 'CONFIRMED' | 'ACTIVE' | 'TOUCHED' | 'PARTIALLY_MITIGATED' | 'FULLY_MITIGATED' | 'MITIGATED' | 'INVALIDATED';
+  mitigationDepthPercentage?: number;
   createdAt?: Date;
   confirmedAtIndex?: number;
   confirmedAtTimestamp?: Date;
