@@ -30,14 +30,14 @@ export interface ITradeJournalRecord {
   readonly holdingDurationMs: number | null;
   readonly holdingDurationSeconds: number | null;
 
-  // Multi-Asset P&L & Accounting
-  readonly quotePnl?: number;
-  readonly quoteCurrency?: string;
+  // Multi-Asset P&L & Accounting (Nullable for legacy/incomplete execution data)
+  readonly quotePnl?: number | null;
+  readonly quoteCurrency?: string | null;
 
-  readonly netPnlAccount: number;
+  readonly netPnlAccount?: number | null;
   readonly accountCurrency: string;
   readonly chargesAccount: number;
-  readonly realizedR?: number;
+  readonly realizedR?: number | null;
   readonly leverage?: number;
 
   // Metadata & Confluence
@@ -57,7 +57,7 @@ export interface ITradeJournalRecord {
   readonly isLegacyExecutionData?: boolean;
   readonly executionDataComplete?: boolean;
 
-  // Backward-compatible semantic aliases (Deprecated: prefer requestedEntryPrice / actualEntryPrice)
+  // Backward-compatible semantic aliases (Deprecated: non-authoritative compatibility aliases; do not use for execution accounting)
   readonly entryPrice?: number | null;
   readonly entryPriceCurrency?: string | null;
   readonly exitPrice?: number | null;

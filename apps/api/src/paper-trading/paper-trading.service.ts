@@ -1114,26 +1114,11 @@ export class PaperTradingService implements IExecutionProvider {
 
     const exitTime = new Date();
     const quantity = Number(pos.quantity);
-    const entryPrice = Number(pos.entryPrice);
     const exitTurnover = finalExitPrice * quantity;
     const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
-
     const isBuy = pos.direction === Direction.BULLISH;
-    const priceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
-    const grossPnL = priceDiff * quantity;
-    const realizedPnL = Number((grossPnL - totalCharges).toFixed(2));
-
-    const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
-    const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
-    const riskAnchor = initialStopLoss ?? stopLoss;
-    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
-    const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
-    const holdingDurationSeconds = Math.max(
-      0,
-      Math.floor((exitTime.getTime() - pos.entryTime.getTime()) / 1000),
-    );
 
     // Determine outcome classification
     let outcomeClassification = 'MANUAL';
@@ -1143,6 +1128,10 @@ export class PaperTradingService implements IExecutionProvider {
     else if (exitReason.includes('Breakeven')) outcomeClassification = 'BREAKEVEN';
     else if (exitReason.includes('Stop Loss') || exitReason.includes('SL'))
       outcomeClassification = 'LOSS_SL';
+
+    let canonicalRealizedPnLLog = 0;
+    let canonicalRealizedRLog = 0;
+    let hasAuthoritativeFillsLog = false;
 
     // Atomic Database Transaction for Position Closure (with Concurrency / Double-Close Guard)
     const trade = await this.prisma.$transaction(async (tx) => {
@@ -1241,6 +1230,7 @@ export class PaperTradingService implements IExecutionProvider {
       };
 
       const hasAuthoritativeEntryFills = entryFills.length > 0;
+      hasAuthoritativeFillsLog = hasAuthoritativeEntryFills;
       let aggregated: {
         entry: any;
         exit: any;
@@ -1254,7 +1244,7 @@ export class PaperTradingService implements IExecutionProvider {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
         // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
-        // Duration is unknown and must not be calculated from unverified position dates.
+        // Duration and authoritative entry price are unknown.
         isLegacyExecutionData = true;
         executionDataComplete = false;
         const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
@@ -1283,23 +1273,37 @@ export class PaperTradingService implements IExecutionProvider {
         calculatedAt: exitTime.getTime(),
       });
 
-      const effectiveEntryPrice = aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
       const effectiveExitPrice = aggregated.exit.weightedPrice;
+      let effectiveEntryPrice = Number(pos.entryPrice);
+      let canonicalRealizedPnL = 0.0;
+      let canonicalRealizedR = 0.0;
+      let pnlCalc: any = null;
 
-      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
-        entryPrice: effectiveEntryPrice,
-        exitPrice: effectiveExitPrice,
-        quantity: Number(pos.quantity),
-        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-        accountingSnapshot: snapshot,
-        fees: totalCharges,
-      });
+      if (hasAuthoritativeEntryFills && aggregated.entry) {
+        effectiveEntryPrice = aggregated.entry.weightedPrice;
+        pnlCalc = TradeAccountingEngine.calculateTradePnl({
+          entryPrice: effectiveEntryPrice,
+          exitPrice: effectiveExitPrice,
+          quantity: Number(pos.quantity),
+          direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+          accountingSnapshot: snapshot,
+          fees: totalCharges,
+        });
 
-      const canonicalRealizedPnL = pnlCalc.netPnlAccount;
-      const canonicalRealizedR =
-        riskDistance > 0
-          ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
-          : 0;
+        const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
+        const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
+        const riskAnchor = initialStopLoss ?? stopLoss;
+        const riskDistance = riskAnchor ? Math.abs(effectiveEntryPrice - riskAnchor) : 0;
+
+        canonicalRealizedPnL = pnlCalc.netPnlAccount;
+        canonicalRealizedR =
+          riskDistance > 0
+            ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
+            : 0;
+      }
+
+      canonicalRealizedPnLLog = canonicalRealizedPnL;
+      canonicalRealizedRLog = canonicalRealizedR;
 
       // 6. Mark Position CLOSED
       await tx.paperPosition.update({
@@ -1358,14 +1362,14 @@ export class PaperTradingService implements IExecutionProvider {
             slippageBps: exitSlippage.slippageBps,
             slippageAmount: exitSlippage.slippageAmount,
             exitReason,
-            realizedPnL: canonicalRealizedPnL,
-            quotePnl: pnlCalc.quotePnl,
+            realizedPnL: hasAuthoritativeEntryFills ? canonicalRealizedPnL : null,
+            quotePnl: pnlCalc ? pnlCalc.quotePnl : null,
             quoteCurrency: snapshot.quoteCurrency,
-            netPnlAccount: pnlCalc.netPnlAccount,
+            netPnlAccount: hasAuthoritativeEntryFills ? pnlCalc.netPnlAccount : null,
             accountCurrency: snapshot.accountCurrency,
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
-            realizedR: canonicalRealizedR,
+            realizedR: hasAuthoritativeEntryFills ? canonicalRealizedR : null,
             holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
@@ -1383,17 +1387,27 @@ export class PaperTradingService implements IExecutionProvider {
       });
 
       // 8. Update PaperAccount Balance & Release Margin with Exact Cash Parity
-      // Lifecycle Cash Delta: (-entryCharges) + (grossPnlAccount - exitCharges) = grossPnlAccount - totalCharges = netPnlAccount
-      const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
-      await tx.paperAccount.update({
-        where: { id: pos.accountId },
-        data: {
-          cashBalance: { increment: canonicalCashImpact },
-          usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: canonicalRealizedPnL },
-          totalChargesPaid: { increment: exitCharges.totalCharges },
-        },
-      });
+      if (hasAuthoritativeEntryFills && pnlCalc) {
+        const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
+        await tx.paperAccount.update({
+          where: { id: pos.accountId },
+          data: {
+            cashBalance: { increment: canonicalCashImpact },
+            usedMargin: { decrement: Number(pos.usedMargin) },
+            realizedPnL: { increment: canonicalRealizedPnL },
+            totalChargesPaid: { increment: exitCharges.totalCharges },
+          },
+        });
+      } else {
+        await tx.paperAccount.update({
+          where: { id: pos.accountId },
+          data: {
+            cashBalance: { decrement: exitCharges.totalCharges },
+            usedMargin: { decrement: Number(pos.usedMargin) },
+            totalChargesPaid: { increment: exitCharges.totalCharges },
+          },
+        });
+      }
 
       // 9. Audit Log
       await tx.auditEvent.create({
@@ -1411,8 +1425,8 @@ export class PaperTradingService implements IExecutionProvider {
             actualExitPrice: aggregated.exit.weightedPrice,
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
-            realizedPnL: canonicalRealizedPnL,
-            quotePnl: pnlCalc.quotePnl,
+            realizedPnL: hasAuthoritativeEntryFills ? canonicalRealizedPnL : null,
+            quotePnl: pnlCalc ? pnlCalc.quotePnl : null,
             quoteCurrency: snapshot.quoteCurrency,
             accountCurrency: snapshot.accountCurrency,
             accountingSnapshotHash: snapshot.snapshotHash,
@@ -1427,7 +1441,7 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     this.logger.log(
-      `✓ [PERSISTED PAPER POSITION CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
+      `✓ [PERSISTED PAPER POSITION CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ${hasAuthoritativeFillsLog ? `₹${canonicalRealizedPnLLog.toFixed(2)} (${canonicalRealizedRLog}R)` : 'Unavailable (Legacy)'} [${exitReason}]`,
     );
 
     return this.mapDbTradeToInterface(trade);

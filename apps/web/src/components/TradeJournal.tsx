@@ -462,7 +462,6 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
           </thead>
           <tbody className="divide-y divide-slate-800/60 bg-slate-950/50">
             {filteredTrades.map((t) => {
-              const isWin = t.state !== 'SL_HIT' && Number(t.netPnlAccount ?? t.pnlAmount ?? 0) >= 0;
               const isCrypto = t.symbol === 'BTCUSDT' || t.symbol?.includes('BTC');
               const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
               const priceCurr = (t as any).entryPriceCurrency || (t as any).currency || (isCrypto ? 'USDT' : isGold ? 'USD' : 'INR');
@@ -478,8 +477,11 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                     : getContractLabel(t.symbol, t.direction, Number(t.entryPrice));
 
               const isSaiyan = t.tradeReason?.includes('Saiyan') || t.symbol === 'BTCUSDT';
-              const effectivePnl = Number(t.netPnlAccount ?? t.pnlAmount ?? 0);
-              const effectiveR = Number(t.realizedR ?? t.pnlRMultiple ?? 0);
+              const isExecutionComplete = (t as any).executionDataComplete !== false && (t as any).isLegacyExecutionData !== true;
+              const hasPnl = t.netPnlAccount != null || t.pnlAmount != null;
+              const effectivePnl = t.netPnlAccount != null ? Number(t.netPnlAccount) : (t.pnlAmount != null ? Number(t.pnlAmount) : null);
+              const effectiveR = t.realizedR != null ? Number(t.realizedR) : (t.pnlRMultiple != null ? Number(t.pnlRMultiple) : null);
+              const isWin = isExecutionComplete && hasPnl && effectivePnl !== null && effectivePnl >= 0 && t.state !== 'SL_HIT';
 
               return (
                 <tr key={t.id} className="hover:bg-slate-900/70 transition-colors">
@@ -626,29 +628,51 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                   {/* Realized Return */}
                   <td
                     className={`py-3 px-3 text-right font-bold ${
-                      effectivePnl >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                      effectivePnl == null || (t as any).executionDataComplete === false
+                        ? 'text-amber-400/90'
+                        : effectivePnl >= 0
+                          ? 'text-emerald-400'
+                          : 'text-rose-400'
                     }`}
                   >
-                    <div>
-                      <span>
-                        {formatPnlWithCurrency(effectivePnl, pnlCurr)}
+                    {effectivePnl != null && (t as any).executionDataComplete !== false ? (
+                      <div>
+                        <span>
+                          {formatPnlWithCurrency(effectivePnl, pnlCurr)}
+                        </span>
+                        {(t as any).quotePnl != null &&
+                          (t as any).quoteCurrency &&
+                          (t as any).quoteCurrency !== pnlCurr && (
+                            <span className="text-[10px] text-slate-400 block font-normal">
+                              {formatPnlWithCurrency(Number((t as any).quotePnl), (t as any).quoteCurrency)}
+                            </span>
+                          )}
+                      </div>
+                    ) : (
+                      <span className="text-amber-400/90 font-normal italic text-[10px]">
+                        Unavailable (Legacy)
                       </span>
-                      {(t as any).quotePnl !== undefined &&
-                        (t as any).quoteCurrency &&
-                        (t as any).quoteCurrency !== pnlCurr && (
-                          <span className="text-[10px] text-slate-400 block font-normal">
-                            {formatPnlWithCurrency(Number((t as any).quotePnl), (t as any).quoteCurrency)}
-                          </span>
-                        )}
-                    </div>
+                    )}
                   </td>
 
                   {/* R Multiple */}
                   <td
-                    className={`py-3 px-3 text-right font-bold ${isWin ? 'text-teal-300' : 'text-rose-400'}`}
+                    className={`py-3 px-3 text-right font-bold ${
+                      effectiveR == null || (t as any).executionDataComplete === false
+                        ? 'text-slate-500 font-normal'
+                        : isWin
+                          ? 'text-teal-300'
+                          : 'text-rose-400'
+                    }`}
                   >
-                    {effectiveR >= 0 ? '+' : ''}
-                    {effectiveR.toFixed(1)}R
+                    {effectiveR != null && (t as any).executionDataComplete !== false ? (
+                      <>
+                        {effectiveR >= 0 ? '+' : ''}
+                        {effectiveR.toFixed(1)}R
+                      </>
+                    ) : (
+                      <span className="text-slate-500 font-normal text-[10px] italic">-</span>
+                    )}
                   </td>
 
                   {/* Entry & Close Date/Time */}

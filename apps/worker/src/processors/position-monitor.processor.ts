@@ -388,28 +388,15 @@ export class PositionMonitorProcessor extends WorkerHost {
     const tickSourceTime = sourceTimestamp || exitTime;
     const isCrypto = pos.symbol === 'BTCUSDT';
     const quantity = Number(pos.quantity);
-    const entryPrice = Number(pos.entryPrice);
     const exitTurnover = finalExitPrice * quantity;
     const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
 
-    const priceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
-    const grossPnL = priceDiff * quantity;
-    const realizedPnL = Number((grossPnL - totalCharges).toFixed(2));
-
-    // Zero synthetic risk: use only persisted SL
-    const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
-    const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
-    const riskAnchor = initialStopLoss ?? stopLoss;
-    const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
-    const realizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
-    const holdingDurationSeconds = Math.max(
-      0,
-      Math.floor((exitTime.getTime() - new Date(pos.openedAt).getTime()) / 1000),
-    );
-
     let closedSuccessfully = false;
+    let canonicalRealizedPnLLog = 0;
+    let canonicalRealizedRLog = 0;
+    let hasAuthoritativeFillsLog = false;
 
     await this.prisma.$transaction(async (tx) => {
       // 1. Atomic state transition: OPEN/EXIT_PENDING/PARTIALLY_CLOSED -> CLOSING (Double-Close Guard)
@@ -513,6 +500,7 @@ export class PositionMonitorProcessor extends WorkerHost {
       };
 
       const hasAuthoritativeEntryFills = entryFills.length > 0;
+      hasAuthoritativeFillsLog = hasAuthoritativeEntryFills;
       let aggregated: {
         entry: any;
         exit: any;
@@ -526,7 +514,7 @@ export class PositionMonitorProcessor extends WorkerHost {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
         // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
-        // Duration is unknown and must not be calculated from unverified position dates.
+        // Duration and authoritative entry price are unknown.
         isLegacyExecutionData = true;
         executionDataComplete = false;
         const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
@@ -555,23 +543,37 @@ export class PositionMonitorProcessor extends WorkerHost {
         calculatedAt: exitTime.getTime(),
       });
 
-      const effectiveEntryPrice = aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
       const effectiveExitPrice = aggregated.exit.weightedPrice;
+      let effectiveEntryPrice = Number(pos.entryPrice);
+      let canonicalRealizedPnL = 0.0;
+      let canonicalRealizedR = 0.0;
+      let pnlCalc: any = null;
 
-      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
-        entryPrice: effectiveEntryPrice,
-        exitPrice: effectiveExitPrice,
-        quantity: Number(pos.quantity),
-        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-        accountingSnapshot: snapshot,
-        fees: totalCharges,
-      });
+      if (hasAuthoritativeEntryFills && aggregated.entry) {
+        effectiveEntryPrice = aggregated.entry.weightedPrice;
+        pnlCalc = TradeAccountingEngine.calculateTradePnl({
+          entryPrice: effectiveEntryPrice,
+          exitPrice: effectiveExitPrice,
+          quantity: Number(pos.quantity),
+          direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+          accountingSnapshot: snapshot,
+          fees: totalCharges,
+        });
 
-      const canonicalRealizedPnL = pnlCalc.netPnlAccount;
-      const canonicalRealizedR =
-        riskDistance > 0
-          ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
-          : 0;
+        const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
+        const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
+        const riskAnchor = initialStopLoss ?? stopLoss;
+        const riskDistance = riskAnchor ? Math.abs(effectiveEntryPrice - riskAnchor) : 0;
+
+        canonicalRealizedPnL = pnlCalc.netPnlAccount;
+        canonicalRealizedR =
+          riskDistance > 0
+            ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
+            : 0;
+      }
+
+      canonicalRealizedPnLLog = canonicalRealizedPnL;
+      canonicalRealizedRLog = canonicalRealizedR;
 
       // 6. Mark position CLOSED
       await tx.paperPosition.update({
@@ -630,14 +632,14 @@ export class PositionMonitorProcessor extends WorkerHost {
             slippageBps: slip.slippageBps,
             slippageAmount: slip.slippageAmount,
             exitReason,
-            realizedPnL: canonicalRealizedPnL,
-            quotePnl: pnlCalc.quotePnl,
+            realizedPnL: hasAuthoritativeEntryFills ? canonicalRealizedPnL : null,
+            quotePnl: pnlCalc ? pnlCalc.quotePnl : null,
             quoteCurrency: snapshot.quoteCurrency,
-            netPnlAccount: pnlCalc.netPnlAccount,
+            netPnlAccount: hasAuthoritativeEntryFills ? pnlCalc.netPnlAccount : null,
             accountCurrency: snapshot.accountCurrency,
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
-            realizedR: canonicalRealizedR,
+            realizedR: hasAuthoritativeEntryFills ? canonicalRealizedR : null,
             holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
@@ -655,17 +657,27 @@ export class PositionMonitorProcessor extends WorkerHost {
       });
 
       // 8. Update PaperAccount Balance & Release Margin with Exact Cash Parity
-      // Lifecycle Cash Delta: (-entryCharges) + (grossPnlAccount - exitCharges) = grossPnlAccount - totalCharges = netPnlAccount
-      const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
-      await tx.paperAccount.update({
-        where: { id: pos.accountId },
-        data: {
-          cashBalance: { increment: canonicalCashImpact },
-          usedMargin: { decrement: Number(pos.usedMargin || 0) },
-          realizedPnL: { increment: canonicalRealizedPnL },
-          totalChargesPaid: { increment: exitCharges.totalCharges },
-        },
-      });
+      if (hasAuthoritativeEntryFills && pnlCalc) {
+        const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
+        await tx.paperAccount.update({
+          where: { id: pos.accountId },
+          data: {
+            cashBalance: { increment: canonicalCashImpact },
+            usedMargin: { decrement: Number(pos.usedMargin || 0) },
+            realizedPnL: { increment: canonicalRealizedPnL },
+            totalChargesPaid: { increment: exitCharges.totalCharges },
+          },
+        });
+      } else {
+        await tx.paperAccount.update({
+          where: { id: pos.accountId },
+          data: {
+            cashBalance: { decrement: exitCharges.totalCharges },
+            usedMargin: { decrement: Number(pos.usedMargin || 0) },
+            totalChargesPaid: { increment: exitCharges.totalCharges },
+          },
+        });
+      }
 
       // 9. Audit Log
       await tx.auditEvent.create({
@@ -685,12 +697,12 @@ export class PositionMonitorProcessor extends WorkerHost {
             sourceTimestamp: tickSourceTime.toISOString(),
             slippageBps: slip.slippageBps,
             slippageAmount: slip.slippageAmount,
-            realizedPnL: canonicalRealizedPnL,
-            quotePnl: pnlCalc.quotePnl,
+            realizedPnL: hasAuthoritativeEntryFills ? canonicalRealizedPnL : null,
+            quotePnl: pnlCalc ? pnlCalc.quotePnl : null,
             quoteCurrency: snapshot.quoteCurrency,
             accountCurrency: snapshot.accountCurrency,
             snapshotHash: snapshot.snapshotHash,
-            realizedR: canonicalRealizedR,
+            realizedR: hasAuthoritativeEntryFills ? canonicalRealizedR : null,
             durationMs: aggregated.durationMs,
             isLegacyExecutionData,
             executionDataComplete,
@@ -708,7 +720,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
 
     this.logger.log(
-      `✓ [POSITION MONITOR CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ₹${realizedPnL.toFixed(2)} (${realizedR}R) [${exitReason}]`,
+      `✓ [POSITION MONITOR CLOSED] ${pos.contractSymbol} @ ₹${finalExitPrice.toFixed(2)} | Net PnL: ${hasAuthoritativeFillsLog ? `₹${canonicalRealizedPnLLog.toFixed(2)} (${canonicalRealizedRLog}R)` : 'Unavailable (Legacy)'} [${exitReason}]`,
     );
 
     // Publish WebSocket notification
@@ -720,8 +732,8 @@ export class PositionMonitorProcessor extends WorkerHost {
           positionId: pos.id,
           contractSymbol: pos.contractSymbol,
           exitPrice: finalExitPrice,
-          realizedPnL,
-          realizedR,
+          realizedPnL: hasAuthoritativeFillsLog ? canonicalRealizedPnLLog : 0,
+          realizedR: hasAuthoritativeFillsLog ? canonicalRealizedRLog : 0,
           exitReason,
           closedAt: exitTime.toISOString(),
         }),

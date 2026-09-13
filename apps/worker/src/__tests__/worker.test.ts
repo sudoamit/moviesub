@@ -714,8 +714,8 @@ describe('Worker Processors', () => {
               slippageAmount: expect.any(Number),
               exitReason: expect.any(String),
               holdingDurationSeconds: null,
-              realizedPnL: expect.any(Number),
-              realizedR: expect.any(Number),
+              realizedPnL: null,
+              realizedR: null,
               outcomeClassification: expect.any(String),
               exitTime: expect.any(String),
             }),
@@ -725,6 +725,42 @@ describe('Worker Processors', () => {
     });
 
     it('19. worker close performs exact and non-duplicative accounting updates on paperAccount', async () => {
+      mockPrisma.paperFill.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'fill-entry-1',
+          orderId: 'order-1',
+          fillPrice: new Decimal(24100.0),
+          fillQuantity: new Decimal(65),
+          fillTimestamp: new Date(Date.now() - 60000),
+          fee: new Decimal(30.0),
+          slippage: new Decimal(0),
+          executionPriceSource: 'LIVE_TICK',
+          sourceTimestamp: new Date(Date.now() - 60000),
+        },
+      ]);
+      mockPrisma.paperPosition.findMany = jest.fn().mockResolvedValue([
+        {
+          id: 'pos-1',
+          orderId: 'order-1',
+          accountId: 'acc-1',
+          symbol: 'NIFTY',
+          contractSymbol: 'NIFTY SPOT',
+          direction: Direction.BULLISH,
+          quantity: new Decimal(65),
+          entryPrice: new Decimal(24100.0),
+          currentPrice: new Decimal(24100.0),
+          stopLoss: new Decimal(24050.0),
+          initialStopLoss: new Decimal(24050.0),
+          target1: new Decimal(24175.0),
+          leverage: new Decimal(5.0),
+          usedMargin: new Decimal(31330.0),
+          unrealizedPnL: new Decimal(0.0),
+          status: PositionState.OPEN,
+          openedAt: new Date(Date.now() - 60000),
+          chargesJson: { totalCharges: 30.0 },
+        },
+      ]);
+
       mockRedis.get = jest.fn().mockResolvedValue(
         JSON.stringify({ price: 24040.0, lastUpdated: Date.now() }),
       );

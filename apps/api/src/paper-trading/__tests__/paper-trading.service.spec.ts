@@ -35,6 +35,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         isActive: true,
       },
     ];
+    let entitySeq = 1;
     dbOrders = [];
     dbFills = [];
     dbPositions = [];
@@ -49,7 +50,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(acc || dbAccounts[0]);
         }),
         create: jest.fn().mockImplementation((args) => {
-          const acc = { id: `acc_${Date.now()}`, ...args.data };
+          const acc = { id: `acc_${Date.now()}_${entitySeq++}`, ...args.data };
           dbAccounts.push(acc);
           return Promise.resolve(acc);
         }),
@@ -115,7 +116,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(null);
         }),
         create: jest.fn().mockImplementation((args) => {
-          const order = { id: `order_${Date.now()}`, ...args.data };
+          const order = { id: `order_${Date.now()}_${entitySeq++}`, ...args.data };
           dbOrders.push(order);
           return Promise.resolve(order);
         }),
@@ -123,9 +124,16 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       },
       paperFill: {
         create: jest.fn().mockImplementation((args) => {
-          const fill = { id: `fill_${Date.now()}`, ...args.data };
+          const fill = { id: `fill_${Date.now()}_${entitySeq++}`, ...args.data };
           dbFills.push(fill);
           return Promise.resolve(fill);
+        }),
+        findMany: jest.fn().mockImplementation((args) => {
+          let list = dbFills;
+          if (args?.where?.orderId) {
+            list = list.filter((f) => f.orderId === args.where.orderId);
+          }
+          return Promise.resolve(list);
         }),
       },
       paperPosition: {
@@ -141,7 +149,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(list);
         }),
         create: jest.fn().mockImplementation((args) => {
-          const pos = { id: `pos_${Date.now()}`, ...args.data };
+          const pos = { id: `pos_${Date.now()}_${entitySeq++}`, ...args.data };
           dbPositions.push(pos);
           return Promise.resolve(pos);
         }),
@@ -174,7 +182,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(trade || null);
         }),
         create: jest.fn().mockImplementation((args) => {
-          const trade = { id: `trade_${Date.now()}`, ...args.data };
+          const trade = { id: `trade_${Date.now()}_${entitySeq++}`, ...args.data };
           dbTrades.push(trade);
           return Promise.resolve(trade);
         }),
@@ -182,12 +190,14 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       },
       auditEvent: {
         create: jest.fn().mockImplementation((args) => {
-          dbAudits.push(args.data);
-          return Promise.resolve(args.data);
+          const audit = { id: `audit_${Date.now()}_${entitySeq++}`, ...args.data };
+          dbAudits.push(audit);
+          return Promise.resolve(audit);
         }),
         createMany: jest.fn().mockImplementation((args) => {
-          dbAudits.push(...args.data);
-          return Promise.resolve({ count: args.data.length });
+          const audits = args.data.map((d: any) => ({ id: `audit_${Date.now()}_${entitySeq++}`, ...d }));
+          dbAudits.push(...audits);
+          return Promise.resolve({ count: audits.length });
         }),
       },
       $transaction: jest.fn().mockImplementation((callback) => callback(mockPrisma)),
