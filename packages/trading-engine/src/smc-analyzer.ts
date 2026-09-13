@@ -80,7 +80,10 @@ export class SMCAnalyzer {
       };
     }
 
-    const closedThrough = candles[candles.length - 1].timestamp;
+    const closedThrough = CandleNormalizer.getCandleCloseTimestamp(
+      candles[candles.length - 1],
+      config.timeframe,
+    );
 
     // Detect data gaps
     const gaps = config.timeframe

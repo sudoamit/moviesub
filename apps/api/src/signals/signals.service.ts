@@ -783,9 +783,9 @@ export class SignalsService implements OnModuleInit {
           netPnlAccount: null,
           accountCurrency: accountCurrency,
           quotePnl: null,
-          quoteCurrency: null,
-          chargesAccount: 0,
-          totalChargesAccount: 0,
+          quoteCurrency: quoteCurrency,
+          chargesAccount: null,
+          totalChargesAccount: null,
           pnlRMultiple: null,
           realizedR: null,
           tradeReason:
@@ -913,26 +913,35 @@ export class SignalsService implements OnModuleInit {
     const rows = trades.map((t: any) => {
       const isCrypto = t.symbol === 'BTCUSDT';
       const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
-      const entryP = Number(t.entryPrice) || 0;
-      const exitP = Number(t.exitPrice) || 0;
+      const entryP = Number(t.actualEntryPrice || t.entryPrice) || 0;
+      const exitP = Number(t.actualExitPrice || t.exitPrice) || 0;
       const qty = Number(t.quantity) || 1;
       const turnover = Number(((entryP + exitP) * qty).toFixed(2));
 
-      // Transaction charges breakdown
-      const brokerage = isCrypto || isGold ? Number((turnover * 0.0005).toFixed(2)) : 40.0;
+      // Canonical transaction charges
+      const totalCharges = Number(
+        (t.totalChargesAccount !== undefined && t.totalChargesAccount !== null && Number(t.totalChargesAccount) > 0
+          ? Number(t.totalChargesAccount)
+          : t.chargesAccount !== undefined && t.chargesAccount !== null && Number(t.chargesAccount) > 0
+            ? Number(t.chargesAccount)
+            : (isCrypto || isGold ? turnover * 0.0005 : 40.0)
+        ).toFixed(2),
+      );
+
+      const brokerage = isCrypto || isGold ? totalCharges : 40.0;
       const stt = isCrypto || isGold ? 0 : Number((turnover * 0.000125).toFixed(2));
       const exchangeTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.0000345).toFixed(2));
-      const gst =
-        isCrypto || isGold ? 0 : Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
+      const gst = isCrypto || isGold ? 0 : Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
       const sebiTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.000001).toFixed(2));
-      const totalCharges = Number(
-        (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
-      );
 
       const isBull = t.direction === 'BULLISH';
       const priceDiff = isBull ? exitP - entryP : entryP - exitP;
       const grossPnL = Number((priceDiff * qty).toFixed(2));
-      const netPnL = Number(t.pnlAmount) || Number((grossPnL - totalCharges).toFixed(2));
+      const netPnL = t.netPnlAccount !== null && t.netPnlAccount !== undefined
+        ? Number(t.netPnlAccount)
+        : t.pnlAmount !== null && t.pnlAmount !== undefined
+          ? Number(t.pnlAmount)
+          : Number((grossPnL - totalCharges).toFixed(2));
 
       return [
         escapeCsv(t.id),

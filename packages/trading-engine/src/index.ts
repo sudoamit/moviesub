@@ -26,5 +26,6 @@ export * from './indian-options-expiry';
 export * from './ai-trade-learning-engine';
 export * from './saiyan-occ-engine';
 export * from './no-trade-engine';
+export * from './canonical-market-snapshot';
 export * from './quant';
 export const TRADING_ENGINE_VERSION = '2.0.0';
