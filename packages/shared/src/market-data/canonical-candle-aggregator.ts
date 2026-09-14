@@ -65,11 +65,13 @@ export class CanonicalCandleAggregator {
 
   /**
    * Stream lifecycle event: Called when MarketStreamProvider connects/reconnects with authoritative context.
+   * Atomically updates providerConnectionEpoch, localConnectionInstanceId, and sequence watermarks.
    */
   onStreamConnected(context: { providerConnectionEpoch?: string | null; localConnectionInstanceId?: string | null; resetSequence?: boolean }): void {
     this.providerConnectionEpoch = context.providerConnectionEpoch && context.providerConnectionEpoch !== 'REST_BOOTSTRAP' ? context.providerConnectionEpoch : null;
     this.localConnectionInstanceId = context.localConnectionInstanceId ?? null;
-    if (context.resetSequence !== false) {
+    const capability = ProviderSequenceCapabilityRegistry.getPolicy(this.providerId);
+    if (context.resetSequence !== false && capability.sequence.resetOnReconnect !== false) {
       this.lastSequenceNumber = null;
     }
   }
@@ -79,19 +81,14 @@ export class CanonicalCandleAggregator {
   }
 
   /**
-   * Explicitly sets current stream connection epoch.
-   * Supports stream lifecycle authority: setConnectionEpoch(providerEpoch, localInstanceId).
+   * @deprecated Use onStreamConnected({ providerConnectionEpoch, localConnectionInstanceId }) instead.
    */
   setConnectionEpoch(epoch: string | null, localInstanceId?: string | null): void {
-    this.providerConnectionEpoch = epoch && epoch !== 'REST_BOOTSTRAP' ? epoch : null;
-    this.localConnectionInstanceId = localInstanceId ?? null;
-    if (!this.connectionEpoch) {
-      this.lastSequenceNumber = null;
-    }
+    this.onStreamConnected({ providerConnectionEpoch: epoch, localConnectionInstanceId: localInstanceId, resetSequence: true });
   }
 
   /**
-   * Resets sequence watermark ONLY when a new connection epoch is provided.
+   * @deprecated Use onStreamReconnected() instead.
    */
   resetSequenceWatermark(epoch?: string, seq?: number): void {
     if (epoch) {

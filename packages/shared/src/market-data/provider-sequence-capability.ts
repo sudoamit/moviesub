@@ -36,7 +36,7 @@ export interface ProviderCapabilities {
 export type ProviderSequencePolicy = ProviderCapabilities;
 
 export class ProviderIdentityNormalizer {
-  private static canonicalAliases: Record<string, string> = {
+  private static readonly defaultAliases: Record<string, string> = {
     BINANCE: 'BINANCE_REALTIME',
     BINANCE_REALTIME: 'BINANCE_REALTIME',
     BINANCE_WS: 'BINANCE_REALTIME',
@@ -60,7 +60,16 @@ export class ProviderIdentityNormalizer {
     UNKNOWN_SOURCE: 'UNKNOWN_PROVIDER',
   };
 
+  private static canonicalAliases: Record<string, string> = { ...ProviderIdentityNormalizer.defaultAliases };
+
+  public static resetAliasesForTesting(): void {
+    this.canonicalAliases = { ...this.defaultAliases };
+  }
+
   public static registerAlias(rawAlias: string, canonicalId: string): void {
+    if (ProviderSequenceCapabilityRegistry.getIsLocked()) {
+      throw new Error('ProviderIdentityNormalizer is locked and cannot register new aliases.');
+    }
     if (rawAlias && canonicalId) {
       this.canonicalAliases[rawAlias.toUpperCase().trim()] = canonicalId.toUpperCase().trim();
     }
@@ -82,7 +91,7 @@ export class ProviderIdentityNormalizer {
 export class ProviderSequenceCapabilityRegistry {
   private static isLocked = false;
 
-  private static capabilities: Record<string, ProviderCapabilities> = {
+  private static readonly defaultCapabilities: Record<string, ProviderCapabilities> = {
     BINANCE_REALTIME: {
       providerId: 'BINANCE_REALTIME',
       sequence: {
@@ -187,11 +196,28 @@ export class ProviderSequenceCapabilityRegistry {
     },
   };
 
+  private static capabilities: Record<string, ProviderCapabilities> = JSON.parse(
+    JSON.stringify(ProviderSequenceCapabilityRegistry.defaultCapabilities),
+  );
+
+  public static getIsLocked(): boolean {
+    return this.isLocked;
+  }
+
   /**
-   * Locks the capability registry to prevent dynamic mutations after startup initialization.
+   * Locks both capabilities and identity aliases to prevent dynamic mutations after startup initialization.
    */
   public static lockRegistry(): void {
     this.isLocked = true;
+  }
+
+  /**
+   * Resets registry capabilities, identity aliases, and lock status for testing isolation.
+   */
+  public static resetRegistryForTesting(): void {
+    this.isLocked = false;
+    this.capabilities = JSON.parse(JSON.stringify(this.defaultCapabilities));
+    ProviderIdentityNormalizer.resetAliasesForTesting();
   }
 
   /**

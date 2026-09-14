@@ -1,4 +1,4 @@
-import { ChartMarketSnapshot, ChartSMCSnapshot } from '@quant/shared';
+import { ChartMarketSnapshot, ChartSMCSnapshot, ProviderSequenceCapabilityRegistry } from '@quant/shared';
 
 export interface ISnapshotValidationResult {
   readonly isValid: boolean;
@@ -259,6 +259,15 @@ export class ChartSnapshotValidator {
 
       if (providerId && providerId !== 'UNKNOWN_PROVIDER' && snapshot.sourceIdentity && snapshot.sourceIdentity !== 'UNKNOWN_SOURCE' && providerId !== snapshot.sourceIdentity) {
         errors.push(`streamState.providerId (${providerId}) does not match snapshot.sourceIdentity (${snapshot.sourceIdentity})`);
+      }
+
+      // Provider capability invariants check
+      const capability = ProviderSequenceCapabilityRegistry.getPolicy(snapshot.sourceIdentity || providerId);
+      if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !capability.sequence.supportsSequenceNumber) {
+        errors.push(`Provider ${snapshot.sourceIdentity || providerId} does not support sequence numbers, but lastSequenceNumber (${lastSequenceNumber}) is present.`);
+      }
+      if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && !capability.volume.supportsSessionVolume) {
+        errors.push(`Provider ${snapshot.sourceIdentity || providerId} does not support session volume, but sessionVolumeWatermark (${sessionVolumeWatermark}) is present.`);
       }
     }
 
