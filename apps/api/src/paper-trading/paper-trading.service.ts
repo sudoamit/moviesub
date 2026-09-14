@@ -952,7 +952,9 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // Atomically update PaperAccount balance, realizedPnL, & usedMargin
+      // MODEL-A ACCOUNTING CONTRACT:
+      // PaperAccount.realizedPnL === PaperTrade.realizedPnL === (cashBalanceFinal - cashBalanceInitial) over any completed lifecycle.
+      // At ENTRY: cashBalance -= entryFees, realizedPnL -= entryFees, totalChargesPaid += entryFees, usedMargin += requiredMargin.
       await tx.paperAccount.update({
         where: { id: account.id },
         data: {
@@ -1384,6 +1386,8 @@ export class PaperTradingService implements IExecutionProvider {
         {
           role: 'FINAL_EXIT',
           price: finalExitPrice,
+          fillPrice: finalExitPrice,
+          executionPriceSource: priceSource,
           quantity: finalQty,
           fee: finalExitCharges,
           grossPnL: finalGrossPnL,
@@ -1485,7 +1489,9 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin for final leg (Authoritative Accounting Ledger Model)
+      // MODEL-A ACCOUNTING CONTRACT:
+      // At FINAL exit: cashBalance += final grossPnL - final exitFees, realizedPnL += final grossPnL - final exitFees, totalChargesPaid += final exitFees, usedMargin -= remainingMargin.
+      // Over complete lifecycle: PaperAccount.realizedPnL === PaperTrade.realizedPnL === (cashBalanceFinal - cashBalanceInitial).
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {

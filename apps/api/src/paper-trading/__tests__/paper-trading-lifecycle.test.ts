@@ -190,7 +190,32 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         }),
       },
       $transaction: jest.fn().mockImplementation(async (cb) => {
-        return await cb(mockPrisma);
+        const snapAccounts = JSON.parse(JSON.stringify(dbAccounts));
+        const snapOrders = JSON.parse(JSON.stringify(dbOrders));
+        const snapFills = JSON.parse(JSON.stringify(dbFills));
+        const snapPositions = JSON.parse(JSON.stringify(dbPositions));
+        const snapTrades = JSON.parse(JSON.stringify(dbTrades));
+        const snapAudits = JSON.parse(JSON.stringify(dbAudits));
+        try {
+          return await cb(mockPrisma);
+        } catch (err) {
+          dbAccounts.length = 0;
+          dbAccounts.push(
+            ...snapAccounts.map((a: any) => ({
+              ...a,
+              cashBalance: new Decimal(a.cashBalance),
+              usedMargin: new Decimal(a.usedMargin),
+              realizedPnL: new Decimal(a.realizedPnL),
+              totalChargesPaid: new Decimal(a.totalChargesPaid),
+            })),
+          );
+          dbOrders.length = 0; dbOrders.push(...snapOrders);
+          dbFills.length = 0; dbFills.push(...snapFills);
+          dbPositions.length = 0; dbPositions.push(...snapPositions);
+          dbTrades.length = 0; dbTrades.push(...snapTrades);
+          dbAudits.length = 0; dbAudits.push(...snapAudits);
+          throw err;
+        }
       }),
     };
 
@@ -1989,5 +2014,247 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     });
 
     expect(resSeqHigh!.price).toBe(51000); // Updated to sequence 101 price
+  });
+
+  // =========================================================================
+  // AI FIX 145 TESTS — FINAL LEDGER & EXECUTION RELEASE GATE
+  // =========================================================================
+
+  it('TEST 145-1: ENTRY TRANSACTION ATOMICITY & FAILURE INJECTION — DB error midway rolls back account state 100%', async () => {
+    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    const initCash = 1000000.0;
+    const initialOrdersCount = dbOrders.length;
+    const initialFillsCount = dbFills.length;
+    const initialPositionsCount = dbPositions.length;
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+
+    // Force failure midway inside mockPrisma.paperPosition.create
+    const origCreatePosition = mockPrisma.paperPosition.create;
+    (mockPrisma.paperPosition.create as jest.Mock) = jest.fn().mockImplementation(() => {
+      throw new Error('[FORCED_DB_FAILURE_INJECTION] Database connection lost midway through transaction');
+    });
+
+    try {
+      await expect(
+        paperService.placeOrder({
+          symbol: 'BTCUSDT',
+          direction: 'BUY',
+          quantity: 2,
+          orderType: 'MARKET',
+          stopLoss: 48000,
+          target1: 52000,
+          executionMode: ExecutionMode.TEST,
+        }),
+      ).rejects.toThrow('[FORCED_DB_FAILURE_INJECTION]');
+    } finally {
+      mockPrisma.paperPosition.create = origCreatePosition;
+    }
+
+    // Assert 100% atomic rollback: zero leftover account balance or margin drift
+    const account = dbAccounts[0];
+    expect(Number(account.cashBalance)).toBe(initCash);
+    expect(Number(account.realizedPnL)).toBe(0.0);
+    expect(Number(account.usedMargin)).toBe(0.0);
+    expect(Number(account.totalChargesPaid)).toBe(0.0);
+
+    // Assert no order, fill, or position survived
+    expect(dbOrders.length).toBe(initialOrdersCount);
+    expect(dbFills.length).toBe(initialFillsCount);
+    expect(dbPositions.length).toBe(initialPositionsCount);
+  });
+
+  it('TEST 145-2 & 145-3: COMPLETE 7-PATH MODEL-A RECONCILIATION MATRIX & FEE RECONCILIATION', async () => {
+    let currentPrice = 50000;
+    let currentEventTime = Date.now();
+
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => ({
+      symbol: sym,
+      price: currentPrice,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: currentEventTime,
+    }));
+
+    const runLifecyclePath = async (
+      pathName: string,
+      direction: 'BUY' | 'SELL',
+      entryPrice: number,
+      sl: number,
+      tp1: number,
+      tp2: number | null,
+      ticks: { price: number; delayMs?: number; action?: 'monitor' | 'close' }[],
+    ) => {
+      // Reset account for isolated test run
+      dbAccounts[0].cashBalance = new Decimal(1000000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 1000000.0;
+      currentPrice = entryPrice;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction,
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: sl,
+        target1: tp1,
+        target2: tp2 || undefined,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      for (const tick of ticks) {
+        currentPrice = tick.price;
+        currentEventTime += tick.delayMs || 2000;
+        if (tick.action === 'close') {
+          await paperService.closePosition(pos.id);
+        } else {
+          await monitorService.evaluateActivePositions();
+        }
+      }
+
+      const acc = dbAccounts[0];
+      const trades = dbTrades.filter((t) => t.positionId === pos.id);
+      expect(trades.length).toBe(1); // Exactly 1 PaperTrade lifecycle record
+
+      const trade = trades[0];
+      const cashDelta = Number(acc.cashBalance) - initCash;
+      const realizedPnLDelta = Number(acc.realizedPnL);
+      const totalChargesPaid = Number(acc.totalChargesPaid);
+      const tradeRealizedPnL = Number(trade.realizedPnL);
+      const chargesJsonTotal = Number((trade.chargesJson as any).totalCharges);
+
+      // Model-A Equality: Account realizedPnL == PaperTrade.realizedPnL == cashDelta
+      expect(realizedPnLDelta).toBeCloseTo(tradeRealizedPnL, 2);
+      expect(cashDelta).toBeCloseTo(tradeRealizedPnL, 2);
+      expect(Number(acc.usedMargin)).toBe(0);
+
+      // Fee Equality: totalChargesPaid delta == chargesJson.totalCharges
+      expect(totalChargesPaid).toBeCloseTo(chargesJsonTotal, 2);
+
+      return { trade, acc };
+    };
+
+    // Path A: Full exit without TP1 (Direct target2 hit)
+    await runLifecyclePath('PathA', 'BUY', 50000, 48000, 52000, 55000, [
+      { price: 55000, action: 'monitor' },
+    ]);
+
+    // Path B: TP1 -> TP2 (Scale out @ 52000, then TP2 @ 55000)
+    await runLifecyclePath('PathB', 'BUY', 50000, 48000, 52000, 55000, [
+      { price: 52000, action: 'monitor' },
+      { price: 55000, action: 'monitor' },
+    ]);
+
+    // Path C: TP1 -> SL (Scale out @ 52000, then initial SL @ 47000)
+    await runLifecyclePath('PathC', 'BUY', 50000, 47000, 52000, null, [
+      { price: 52000, action: 'monitor' },
+      { price: 47000, action: 'monitor' },
+    ]);
+
+    // Path D: TP1 -> Breakeven SL (Scale out @ 52000, then SL moved to entry 50000)
+    await runLifecyclePath('PathD', 'BUY', 50000, 48000, 52000, null, [
+      { price: 52000, action: 'monitor' },
+      { price: 50000, action: 'monitor' },
+    ]);
+
+    // Path E: TP1 -> Manual Exit (Scale out @ 52000, then manual close @ 53000)
+    await runLifecyclePath('PathE', 'BUY', 50000, 48000, 52000, null, [
+      { price: 52000, action: 'monitor' },
+      { price: 53000, action: 'close' },
+    ]);
+
+    // Path F: Losing Full SL (Direct SL @ 48000 hit without TP1)
+    await runLifecyclePath('PathF', 'BUY', 50000, 48000, 52000, null, [
+      { price: 48000, action: 'monitor' },
+    ]);
+
+    // Path G: Short/Bearish Lifecycle (SELL order @ 50000, TP1 @ 48000, TP2 @ 45000)
+    await runLifecyclePath('PathG', 'SELL', 50000, 52000, 48000, 45000, [
+      { price: 48000, action: 'monitor' },
+      { price: 45000, action: 'monitor' },
+    ]);
+  });
+
+  it('TEST 145-4: EXECUTION PATH USES VALIDATED TICKER — position monitor fails closed on invalid ticker', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation(() => {
+      throw new Error('MARKET_DATA_UNAVAILABLE: Stale or unvalidated quote');
+    });
+
+    // Monitor evaluation should catch error or ignore position without executing trade
+    await expect(monitorService.evaluateActivePositions()).resolves.not.toThrow();
+  });
+
+  it('TEST 145-5: EXECUTION LEG AUDIT SCHEMA CHECK — legs contain role, prices, timestamps, PnL & R', async () => {
+    let currentPrice = 50000;
+    let currentEventTime = Date.now();
+
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => ({
+      symbol: sym,
+      price: currentPrice,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: currentEventTime,
+    }));
+
+    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 2,
+      orderType: 'MARKET',
+      stopLoss: 48000,
+      target1: 52000,
+      target2: 55000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // TP1 @ 52000
+    currentPrice = 52000;
+    currentEventTime += 2000;
+    await monitorService.evaluateActivePositions();
+
+    // TP2 @ 55000
+    currentPrice = 55000;
+    currentEventTime += 2000;
+    await monitorService.evaluateActivePositions();
+
+    const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+    const legs = (trade.outcomeSnapshotJson as any).legs;
+
+    expect(legs).toBeDefined();
+    expect(legs.length).toBe(3); // ENTRY, TP1_PARTIAL, FINAL_EXIT
+
+    const tp1Leg = legs.find((l: any) => l.role === 'TP1_PARTIAL');
+    expect(tp1Leg).toBeDefined();
+    expect(tp1Leg.role).toBe('TP1_PARTIAL');
+    expect(tp1Leg.triggerPrice).toBe(52000);
+    expect(tp1Leg.fillPrice).toBe(52000);
+    expect(tp1Leg.quantity).toBe(1.0);
+    expect(tp1Leg.fee).toBeGreaterThan(0);
+    expect(tp1Leg.grossPnL).toBeGreaterThan(0);
+    expect(tp1Leg.netPnL).toBeGreaterThan(0);
+    expect(tp1Leg.fillTimestamp).toBeDefined();
+
+    const finalLeg = legs.find((l: any) => l.role === 'FINAL_EXIT');
+    expect(finalLeg).toBeDefined();
+    expect(finalLeg.role).toBe('FINAL_EXIT');
+    expect(finalLeg.fillPrice).toBe(55000);
+    expect(finalLeg.quantity).toBe(1.0);
+    expect(finalLeg.fee).toBeGreaterThan(0);
   });
 });

@@ -377,7 +377,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           },
         });
 
-        // Update PaperAccount balance and used margin ONLY — PaperTrade record is created ONLY on final exit
+        // MODEL-A ACCOUNTING CONTRACT:
+        // At TP1 partial exit: cashBalance += TP1 grossPnL - TP1 exitFees, realizedPnL += TP1 grossPnL - TP1 exitFees, totalChargesPaid += TP1 exitFees, usedMargin -= releasedMargin.
+        // PaperTrade record is created ONLY on final exit to preserve 1 Position = 1 PaperTrade lifecycle.
         await tx.paperAccount.update({
           where: { id: pos.accountId },
           data: {
