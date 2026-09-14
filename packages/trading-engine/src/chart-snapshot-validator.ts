@@ -196,16 +196,32 @@ export class ChartSnapshotValidator {
 
     // Validate Stream State Watermarks & Single Ownership Consistency Invariants
     if (snapshot.streamState) {
-      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch, marketAsOf, observedAt: streamObservedAt, sessionKey, providerId } = snapshot.streamState;
+      const {
+        sessionVolumeWatermark,
+        lastSequenceNumber,
+        connectionEpoch,
+        providerConnectionEpoch,
+        localConnectionInstanceId,
+        marketAsOf,
+        observedAt: streamObservedAt,
+        sessionKey,
+        providerId,
+      } = snapshot.streamState;
 
       if (!streamObservedAt) {
         errors.push('Stream state observedAt missing');
+      } else if (snapshot.observedAt) {
+        const sObsMs = new Date(streamObservedAt).getTime();
+        const topObsMs = new Date(snapshot.observedAt).getTime();
+        if (!isNaN(sObsMs) && !isNaN(topObsMs) && sObsMs !== topObsMs) {
+          errors.push(`streamState.observedAt (${streamObservedAt}) does not match snapshot.observedAt (${snapshot.observedAt})`);
+        }
       }
 
       if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && sessionVolumeWatermark < 0) {
         errors.push(`streamState sessionVolumeWatermark < 0: ${sessionVolumeWatermark}`);
       }
-      if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && (!snapshot.sessionKey || snapshot.sessionKey.trim() === '')) {
+      if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && (!sessionKey || sessionKey.trim() === '')) {
         errors.push('streamState sessionVolumeWatermark specified without sessionKey');
       }
       if (snapshot.sessionVolumeWatermark !== undefined && snapshot.sessionVolumeWatermark !== null && sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null) {
@@ -213,8 +229,8 @@ export class ChartSnapshotValidator {
           errors.push(`snapshot.sessionVolumeWatermark (${snapshot.sessionVolumeWatermark}) does not match streamState.sessionVolumeWatermark (${sessionVolumeWatermark})`);
         }
       }
-      if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !connectionEpoch) {
-        errors.push('streamState sequence number specified without connectionEpoch');
+      if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !connectionEpoch && !providerConnectionEpoch && !localConnectionInstanceId) {
+        errors.push('streamState sequence number specified without connectionEpoch or connection identity');
       }
 
       if (marketAsOf && snapshot.marketAsOf) {

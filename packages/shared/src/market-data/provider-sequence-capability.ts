@@ -114,8 +114,25 @@ export class ProviderSequenceCapabilityRegistry {
       },
       volume: {
         supportsSessionVolume: false,
+        supportsBucketCumulative: false,
+        supportsIncremental: false,
+      },
+      session: {
+        isContinuous247: false,
+        requiresVenueCalendar: true,
+      },
+    },
+    REST_BOOTSTRAP: {
+      providerId: 'REST_BOOTSTRAP',
+      sequence: {
+        scope: 'NONE',
+        resetOnReconnect: true,
+        supportsSequenceNumber: false,
+      },
+      volume: {
+        supportsSessionVolume: false,
         supportsBucketCumulative: true,
-        supportsIncremental: true,
+        supportsIncremental: false,
       },
       session: {
         isContinuous247: false,
@@ -124,27 +141,69 @@ export class ProviderSequenceCapabilityRegistry {
     },
   };
 
+  private static canonicalAliases: Record<string, string> = {
+    BINANCE: 'BINANCE_REALTIME',
+    BINANCE_REALTIME: 'BINANCE_REALTIME',
+    BINANCE_WS: 'BINANCE_REALTIME',
+    'BINANCE-1': 'BINANCE_REALTIME',
+    P1: 'BINANCE_REALTIME',
+    TEST: 'NSE_TRUE_DATA',
+    TEST_PROVIDER: 'NSE_TRUE_DATA',
+    NSE: 'NSE_TRUE_DATA',
+    NSE_TRUE_DATA: 'NSE_TRUE_DATA',
+    NSE_REALTIME: 'NSE_TRUE_DATA',
+    NSE_LIVE: 'NSE_TRUE_DATA',
+    COMEX: 'COMEX_GOLD',
+    COMEX_GOLD: 'COMEX_GOLD',
+    GOLD: 'COMEX_GOLD',
+    YAHOO: 'YAHOO_FINANCE',
+    YAHOO_FINANCE: 'YAHOO_FINANCE',
+    REST_BOOTSTRAP: 'REST_BOOTSTRAP',
+    UNKNOWN_PROVIDER: 'UNKNOWN_PROVIDER',
+    UNKNOWN_SOURCE: 'UNKNOWN_PROVIDER',
+  };
+
+  /**
+   * Registers custom provider capabilities from adapter definitions.
+   */
+  public static registerCapabilities(capabilities: ProviderCapabilities): void {
+    if (capabilities && capabilities.providerId) {
+      const key = capabilities.providerId.toUpperCase().trim();
+      this.capabilities[key] = capabilities;
+      this.canonicalAliases[key] = key;
+    }
+  }
+
   /**
    * Retrieves formal provider capabilities for a given canonical provider identifier.
+   * Exact lookup & Canonical resolution: Raw provider ID → Canonical Provider ID → Capabilities.
    * Fails closed to UNKNOWN_PROVIDER when provider identifier is missing or unknown.
    */
   public static getPolicy(providerId?: string): ProviderCapabilities {
-    if (!providerId || providerId.trim() === '' || providerId === 'UNKNOWN_PROVIDER' || providerId === 'UNKNOWN_SOURCE') {
+    if (!providerId || providerId.trim() === '') {
       return this.capabilities['UNKNOWN_PROVIDER'];
     }
 
     const key = providerId.toUpperCase().trim();
+
+    // 1. Exact direct lookup
     if (this.capabilities[key]) {
       return this.capabilities[key];
     }
 
-    // Exact canonical lookup or fail-closed to UNKNOWN_PROVIDER
+    // 2. Canonical alias resolution
+    const canonicalKey = this.canonicalAliases[key];
+    if (canonicalKey && this.capabilities[canonicalKey]) {
+      return this.capabilities[canonicalKey];
+    }
+
+    // 3. Provider family canonical resolution for standard exchange feeds
     if (key.startsWith('BINANCE')) return this.capabilities['BINANCE_REALTIME'];
     if (key.startsWith('NSE')) return this.capabilities['NSE_TRUE_DATA'];
     if (key.startsWith('COMEX') || key.startsWith('GOLD')) return this.capabilities['COMEX_GOLD'];
     if (key.startsWith('YAHOO')) return this.capabilities['YAHOO_FINANCE'];
-    if (key.startsWith('TEST') || key.startsWith('P') || key.startsWith('MOCK')) return this.capabilities['NSE_TRUE_DATA'];
 
+    // 4. Fail-closed: Return UNKNOWN_PROVIDER for any unknown/unregistered provider ID
     return this.capabilities['UNKNOWN_PROVIDER'];
   }
 }

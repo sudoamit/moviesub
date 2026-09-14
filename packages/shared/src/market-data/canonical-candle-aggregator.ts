@@ -33,6 +33,8 @@ export class CanonicalCandleAggregator {
   private lastSequenceNumber: number | null = null;
   private sessionVolumeWatermark: number | null = null;
   private connectionEpoch: string | null = null;
+  private providerConnectionEpoch: string | null = null;
+  private localConnectionInstanceId: string | null = null;
   private providerId = 'UNKNOWN_PROVIDER';
   private lastSessionKey = '';
   private currentSymbol = '';
@@ -48,6 +50,8 @@ export class CanonicalCandleAggregator {
     this.lastSequenceNumber = null;
     this.sessionVolumeWatermark = null;
     this.connectionEpoch = null;
+    this.providerConnectionEpoch = null;
+    this.localConnectionInstanceId = null;
     this.providerId = 'UNKNOWN_PROVIDER';
     this.lastSessionKey = '';
     this.currentSymbol = '';
@@ -102,7 +106,9 @@ export class CanonicalCandleAggregator {
       this.providerId = 'UNKNOWN_PROVIDER';
     }
 
-    this.connectionEpoch = state?.connectionEpoch ?? (snapshot.streamState ? 'REST_BOOTSTRAP' : null);
+    this.providerConnectionEpoch = state?.providerConnectionEpoch ?? (state?.connectionEpoch && state.connectionEpoch !== 'REST_BOOTSTRAP' ? state.connectionEpoch : null);
+    this.localConnectionInstanceId = state?.localConnectionInstanceId ?? null;
+    this.connectionEpoch = state?.connectionEpoch ?? (this.providerConnectionEpoch || this.localConnectionInstanceId || (snapshot.streamState ? 'REST_BOOTSTRAP' : null));
 
     // 2. Restore Latest Event Watermark (marketAsOf)
     if (state?.marketAsOf) {
@@ -188,6 +194,8 @@ export class CanonicalCandleAggregator {
     const seqNum = capability.sequence.supportsSequenceNumber ? rawSeqNum : undefined;
 
     let candidateEpoch = this.connectionEpoch;
+    let candidateProviderEpoch = this.providerConnectionEpoch;
+    let candidateLocalInstanceId = this.localConnectionInstanceId;
     let candidateSequenceNum = this.lastSequenceNumber;
 
     // 3. REST_BOOTSTRAP Non-Reusability & Connection Epoch Verification
@@ -198,19 +206,32 @@ export class CanonicalCandleAggregator {
       }
     }
 
-    if (tickEpoch && tickEpoch !== this.connectionEpoch) {
+    const rawProviderEpoch = (rawTick as ProviderTick).providerConnectionEpoch || (tick.providerConnectionEpoch) || (tickEpoch && tickEpoch !== 'REST_BOOTSTRAP' ? tickEpoch : null);
+    const rawLocalInstanceId = (rawTick as ProviderTick).localConnectionInstanceId || (tick.localConnectionInstanceId) || null;
+
+    if (rawProviderEpoch || rawLocalInstanceId) {
       if (isReconnect || this.connectionEpoch === null || this.connectionEpoch === 'REST_BOOTSTRAP' || this.connectionEpoch === '') {
-        // Accept transition from REST_BOOTSTRAP or reconnect to new LIVE connection epoch
-        candidateEpoch = tickEpoch;
+        candidateProviderEpoch = rawProviderEpoch;
+        candidateLocalInstanceId = rawLocalInstanceId;
+        candidateEpoch = candidateProviderEpoch || candidateLocalInstanceId;
         candidateSequenceNum = seqNum ?? null;
+      } else if (rawProviderEpoch && candidateProviderEpoch && rawProviderEpoch !== candidateProviderEpoch) {
+        return snapshot; // Reject tick from mismatched provider connection epoch
       } else {
-        // Reject tick from mismatched / old connection epoch
-        return snapshot;
+        if (!candidateProviderEpoch) candidateProviderEpoch = rawProviderEpoch;
+        if (!candidateLocalInstanceId) candidateLocalInstanceId = rawLocalInstanceId;
+        candidateEpoch = candidateProviderEpoch || candidateLocalInstanceId;
       }
     } else if (this.connectionEpoch === null || this.connectionEpoch === '' || this.connectionEpoch === 'REST_BOOTSTRAP') {
-      candidateEpoch = tickEpoch || `${tickProviderId}_epoch`;
+      // Generate a distinct local connection instance ID for the local stream session (never masquerade as provider epoch)
+      candidateLocalInstanceId = `local_inst_${tickTimeMs}_${Math.random().toString(36).substring(2, 7)}`;
+      candidateProviderEpoch = null;
+      candidateEpoch = candidateLocalInstanceId;
       candidateSequenceNum = seqNum ?? null;
-    } else if (isReconnect) {
+    }
+
+    // Sequence Monotonicity & Ordering Validation
+    if (isReconnect) {
       candidateSequenceNum = seqNum ?? null;
     } else if (seqNum !== undefined && seqNum !== null) {
       // Sequence requires valid non-REST connectionEpoch invariant
@@ -218,7 +239,7 @@ export class CanonicalCandleAggregator {
         return snapshot; // Reject sequence specified without live connectionEpoch
       }
 
-      if (candidateSequenceNum !== null && seqNum <= candidateSequenceNum) {
+      if (this.lastSequenceNumber !== null && this.connectionEpoch === candidateEpoch && seqNum <= this.lastSequenceNumber) {
         return snapshot; // Reject stale or out-of-order sequence number -> watermarks UNCHANGED
       }
       candidateSequenceNum = seqNum;
@@ -322,23 +343,23 @@ export class CanonicalCandleAggregator {
       } else if (tick.volumeType === 'BUCKET_CUMULATIVE') {
         newVol = Math.max(currentForming.volume, safeVol);
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
-        // Enforce Volume Capability: If provider does not support session volume, reject SESSION_CUMULATIVE aggregation!
         if (capability.volume.supportsSessionVolume === false) {
-          newVol = currentForming.volume; // Fail closed, volume unchanged
+          newVol = currentForming.volume;
         } else if (explicitSessionVol === undefined || explicitSessionVol === null) {
-          // Mandatory sessionVolume requirement: if absent, fail closed on volume update
           newVol = currentForming.volume;
         } else {
           const baseline = candidateSessionVolumeWatermark;
-          const delta =
-            baseline !== null && baseline >= 0 && !isNewSession
-              ? Math.max(0, explicitSessionVol - baseline)
-              : 0;
-          newVol = currentForming.volume + delta;
-          candidateSessionVolumeWatermark = explicitSessionVol;
+          if (baseline === null || baseline === undefined || isNewSession) {
+            // P0-2 Bootstrap: First live SESSION_CUMULATIVE tick establishes baseline watermark without fabricating a delta
+            candidateSessionVolumeWatermark = explicitSessionVol;
+            newVol = currentForming.volume;
+          } else {
+            const delta = Math.max(0, explicitSessionVol - baseline);
+            newVol = currentForming.volume + delta;
+            candidateSessionVolumeWatermark = explicitSessionVol;
+          }
         }
       } else {
-        // UNKNOWN: fail-closed, keep volume unchanged
         newVol = currentForming.volume;
       }
 
@@ -362,9 +383,17 @@ export class CanonicalCandleAggregator {
       ) {
         initialVol = safeVol;
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
-        initialVol = 0;
         if (capability.volume.supportsSessionVolume !== false && explicitSessionVol !== undefined && explicitSessionVol !== null) {
-          candidateSessionVolumeWatermark = explicitSessionVol;
+          const baseline = candidateSessionVolumeWatermark;
+          if (baseline === null || baseline === undefined || isNewSession) {
+            candidateSessionVolumeWatermark = explicitSessionVol;
+            initialVol = 0;
+          } else {
+            initialVol = Math.max(0, explicitSessionVol - baseline);
+            candidateSessionVolumeWatermark = explicitSessionVol;
+          }
+        } else {
+          initialVol = 0;
         }
       }
 
@@ -398,6 +427,8 @@ export class CanonicalCandleAggregator {
       sessionKey,
       providerId: tickProviderId,
       connectionEpoch: candidateEpoch,
+      providerConnectionEpoch: candidateProviderEpoch,
+      localConnectionInstanceId: candidateLocalInstanceId,
       lastSequenceNumber: candidateSequenceNum,
       sessionVolumeWatermark: candidateSessionVolumeWatermark,
     };
@@ -424,7 +455,10 @@ export class CanonicalCandleAggregator {
     // 12. TRANSACTIONAL COMMIT: Only update internal state AFTER tick processing succeeds
     this.providerId = tickProviderId;
     this.connectionEpoch = candidateEpoch;
+    this.providerConnectionEpoch = candidateProviderEpoch;
+    this.localConnectionInstanceId = candidateLocalInstanceId;
     this.lastSequenceNumber = candidateSequenceNum;
+    this.sessionVolumeWatermark = candidateSessionVolumeWatermark;
     this.sessionVolumeWatermark = candidateSessionVolumeWatermark;
     this.lastAcceptedEventTimeMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
     this.lastSessionKey = sessionKey;

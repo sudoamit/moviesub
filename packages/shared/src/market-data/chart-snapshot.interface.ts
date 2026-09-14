@@ -23,6 +23,8 @@ export interface ProviderTick {
   readonly sequenceNumber?: number;
   readonly providerId?: string;
   readonly connectionEpoch?: string;
+  readonly providerConnectionEpoch?: string | null;
+  readonly localConnectionInstanceId?: string | null;
   readonly sessionVolume?: number;
   readonly isReconnect?: boolean;
 }
@@ -37,6 +39,8 @@ export interface NormalizedTick {
   readonly sequenceNumber?: number;
   readonly providerId?: string;
   readonly connectionEpoch?: string;
+  readonly providerConnectionEpoch?: string | null;
+  readonly localConnectionInstanceId?: string | null;
   readonly sessionVolume?: number;
   readonly isReconnect?: boolean;
 }
@@ -71,6 +75,8 @@ export interface CanonicalStreamState {
   readonly sessionKey: string;
   readonly providerId?: string;
   readonly connectionEpoch?: string | null;
+  readonly providerConnectionEpoch?: string | null;
+  readonly localConnectionInstanceId?: string | null;
   readonly lastSequenceNumber?: number | null;
   readonly sessionVolumeWatermark?: number | null;
 }

@@ -63,6 +63,10 @@ describe('AI FIX 128 — Canonical Provider Observation & Capability Enforcement
       ...baseSnapshot,
       marketAsOf: 1700001000000,
       observedAt: 1700005000000,
+      streamState: {
+        ...baseSnapshot.streamState!,
+        observedAt: 1700005000000,
+      },
     };
     expect(snap.marketAsOf).toBeLessThanOrEqual(snap.observedAt as number);
     expect(snap.marketAsOf).not.toBe(snap.observedAt);

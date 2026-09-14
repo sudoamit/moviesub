@@ -72,7 +72,9 @@ export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): Norma
     tickId: raw.tickId ? String(raw.tickId) : undefined,
     sequenceNumber: raw.sequenceNumber,
     providerId: raw.providerId,
-    connectionEpoch: raw.connectionEpoch,
+    connectionEpoch: raw.connectionEpoch || raw.providerConnectionEpoch || raw.localConnectionInstanceId || undefined,
+    providerConnectionEpoch: raw.providerConnectionEpoch ?? (raw.connectionEpoch || null),
+    localConnectionInstanceId: raw.localConnectionInstanceId ?? null,
     sessionVolume: safeSessionVol,
     isReconnect: raw.isReconnect,
   };

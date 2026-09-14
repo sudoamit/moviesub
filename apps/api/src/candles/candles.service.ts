@@ -413,21 +413,35 @@ export class CandlesService {
     const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
-    // Actual latest provider market event timestamp (strictly derived from market event timestamps, NEVER Date.now())
-    const formingTimeMs = candlesResp.formingCandle ? new Date(candlesResp.formingCandle.timestamp).getTime() : 0;
-    const closedTimeMs = new Date(latestClosedTimestamp).getTime();
-    const latestEventMs = Math.max(formingTimeMs, closedTimeMs);
-    const marketAsOf = new Date(latestEventMs).toISOString();
+
+    // Genuine provider market event timestamp (P0-1)
+    // Do NOT derive marketAsOf from formingCandle.timestamp, closed candle timestamp, or Date.now().
+    const providerMarketEventMs = (candlesResp as any).latestMarketEventTimestamp
+      ? new Date((candlesResp as any).latestMarketEventTimestamp).getTime()
+      : null;
+
+    let marketAsOf: string | undefined = undefined;
+    let isDegraded = Boolean(convResult.isDegraded || smcAnalysis.isDegraded);
+
+    if (providerMarketEventMs && !isNaN(providerMarketEventMs) && providerMarketEventMs > 0) {
+      marketAsOf = new Date(providerMarketEventMs).toISOString();
+    } else {
+      // Provider event timestamp unavailable: mark snapshot as degraded and do NOT masquerade formingCandle.timestamp as marketAsOf
+      isDegraded = true;
+      marketAsOf = undefined;
+    }
+
     const sessionKey = VenueSessionCalendar.getSessionKey(sym, latestClosedTimestamp);
-    // REST initial snapshot does not claim session cumulative watermark unless provider gave explicit reading
     const sessionVolumeWatermark: number | null = null;
 
     const streamState: CanonicalStreamState = {
-      marketAsOf,
+      marketAsOf: marketAsOf || observationTime,
       observedAt: observationTime,
       sessionKey,
       providerId: sourceIdentity,
       connectionEpoch: 'REST_BOOTSTRAP',
+      providerConnectionEpoch: 'REST_BOOTSTRAP',
+      localConnectionInstanceId: null,
       lastSequenceNumber: null,
       sessionVolumeWatermark,
     };
@@ -458,6 +472,7 @@ export class CandlesService {
       streamState,
       dataProvenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
       sourceIdentity,
+      isDegraded,
       smcSnapshot: {
         symbol: inst.symbol,
         timeframe,
@@ -480,7 +495,6 @@ export class CandlesService {
         fvgs: smcAnalysis.fairValueGaps || [],
         orderBlocks: smcAnalysis.orderBlocks || [],
       },
-      isDegraded: convResult.isDegraded || smcAnalysis.isDegraded || false,
     };
   }
 
