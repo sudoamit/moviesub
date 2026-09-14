@@ -12,18 +12,18 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
   let serviceA: PaperPositionMonitorService;
   let serviceB: PaperPositionMonitorService;
 
-  const DB_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+  const DB_URL = process.env.TEST_DATABASE_URL;
 
   beforeAll(async () => {
     if (process.env.CI && !DB_URL) {
       throw new Error(
-        '❌ [FAIL-FAST CI CONFIG] Neither TEST_DATABASE_URL nor DATABASE_URL environment variable is set in CI environment.',
+        '❌ [FAIL-FAST CI CONFIG] TEST_DATABASE_URL environment variable is required for integration tests in CI environment.',
       );
     }
 
     if (!DB_URL) {
       console.warn(
-        '⚠️ [INTEGRATION TEST SKIPPED] Neither TEST_DATABASE_URL nor DATABASE_URL environment variable is set.',
+        '⚠️ [INTEGRATION TEST SKIPPED] TEST_DATABASE_URL environment variable is not set. Skipped PostgreSQL integration suite.',
       );
       return;
     }

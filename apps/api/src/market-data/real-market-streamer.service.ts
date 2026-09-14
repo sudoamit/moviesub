@@ -20,6 +20,7 @@ export interface ILiveRealTicker {
   lastUpdated: number;
   provenance: QuoteProvenance;
   marketEventTime?: number;
+  sequence?: number;
   observedAt?: number;
   receivedAt?: number;
 }
@@ -347,8 +348,22 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const now = Date.now();
     const existing = this.tickers.get(sym);
 
-    // Out-of-order rejection: Do NOT regress to an older provider marketEventTime
-    if (existing && existing.marketEventTime && tick.marketEventTime && tick.marketEventTime < existing.marketEventTime) {
+    const provenance = tick.provenance ?? 'LIVE_PROVIDER';
+    if (provenance === 'LIVE_PROVIDER') {
+      const eventTime = tick.marketEventTime;
+      if (eventTime === undefined || eventTime === null || !Number.isFinite(eventTime) || eventTime <= 0) {
+        return existing || null; // Reject tick: LIVE_PROVIDER requires valid positive marketEventTime
+      }
+    }
+
+    // Sequence number ordering: higher sequence takes precedence over timestamp
+    const hasSequenceComparison = existing && existing.sequence !== undefined && tick.sequence !== undefined;
+    if (hasSequenceComparison) {
+      if (tick.sequence! < existing!.sequence!) {
+        return existing;
+      }
+    } else if (existing && existing.marketEventTime && tick.marketEventTime && tick.marketEventTime < existing.marketEventTime) {
+      // Out-of-order rejection: Do NOT regress to an older provider marketEventTime when sequence is absent
       return existing;
     }
 
@@ -376,8 +391,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       tickSize,
       volatility: tick.volatility ?? existing?.volatility ?? 1.0,
       lastUpdated: tick.lastUpdated ?? now,
-      provenance: tick.provenance ?? 'LIVE_PROVIDER',
+      provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
+      sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
     };
@@ -484,6 +500,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const key = contractSymbol.toUpperCase();
     const now = Date.now();
     const existing = this.optionTickers.get(key);
+
+    const provenance = tick.provenance ?? 'LIVE_PROVIDER';
+    if (provenance === 'LIVE_PROVIDER') {
+      const eventTime = tick.marketEventTime;
+      if (eventTime === undefined || eventTime === null || !Number.isFinite(eventTime) || eventTime <= 0) {
+        return existing || null; // Reject tick: LIVE_PROVIDER requires valid positive marketEventTime
+      }
+    }
+
     const updated: ILiveRealTicker = {
       symbol: key,
       price: tick.price,
@@ -498,8 +523,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       tickSize: tick.tickSize ?? existing?.tickSize ?? undefined,
       volatility: tick.volatility ?? existing?.volatility ?? 1.0,
       lastUpdated: tick.lastUpdated ?? now,
-      provenance: tick.provenance ?? 'LIVE_PROVIDER',
+      provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
+      sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
     };

@@ -816,7 +816,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: binanceCloseTime,
     });
 
-    expect(ticker.marketEventTime).toBe(binanceCloseTime);
+    expect(ticker!.marketEventTime).toBe(binanceCloseTime);
   });
 
   // TEST S: SINGLE PAPERTRADE RECORD INVARIANT FOR MULTI-LEG LIFECYCLE
@@ -1592,25 +1592,25 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: Date.now(),
       provenance: 'LIVE_PROVIDER',
     });
-    expect(tickKnown.tickSize).toBe(0.1); // Registry tickSize for BTCUSDT
+    expect(tickKnown!.tickSize).toBe(0.1); // Registry tickSize for BTCUSDT
 
     const tickUnknown = streamer.updateTicker('UNKNOWN_XYZ_999', {
       price: 100,
       marketEventTime: Date.now(),
       provenance: 'LIVE_PROVIDER',
     });
-    expect(tickUnknown.tickSize).toBeUndefined(); // Never fabricates 0.05 or 0.01
+    expect(tickUnknown?.tickSize).toBeUndefined(); // Never fabricates 0.05 or 0.01
   });
 
   it('TEST 143-2: LIVE_PROVIDER MANDATORY MARKET EVENT TIME — missing/invalid marketEventTime fails closed in streamer and monitor', async () => {
     const streamer = new RealMarketStreamerService(null as any);
-    streamer.updateTicker('BTCUSDT', {
+    const resNoTime = streamer.updateTicker('NEW_MANDATORY_SYM', {
       price: 50000,
       provenance: 'LIVE_PROVIDER',
-      marketEventTime: undefined as any, // Missing timestamp
+      marketEventTime: undefined as any,
     });
-
-    expect(() => streamer.getValidatedTicker('BTCUSDT', 5)).toThrow(/missing mandatory provider marketEventTime/);
+    expect(resNoTime).toBeNull();
+    expect(() => streamer.getValidatedTicker('NEW_MANDATORY_SYM', 5)).toThrow(/No active market data stream available for symbol/);
 
     // 1. Place order with valid ticker
     (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
@@ -1662,5 +1662,332 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     });
 
     expect(() => streamer.getValidatedTicker('SOLUSDT', 5)).toThrow();
+  });
+
+  // =========================================================================
+  // AI FIX 144 TESTS — RELEASE GATE INGESTION VALIDATION & REAL MODEL-A LEDGER
+  // =========================================================================
+
+  it('TEST 144-1: INGESTION BOUNDARY VALIDATION — LIVE_PROVIDER rejected if marketEventTime is missing, 0, negative, NaN, or Infinity', () => {
+    const streamer = new RealMarketStreamerService(null as any);
+
+    // 1. Missing / undefined
+    const res1 = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: undefined });
+    expect(res1).toBeNull();
+    expect(streamer.getTicker('TEST_SYM')).toBeUndefined();
+
+    // 2. Zero (0)
+    const res2 = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: 0 });
+    expect(res2).toBeNull();
+
+    // 3. Negative (-1000)
+    const res3 = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: -1000 });
+    expect(res3).toBeNull();
+
+    // 4. NaN
+    const res4 = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: NaN });
+    expect(res4).toBeNull();
+
+    // 5. Infinity
+    const res5 = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: Infinity });
+    expect(res5).toBeNull();
+
+    // 6. Option Ticker missing timestamp
+    const optRes = streamer.updateOptionTicker('NIFTY24DEC24000CE', { price: 50, provenance: 'LIVE_PROVIDER', marketEventTime: undefined });
+    expect(optRes).toBeNull();
+
+    // 7. Valid timestamp -> Accepted
+    const now = Date.now();
+    const resValid = streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: now });
+    expect(resValid).not.toBeNull();
+    expect(resValid!.provenance).toBe('LIVE_PROVIDER');
+    expect(resValid!.marketEventTime).toBe(now);
+  });
+
+  it('TEST 144-2: REAL PRODUCTION MODEL-A ENTRY ACCOUNTING — placeOrder() decrements cashBalance & realizedPnL by entryFees before any exit', async () => {
+    // 1. Set up clean account balance
+    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+
+    const initCash = 1000000.0;
+
+    // 2. Place MARKET entry order with quantity: 2 (risk = 4,000 <= 10,000 max risk limit)
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 2,
+      orderType: 'MARKET',
+      stopLoss: 48000,
+      target1: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    const accountAfterEntry = dbAccounts[0];
+    const entryFill = dbFills[dbFills.length - 1];
+    const entryFees = Number(entryFill.fee);
+    const requiredMargin = Number(accountAfterEntry.usedMargin);
+
+    // Assert production Model-A accounting state RIGHT AFTER ENTRY:
+    // cashBalance = 1,000,000 - entryFees
+    expect(Number(accountAfterEntry.cashBalance)).toBeCloseTo(initCash - entryFees, 2);
+
+    // realizedPnL = -entryFees
+    expect(Number(accountAfterEntry.realizedPnL)).toBeCloseTo(-entryFees, 2);
+
+    // usedMargin = requiredMargin
+    expect(Number(accountAfterEntry.usedMargin)).toBeCloseTo(requiredMargin, 2);
+
+    // totalChargesPaid = entryFees
+    expect(Number(accountAfterEntry.totalChargesPaid)).toBeCloseTo(entryFees, 2);
+
+    // No trades exist yet
+    const trades = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(trades.length).toBe(0);
+  });
+
+  it('TEST 144-3: COMPLETE 5-LIFECYCLE RECONCILIATION MATRIX — Account.realizedPnL === PaperTrade.realizedPnL === cashDelta & usedMargin === 0', async () => {
+    let currentPrice = 50000;
+    let currentEventTime = Date.now();
+
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => ({
+      symbol: sym,
+      price: currentPrice,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: currentEventTime,
+    }));
+
+    // Path 1: Full Exit Without TP1 (Direct Target 2 Hit)
+    {
+      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 500000.0;
+      currentPrice = 50000;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 52000,
+        target2: 55000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      // Price skips target1 and hits target2 @ 55000
+      currentPrice = 55000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      const account = dbAccounts[0];
+      const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+      const cashDelta = Number(account.cashBalance) - initCash;
+
+      expect(Number(account.realizedPnL)).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(Number(account.usedMargin)).toBe(0);
+    }
+
+    // Path 2: TP1 -> TP2 (Scale-out then full target hit)
+    {
+      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 500000.0;
+      currentPrice = 50000;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 52000,
+        target2: 55000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      // TP1 @ 52000
+      currentPrice = 52000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      // TP2 @ 55000
+      currentPrice = 55000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      const account = dbAccounts[0];
+      const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+      const cashDelta = Number(account.cashBalance) - initCash;
+
+      expect(Number(account.realizedPnL)).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(Number(account.usedMargin)).toBe(0);
+    }
+
+    // Path 3: TP1 -> SL (Scale-out then initial SL hit)
+    {
+      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 500000.0;
+      currentPrice = 50000;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 47000,
+        target1: 52000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      // TP1 @ 52000
+      currentPrice = 52000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      // SL @ 47000
+      currentPrice = 47000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      const account = dbAccounts[0];
+      const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+      const cashDelta = Number(account.cashBalance) - initCash;
+
+      expect(Number(account.realizedPnL)).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(Number(account.usedMargin)).toBe(0);
+    }
+
+    // Path 4: TP1 -> Breakeven (Scale-out then SL moved to entry price hit)
+    {
+      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 500000.0;
+      currentPrice = 50000;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 52000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      // TP1 @ 52000 (moves SL to 50000 breakeven)
+      currentPrice = 52000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      // Breakeven SL @ 50000
+      currentPrice = 50000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      const account = dbAccounts[0];
+      const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+      const cashDelta = Number(account.cashBalance) - initCash;
+
+      expect(Number(account.realizedPnL)).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(Number(account.usedMargin)).toBe(0);
+    }
+
+    // Path 5: Losing Final Exit (Direct SL hit without TP1)
+    {
+      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+      const initCash = 500000.0;
+      currentPrice = 50000;
+      currentEventTime = Date.now();
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 55000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      // Direct SL @ 48000
+      currentPrice = 48000;
+      currentEventTime += 2000;
+      await monitorService.evaluateActivePositions();
+
+      const account = dbAccounts[0];
+      const trade = dbTrades.find((t) => t.positionId === pos.id)!;
+      const cashDelta = Number(account.cashBalance) - initCash;
+
+      expect(Number(account.realizedPnL)).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
+      expect(Number(account.usedMargin)).toBe(0);
+    }
+  });
+
+  it('TEST 144-4: PROVIDER SEQUENCE ORDERING — higher sequence number takes precedence over timestamp', () => {
+    const streamer = new RealMarketStreamerService(null as any);
+    const now = Date.now();
+
+    // 1. First event with sequence 100 @ timestamp T (Price 50,000)
+    streamer.updateTicker('BTCUSDT', {
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now,
+      sequence: 100,
+    });
+
+    // 2. Incoming event with sequence 99 @ timestamp T+100ms (Price 49,000) — should be REJECTED
+    const resSeqLow = streamer.updateTicker('BTCUSDT', {
+      price: 49000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 100,
+      sequence: 99,
+    });
+
+    expect(resSeqLow!.price).toBe(50000); // Maintained sequence 100 price
+
+    // 3. Incoming event with sequence 101 @ timestamp T-10ms (Price 51,000) — should be ACCEPTED
+    const resSeqHigh = streamer.updateTicker('BTCUSDT', {
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now - 10,
+      sequence: 101,
+    });
+
+    expect(resSeqHigh!.price).toBe(51000); // Updated to sequence 101 price
   });
 });
