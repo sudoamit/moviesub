@@ -4,7 +4,7 @@ import { PaperTradingService } from './paper-trading.service';
 import { ExecutionMode } from './execution-provider.interface';
 import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
-import { Direction, PositionState, WS_EVENTS } from '@quant/shared';
+import { Direction, PositionState, WS_EVENTS, getAuthoritativeInstrument } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
 @Injectable()
@@ -81,21 +81,21 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       if (isOption) {
         // Options: fetch option contract quote for exact instrument contractSymbol
         const optionQuote = await this.getOptionContractQuote(pos);
-        if (!optionQuote || optionQuote.provenance !== 'LIVE_PROVIDER' || optionQuote.price <= 0) {
-          // If exact option LTP is unavailable, do NOT fall back to spot price. Fail closed.
+        if (!optionQuote || optionQuote.provenance !== 'LIVE_PROVIDER' || optionQuote.price <= 0 || !optionQuote.marketEventTime || optionQuote.marketEventTime <= 0) {
+          // If exact option LTP is unavailable or missing marketEventTime, do NOT fall back. Fail closed.
           return;
         }
         livePrice = optionQuote.price;
-        marketEventTime = new Date(optionQuote.marketEventTime || optionQuote.lastUpdated);
+        marketEventTime = new Date(optionQuote.marketEventTime);
         provenance = optionQuote.provenance;
       } else {
         // Spot or Crypto: fetch validated ticker
         const ticker = this.realMarketStreamer.getValidatedTicker(symbol, 5);
-        if (!ticker || ticker.provenance !== 'LIVE_PROVIDER' || ticker.price <= 0) {
+        if (!ticker || ticker.provenance !== 'LIVE_PROVIDER' || ticker.price <= 0 || !ticker.marketEventTime || ticker.marketEventTime <= 0) {
           return;
         }
         livePrice = ticker.price;
-        marketEventTime = new Date(ticker.marketEventTime || ticker.lastUpdated);
+        marketEventTime = new Date(ticker.marketEventTime);
         provenance = ticker.provenance;
       }
     } catch {
@@ -240,7 +240,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               prevClose: parsed.price,
               changePercent: 0,
               changeAmount: 0,
-              tickSize: 0.05,
+              tickSize: (getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined),
               volatility: 1.0,
               lastUpdated: parsed.timestamp || Date.now(),
               provenance: 'LIVE_PROVIDER',

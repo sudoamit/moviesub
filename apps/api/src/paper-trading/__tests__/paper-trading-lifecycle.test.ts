@@ -70,6 +70,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
             if (args.data.usedMargin?.decrement) {
               acc.usedMargin = new Decimal(Number(acc.usedMargin) - Number(args.data.usedMargin.decrement));
             }
+            if (args.data.realizedPnL?.decrement) {
+              acc.realizedPnL = new Decimal(Number(acc.realizedPnL) - Number(args.data.realizedPnL.decrement));
+            }
             if (args.data.realizedPnL?.increment) {
               acc.realizedPnL = new Decimal(Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment));
             }
@@ -1025,7 +1028,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const postTp1Cash = Number(postTp1Account.cashBalance);
     const postTp1RealizedPnL = Number(postTp1Account.realizedPnL);
 
-    expect(postTp1RealizedPnL).toBeCloseTo(tp1NetPnL, 2);
+    expect(postTp1RealizedPnL).toBeCloseTo(tp1NetPnL - entryCharges, 2);
     expect(postTp1Cash).toBeCloseTo(postEntryCash + tp1NetPnL, 2);
 
     // 2. Execute TP2 final exit (5 qty @ 52000)
@@ -1042,7 +1045,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const finalLegNetPnL = (52000 - 50000) * 5 - Number(finalFill.fee);
     const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
 
-    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(tp1NetPnL + finalLegNetPnL, 2);
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
     expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(totalLifecycleNetPnL, 2);
     expect(Number(finalAccount.usedMargin)).toBe(0);
 
@@ -1427,7 +1430,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // 4. Assert Account Ledger Invariants
     const finalAccount = dbAccounts[0];
-    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(tp1NetPnL + finalLegNetPnL, 2);
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
     expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(totalLifecycleNetPnL, 2);
     expect(Number(finalAccount.usedMargin)).toBe(0);
 
@@ -1495,23 +1498,22 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const finalExitFees = Number(finalFill.fee);
     const finalLegNetPnL = finalGrossPnL - finalExitFees;
 
-    const accountRealizedDelta = tp1NetPnL + finalLegNetPnL;
     const totalLifecycleNetPnL = tp1GrossPnL + finalGrossPnL - entryFees - tp1ExitFees - finalExitFees;
-    const cashDelta = accountRealizedDelta - entryFees;
+    const cashDelta = totalLifecycleNetPnL;
 
     const finalAccount = dbAccounts[0];
     const trade = dbTrades.find((t) => t.positionId === pos.id)!;
 
-    // 1. Account realized PnL delta equals sum of exit leg net PnLs
-    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(accountRealizedDelta, 2);
+    // 1. Account realized PnL delta equals total lifecycle net PnL (Model A)
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
 
-    // 2. Cash balance delta equals Account realized delta minus entry fees paid at entry
+    // 2. Cash balance delta equals total lifecycle net PnL
     expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(cashDelta, 2);
 
     // 3. PaperTrade realized PnL equals lifecycle gross PnL minus all lifecycle charges
     expect(Number(trade.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
 
-    // 4. Parity equation: cashDelta === PaperTrade.realizedPnL
+    // 4. Parity equation: cashDelta === Account.realizedPnL === PaperTrade.realizedPnL
     expect(cashDelta).toBeCloseTo(Number(trade.realizedPnL), 2);
   });
 
@@ -1577,5 +1579,88 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const fill = dbFills[dbFills.length - 1];
     expect(fill.sourceTimestamp).toBeDefined();
     expect(fill.fillTimestamp).toBeDefined();
+  });
+
+  // =========================================================================
+  // AI FIX 143 TESTS — AUTHORITATIVE EXECUTION BASELINE
+  // =========================================================================
+
+  it('TEST 143-1: SYNTHETIC TICKSIZE REMOVAL — unknown instrument tickSize is undefined/null; known instrument uses registry tickSize', () => {
+    const streamer = new RealMarketStreamerService(null as any);
+    const tickKnown = streamer.updateTicker('BTCUSDT', {
+      price: 50000,
+      marketEventTime: Date.now(),
+      provenance: 'LIVE_PROVIDER',
+    });
+    expect(tickKnown.tickSize).toBe(0.1); // Registry tickSize for BTCUSDT
+
+    const tickUnknown = streamer.updateTicker('UNKNOWN_XYZ_999', {
+      price: 100,
+      marketEventTime: Date.now(),
+      provenance: 'LIVE_PROVIDER',
+    });
+    expect(tickUnknown.tickSize).toBeUndefined(); // Never fabricates 0.05 or 0.01
+  });
+
+  it('TEST 143-2: LIVE_PROVIDER MANDATORY MARKET EVENT TIME — missing/invalid marketEventTime fails closed in streamer and monitor', async () => {
+    const streamer = new RealMarketStreamerService(null as any);
+    streamer.updateTicker('BTCUSDT', {
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: undefined as any, // Missing timestamp
+    });
+
+    expect(() => streamer.getValidatedTicker('BTCUSDT', 5)).toThrow(/missing mandatory provider marketEventTime/);
+
+    // 1. Place order with valid ticker
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 1,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // 2. Monitor evaluation fails closed when ticker lacks marketEventTime
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation(() => {
+      throw new Error('Market quote missing mandatory marketEventTime');
+    });
+
+    await monitorService.evaluateActivePositions();
+    const unclosedPos = dbPositions.find((p) => p.id === pos.id);
+    expect(unclosedPos.status).toBe(PositionState.OPEN); // Fails closed
+  });
+
+  it('TEST 143-3: FUTURE TIMESTAMP CLOCK SKEW & AGE 0 — future event inside 5s skew yields age = 0; future event > 5s skew is rejected', () => {
+    const streamer = new RealMarketStreamerService(null as any);
+    const now = Date.now();
+
+    // 1. Future event within allowed 5s clock skew (+2s)
+    streamer.updateTicker('SOLUSDT', {
+      price: 150,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 2000,
+    });
+
+    const validFuture = streamer.getValidatedTicker('SOLUSDT', 5);
+    expect(validFuture.symbol).toBe('SOLUSDT');
+
+    // 2. Future event beyond 5s clock skew (+10s)
+    streamer.updateTicker('SOLUSDT', {
+      price: 150,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 10000,
+    });
+
+    expect(() => streamer.getValidatedTicker('SOLUSDT', 5)).toThrow();
   });
 });

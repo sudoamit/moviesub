@@ -15,7 +15,7 @@ export interface ILiveRealTicker {
   prevClose: number;
   changePercent: number;
   changeAmount: number;
-  tickSize: number;
+  tickSize?: number;
   volatility: number;
   lastUpdated: number;
   provenance: QuoteProvenance;
@@ -352,6 +352,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return existing;
     }
 
+    let tickSize: number | undefined = tick.tickSize ?? existing?.tickSize;
+    if (tickSize === undefined) {
+      try {
+        const inst = getAuthoritativeInstrument(sym);
+        if (inst && inst.tickSize) tickSize = inst.tickSize;
+      } catch {
+        // Unknown instrument -> tickSize remains undefined
+      }
+    }
+
     const updated: ILiveRealTicker = {
       symbol: sym,
       price: tick.price,
@@ -363,11 +373,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       prevClose: tick.prevClose ?? existing?.prevClose ?? tick.price,
       changePercent: tick.changePercent ?? existing?.changePercent ?? 0,
       changeAmount: tick.changeAmount ?? existing?.changeAmount ?? 0,
-      tickSize: tick.tickSize ?? existing?.tickSize ?? 0.05,
+      tickSize,
       volatility: tick.volatility ?? existing?.volatility ?? 1.0,
       lastUpdated: tick.lastUpdated ?? now,
       provenance: tick.provenance ?? 'LIVE_PROVIDER',
-      marketEventTime: tick.marketEventTime ?? tick.lastUpdated ?? now,
+      marketEventTime: tick.marketEventTime ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
     };
@@ -446,7 +456,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       prevClose: Number.isFinite(open) ? open : livePrice,
       changePercent: Number.isFinite(changePercent) ? changePercent : 0,
       changeAmount: Number.isFinite(changeAmount) ? changeAmount : 0,
-      tickSize: tickSize ?? existing?.tickSize ?? 0.01,
+      tickSize: tickSize ?? existing?.tickSize ?? undefined,
       volatility: existing?.volatility ?? 1.0,
       lastUpdated: now,
       provenance: 'LIVE_PROVIDER',
@@ -485,11 +495,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       prevClose: tick.prevClose ?? existing?.prevClose ?? tick.price,
       changePercent: tick.changePercent ?? existing?.changePercent ?? 0,
       changeAmount: tick.changeAmount ?? existing?.changeAmount ?? 0,
-      tickSize: tick.tickSize ?? existing?.tickSize ?? 0.05,
+      tickSize: tick.tickSize ?? existing?.tickSize ?? undefined,
       volatility: tick.volatility ?? existing?.volatility ?? 1.0,
       lastUpdated: tick.lastUpdated ?? now,
       provenance: tick.provenance ?? 'LIVE_PROVIDER',
-      marketEventTime: tick.marketEventTime ?? tick.lastUpdated ?? now,
+      marketEventTime: tick.marketEventTime ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
     };
@@ -506,8 +516,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
    * Retrieves live ticker with strict validation for trade execution:
    * 1. Price > 0
    * 2. Provenance must be LIVE_PROVIDER (BOOTSTRAP / UNKNOWN / STALE rejected)
-   * 3. Freshness check: age <= maxAgeSeconds (default 5s)
-   * 4. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
+   * 3. Must contain genuine, positive marketEventTime
+   * 4. Freshness check: age <= maxAgeSeconds (default 5s)
+   * 5. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
    */
   getValidatedTicker(
     symbol: string,
@@ -530,16 +541,29 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
+    if (!ticker.marketEventTime || !Number.isFinite(ticker.marketEventTime) || ticker.marketEventTime <= 0) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is missing mandatory provider marketEventTime`,
+      );
+    }
+
     if (!Number.isFinite(ticker.price) || ticker.price <= 0) {
       throw new MarketDataUnavailableError(
         sym,
         `Invalid execution price received: ${ticker.price}`,
-        new Date(ticker.marketEventTime || ticker.lastUpdated),
+        new Date(ticker.marketEventTime),
       );
     }
 
-    const eventTime = ticker.marketEventTime || ticker.lastUpdated;
-    const ageMs = Math.max(0, Date.now() - eventTime);
+    const now = Date.now();
+    const eventTime = ticker.marketEventTime;
+    const maxClockSkewMs = 5000;
+    if (eventTime > now + maxClockSkewMs) {
+      throw new StaleMarketDataError(sym, (eventTime - now) / 1000, maxAgeSeconds, new Date(eventTime));
+    }
+
+    const ageMs = Math.max(0, now - eventTime);
     const ageSeconds = ageMs / 1000;
     if (ageSeconds > maxAgeSeconds) {
       throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(eventTime));

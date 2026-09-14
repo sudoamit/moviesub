@@ -952,11 +952,12 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // Atomically update PaperAccount balance & usedMargin
+      // Atomically update PaperAccount balance, realizedPnL, & usedMargin
       await tx.paperAccount.update({
         where: { id: account.id },
         data: {
           cashBalance: { decrement: charges.totalCharges },
+          realizedPnL: { decrement: charges.totalCharges },
           usedMargin: { increment: requiredMargin },
           totalChargesPaid: { increment: charges.totalCharges },
         },
@@ -1079,8 +1080,18 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    if (pos.status === PositionState.CLOSED) {
-      // Idempotent retry: recognize and return existing completed PaperTrade
+    if (pos.status === PositionState.CLOSED || pos.status === PositionState.CLOSING) {
+      // Idempotent retry / concurrency handling: wait for and return existing completed PaperTrade
+      for (let i = 0; i < 10; i++) {
+        const existingTrade = await this.prisma.paperTrade.findFirst({
+          where: { positionId: pos.id },
+          orderBy: { exitTime: 'desc' },
+        });
+        if (existingTrade) {
+          return this.mapDbTradeToInterface(existingTrade);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       const existingTrade = await this.prisma.paperTrade.findFirst({
         where: { positionId: pos.id },
         orderBy: { exitTime: 'desc' },
@@ -1088,12 +1099,6 @@ export class PaperTradingService implements IExecutionProvider {
       if (existingTrade) {
         return this.mapDbTradeToInterface(existingTrade);
       }
-      throw new NotFoundException(
-        `Active position with ID '${positionId}' is already closed, but no trade record exists.`,
-      );
-    }
-
-    if (pos.status === PositionState.CLOSING) {
       throw new BadRequestException(
         `Position '${positionId}' is currently being closed by another request.`,
       );
@@ -1184,6 +1189,16 @@ export class PaperTradingService implements IExecutionProvider {
 
       if (updated.count === 0) {
         // Concurrency check: another worker/thread already closed this position!
+        for (let i = 0; i < 10; i++) {
+          const existingTrade = await tx.paperTrade.findFirst({
+            where: { positionId: pos.id },
+            orderBy: { exitTime: 'desc' },
+          });
+          if (existingTrade) {
+            return existingTrade;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         const existingTrade = await tx.paperTrade.findFirst({
           where: { positionId: pos.id },
           orderBy: { exitTime: 'desc' },

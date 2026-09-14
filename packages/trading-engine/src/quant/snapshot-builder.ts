@@ -1,4 +1,4 @@
-import { AssetType, Direction, ICandle, Timeframe } from '@quant/shared';
+import { AssetType, Direction, ICandle, Timeframe, getAuthoritativeInstrument } from '@quant/shared';
 import { SMCAnalyzer } from '../smc-analyzer';
 import {
   DecisionTrace,
