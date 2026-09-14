@@ -6,6 +6,7 @@ export interface IPaperOrderRequest {
   quantity: number;
   orderType: 'MARKET' | 'LIMIT';
   price?: number;
+  allowPriceOverride?: boolean;
   signalPrice?: number;
   signalTime?: string;
   stopLoss?: number;
@@ -126,6 +127,8 @@ export interface IPaperPortfolio {
 export interface IClosePositionOptions {
   exitPriceOverride?: number;
   allowPriceOverride?: boolean;
+  triggerPrice?: number;
+  triggerMarketEventTime?: Date | string;
   correlationId?: string;
 }
 

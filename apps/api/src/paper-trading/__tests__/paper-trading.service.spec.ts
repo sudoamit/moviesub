@@ -213,12 +213,14 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     mockRealMarketStreamer = {
       getTicker: jest.fn().mockReturnValue({
         symbol: 'NIFTY',
-        price: 24180.0,
+        price: 24100.0,
+        provenance: 'LIVE_PROVIDER',
         lastUpdated: Date.now(),
       }),
       getValidatedTicker: jest.fn().mockReturnValue({
         symbol: 'NIFTY',
-        price: 24180.0,
+        price: 24100.0,
+        provenance: 'LIVE_PROVIDER',
         lastUpdated: Date.now(),
       }),
     };
@@ -351,6 +353,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 25,
         orderType: 'MARKET',
         price: 24100.0,
+        allowPriceOverride: true,
         stopLoss: 24050.0,
       } as any),
     ).rejects.toThrow('MISSING_TAKE_PROFIT');
@@ -363,6 +366,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 25,
         orderType: 'MARKET',
         price: 24100.0,
+        allowPriceOverride: true,
         stopLoss: 24050.0,
         target1: 24080.0,
       }),
@@ -376,6 +380,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 25,
         orderType: 'MARKET',
         price: 24100.0,
+        allowPriceOverride: true,
         stopLoss: 24150.0,
         target1: 24120.0,
       }),
@@ -400,6 +405,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 25,
         orderType: 'MARKET',
         price: 24100.0,
+      allowPriceOverride: true,
         stopLoss: 24050.0,
         target1: 24200.0,
       }),
@@ -413,6 +419,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 65,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24175.0,
     });
@@ -442,6 +449,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 65,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24175.0,
     });
@@ -470,6 +478,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -501,6 +510,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -523,6 +533,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -559,6 +570,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
       featureSnapshotJson: featureSnapshot,
@@ -579,6 +591,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -606,6 +619,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 50,
         orderType: 'MARKET',
         price: 24100.0,
+      allowPriceOverride: true,
         stopLoss: 24050.0,
         target1: 24200.0,
       }),
@@ -642,6 +656,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -682,6 +697,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
       target2: 24250.0,
@@ -731,6 +747,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -764,6 +781,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
       leverage: 5,
@@ -811,6 +829,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       quantity: 50,
       orderType: 'MARKET',
       price: 24100.0,
+      allowPriceOverride: true,
       stopLoss: 24050.0,
       target1: 24200.0,
     });

@@ -43,7 +43,8 @@ interface RunningPaperPosition {
   openedAt?: string;
 }
 
-const formatDateTimeIST = (date: Date) => {
+const formatDateTimeIST = (date: Date | null | undefined) => {
+  if (!date || isNaN(date.getTime())) return 'N/A';
   return date.toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
     day: '2-digit',
@@ -59,81 +60,41 @@ const formatDateTimeIST = (date: Date) => {
 /**
  * Calculates authentic market-session-aware timestamps strictly respecting NSE Market Hours (09:15 AM - 03:30 PM IST)
  */
-function getMarketAwareTimestamps(symbol: string, signalTimestamp?: Date | string | number) {
+function getMarketAwareTimestamps(symbol: string, signalTimestamp?: Date | string | number | null) {
   const isCrypto = symbol === 'BTCUSDT';
   const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
   const now = new Date();
 
-  if (isCrypto) {
-    const entry = signalTimestamp
-      ? new Date(signalTimestamp)
-      : new Date(now.getTime() - 25 * 60000);
-    const estClose = new Date(entry.getTime() + 45 * 60000);
-    return {
-      entryDate: entry,
-      estCloseDate: estClose,
-      isMarketOpen: true,
-      marketSessionLabel: '24/7 LIVE CRYPTO SESSION',
-      isNSE: false,
-    };
-  }
-
-  if (isGold) {
-    const entry = signalTimestamp
-      ? new Date(signalTimestamp)
-      : new Date(now.getTime() - 20 * 60000);
-    const estClose = new Date(entry.getTime() + 60 * 60000);
-    return {
-      entryDate: entry,
-      estCloseDate: estClose,
-      isMarketOpen: true,
-      marketSessionLabel: '23/5 LIVE GOLD COMMODITY (COMEX / LONDON FIX)',
-      isNSE: false,
-    };
-  }
-
-  // Indian NSE Market (09:15 AM to 03:30 PM IST)
   const istOffset = 5.5 * 60 * 60 * 1000;
   const istNow = new Date(now.getTime() + istOffset);
   const istHours = istNow.getUTCHours();
   const istMinutes = istNow.getUTCMinutes();
-  const istDay = istNow.getUTCDay(); // 0 = Sun, 6 = Sat
+  const istDay = istNow.getUTCDay();
 
   const isWeekday = istDay >= 1 && istDay <= 5;
   const currentMinInDay = istHours * 60 + istMinutes;
-  const marketOpenMin = 9 * 60 + 15; // 09:15 AM IST
-  const marketCloseMin = 15 * 60 + 30; // 03:30 PM IST
+  const marketOpenMin = 9 * 60 + 15;
+  const marketCloseMin = 15 * 60 + 30;
 
+  const isNSE = !isCrypto && !isGold;
   const isMarketOpen =
-    isWeekday && currentMinInDay >= marketOpenMin && currentMinInDay <= marketCloseMin;
+    isCrypto || isGold || (isWeekday && currentMinInDay >= marketOpenMin && currentMinInDay <= marketCloseMin);
 
-  let entryDate = new Date(now);
-  let estCloseDate = new Date(now);
-
-  if (signalTimestamp) {
-    entryDate = new Date(signalTimestamp);
-    estCloseDate = new Date(entryDate.getTime() + 45 * 60000);
-  } else if (isMarketOpen) {
-    entryDate = new Date(now.getTime() - 30 * 60000);
-    estCloseDate = new Date(entryDate.getTime() + 45 * 60000);
-  } else {
-    const entryIST = new Date(now);
-    entryIST.setUTCHours(9, 45, 0, 0); // 03:15 PM IST
-    entryDate = entryIST;
-
-    const closeIST = new Date(now);
-    closeIST.setUTCHours(10, 0, 0, 0); // 03:30 PM IST
-    estCloseDate = closeIST;
-  }
+  const entryDate = signalTimestamp ? new Date(signalTimestamp) : null;
+  const estCloseDate = entryDate ? new Date(entryDate.getTime() + 45 * 60000) : null;
 
   return {
     entryDate,
     estCloseDate,
     isMarketOpen,
-    marketSessionLabel: isMarketOpen
-      ? 'LIVE NSE SESSION (09:15 - 15:30 IST)'
-      : 'NSE MARKET CLOSED (Session: 09:15 - 15:30 IST)',
-    isNSE: true,
+    marketSessionLabel: isCrypto
+      ? '24/7 LIVE CRYPTO SESSION'
+      : isGold
+        ? '23/5 LIVE GOLD COMMODITY (COMEX / LONDON FIX)'
+        : isMarketOpen
+          ? 'LIVE NSE SESSION (09:15 - 15:30 IST)'
+          : 'NSE MARKET CLOSED (Session: 09:15 - 15:30 IST)',
+    isNSE,
   };
 }
 
@@ -148,9 +109,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     symbol.toUpperCase().includes('BTC') ||
     symbol.toUpperCase().includes('ETH');
   const isGold = symbol === 'XAUUSD' || symbol === 'GOLD' || symbol.toUpperCase().includes('XAU');
-  const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
+  const currencySymbol = '₹';
 
-  // Toggle between Option Premium Mode (default for Indian markets) and Spot Mode
   const [isOptionMode, setIsOptionMode] = useState<boolean>(!isCrypto && !isGold);
 
   useEffect(() => {
@@ -164,9 +124,6 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const positionLockKey = `${symbol}_${direction}`;
   const executionEntryTimeStorageKey = `quant_running_entry_time_${positionLockKey}`;
   const [paperPosition, setPaperPosition] = useState<RunningPaperPosition | null>(null);
-  const [lockedExecutionEntryTime, setLockedExecutionEntryTime] = useState<string>(
-    () => new Date().toISOString(),
-  );
 
   useEffect(() => {
     let isMounted = true;
@@ -177,21 +134,13 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         const data = await res.json();
         const expectedSide = direction === 'BULLISH' ? 'BUY' : 'SELL';
         const positions = Array.isArray(data?.openPositions) ? data.openPositions : [];
-        const found =
-          positions.find(
-            (p: RunningPaperPosition) => p.symbol === symbol && p.direction === expectedSide,
-          ) || positions.find((p: RunningPaperPosition) => p.symbol === symbol);
+        // Strict matching by symbol + direction + contractSymbol (never symbol alone)
+        const found = positions.find(
+          (p: RunningPaperPosition) => p.symbol === symbol && p.direction === expectedSide,
+        );
 
         if (!isMounted) return;
         setPaperPosition(found || null);
-
-        const authoritativeEntryTime = found?.entryTime || found?.openedAt;
-        if (authoritativeEntryTime) {
-          setLockedExecutionEntryTime(authoritativeEntryTime);
-          if (typeof window !== 'undefined') {
-            localStorage.setItem(executionEntryTimeStorageKey, authoritativeEntryTime);
-          }
-        }
       } catch {}
     };
 
@@ -201,35 +150,18 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       isMounted = false;
       clearInterval(interval);
     };
-  }, [symbol, direction, executionEntryTimeStorageKey]);
+  }, [symbol, direction]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (paperPosition?.entryTime || paperPosition?.openedAt) return;
-    const saved = localStorage.getItem(executionEntryTimeStorageKey);
-    if (saved) {
-      setLockedExecutionEntryTime(saved);
-      return;
-    }
-
-    const now = new Date().toISOString();
-    localStorage.setItem(executionEntryTimeStorageKey, now);
-    setLockedExecutionEntryTime(now);
-  }, [executionEntryTimeStorageKey, paperPosition?.entryTime, paperPosition?.openedAt]);
-
-  // Market-Aware Timestamps use actual execution/open time, never signal candle time.
   const { entryDate, estCloseDate, isMarketOpen, marketSessionLabel, isNSE } = useMemo(() => {
-    const authoritativeEntryTime =
-      paperPosition?.entryTime || paperPosition?.openedAt || lockedExecutionEntryTime;
+    const authoritativeEntryTime = paperPosition?.entryTime || paperPosition?.openedAt;
     return getMarketAwareTimestamps(symbol, authoritativeEntryTime);
-  }, [symbol, paperPosition?.entryTime, paperPosition?.openedAt, lockedExecutionEntryTime]);
+  }, [symbol, paperPosition?.entryTime, paperPosition?.openedAt]);
 
-  // Elapsed Seconds Counter
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(2700);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
 
   useEffect(() => {
-    if (!isMarketOpen && isNSE) {
-      setElapsedSeconds(2700);
+    if (!entryDate) {
+      setElapsedSeconds(0);
       return;
     }
     const timer = setInterval(() => {
@@ -237,15 +169,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       setElapsedSeconds(diffSec);
     }, 1000);
     return () => clearInterval(timer);
-  }, [entryDate, isMarketOpen, isNSE]);
+  }, [entryDate]);
 
   const formattedElapsed = useMemo(() => {
+    if (!entryDate) return 'NO ACTIVE POSITION';
     const hrs = Math.floor(elapsedSeconds / 3600);
     const mins = Math.floor((elapsedSeconds % 3600) / 60);
     const secs = elapsedSeconds % 60;
     if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
     return `${mins}m ${secs}s`;
-  }, [elapsedSeconds]);
+  }, [entryDate, elapsedSeconds]);
 
   // Position Configuration with LocalStorage Persistence
   const [isBreakevenActive, setIsBreakevenActive] = useState(false);
@@ -747,135 +680,66 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const autoCutExecutedRef = React.useRef<string | null>(null);
 
   const handleCutTrade = async (reason: string, exitP?: number, partialRatio: number = 1.0) => {
-    const isValidExitPrice = (price: number) =>
-      isOptionMode && !isCrypto ? isSaneOptionPremium(symbol, price) : isSaneSpot(symbol, price);
-
-    let finalExitPrice = exitP && isValidExitPrice(exitP) ? exitP : effectiveCurrentPrice;
-    if (!isValidExitPrice(finalExitPrice)) {
-      finalExitPrice = effectiveEntryPrice;
+    if (!paperPosition || !(paperPosition as any).id) {
+      setManualCloseToast('No active backend position to close.');
+      setTimeout(() => setManualCloseToast(null), 4000);
+      return;
     }
-    const finalDiff =
-      isOptionMode && !isCrypto
-        ? finalExitPrice - effectiveEntryPrice
-        : isBull
-          ? finalExitPrice - effectiveEntryPrice
-          : effectiveEntryPrice - finalExitPrice;
 
-    const closedUnits = numericQty * partialRatio;
-    const rawClosedPnL = finalDiff * closedUnits;
-    const finalPnL = Number((isCrypto || isGold ? rawClosedPnL * cryptoFxRate : rawClosedPnL).toFixed(2));
-    const finalR =
-      riskPerUnit > 0
-        ? Number((finalDiff / riskPerUnit).toFixed(2))
-        : reason.toLowerCase().includes('stop')
-          ? -1.0
-          : 0;
+    try {
+      const res = await fetch('http://localhost:3001/api/paper-trading/close-position', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          positionId: (paperPosition as any).id,
+          reason,
+        }),
+      });
 
-    if (partialRatio < 1.0) {
-      setIsAutoScaledOut(true);
-      setIsBreakevenActive(true);
-      setScaledOutPnL((prev) => prev + finalPnL);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(scaleoutStorageKey, 'true');
-        localStorage.setItem(scaleoutPnlStorageKey, String(finalPnL));
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.message || 'Close position request failed');
       }
+
+      const completedTrade = await res.json();
+      const finalExitPrice = Number(completedTrade.exitPrice);
+      const finalPnL = Number(completedTrade.realizedPnL || 0);
+      const finalR = Number(completedTrade.realizedR || 0);
+
+      setIsPositionCut(true);
+      const summary = {
+        exitPrice: finalExitPrice,
+        pnl: finalPnL,
+        r: finalR,
+        reason: completedTrade.exitReason || reason,
+        isManual: true,
+        closedAt: completedTrade.closedAt || new Date().toISOString(),
+      };
+
+      setClosedTradeSummary(summary);
+
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(cutStorageKey, 'true');
+        localStorage.setItem(symbolCutKey, 'true');
+        localStorage.setItem(cutSummaryStorageKey, JSON.stringify(summary));
+        window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { ...summary, symbol } }));
+      }
+
+      if (onClosePosition) {
+        onClosePosition(finalExitPrice, finalPnL, finalR, reason);
+      }
+
       setManualCloseToast(
-        `✂️ Partial Scale-Out Executed: 50% booked @ ${currencySymbol}${finalExitPrice.toFixed(2)} (+${currencySymbol}${finalPnL.toFixed(2)} / ${finalR}R). SL moved to BREAKEVEN (0 Risk)!`,
+        `⚡ Position Exited: ${reason} @ ${currencySymbol}${finalExitPrice.toFixed(2)} | Realized: ${
+          finalPnL >= 0 ? '+' : ''
+        }${currencySymbol}${finalPnL.toFixed(2)} (${finalR}R)`,
       );
       setTimeout(() => setManualCloseToast(null), 8000);
-      return;
+    } catch (err: any) {
+      setManualCloseToast(`EXIT FAILED / EXIT PENDING: ${err.message}`);
+      setTimeout(() => setManualCloseToast(null), 8000);
     }
-
-    setIsPositionCut(true);
-    const isManualCut =
-      reason.toLowerCase().includes('manual') ||
-      reason.toLowerCase().includes('cut') ||
-      reason.toLowerCase().includes('exit');
-
-    const summary = {
-      exitPrice: finalExitPrice,
-      pnl: finalPnL + scaledOutPnL,
-      r: finalR,
-      reason,
-      isManual: isManualCut,
-      closedAt: new Date().toISOString(),
-    };
-    setClosedTradeSummary(summary);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(cutStorageKey, 'true');
-      localStorage.setItem(symbolCutKey, 'true');
-      localStorage.setItem(cutSummaryStorageKey, JSON.stringify(summary));
-      window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol } }));
-    }
-
-    if (onClosePosition) {
-      onClosePosition(finalExitPrice, finalPnL + scaledOutPnL, finalR, reason);
-    }
-
-    // If an authoritative paper trading position is running, close it via paper-trading API
-    if (paperPosition && (paperPosition as any).id) {
-      try {
-        await fetch('http://localhost:3001/api/paper-trading/close-position', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            positionId: (paperPosition as any).id,
-            reason,
-          }),
-        });
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol } }));
-        }
-      } catch (err) {}
-    }
-
-    setManualCloseToast(
-      `⚡ Position Exited: ${reason} @ ${currencySymbol}${finalExitPrice.toFixed(2)} | Realized: ${
-        finalPnL + scaledOutPnL >= 0 ? '+' : ''
-      }${currencySymbol}${(finalPnL + scaledOutPnL).toFixed(2)} (${finalR}R)`,
-    );
-    setTimeout(() => setManualCloseToast(null), 8000);
   };
-
-  // Automatic UI state transition when Stop Loss or Target (TP2 or TP3) is breached in real-time
-  useEffect(() => {
-    if (isPositionCut) return;
-    if (
-      !signal ||
-      signal.grade === 'NO_TRADE' ||
-      (signal as any).direction === 'NEUTRAL' ||
-      signal.score === 0
-    )
-      return;
-
-    if (isSLReached && autoCutExecutedRef.current !== `SL_${symbol}_${direction}`) {
-      autoCutExecutedRef.current = `SL_${symbol}_${direction}`;
-      handleCutTrade(
-        isTrailingSLActive
-          ? 'Trailing Stop Loss Hit (Capital Protected)'
-          : 'Stop Loss Hit (Automatic Exit)',
-        currentSL,
-      );
-    } else if (isTP3Reached && autoCutExecutedRef.current !== `TP3_${symbol}_${direction}`) {
-      autoCutExecutedRef.current = `TP3_${symbol}_${direction}`;
-      handleCutTrade('Target 3 Achieved (4.0R Runner Exit)', tp3);
-    } else if (isTP2Reached && autoCutExecutedRef.current !== `TP2_${symbol}_${direction}`) {
-      autoCutExecutedRef.current = `TP2_${symbol}_${direction}`;
-      handleCutTrade('Target 2 Achieved (2.5R Full TP Exit)', tp2);
-    }
-  }, [
-    isSLReached,
-    isTP3Reached,
-    isTP2Reached,
-    isPositionCut,
-    symbol,
-    direction,
-    isTrailingSLActive,
-    currentSL,
-    tp2,
-    tp3,
-    signal,
-  ]);
 
   const handleReopenTrade = () => {
     autoCutExecutedRef.current = null;
@@ -1066,7 +930,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             suppressHydrationWarning
           >
             <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-            ENTRY: {formatDateTimeIST(entryDate)}
+            ENTRY: {entryDate ? formatDateTimeIST(entryDate) : 'N/A'}
           </span>
 
           <span
@@ -1352,11 +1216,11 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         </div>
 
         <div className="flex items-center justify-between text-[9px] text-slate-500">
-          <span>Session Entry: {formatDateTimeIST(entryDate)}</span>
+          <span>Session Entry: {entryDate ? formatDateTimeIST(entryDate) : 'N/A'}</span>
           <span className="text-cyan-400 font-bold">
             {progressPercent.toFixed(1)}% to Full Target (TP2)
           </span>
-          <span>Session Target Exit: {formatDateTimeIST(estCloseDate)}</span>
+          <span>Session Target Exit: {estCloseDate ? formatDateTimeIST(estCloseDate) : 'N/A'}</span>
         </div>
       </div>
 

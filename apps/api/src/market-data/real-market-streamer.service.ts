@@ -2,7 +2,9 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { RedisService } from '../common/redis/redis.service';
 import { WS_EVENTS, MarketDataUnavailableError, StaleMarketDataError } from '@quant/shared';
 
-interface ILiveRealTicker {
+export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'UNKNOWN';
+
+export interface ILiveRealTicker {
   symbol: string;
   price: number;
   open: number;
@@ -16,6 +18,10 @@ interface ILiveRealTicker {
   tickSize: number;
   volatility: number;
   lastUpdated: number;
+  provenance: QuoteProvenance;
+  marketEventTime?: number;
+  observedAt?: number;
+  receivedAt?: number;
 }
 
 @Injectable()
@@ -42,6 +48,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.05,
         volatility: 0.8,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -60,6 +67,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.05,
         volatility: 2.2,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -78,6 +86,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.1,
         volatility: 8.5,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -96,6 +105,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.01,
         volatility: 1.2,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -114,6 +124,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.05,
         volatility: 0.3,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -132,6 +143,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.05,
         volatility: 0.15,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
     [
@@ -150,6 +162,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: 0.05,
         volatility: 0.25,
         lastUpdated: Date.now(),
+        provenance: 'BOOTSTRAP',
       },
     ],
   ]);
@@ -181,6 +194,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   private async fetchRealBinancePrice() {
+    const now = Date.now();
     try {
       const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
       const data = await res.json();
@@ -207,7 +221,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           changeAmount,
           tickSize: 0.1,
           volatility: 8.5,
-          lastUpdated: Date.now(),
+          lastUpdated: now,
+          provenance: 'LIVE_PROVIDER',
         };
 
         ticker.price = livePrice;
@@ -217,7 +232,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         ticker.volume = Math.round(volume);
         ticker.changePercent = changePercent;
         ticker.changeAmount = changeAmount;
-        ticker.lastUpdated = Date.now();
+        ticker.lastUpdated = now;
+        ticker.provenance = 'LIVE_PROVIDER';
+        ticker.marketEventTime = now;
+        ticker.observedAt = now;
+        ticker.receivedAt = now;
 
         this.tickers.set('BTCUSDT', ticker);
         await this.broadcastTick(ticker);
@@ -249,7 +268,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           changeAmount,
           tickSize: 0.01,
           volatility: 1.2,
-          lastUpdated: Date.now(),
+          lastUpdated: now,
+          provenance: 'LIVE_PROVIDER',
         };
 
         ticker.price = livePrice;
@@ -259,7 +279,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         ticker.volume = Math.round(volume);
         ticker.changePercent = changePercent;
         ticker.changeAmount = changeAmount;
-        ticker.lastUpdated = Date.now();
+        ticker.lastUpdated = now;
+        ticker.provenance = 'LIVE_PROVIDER';
+        ticker.marketEventTime = now;
+        ticker.observedAt = now;
+        ticker.receivedAt = now;
 
         this.tickers.set('PAXGUSDT', ticker);
         await this.broadcastTick(ticker);
@@ -270,6 +294,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   private async fetchRealNSEQuotes() {
+    const now = Date.now();
     const symbolMap: Record<string, string> = {
       NIFTY: '^NSEI',
       BANKNIFTY: '^NSEBANK',
@@ -311,7 +336,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             ticker.prevClose = prevClose;
             ticker.changeAmount = changeAmount;
             ticker.changePercent = changePercent;
-            ticker.lastUpdated = Date.now();
+            ticker.lastUpdated = now;
+            ticker.provenance = 'LIVE_PROVIDER';
+            ticker.marketEventTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : now;
+            ticker.observedAt = now;
+            ticker.receivedAt = now;
             await this.broadcastTick(ticker);
           }
         }
@@ -340,10 +369,42 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       changeAmount: ticker.changeAmount,
       changePercent: ticker.changePercent,
       timestamp: new Date().toISOString(),
+      provenance: ticker.provenance,
+      marketEventTime: ticker.marketEventTime,
       isRealMarket: true,
     };
 
     await redisClient.publish(WS_EVENTS.CANDLE_UPDATED, JSON.stringify(payload));
+  }
+
+  /**
+   * Helper to manually push/update a ticker (e.g. for live provider feeds or automated tests)
+   */
+  public updateTicker(symbol: string, tick: Partial<ILiveRealTicker> & { price: number }) {
+    const sym = symbol.toUpperCase();
+    const now = Date.now();
+    const existing = this.tickers.get(sym);
+    const updated: ILiveRealTicker = {
+      symbol: sym,
+      price: tick.price,
+      open: tick.open ?? existing?.open ?? tick.price,
+      high: tick.high ?? existing?.high ?? tick.price,
+      low: tick.low ?? existing?.low ?? tick.price,
+      close: tick.close ?? tick.price,
+      volume: tick.volume ?? existing?.volume ?? 1000,
+      prevClose: tick.prevClose ?? existing?.prevClose ?? tick.price,
+      changePercent: tick.changePercent ?? existing?.changePercent ?? 0,
+      changeAmount: tick.changeAmount ?? existing?.changeAmount ?? 0,
+      tickSize: tick.tickSize ?? existing?.tickSize ?? 0.05,
+      volatility: tick.volatility ?? existing?.volatility ?? 1.0,
+      lastUpdated: tick.lastUpdated ?? now,
+      provenance: tick.provenance ?? 'LIVE_PROVIDER',
+      marketEventTime: tick.marketEventTime ?? tick.lastUpdated ?? now,
+      observedAt: tick.observedAt ?? now,
+      receivedAt: tick.receivedAt ?? now,
+    };
+    this.tickers.set(sym, updated);
+    return updated;
   }
 
   getTicker(symbol: string) {
@@ -353,8 +414,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   /**
    * Retrieves live ticker with strict validation for trade execution:
    * 1. Price > 0
-   * 2. Freshness check: age <= maxAgeSeconds (default 5s)
-   * 3. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
+   * 2. Provenance must be LIVE_PROVIDER (BOOTSTRAP / UNKNOWN / STALE rejected)
+   * 3. Freshness check: age <= maxAgeSeconds (default 5s)
+   * 4. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
    */
   getValidatedTicker(
     symbol: string,
@@ -370,17 +432,25 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
+    if (ticker.provenance !== 'LIVE_PROVIDER') {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is of provenance '${ticker.provenance}'. Startup BOOTSTRAP defaults cannot be used for execution.`,
+      );
+    }
+
     if (!Number.isFinite(ticker.price) || ticker.price <= 0) {
       throw new MarketDataUnavailableError(
         sym,
         `Invalid execution price received: ${ticker.price}`,
-        new Date(ticker.lastUpdated),
+        new Date(ticker.marketEventTime || ticker.lastUpdated),
       );
     }
 
-    const ageSeconds = (Date.now() - ticker.lastUpdated) / 1000;
+    const eventTime = ticker.marketEventTime || ticker.lastUpdated;
+    const ageSeconds = (Date.now() - eventTime) / 1000;
     if (ageSeconds > maxAgeSeconds) {
-      throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(ticker.lastUpdated));
+      throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(eventTime));
     }
 
     return ticker;

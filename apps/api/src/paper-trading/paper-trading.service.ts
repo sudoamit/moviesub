@@ -446,8 +446,15 @@ export class PaperTradingService implements IExecutionProvider {
     }
 
     // 3. Resolve Real Validated Execution Price with Mode Separation & Slippage
-    let executionPrice = req.price;
+    const isMarketOrder = !req.orderType || req.orderType === 'MARKET';
+    let executionPrice: number | undefined;
     let sourceTimestamp = new Date();
+
+    if (!isMarketOrder && req.price && req.price > 0) {
+      executionPrice = req.price;
+    } else if (req.allowPriceOverride && req.price && req.price > 0) {
+      executionPrice = req.price;
+    }
 
     if (!executionPrice || executionPrice <= 0) {
       try {
@@ -800,7 +807,7 @@ export class PaperTradingService implements IExecutionProvider {
     const slippageResult = ExecutionPriceResolver.calculateSlippage(
       executionPrice,
       req.direction,
-      config.maxSlippageBps || 50,
+      config.maxSlippageBps ?? 50,
     );
     const finalFillPrice = slippageResult.fillPrice;
     const slippageAmount = slippageResult.slippageAmount;
@@ -1039,6 +1046,8 @@ export class PaperTradingService implements IExecutionProvider {
     let exitPriceOverride: number | undefined;
     let allowPriceOverride = false;
     let correlationIdOpt: string | undefined;
+    let triggerPriceOpt: number | undefined;
+    let triggerMarketEventTimeOpt: Date | string | undefined;
 
     if (typeof options === 'number') {
       exitPriceOverride = options;
@@ -1046,6 +1055,8 @@ export class PaperTradingService implements IExecutionProvider {
       exitPriceOverride = options.exitPriceOverride;
       allowPriceOverride = options.allowPriceOverride === true;
       correlationIdOpt = options.correlationId;
+      triggerPriceOpt = options.triggerPrice;
+      triggerMarketEventTimeOpt = options.triggerMarketEventTime;
     }
 
     const pos = await this.prisma.paperPosition.findUnique({
@@ -1119,7 +1130,7 @@ export class PaperTradingService implements IExecutionProvider {
     const exitSlippage = ExecutionPriceResolver.calculateSlippage(
       exitPrice,
       pos.direction === Direction.BULLISH ? 'SELL' : 'BUY',
-      config.maxSlippageBps || 50,
+      config.maxSlippageBps ?? 50,
     );
     const finalExitPrice = exitSlippage.fillPrice;
 
@@ -1359,6 +1370,8 @@ export class PaperTradingService implements IExecutionProvider {
           outcomeSnapshotJson: {
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
+            triggerPrice: triggerPriceOpt ?? null,
+            triggerMarketEventTime: triggerMarketEventTimeOpt ? new Date(triggerMarketEventTimeOpt).toISOString() : null,
             livePrice: exitPrice,
             exitPrice: effectiveExitPrice,
             entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? effectiveEntryPrice : Number(pos.entryPrice),
