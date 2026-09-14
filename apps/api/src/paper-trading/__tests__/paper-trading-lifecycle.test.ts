@@ -4,7 +4,15 @@ import { PaperPositionMonitorService } from '../paper-position-monitor.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CandlesService } from '../../candles/candles.service';
 import { RealMarketStreamerService, ILiveRealTicker } from '../../market-data/real-market-streamer.service';
-import { Direction, PositionState, OrderState, MarketDataUnavailableError, StaleMarketDataError, PointInTimeCurrencyConverter } from '@quant/shared';
+import {
+  Direction,
+  PositionState,
+  OrderState,
+  MarketDataUnavailableError,
+  StaleMarketDataError,
+  PointInTimeCurrencyConverter,
+  createCanonicalOptionQuoteRecord,
+} from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
 describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests A-O)', () => {
@@ -3671,7 +3679,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         target1: 180.0,
       };
 
-      // 1. Unauthenticated Redis quote: contains only price and timestamp (no providerId, no epoch)
+      // 1. Raw Redis JSON: contains only price and timestamp (no canonical schema, no signature)
       mockRedisClient.get.mockResolvedValueOnce(
         JSON.stringify({
           price: 155.0,
@@ -3682,10 +3690,10 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const unauthQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(unauthQuote).toBeDefined();
       expect(unauthQuote.price).toBe(155.0);
-      // Provenance MUST NOT be declared LIVE_PROVIDER without authenticated provider origin
+      // Provenance MUST NOT be declared LIVE_PROVIDER without canonical signature
       expect(unauthQuote.provenance).toBe('DEGRADED');
 
-      // 2. Authenticated Redis quote with matching active connection epoch
+      // 2. Forged Redis JSON: claims LIVE_PROVIDER + providerId + epoch without canonical signature
       mockRedisClient.get.mockResolvedValueOnce(
         JSON.stringify({
           price: 160.0,
@@ -3696,6 +3704,20 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         }),
       );
 
+      const forgedQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(forgedQuote).toBeDefined();
+      expect(forgedQuote.provenance).toBe('DEGRADED');
+
+      // 3. Authentic canonical payload with valid cryptographic signature and matching epoch
+      const authenticRecord = createCanonicalOptionQuoteRecord({
+        contractSymbol: 'NIFTY26SEP24500CE',
+        price: 160.0,
+        marketEventTime: Date.now() - 200,
+        providerId: 'NSE_DIRECT',
+        connectionEpoch: activeEpoch,
+      });
+      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
+
       const authQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(authQuote).toBeDefined();
       expect(authQuote.price).toBe(160.0);
@@ -3703,24 +3725,198 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(authQuote.providerId).toBe('NSE_DIRECT');
       expect(authQuote.connectionEpoch).toBe(activeEpoch);
 
-      // 3. Provider disconnects -> bumps epoch
-      realStreamer.disconnectProvider();
+      // 4. Provider reconnects: exactly one new epoch is assigned
+      realStreamer.handleProviderDisconnect('Simulated connection drop');
+      expect(realStreamer.getProviderState()).toBe('DISCONNECTED');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+
+      // Re-querying during DISCONNECTED fails closed -> DEGRADED
+      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
+      const disconnectedQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(disconnectedQuote.provenance).toBe('DEGRADED');
+
+      // Provider transitions to RECONNECTING: still fails closed -> DEGRADED
+      realStreamer.handleProviderReconnecting();
+      expect(realStreamer.getProviderState()).toBe('RECONNECTING');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+
+      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
+      const reconnectingQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(reconnectingQuote.provenance).toBe('DEGRADED');
+
+      // Provider finishes reconnection -> exactly one epoch increment
+      realStreamer.handleProviderReconnect();
       const newEpoch = realStreamer.getConnectionEpoch();
-      expect(newEpoch).toBeGreaterThan(activeEpoch);
+      expect(newEpoch).toBe(activeEpoch + 1);
+      expect(realStreamer.getProviderState()).toBe('RECONNECTED');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(true);
 
-      // Re-querying previously cached quote now fails epoch check -> degraded
-      mockRedisClient.get.mockResolvedValueOnce(
-        JSON.stringify({
-          price: 160.0,
-          provenance: 'LIVE_PROVIDER',
-          providerId: 'NSE_DIRECT',
-          connectionEpoch: activeEpoch, // obsolete epoch!
-          marketEventTime: Date.now(),
-        }),
-      );
-
+      // Cached quote from old epoch is rejected even after reconnection
+      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
       const obsoleteEpochQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(obsoleteEpochQuote.provenance).toBe('DEGRADED');
+
+      // Fresh quote produced on new connection epoch is accepted as LIVE_PROVIDER
+      const freshRecord = createCanonicalOptionQuoteRecord({
+        contractSymbol: 'NIFTY26SEP24500CE',
+        price: 165.0,
+        marketEventTime: Date.now() - 100,
+        providerId: 'NSE_DIRECT',
+        connectionEpoch: newEpoch,
+      });
+      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(freshRecord));
+      const freshEpochQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(freshEpochQuote.provenance).toBe('LIVE_PROVIDER');
+      expect(freshEpochQuote.price).toBe(165.0);
+      expect(freshEpochQuote.connectionEpoch).toBe(newEpoch);
+    });
+
+    it('TEST 153-1 (Deterministic Connection Epoch Lifecycle): Disconnect and Reconnecting do NOT mint premature epochs; Reconnect mints exactly one new epoch', () => {
+      const realStreamer = new RealMarketStreamerService({} as any);
+      const initialEpoch = realStreamer.getConnectionEpoch();
+
+      // Disconnect
+      realStreamer.handleProviderDisconnect('Network blip');
+      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch);
+      expect(realStreamer.getProviderState()).toBe('DISCONNECTED');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+
+      // Reconnecting
+      realStreamer.handleProviderReconnecting();
+      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch);
+      expect(realStreamer.getProviderState()).toBe('RECONNECTING');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+
+      // Reconnect completes -> exactly one new epoch
+      realStreamer.handleProviderReconnect();
+      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch + 1);
+      expect(realStreamer.getProviderState()).toBe('RECONNECTED');
+      expect(realStreamer.isExecutionDataHealthy()).toBe(true);
+
+      // Subsequent duplicate call does not bump epoch again
+      realStreamer.handleProviderReconnect();
+      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch + 1);
+    });
+
+    it('TEST 153-2 (Spot Execution Fail-Closed on RECONNECTING and DISCONNECTED): getValidatedTicker strictly blocks execution', () => {
+      const realStreamer = new RealMarketStreamerService({} as any);
+      const now = Date.now();
+
+      // Seed valid ticker
+      realStreamer.updateTicker('BTCUSDT', {
+        price: 60000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now - 500,
+      });
+
+      // CONNECTED state -> accepted
+      expect(realStreamer.getValidatedTicker('BTCUSDT').price).toBe(60000.0);
+
+      // Transition to RECONNECTING -> execution rejected fail-closed
+      realStreamer.handleProviderReconnecting();
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/RECONNECTING/);
+
+      // Transition to DISCONNECTED -> execution rejected fail-closed
+      realStreamer.handleProviderDisconnect('Physical drop');
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/DISCONNECTED/);
+
+      // Reconnected -> fresh tick is required on new epoch
+      realStreamer.handleProviderReconnect();
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/fresh valid tick is required/);
+
+      // Fresh tick arrives on new epoch -> accepted
+      realStreamer.updateTicker('BTCUSDT', {
+        price: 60100.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: Date.now() - 100,
+      });
+      expect(realStreamer.getValidatedTicker('BTCUSDT').price).toBe(60100.0);
+    });
+
+    it('TEST 153-3 (Production-Equivalent Redis Round-Trip): publishCanonicalOptionQuote -> Redis write -> getOptionContractQuote -> LIVE_PROVIDER authority', async () => {
+      let redisStore: Record<string, string> = {};
+      const mockRedisClient = {
+        status: 'ready',
+        set: jest.fn(async (key: string, val: string) => {
+          redisStore[key] = val;
+          return 'OK';
+        }),
+        get: jest.fn(async (key: string) => redisStore[key] ?? null),
+      };
+      const mockRedis = {
+        getClient: () => mockRedisClient,
+      };
+
+      const realStreamer = new RealMarketStreamerService(mockRedis as any);
+      const testMonitor = new PaperPositionMonitorService(
+        {} as any,
+        paperService,
+        realStreamer,
+        mockRedis as any,
+      );
+
+      const contract = 'NIFTY24OCT25000PE';
+      const now = Date.now();
+
+      // 1. Canonical provider ingestion publishes authentic option quote
+      const published = await realStreamer.publishCanonicalOptionQuote({
+        contractSymbol: contract,
+        price: 210.5,
+        marketEventTime: now - 300,
+        providerId: 'NSE_STREAM_GATEWAY',
+      });
+      expect(published).toBeDefined();
+      expect(published?.signatureToken).toBeDefined();
+
+      const pos = {
+        id: 'opt_pos_roundtrip',
+        symbol: 'NIFTY',
+        contractSymbol: contract,
+        instrumentType: 'OPTION',
+        direction: Direction.BEARISH,
+        quantity: 50,
+        entryPrice: 200.0,
+      };
+
+      // 2. Monitor reads from Redis and establishes LIVE_PROVIDER authority
+      const retrievedQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(retrievedQuote).toBeDefined();
+      expect(retrievedQuote.provenance).toBe('LIVE_PROVIDER');
+      expect(retrievedQuote.price).toBe(210.5);
+      expect(retrievedQuote.providerId).toBe('NSE_STREAM_GATEWAY');
+
+      // 3. Round-trip fails when payload signature is tampered/forged
+      const storedJson = JSON.parse(redisStore[`option:ltp:${contract}`]);
+      storedJson.price = 999.0; // Tamper price without regenerating cryptographic signature
+      redisStore[`option:ltp:${contract}`] = JSON.stringify(storedJson);
+
+      const tamperedQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(tamperedQuote.provenance).toBe('DEGRADED');
+
+      // 4. Round-trip fails when future-skewed beyond limit
+      const futureSkewed = await realStreamer.publishCanonicalOptionQuote({
+        contractSymbol: contract,
+        price: 212.0,
+        marketEventTime: Date.now() + 10000, // +10s in future
+        providerId: 'NSE_STREAM_GATEWAY',
+      });
+      expect(futureSkewed).toBeDefined();
+      const futureQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(futureQuote.provenance).toBe('DEGRADED');
+
+      // 5. Round-trip fails when stale beyond limit
+      const staleSkewed = await realStreamer.publishCanonicalOptionQuote({
+        contractSymbol: contract,
+        price: 212.0,
+        marketEventTime: Date.now() - 10000, // 10s old
+        providerId: 'NSE_STREAM_GATEWAY',
+      });
+      expect(staleSkewed).toBeDefined();
+      const staleQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(staleQuote.provenance).toBe('DEGRADED');
     });
   });
 });
+

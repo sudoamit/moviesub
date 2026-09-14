@@ -159,4 +159,29 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(violations).toEqual([]);
     expect(productionFiles.length).toBeGreaterThanOrEqual(100);
   });
+
+  it('RULE 9: AI FIX 153 Structural Guards — Zero Date.now() marketEventTime fallback, no unauthenticated Redis LIVE_PROVIDER elevation, and RECONNECTING fails closed', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. Streamer must not use Date.now() as marketEventTime fallback
+    expect(streamerContent).not.toMatch(/marketEventTime\s*=\s*[^;\n]*\?\s*[^;\n]*:\s*now/);
+    expect(streamerContent).not.toMatch(/marketEventTime:\s*[^,\n]*\?\?\s*now/);
+    expect(streamerContent).not.toMatch(/marketEventTime:\s*[^,\n]*\?\?\s*Date\.now\(\)/);
+
+    // 2. Streamer must have isExecutionDataHealthy() predicate
+    expect(streamerContent).toContain('isExecutionDataHealthy()');
+
+    // 3. Monitor must use parseAndValidateRedisOptionQuote
+    const monitorFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-position-monitor.service.ts');
+    const monitorContent = fs.readFileSync(monitorFile, 'utf8');
+    expect(monitorContent).toContain('parseAndValidateRedisOptionQuote');
+
+    // 4. Invariant: Monitor must NEVER assign LIVE_PROVIDER directly from arbitrary unverified Redis parsed object
+    expect(monitorContent).not.toMatch(/provenance:\s*parsed\.provenance/);
+
+    // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
+    expect(streamerContent).toContain("providerState === 'CONNECTED' || this.providerState === 'RECONNECTED'");
+  });
 });
+

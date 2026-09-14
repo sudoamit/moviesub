@@ -1,6 +1,15 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { RedisService } from '../common/redis/redis.service';
-import { WS_EVENTS, MarketDataUnavailableError, StaleMarketDataError, getAuthoritativeInstrument } from '@quant/shared';
+import {
+  WS_EVENTS,
+  MarketDataUnavailableError,
+  StaleMarketDataError,
+  getAuthoritativeInstrument,
+  isProviderExecutionHealthy,
+  validateExecutionQuoteTimestamp,
+  createCanonicalOptionQuoteRecord,
+  ICanonicalOptionQuoteRecord,
+} from '@quant/shared';
 
 export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
 export type ProviderConnectionState = 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'RECONNECTED';
@@ -306,6 +315,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
           const ticker = this.tickers.get(sym);
           if (ticker) {
+            const marketEventTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : null;
+            if (!marketEventTime || !Number.isFinite(marketEventTime) || marketEventTime <= 0) {
+              // Missing provider event time from REST feed -> do NOT synthesize Date.now()
+              this.restHealthState = 'DEGRADED';
+              return;
+            }
+
+            this.restHealthState = 'HEALTHY';
             ticker.price = livePrice;
             ticker.close = livePrice;
             ticker.open = Number((meta.regularMarketOpen || ticker.open || livePrice).toFixed(2));
@@ -317,13 +334,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             ticker.changePercent = changePercent;
             ticker.lastUpdated = now;
             ticker.provenance = 'LIVE_PROVIDER';
-            ticker.marketEventTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : now;
+            ticker.marketEventTime = marketEventTime;
             ticker.observedAt = now;
             ticker.receivedAt = now;
             await this.broadcastTick(ticker);
           }
         }
       } catch (err) {
+        this.restHealthState = 'UNAVAILABLE';
         this.logger.debug(`NSE real tick notice for ${sym}: ${(err as Error).message}`);
       }
     }
@@ -428,6 +446,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   private providerState: ProviderConnectionState = 'CONNECTED';
+  private streamConnectionState: ProviderConnectionState = 'CONNECTED';
+  private restHealthState: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' = 'HEALTHY';
   private providerConnected = true;
   private providerConnectionEpoch: number = 1;
   private reconnectedAt: number | null = null;
@@ -435,6 +455,30 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   public getProviderState(): ProviderConnectionState {
     return this.providerState;
+  }
+
+  public getStreamConnectionState(): ProviderConnectionState {
+    return this.streamConnectionState;
+  }
+
+  public getRestHealthState(): 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' {
+    return this.restHealthState;
+  }
+
+  public setRestHealthState(state: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE'): void {
+    this.restHealthState = state;
+  }
+
+  /**
+   * Explicit fail-closed predicate for execution-authoritative data:
+   * Execution data is strictly accepted ONLY when providerState is CONNECTED or RECONNECTED.
+   * DISCONNECTED and RECONNECTING fail closed immediately.
+   */
+  public isExecutionDataHealthy(): boolean {
+    return (
+      this.providerConnected &&
+      (this.providerState === 'CONNECTED' || this.providerState === 'RECONNECTED')
+    );
   }
 
   public getConnectionEpoch(): number {
@@ -446,29 +490,34 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       this.logger.warn(`Market data provider disconnected: ${reason || 'Connection lost'}`);
     }
     this.providerState = 'DISCONNECTED';
+    this.streamConnectionState = 'DISCONNECTED';
     this.providerConnected = false;
-    // Atomically bump connection epoch so any pre-existing ticks become obsolete
-    this.providerConnectionEpoch++;
+    // Note: Do NOT bump epoch here. Old quotes are immediately rejected because
+    // isExecutionDataHealthy() is false during DISCONNECTED and RECONNECTING.
+    // The single new epoch is assigned upon successful RECONNECTED.
     this.freshSymbolsAfterReconnect.clear();
   }
 
   public handleProviderReconnecting(): void {
     this.providerState = 'RECONNECTING';
+    this.streamConnectionState = 'RECONNECTING';
     this.providerConnected = false;
-    this.providerConnectionEpoch++;
+    // Note: Do NOT bump epoch here. Provider is attempting reconnection.
+    // Execution fails closed immediately via isExecutionDataHealthy().
     this.freshSymbolsAfterReconnect.clear();
   }
 
   public handleProviderReconnect(): void {
-    const wasNotConnected = !this.providerConnected || this.providerState !== 'CONNECTED';
+    const wasNotConnected = !this.providerConnected || (this.providerState !== 'CONNECTED' && this.providerState !== 'RECONNECTED');
     if (wasNotConnected) {
       this.providerState = 'RECONNECTED';
+      this.streamConnectionState = 'RECONNECTED';
       this.providerConnected = true;
       this.reconnectedAt = Date.now();
-      // Fresh connection epoch begins upon reconnection
+      // Exactly ONE new connection epoch is minted for the new provider connection lifecycle
       this.providerConnectionEpoch++;
       this.freshSymbolsAfterReconnect.clear();
-      this.logger.log(`Market data provider reconnected. Connection epoch bumped to ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
+      this.logger.log(`Market data provider reconnected. Exactly one new connection epoch assigned: ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
     }
   }
 
@@ -642,7 +691,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getOptionTicker(contractSymbol: string): ILiveRealTicker | null {
-    if (!this.providerConnected || this.providerState === 'DISCONNECTED') {
+    if (!this.isExecutionDataHealthy()) {
       return null;
     }
     const key = contractSymbol.toUpperCase();
@@ -664,7 +713,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
    * 3. Must contain genuine, positive marketEventTime
    * 4. Freshness check: age <= maxAgeSeconds (default 5s)
    * 5. Connection epoch check: quote must match active provider connection epoch
-   * 6. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
+   * 6. Fails closed if provider is in DISCONNECTED or RECONNECTING state
+   * 7. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
    */
   getValidatedTicker(
     symbol: string,
@@ -672,10 +722,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
 
-    if (!this.providerConnected || this.providerState === 'DISCONNECTED') {
+    if (!this.isExecutionDataHealthy()) {
       throw new MarketDataUnavailableError(
         sym,
-        'Market data provider is disconnected. Trade execution blocked.',
+        `Market data provider is ${this.providerState === 'DISCONNECTED' ? 'disconnected (DISCONNECTED)' : `in '${this.providerState}' state`}. Trade execution blocked.`,
       );
     }
 
@@ -731,13 +781,65 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       throw new StaleMarketDataError(sym, (eventTime - now) / 1000, maxAgeSeconds, new Date(eventTime));
     }
 
-    const ageMs = Math.max(0, now - eventTime);
-    const ageSeconds = ageMs / 1000;
+    const ageMs = now - eventTime;
+    if (ageMs < 0 && Math.abs(ageMs) > maxClockSkewMs) {
+      throw new StaleMarketDataError(sym, (eventTime - now) / 1000, maxAgeSeconds, new Date(eventTime));
+    }
+    const ageSeconds = Math.max(0, ageMs) / 1000;
     if (ageSeconds > maxAgeSeconds) {
       throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(eventTime));
     }
 
     return ticker;
+  }
+
+  /**
+   * Canonical producer ingestion write to Redis:
+   * Serializes an authentic option quote with canonical schema and signature.
+   */
+  public async publishCanonicalOptionQuote(params: {
+    contractSymbol: string;
+    price: number;
+    marketEventTime: number;
+    providerId?: string;
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+    volume?: number;
+    prevClose?: number;
+    changePercent?: number;
+    changeAmount?: number;
+    volatility?: number;
+    tickSize?: number;
+    sequence?: number;
+  }): Promise<ICanonicalOptionQuoteRecord | null> {
+    const redisClient = this.redis.getClient();
+    if (!redisClient || redisClient.status !== 'ready') return null;
+
+    const providerId = params.providerId || 'CANONICAL_STREAMER';
+    const canonicalRecord = createCanonicalOptionQuoteRecord({
+      contractSymbol: params.contractSymbol,
+      price: params.price,
+      marketEventTime: params.marketEventTime,
+      providerId,
+      connectionEpoch: this.providerConnectionEpoch,
+      open: params.open,
+      high: params.high,
+      low: params.low,
+      close: params.close,
+      volume: params.volume,
+      prevClose: params.prevClose,
+      changePercent: params.changePercent,
+      changeAmount: params.changeAmount,
+      volatility: params.volatility,
+      tickSize: params.tickSize,
+      sequence: params.sequence,
+    });
+
+    const key = `option:ltp:${params.contractSymbol.toUpperCase()}`;
+    await redisClient.set(key, JSON.stringify(canonicalRecord), 'EX', 60);
+    return canonicalRecord;
   }
 
   getAllTickers() {

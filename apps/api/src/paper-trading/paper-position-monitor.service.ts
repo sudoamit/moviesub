@@ -4,7 +4,14 @@ import { PaperTradingService } from './paper-trading.service';
 import { ExecutionMode } from './execution-provider.interface';
 import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
-import { Direction, PositionState, WS_EVENTS, getAuthoritativeInstrument, PointInTimeCurrencyConverter } from '@quant/shared';
+import {
+  Direction,
+  PositionState,
+  WS_EVENTS,
+  getAuthoritativeInstrument,
+  PointInTimeCurrencyConverter,
+  parseAndValidateRedisOptionQuote,
+} from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { Decimal } from '@prisma/client/runtime/library';
 
@@ -226,30 +233,25 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       try {
         const cached = await this.redis.getClient().get(`option:ltp:${pos.contractSymbol}`);
         if (cached) {
+          const currentEpoch = this.realMarketStreamer?.getConnectionEpoch() ?? 0;
+          const isStreamerHealthy = this.realMarketStreamer?.isExecutionDataHealthy() ?? false;
+
+          const validation = parseAndValidateRedisOptionQuote(
+            cached,
+            pos.contractSymbol,
+            currentEpoch,
+            isStreamerHealthy,
+          );
+
+          if (validation.valid && validation.quote) {
+            return validation.quote as ILiveRealTicker;
+          }
+
+          // If Redis record fails canonical validation, parse minimal fields for DEGRADED representation
+          // but NEVER elevate to LIVE_PROVIDER authority!
           const parsed = JSON.parse(cached);
           const rawEventTime = parsed.marketEventTime;
           const eventTime = rawEventTime ? Number(rawEventTime) : undefined;
-          const currentEpoch = this.realMarketStreamer?.getConnectionEpoch();
-
-          // Strict provenance authority:
-          // A Redis cached quote is ONLY permitted to declare LIVE_PROVIDER if:
-          // 1. The Redis entry itself explicitly carries authenticated provider-origin metadata
-          // 2. The entry has a genuine, positive marketEventTime within 5s freshness
-          // 3. The entry preserves connectionEpoch matching the current active streamer connection epoch
-          // 4. The streamer provider is currently connected and healthy
-          const isStreamerConnected = this.realMarketStreamer?.getProviderState() !== 'DISCONNECTED';
-          const isFresh = eventTime !== undefined && Number.isFinite(eventTime) && Date.now() - eventTime <= 5000;
-          const hasProviderOrigin = Boolean(parsed.providerId || parsed.providerOrigin);
-          const isEpochMatching = parsed.connectionEpoch !== undefined && parsed.connectionEpoch === currentEpoch;
-          const isAuthenticProvider =
-            isStreamerConnected &&
-            parsed.provenance === 'LIVE_PROVIDER' &&
-            hasProviderOrigin &&
-            isFresh &&
-            isEpochMatching;
-
-          const provenance: QuoteProvenance = isAuthenticProvider ? 'LIVE_PROVIDER' : 'DEGRADED';
-
           if (parsed.price > 0 && eventTime) {
             return {
               symbol: pos.contractSymbol,
@@ -265,7 +267,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               tickSize: (getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined),
               volatility: parsed.volatility,
               lastUpdated: parsed.timestamp || Date.now(),
-              provenance,
+              provenance: 'DEGRADED',
               marketEventTime: eventTime,
               connectionEpoch: parsed.connectionEpoch,
               providerId: parsed.providerId || parsed.providerOrigin,
