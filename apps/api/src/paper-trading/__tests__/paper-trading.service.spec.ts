@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PaperTradingService } from '../paper-trading.service';
+import { PaperTradingService, ExecutionMode } from '../paper-trading.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CandlesService } from '../../candles/candles.service';
 import { RealMarketStreamerService } from '../../market-data/real-market-streamer.service';
@@ -534,6 +534,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       orderType: 'MARKET',
       price: 24100.0,
       allowPriceOverride: true,
+      executionMode: ExecutionMode.TEST,
       stopLoss: 24050.0,
       target1: 24200.0,
     });
@@ -541,6 +542,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     const trade = await service.closePosition(pos.id, 'Backtest Close', {
       exitPriceOverride: 24250.0,
       allowPriceOverride: true,
+      executionMode: ExecutionMode.TEST,
     });
 
     expect(trade.outcomeSnapshotJson.executionPriceSource).toBe('SIMULATED_FILL');

@@ -136,6 +136,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             triggerMarketEventTime: marketEventTime,
             exitPriceOverride: livePrice,
             allowPriceOverride: true,
+            isInternalCall: true,
             executionMode: ExecutionMode.PAPER_MARKET,
             correlationId: pos.correlationId,
           },
@@ -174,6 +175,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             triggerMarketEventTime: marketEventTime,
             exitPriceOverride: livePrice,
             allowPriceOverride: true,
+            isInternalCall: true,
             executionMode: ExecutionMode.PAPER_MARKET,
             correlationId: pos.correlationId,
           },
@@ -224,7 +226,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         const cached = await this.redis.getClient().get(`option:ltp:${pos.contractSymbol}`);
         if (cached) {
           const parsed = JSON.parse(cached);
-          if (parsed.price > 0 && Date.now() - parsed.timestamp <= 5000) {
+          // Strict quality contract: Require genuine provider marketEventTime within 5s freshness
+          const eventTime = parsed.marketEventTime;
+          if (parsed.price > 0 && eventTime && Date.now() - Number(eventTime) <= 5000) {
             return {
               symbol: pos.contractSymbol,
               price: parsed.price,
@@ -238,9 +242,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               changeAmount: 0,
               tickSize: 0.05,
               volatility: 1.0,
-              lastUpdated: parsed.timestamp,
+              lastUpdated: parsed.timestamp || Date.now(),
               provenance: 'LIVE_PROVIDER',
-              marketEventTime: parsed.marketEventTime || parsed.timestamp,
+              marketEventTime: Number(eventTime),
             };
           }
         }

@@ -135,6 +135,7 @@ export interface IPaperPortfolio {
 export interface IClosePositionOptions {
   exitPriceOverride?: number;
   allowPriceOverride?: boolean;
+  isInternalCall?: boolean;
   executionMode?: ExecutionMode;
   triggerPrice?: number;
   triggerMarketEventTime?: Date | string;

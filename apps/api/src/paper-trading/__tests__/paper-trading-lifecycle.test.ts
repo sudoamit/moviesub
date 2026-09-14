@@ -922,4 +922,59 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(quote).toBeDefined();
     expect(quote.marketEventTime).toBe(optionEventTime.getTime());
   });
+
+  // TEST V: REAL UNMOCKED MARKET STREAMER TO MONITOR END-TO-END INTEGRATION
+  it('TEST V: REAL UNMOCKED MARKET STREAMER END-TO-END — real tick in RealMarketStreamer propagates through PaperPositionMonitorService to close position and record single PaperTrade', async () => {
+    const realStreamer = new RealMarketStreamerService({
+      getClient: () => null,
+      set: jest.fn(),
+      get: jest.fn(),
+    } as any);
+
+    const realMonitor = new PaperPositionMonitorService(
+      mockPrisma as any,
+      paperService,
+      realStreamer,
+    );
+
+    (paperService as any).realMarketStreamer = realStreamer;
+
+    const providerTime = Date.now() - 1000;
+    realStreamer.updateTicker('NIFTY', {
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: providerTime,
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49500,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // Push live provider tick crossing TP2 into unmocked RealMarketStreamerService
+    const tpEventTime = Date.now();
+    realStreamer.updateTicker('NIFTY', {
+      price: 52050,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: tpEventTime,
+    });
+
+    // Execute unmocked PaperPositionMonitorService evaluation loop
+    await realMonitor.evaluateActivePositions();
+
+    const dbPos = dbPositions.find((p) => p.id === pos.id);
+    expect(dbPos.status).toBe(PositionState.CLOSED);
+
+    const trades = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(trades.length).toBe(1);
+    expect(Number(trades[0].exitPrice)).toBe(52050);
+    expect(Number(trades[0].realizedPnL)).toBeGreaterThan(0);
+    expect(trades[0].outcomeSnapshotJson.exitQuotePrice).toBe(52050);
+  });
 });

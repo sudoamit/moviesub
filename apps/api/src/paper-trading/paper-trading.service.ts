@@ -1052,11 +1052,16 @@ export class PaperTradingService implements IExecutionProvider {
     let triggerPriceOpt: number | undefined;
     let triggerMarketEventTimeOpt: Date | string | undefined;
 
+    let isInternalCall = false;
+    let executionModeOpt: ExecutionMode | undefined;
+
     if (typeof options === 'number') {
       exitPriceOverride = options;
     } else if (options && typeof options === 'object') {
       exitPriceOverride = options.exitPriceOverride;
       allowPriceOverride = options.allowPriceOverride === true;
+      isInternalCall = options.isInternalCall === true;
+      executionModeOpt = options.executionMode;
       correlationIdOpt = options.correlationId;
       triggerPriceOpt = options.triggerPrice;
       triggerMarketEventTimeOpt = options.triggerMarketEventTime;
@@ -1104,7 +1109,12 @@ export class PaperTradingService implements IExecutionProvider {
     let sourceTimestamp = new Date();
     let priceSource = ExecutionPriceSource.LIVE_TICK;
 
-    if (allowPriceOverride && exitPriceOverride && exitPriceOverride > 0) {
+    const effectiveExecutionMode = executionModeOpt || (pos as any).executionMode;
+    const isTestOrSimulated =
+      effectiveExecutionMode === ExecutionMode.TEST ||
+      effectiveExecutionMode === ExecutionMode.SIMULATED;
+
+    if (allowPriceOverride && (isInternalCall || isTestOrSimulated) && exitPriceOverride && exitPriceOverride > 0) {
       exitPrice = exitPriceOverride;
       priceSource = ExecutionPriceSource.SIMULATED_FILL;
     } else {
