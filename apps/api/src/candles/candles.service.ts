@@ -37,6 +37,7 @@ export interface ICandlesResponse {
   sourceIdentity: string;
   candles: ICandle[];
   formingCandle?: ICandle | null;
+  latestMarketEventTimestamp?: Date | string | number | null;
 }
 
 export interface IChartDataResponse {
@@ -416,8 +417,8 @@ export class CandlesService {
 
     // Genuine provider market event timestamp (P0-1)
     // Do NOT derive marketAsOf from formingCandle.timestamp, closed candle timestamp, or Date.now().
-    const providerMarketEventMs = (candlesResp as any).latestMarketEventTimestamp
-      ? new Date((candlesResp as any).latestMarketEventTimestamp).getTime()
+    const providerMarketEventMs = candlesResp.latestMarketEventTimestamp
+      ? new Date(candlesResp.latestMarketEventTimestamp).getTime()
       : null;
 
     let marketAsOf: string | undefined = undefined;
@@ -435,7 +436,7 @@ export class CandlesService {
     const sessionVolumeWatermark: number | null = null;
 
     const streamState: CanonicalStreamState = {
-      marketAsOf: marketAsOf || observationTime,
+      marketAsOf: marketAsOf,
       observedAt: observationTime,
       sessionKey,
       providerId: sourceIdentity,

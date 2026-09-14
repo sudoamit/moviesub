@@ -60,10 +60,13 @@ export class CanonicalCandleAggregator {
 
   /**
    * Explicitly sets current stream connection epoch.
+   * Supports stream lifecycle authority: setConnectionEpoch(providerEpoch, localInstanceId).
    */
-  setConnectionEpoch(epoch: string | null): void {
-    this.connectionEpoch = epoch;
-    if (!epoch || epoch === 'REST_BOOTSTRAP') {
+  setConnectionEpoch(epoch: string | null, localInstanceId?: string | null): void {
+    this.providerConnectionEpoch = epoch && epoch !== 'REST_BOOTSTRAP' ? epoch : null;
+    this.localConnectionInstanceId = localInstanceId ?? null;
+    this.connectionEpoch = this.providerConnectionEpoch || this.localConnectionInstanceId || (epoch === 'REST_BOOTSTRAP' ? 'REST_BOOTSTRAP' : null);
+    if (!this.connectionEpoch || this.connectionEpoch === 'REST_BOOTSTRAP') {
       this.lastSequenceNumber = null;
     }
   }
@@ -110,17 +113,13 @@ export class CanonicalCandleAggregator {
     this.localConnectionInstanceId = state?.localConnectionInstanceId ?? null;
     this.connectionEpoch = state?.connectionEpoch ?? (this.providerConnectionEpoch || this.localConnectionInstanceId || (snapshot.streamState ? 'REST_BOOTSTRAP' : null));
 
-    // 2. Restore Latest Event Watermark (marketAsOf)
+    // 2. Restore Latest Event Watermark (marketAsOf) strictly from genuine market event watermarks
     if (state?.marketAsOf) {
       this.lastAcceptedEventTimeMs = new Date(state.marketAsOf).getTime();
     } else if (snapshot.marketAsOf) {
       this.lastAcceptedEventTimeMs = new Date(snapshot.marketAsOf).getTime();
-    } else if (snapshot.formingCandle) {
-      this.lastAcceptedEventTimeMs = new Date(snapshot.formingCandle.timestamp).getTime();
-    } else if (snapshot.closedCandles && snapshot.closedCandles.length > 0) {
-      this.lastAcceptedEventTimeMs = new Date(
-        snapshot.closedCandles[snapshot.closedCandles.length - 1].timestamp,
-      ).getTime();
+    } else {
+      this.lastAcceptedEventTimeMs = -1;
     }
 
     // 3. Restore Venue Session Key
@@ -190,8 +189,8 @@ export class CanonicalCandleAggregator {
       }
     }
 
-    // Enforce Sequence Capability: If provider does not support sequence numbers, ignore sequenceNumber completely
-    const seqNum = capability.sequence.supportsSequenceNumber ? rawSeqNum : undefined;
+    const sequenceScope = capability.sequence.scope;
+    const seqNum = capability.sequence.supportsSequenceNumber && sequenceScope !== 'NONE' ? rawSeqNum : undefined;
 
     let candidateEpoch = this.connectionEpoch;
     let candidateProviderEpoch = this.providerConnectionEpoch;
@@ -230,17 +229,25 @@ export class CanonicalCandleAggregator {
       candidateSequenceNum = seqNum ?? null;
     }
 
-    // Sequence Monotonicity & Ordering Validation
+    // Sequence Monotonicity & Ordering Validation according to SequenceScope policy
     if (isReconnect) {
       candidateSequenceNum = seqNum ?? null;
     } else if (seqNum !== undefined && seqNum !== null) {
-      // Sequence requires valid non-REST connectionEpoch invariant
-      if (!candidateEpoch || candidateEpoch === 'REST_BOOTSTRAP') {
-        return snapshot; // Reject sequence specified without live connectionEpoch
-      }
-
-      if (this.lastSequenceNumber !== null && this.connectionEpoch === candidateEpoch && seqNum <= this.lastSequenceNumber) {
-        return snapshot; // Reject stale or out-of-order sequence number -> watermarks UNCHANGED
+      if (sequenceScope === 'CONNECTION_SCOPED') {
+        if (!candidateEpoch || candidateEpoch === 'REST_BOOTSTRAP') {
+          return snapshot; // Reject sequence specified without live connection epoch
+        }
+        if (this.lastSequenceNumber !== null && this.connectionEpoch === candidateEpoch && seqNum <= this.lastSequenceNumber) {
+          return snapshot; // Reject stale or out-of-order sequence number -> watermarks UNCHANGED
+        }
+      } else if (sequenceScope === 'PROVIDER_SCOPED') {
+        if (this.lastSequenceNumber !== null && this.providerId === tickProviderId && seqNum <= this.lastSequenceNumber) {
+          return snapshot; // Reject stale sequence number across connection restarts for same provider
+        }
+      } else if (sequenceScope === 'GLOBALLY_MONOTONIC') {
+        if (this.lastSequenceNumber !== null && seqNum <= this.lastSequenceNumber) {
+          return snapshot; // Reject stale sequence number globally for symbol
+        }
       }
       candidateSequenceNum = seqNum;
     }

@@ -70,7 +70,7 @@ export interface ChartFormingCandle {
 }
 
 export interface CanonicalStreamState {
-  readonly marketAsOf: Date | string | number;
+  readonly marketAsOf?: Date | string | number | null;
   readonly observedAt?: Date | string | number;
   readonly sessionKey: string;
   readonly providerId?: string;

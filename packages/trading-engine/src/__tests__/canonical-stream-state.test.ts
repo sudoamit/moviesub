@@ -2,6 +2,7 @@ import {
   CanonicalCandleAggregator,
   ChartMarketSnapshot,
   VenueSessionCalendar,
+  ProviderSequenceCapabilityRegistry,
 } from '@quant/shared';
 import { ChartSnapshotValidator } from '../chart-snapshot-validator';
 
@@ -10,6 +11,23 @@ describe('AI FIX 126 — Canonical Stream State Correctness Suite', () => {
 
   beforeEach(() => {
     aggregator = new CanonicalCandleAggregator();
+    ProviderSequenceCapabilityRegistry.registerCapabilities({
+      providerId: 'p1',
+      sequence: {
+        scope: 'CONNECTION_SCOPED',
+        resetOnReconnect: true,
+        supportsSequenceNumber: true,
+      },
+      volume: {
+        supportsSessionVolume: true,
+        supportsBucketCumulative: true,
+        supportsIncremental: true,
+      },
+      session: {
+        isContinuous247: true,
+        requiresVenueCalendar: false,
+      },
+    });
   });
 
   // 1. Transactional Sequence Watermarks

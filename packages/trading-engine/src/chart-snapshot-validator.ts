@@ -233,7 +233,13 @@ export class ChartSnapshotValidator {
         errors.push('streamState sequence number specified without connectionEpoch or connection identity');
       }
 
-      if (marketAsOf && snapshot.marketAsOf) {
+      if (snapshot.marketAsOf === undefined || snapshot.marketAsOf === null) {
+        if (marketAsOf !== undefined && marketAsOf !== null) {
+          errors.push(`streamState.marketAsOf (${marketAsOf}) specified when snapshot.marketAsOf is null/undefined`);
+        }
+      } else if (!marketAsOf) {
+        errors.push(`streamState.marketAsOf is null/undefined when snapshot.marketAsOf is present (${snapshot.marketAsOf})`);
+      } else {
         const sMarketMs = new Date(marketAsOf).getTime();
         if (!isNaN(sMarketMs) && !isNaN(marketAsOfMs) && sMarketMs !== marketAsOfMs) {
           errors.push(`streamState.marketAsOf (${marketAsOf}) does not match snapshot.marketAsOf (${snapshot.marketAsOf})`);
