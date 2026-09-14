@@ -20,7 +20,7 @@ import {
   RotateCcw,
   Check,
 } from 'lucide-react';
-import { ISignalSetup } from '@quant/shared';
+import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
 
 interface RiskWidgetProps {
   selectedSignal: ISignalSetup | null;
@@ -143,11 +143,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     }
   }, [selectedSignal]);
 
-  // BTC is USDT-quoted; XAUUSD is USD-quoted — use separate FX rates
-  const USDT_INR_RATE = 92.0; // BTCUSDT settles in Tether (USDT), not USD
-  const USD_INR_RATE = 87.0;  // XAUUSD is denominated in USD
-  // Effective INR conversion rate for cross-currency instruments
-  const cryptoInrRate = isGold ? USD_INR_RATE : USDT_INR_RATE;
+  // Dynamic point-in-time FX rate resolution from PointInTimeCurrencyConverter
+  const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
+  const cryptoInrRate = quoteCurrency === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
   // Display price helper: converts USD/USDT prices to INR for BTC and Gold display
   const dp = (price: number) => (isCrypto || isGold ? price * cryptoInrRate : price);
   const riskPerUnit = Math.abs(entryPrice - stopLoss);
@@ -156,7 +154,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const plannedRiskAmount = (accountBalance * riskPercent) / 100;
 
   // Unit / Quantity sizing
-  const inrRiskPerUnit = isCrypto ? riskPerUnit * USDT_INR_RATE : isGold ? riskPerUnit * USD_INR_RATE : riskPerUnit;
+  const inrRiskPerUnit = riskPerUnit * cryptoInrRate;
   let calculatedUnits = inrRiskPerUnit > 0 ? plannedRiskAmount / inrRiskPerUnit : 0;
   let finalUnits = 0;
   let lotsCount = 0;
@@ -175,11 +173,11 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   }
 
   // Notional & Profit/Loss Values
-  const totalPositionValue = finalUnits * entryPrice * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
-  const actualMaxRisk = finalUnits * riskPerUnit * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
+  const totalPositionValue = finalUnits * entryPrice * cryptoInrRate;
+  const actualMaxRisk = finalUnits * riskPerUnit * cryptoInrRate;
   const actualRiskPercent = accountBalance > 0 ? (actualMaxRisk / accountBalance) * 100 : 0;
-  const expectedProfitTP1 = finalUnits * target1Distance * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
-  const expectedProfitTP2 = finalUnits * target2Distance * (isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0);
+  const expectedProfitTP1 = finalUnits * target1Distance * cryptoInrRate;
+  const expectedProfitTP2 = finalUnits * target2Distance * cryptoInrRate;
   const rewardToRiskRatio =
     riskPerUnit > 0 ? Number((target2Distance / riskPerUnit).toFixed(2)) : 0;
 

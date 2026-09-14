@@ -18,6 +18,7 @@ import {
   toPrismaTimeframe,
   ICandle,
   getAuthoritativeInstrument,
+  PointInTimeCurrencyConverter,
 } from '@quant/shared';
 
 export interface IRecordTradeDto {
@@ -1292,7 +1293,8 @@ export class SignalsService implements OnModuleInit {
               if (closedState) {
                 const isLong = activeTrade.dir === 'BULLISH';
                 const priceDiff = isLong ? exitP - activeTrade.entry : activeTrade.entry - exitP;
-                const pnlAmount = Number((priceDiff * 0.2 * 87.0).toFixed(2));
+                const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+                const pnlAmount = Number((priceDiff * 0.2 * btcFxRate).toFixed(2));
 
                 await this.recordCompletedTrade({
                   symbol: 'BTCUSDT',
@@ -1373,13 +1375,15 @@ export class SignalsService implements OnModuleInit {
                   const isLong = activeSignal.direction === 'BULLISH';
                   const exitPrice = update.currentPrice;
                   const priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
+                  const quoteCurr = sym === 'XAUUSD' || sym === 'GOLD' ? 'USD' : sym === 'BTCUSDT' || sym?.includes('BTC') ? 'USDT' : 'INR';
+                  const goldFxRate = quoteCurr === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurr, 'INR', Date.now()).fxRate;
                   const lotMultiplier =
                     sym === 'NIFTY'
                       ? 65
                       : sym === 'BANKNIFTY'
                         ? 15
                         : sym === 'XAUUSD' || sym === 'GOLD'
-                          ? 10 * 87.0
+                          ? 10 * goldFxRate
                           : sym === 'RELIANCE'
                             ? 250
                             : sym === 'HDFCBANK'

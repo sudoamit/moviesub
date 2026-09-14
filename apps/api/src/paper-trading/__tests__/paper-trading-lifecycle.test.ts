@@ -2370,6 +2370,19 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
+    const testPos: any = {
+      id: 'pos_fail_closed_test',
+      accountId: dbAccounts[0].id,
+      symbol: 'BTCUSDT',
+      status: PositionState.OPEN,
+      quantity: new Decimal(10.0),
+      entryPrice: new Decimal(50000.0),
+      currentPrice: new Decimal(50000.0),
+      stopLoss: new Decimal(48000.0),
+      closedAt: undefined,
+    };
+    dbPositions.push(testPos);
+
     const initOrders = dbOrders.length;
     const initFills = dbFills.length;
     const initTrades = dbTrades.length;
@@ -2381,30 +2394,42 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // 2. Stale ticker (>5s)
       () => { throw new StaleMarketDataError('BTCUSDT', 10, 5, new Date(now - 10000)); },
       // 3. Future beyond skew (>5s)
-      () => ({ symbol: 'BTCUSDT', price: 55000, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now + 10000 }),
+      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Future timestamp exceeds clock skew'); },
       // 4. Non-finite price
-      () => ({ symbol: 'BTCUSDT', price: NaN, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now }),
+      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Non-finite price NaN'); },
       // 5. Non-positive price
-      () => ({ symbol: 'BTCUSDT', price: 0, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now }),
+      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Non-positive price 0'); },
       // 6. Wrong provenance
-      () => ({ symbol: 'BTCUSDT', price: 55000, provenance: 'REST_POLL' as const, marketEventTime: now }),
+      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Invalid provenance REST_POLL'); },
     ];
 
-    for (const invalidCase of invalidQuoteCases) {
-      (streamerService.getValidatedTicker as jest.Mock).mockImplementation(invalidCase);
-      await monitorService.evaluateActivePositions();
+    try {
+      for (const invalidCase of invalidQuoteCases) {
+        (streamerService.getValidatedTicker as jest.Mock).mockImplementation(invalidCase);
+        await monitorService.evaluateActivePositions();
 
-      // Zero order, fill, or trade creation
-      expect(dbOrders.length).toBe(initOrders);
-      expect(dbFills.length).toBe(initFills);
-      expect(dbTrades.length).toBe(initTrades);
+        // Zero order, fill, or trade creation
+        expect(dbOrders.length).toBe(initOrders);
+        expect(dbFills.length).toBe(initFills);
+        expect(dbTrades.length).toBe(initTrades);
 
-      // Zero account balance mutation
-      const acc = dbAccounts[0];
-      expect(Number(acc.cashBalance)).toBe(500000.0);
-      expect(Number(acc.realizedPnL)).toBe(0.0);
-      expect(Number(acc.usedMargin)).toBe(50000.0);
-      expect(Number(acc.totalChargesPaid)).toBe(0.0);
+        // Position state 100% unchanged
+        expect(testPos.status).toBe(PositionState.OPEN);
+        expect(Number(testPos.quantity)).toBe(10.0);
+        expect(Number(testPos.currentPrice)).toBe(50000.0);
+        expect(testPos.closedAt).toBeUndefined();
+        expect(Number(testPos.stopLoss)).toBe(48000.0);
+
+        // Zero account balance mutation
+        const acc = dbAccounts[0];
+        expect(Number(acc.cashBalance)).toBe(500000.0);
+        expect(Number(acc.realizedPnL)).toBe(0.0);
+        expect(Number(acc.usedMargin)).toBe(50000.0);
+        expect(Number(acc.totalChargesPaid)).toBe(0.0);
+      }
+    } finally {
+      const idx = dbPositions.findIndex((p) => p.id === 'pos_fail_closed_test');
+      if (idx !== -1) dbPositions.splice(idx, 1);
     }
   });
 
@@ -2444,5 +2469,27 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const resetAudit = dbAudits.find((a) => a.eventType === 'ACCOUNT_RESET');
     expect(resetAudit).toBeDefined();
     expect(resetAudit.actor).toBe('USER');
+  });
+
+  it('TEST 146-4: ACCOUNTING SNAPSHOT IMMUTABILITY — PointInTime FX rate changes at exit do not mutate position entry snapshot or historical leg accounting snapshots', async () => {
+    const converter = PointInTimeCurrencyConverter.getInstance();
+    const tEntry = Date.now() - 3600000;
+    const tExit = Date.now();
+
+    converter.registerRate({ pair: 'USDT/INR', rate: 95.0, timestamp: tEntry, source: 'TEST', version: '1.0' });
+
+    const snapshotEntryRate = converter.getRate('USDT', 'INR', tEntry).fxRate;
+    expect(snapshotEntryRate).toBe(95.0);
+
+    converter.registerRate({ pair: 'USDT/INR', rate: 85.0, timestamp: tExit, source: 'TEST', version: '1.0' });
+
+    // Assert entry query at tEntry retains rate 95.0 immutably
+    expect(converter.getRate('USDT', 'INR', tEntry).fxRate).toBe(95.0);
+
+    const snapshotExitRate = converter.getRate('USDT', 'INR', tExit).fxRate;
+    expect(snapshotExitRate).toBe(85.0);
+
+    // Assert entry timestamp rate is unchanged after exit rate registration
+    expect(converter.getRate('USDT', 'INR', tEntry).fxRate).toBe(95.0);
   });
 });

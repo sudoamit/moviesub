@@ -22,7 +22,7 @@ import {
   Check,
   DollarSign,
 } from 'lucide-react';
-import { ISignalSetup } from '@quant/shared';
+import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
 
 interface PaperTradingWidgetProps {
   currentSymbol: string;
@@ -38,10 +38,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const isCrypto = currentSymbol === 'BTCUSDT';
   const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
   const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
-  // FX rates for price display conversion
-  const USDT_INR_RATE = 92.0;
-  const USD_INR_RATE = 87.0;
-  const fxRate = isCrypto ? USDT_INR_RATE : isGold ? USD_INR_RATE : 1.0;
+  // Dynamic FX rates from PointInTimeCurrencyConverter
+  const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
+  const fxRate = quoteCurrency === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
   // Display price helper: converts USD/USDT prices to INR for BTC/Gold
   const dp = (price: number) => (isCrypto || isGold ? price * fxRate : price);
 
@@ -516,7 +515,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                     {portfolio?.openPositions?.map((pos: any) => {
                       const isCryptoPos = pos.symbol === 'BTCUSDT' || pos.symbol?.includes('BTC');
                       const isGoldPos = pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD';
-                      const posFx = isCryptoPos ? USDT_INR_RATE : isGoldPos ? USD_INR_RATE : 1.0;
+                      const posQuote = isCryptoPos ? 'USDT' : isGoldPos ? 'USD' : 'INR';
+                      const posFx = posQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(posQuote, 'INR', Date.now()).fxRate;
                       const dpPos = (p: number) => (isCryptoPos || isGoldPos ? p * posFx : p);
                       return (
                         <tr key={pos.id} className="hover:bg-slate-900/50 transition-colors">
@@ -616,7 +616,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                       const isCryptoTrade =
                         trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
                       const isGoldTrade = trade.symbol === 'XAUUSD' || trade.symbol === 'GOLD';
-                      const tradeFx = isCryptoTrade ? USDT_INR_RATE : isGoldTrade ? USD_INR_RATE : 1.0;
+                      const tradeQuote = isCryptoTrade ? 'USDT' : isGoldTrade ? 'USD' : 'INR';
+                      const tradeTimestamp = trade.closedAt ? new Date(trade.closedAt).getTime() : Date.now();
+                      const tradeFx = tradeQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(tradeQuote, 'INR', tradeTimestamp).fxRate;
                       const dpTrade = (p: number) => (isCryptoTrade || isGoldTrade ? p * tradeFx : p);
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">

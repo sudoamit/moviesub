@@ -25,7 +25,7 @@ import {
   Radio,
   Sliders,
 } from 'lucide-react';
-import { ISignalSetup } from '@quant/shared';
+import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
 
 interface LivePositionTrackerProps {
   symbol: string;
@@ -543,10 +543,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? currentSL > effectiveEntryPrice
         : currentSL < effectiveEntryPrice;
 
-  // BTC is USDT-quoted; XAUUSD is USD-quoted — use separate rates
-  const USDT_INR_RATE = 92.0; // For BTCUSDT (Binance perpetual, USDT settlement)
-  const USD_INR_RATE = 87.0;  // For XAUUSD (gold, USD-denominated)
-  const cryptoFxRate = isGold ? USD_INR_RATE : USDT_INR_RATE;
+  // Dynamic FX rates from PointInTimeCurrencyConverter
+  const trackerQuote = isGold ? 'USD' : isCrypto ? 'USDT' : 'INR';
+  const cryptoFxRate = trackerQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(trackerQuote, 'INR', Date.now()).fxRate;
 
   // Read leverage from localStorage (written by PaperTradingWidget) or fall back to 5x default
   const [activeLeverage, setActiveLeverage] = React.useState<number>(5);
