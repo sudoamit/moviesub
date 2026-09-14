@@ -2996,4 +2996,388 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(closedTrade.accountingSnapshotHash).toBeDefined();
     });
   });
+
+  describe('AI FIX 149 — Release Gate & Architectural Invariants Suite', () => {
+    it('TEST 149-1 (Blockers 1 & 7): Full Persistence Graph Assertions Across All 6 Exit Paths for BUY & SELL', async () => {
+      const directions: ('BUY' | 'SELL')[] = ['BUY', 'SELL'];
+
+      for (const dir of directions) {
+        for (let path = 1; path <= 6; path++) {
+          const now = Date.now();
+          const entryPrice = 50000.0;
+          const slPrice = dir === 'BUY' ? 49000.0 : 51000.0;
+          const tp1Price = dir === 'BUY' ? 51000.0 : 49000.0;
+          const tp2Price = dir === 'BUY' ? 52000.0 : 48000.0;
+
+          // Fresh database state for each path
+          dbAccounts[0].cashBalance = new Decimal(1000000.0);
+          dbAccounts[0].usedMargin = new Decimal(0.0);
+          dbAccounts[0].realizedPnL = new Decimal(0.0);
+          dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+          dbOrders = [];
+          dbFills = [];
+          dbPositions = [];
+          dbTrades = [];
+
+          const initialCash = Number(dbAccounts[0].cashBalance);
+          const initialRealized = Number(dbAccounts[0].realizedPnL);
+          const initialCharges = Number(dbAccounts[0].totalChargesPaid);
+
+          (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+            symbol: 'NIFTY',
+            price: entryPrice,
+            provenance: 'LIVE_PROVIDER',
+            marketEventTime: now,
+            lastUpdated: now,
+          });
+
+          const pos = await paperService.placeOrder({
+            symbol: 'NIFTY',
+            direction: dir,
+            quantity: 10,
+            orderType: 'MARKET',
+            stopLoss: slPrice,
+            target1: tp1Price,
+            target2: tp2Price,
+            executionMode: ExecutionMode.TEST,
+          });
+
+          if (path === 1) {
+            // Direct TP2
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp2Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 2) {
+            // TP1 then TP2
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp2Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 3) {
+            // TP1 then SL
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: slPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 4) {
+            // TP1 then Breakeven
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: entryPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 5) {
+            // TP1 then manual closePosition
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: entryPrice + (dir === 'BUY' ? 500 : -500),
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await paperService.closePosition(pos.id, 'Manual Exit');
+          } else if (path === 6) {
+            // Direct SL
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: slPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+          }
+
+          // Exact Persistence Graph Assertions:
+          // 1. Exactly 1 Position row, status CLOSED
+          expect(dbPositions.length).toBe(1);
+          expect(dbPositions[0].status).toBe(PositionState.CLOSED);
+
+          // 2. Exactly 1 PaperTrade row
+          expect(dbTrades.length).toBe(1);
+          const trade = dbTrades[0];
+          expect(trade.positionId).toBe(pos.id);
+
+          // 3. Orders and Fills exact counts:
+          // Single-leg exit (paths 1, 6): exactly 2 orders (Entry + FinalExit), exactly 2 fills
+          // Multi-leg exit (paths 2, 3, 4, 5): exactly 3 orders (Entry + TP1 + FinalExit), exactly 3 fills
+          const isMultiLeg = path === 2 || path === 3 || path === 4 || path === 5;
+          const expectedCount = isMultiLeg ? 3 : 2;
+          expect(dbOrders.length).toBe(expectedCount);
+          expect(dbFills.length).toBe(expectedCount);
+
+          // 4. Legs exact count in outcomeSnapshotJson
+          const legs: any[] = trade.outcomeSnapshotJson?.legs || [];
+          expect(legs.length).toBe(expectedCount);
+
+          // 5. Financial Invariants
+          const finalCash = Number(dbAccounts[0].cashBalance);
+          const finalRealized = Number(dbAccounts[0].realizedPnL);
+          const finalCharges = Number(dbAccounts[0].totalChargesPaid);
+          const finalMargin = Number(dbAccounts[0].usedMargin);
+
+          const cashDelta = Number((finalCash - initialCash).toFixed(2));
+          const realizedDelta = Number((finalRealized - initialRealized).toFixed(2));
+          const chargesDelta = Number((finalCharges - initialCharges).toFixed(2));
+          const tradePnl = Number(Number(trade.realizedPnL).toFixed(2));
+
+          expect(cashDelta).toBeCloseTo(tradePnl, 1);
+          expect(realizedDelta).toBeCloseTo(tradePnl, 1);
+
+          const sumLegsNetPnL = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2));
+          expect(tradePnl).toBeCloseTo(sumLegsNetPnL, 1);
+
+          const sumFillFees = Number(dbFills.reduce((acc: number, f: any) => acc + Number(f.fee || 0), 0).toFixed(2));
+          const tradeTotalCharges = Number(Number(trade.chargesJson?.totalCharges || 0).toFixed(2));
+          expect(sumFillFees).toBeCloseTo(tradeTotalCharges, 1);
+          expect(chargesDelta).toBeCloseTo(sumFillFees, 1);
+
+          // 6. Used margin restored to exactly 0
+          expect(finalMargin).toBe(0.0);
+        }
+      }
+    });
+
+    it('TEST 149-2 (Blocker 2): LIVE override rejection leaves zero side effects before any state mutation', async () => {
+      const now = Date.now();
+      dbAccounts[0].cashBalance = new Decimal(1000000.0);
+      dbAccounts[0].usedMargin = new Decimal(0.0);
+      dbAccounts[0].realizedPnL = new Decimal(0.0);
+      dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+      dbOrders = [];
+      dbFills = [];
+      dbPositions = [];
+      dbTrades = [];
+
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 50000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now,
+        lastUpdated: now,
+      });
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 1,
+        orderType: 'MARKET',
+        stopLoss: 49000,
+        target1: 52000,
+        executionMode: ExecutionMode.LIVE_MARKET,
+      });
+
+      const postEntryCash = Number(dbAccounts[0].cashBalance);
+      const postEntryMargin = Number(dbAccounts[0].usedMargin);
+      const postEntryRealized = Number(dbAccounts[0].realizedPnL);
+      const postEntryCharges = Number(dbAccounts[0].totalChargesPaid);
+
+      const orderCountAfterEntry = dbOrders.length; // 1
+      const fillCountAfterEntry = dbFills.length; // 1
+      const tradeCountAfterEntry = dbTrades.length; // 0
+
+      // Attempt LIVE exit with price override — must fail closed immediately
+      await expect(
+        paperService.closePosition(pos.id, 'Manual Exit', {
+          exitPriceOverride: 99999.0,
+          allowPriceOverride: true,
+          executionMode: ExecutionMode.LIVE_MARKET,
+        }),
+      ).rejects.toThrow(/\[LIVE_OVERRIDE_REJECTED\]/);
+
+      // Assert zero state mutations:
+      expect(dbOrders.length).toBe(orderCountAfterEntry);
+      expect(dbFills.length).toBe(fillCountAfterEntry);
+      expect(dbTrades.length).toBe(tradeCountAfterEntry);
+
+      // Position must remain OPEN, NOT EXIT_PENDING, CLOSING, or CLOSED
+      const currentPos = dbPositions.find((p) => p.id === pos.id);
+      expect(currentPos.status).toBe(PositionState.OPEN);
+
+      // Account financial fields must be 100% unchanged
+      expect(Number(dbAccounts[0].cashBalance)).toBe(postEntryCash);
+      expect(Number(dbAccounts[0].usedMargin)).toBe(postEntryMargin);
+      expect(Number(dbAccounts[0].realizedPnL)).toBe(postEntryRealized);
+      expect(Number(dbAccounts[0].totalChargesPaid)).toBe(postEntryCharges);
+    });
+
+    it('TEST 149-3 (Blocker 3): RealMarketStreamerService degradation & reconnection state machine', () => {
+      const realStreamer = new RealMarketStreamerService({} as any);
+
+      // 1. Newer valid tick -> LIVE_PROVIDER
+      const t1 = realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: 1000,
+        lastPrice: '50000.0',
+        provenance: 'LIVE_PROVIDER',
+      });
+      expect(t1).not.toBeNull();
+      expect(t1!.provenance).toBe('LIVE_PROVIDER');
+      expect(realStreamer.getTicker('BTCUSDT')?.provenance).toBe('LIVE_PROVIDER');
+
+      // 2. Older invalid tick -> ignored (does NOT degrade fresh existing ticker!)
+      const olderInvalid = realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: 500, // older than 1000
+        lastPrice: '-1.0', // invalid price
+        provenance: 'LIVE_PROVIDER',
+      });
+      expect(olderInvalid).toBeNull();
+      expect(realStreamer.getTicker('BTCUSDT')?.provenance).toBe('LIVE_PROVIDER');
+
+      // 3. Newer invalid tick -> degrades to DEGRADED
+      const newerInvalid = realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: 1500, // newer than 1000
+        lastPrice: '-1.0', // invalid price
+        provenance: 'LIVE_PROVIDER',
+      });
+      expect(newerInvalid).toBeNull();
+      expect(realStreamer.getTicker('BTCUSDT')?.provenance).toBe('DEGRADED');
+
+      // 4. Provider disconnected -> MarketDataUnavailableError ('disconnected')
+      realStreamer.disconnectProvider();
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/disconnected/);
+
+      // 5. Provider reconnected -> rejects cached ticks from before reconnection
+      realStreamer.setProviderConnected(true);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/cached tick from before provider reconnection/);
+
+      // 6. Fresh valid tick after reconnection -> succeeds
+      const freshTick = realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: Date.now(),
+        lastPrice: '51000.0',
+        provenance: 'LIVE_PROVIDER',
+      });
+      expect(freshTick).not.toBeNull();
+      const validated = realStreamer.getValidatedTicker('BTCUSDT');
+      expect(validated.price).toBe(51000.0);
+      expect(validated.provenance).toBe('LIVE_PROVIDER');
+    });
+
+    it('TEST 149-4 (Blocker 4): Cross-currency order fails closed with MISSING_FX_RATE without universal epoch 0 fallback', async () => {
+      const converter = PointInTimeCurrencyConverter.getInstance();
+      converter.clearAllRates();
+
+      const now = Date.now();
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 50000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now,
+        lastUpdated: now,
+      });
+
+      // 1. With NO rate registered at all -> must reject with MISSING_FX_RATE
+      await expect(
+        paperService.placeOrder({
+          symbol: 'BTCUSDT',
+          direction: 'BUY',
+          quantity: 1,
+          orderType: 'MARKET',
+          stopLoss: 49000,
+          target1: 52000,
+          executionMode: ExecutionMode.TEST,
+        }),
+      ).rejects.toThrow(/MISSING_FX_RATE/);
+
+      // 2. With rate ONLY in the future -> lookahead prevention: must reject with MISSING_FX_RATE
+      converter.registerRate({
+        pair: 'USDT/INR',
+        rate: 92.0,
+        timestamp: Date.now() + 100000,
+        source: 'FUTURE_RATE',
+        version: '1.0',
+      });
+
+      await expect(
+        paperService.placeOrder({
+          symbol: 'BTCUSDT',
+          direction: 'BUY',
+          quantity: 1,
+          orderType: 'MARKET',
+          stopLoss: 49000,
+          target1: 52000,
+          executionMode: ExecutionMode.TEST,
+        }),
+      ).rejects.toThrow(/MISSING_FX_RATE/);
+
+      // 3. With point-in-time rate (<= timestamp) -> succeeds
+      converter.registerRate({
+        pair: 'USDT/INR',
+        rate: 92.0,
+        timestamp: Date.now() - 1000,
+        source: 'VALID_PIT_RATE',
+        version: '1.0',
+      });
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 1,
+        orderType: 'MARKET',
+        stopLoss: 49000,
+        target1: 52000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      expect(pos).toBeDefined();
+      expect(pos.id).toBeDefined();
+    });
+  });
 });

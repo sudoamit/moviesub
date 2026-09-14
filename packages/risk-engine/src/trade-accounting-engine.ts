@@ -60,6 +60,32 @@ export interface ITradePnlParams {
   accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
+export interface IExecutionLegSettlementParams {
+  role: 'ENTRY' | 'TP1_PARTIAL' | 'FINAL_EXIT';
+  entryPrice: number;
+  fillPrice: number;
+  quantity: number;
+  direction: Direction | string;
+  accountingSnapshot?: ITradeAccountingSnapshot;
+  fxRate?: number;
+  fees?: number;
+  slippage?: number;
+  initialStopLoss?: number;
+}
+
+export interface IExecutionLegSettlement {
+  role: 'ENTRY' | 'TP1_PARTIAL' | 'FINAL_EXIT';
+  grossPnL: number;
+  netPnL: number;
+  realizedR: number;
+  fees: number;
+  slippage: number;
+  fxRateUsed: number;
+  accountingSnapshotHash?: string;
+  cashDelta: number;
+  realizedPnLDelta: number;
+}
+
 export class TradeAccountingEngine {
   /**
    * Calculates notional values in both quote currency and INR account currency.
@@ -434,6 +460,74 @@ export class TradeAccountingEngine {
       fees: safeFees,
       slippage: safeSlippage,
       accountingSnapshot: acctSnap,
+    };
+  }
+
+  /**
+   * CANONICAL SINGLE-AUTHORITY LEG SETTLEMENT PIPELINE:
+   * Validated Fill -> Canonical Accounting Snapshot -> TradeAccountingEngine.settleExecutionLeg -> Canonical Leg P&L -> Account Ledger
+   */
+  static settleExecutionLeg(params: IExecutionLegSettlementParams): IExecutionLegSettlement {
+    const {
+      role,
+      entryPrice,
+      fillPrice,
+      quantity,
+      direction,
+      accountingSnapshot,
+      fees = 0,
+      slippage = 0,
+      initialStopLoss,
+    } = params;
+    const fxRate = accountingSnapshot?.fxRate ?? params.fxRate ?? 1.0;
+    const snapshotHash = accountingSnapshot?.snapshotHash;
+
+    if (role === 'ENTRY') {
+      const safeFees = Number.isFinite(fees) ? fees : 0;
+      return {
+        role: 'ENTRY',
+        grossPnL: 0,
+        netPnL: -safeFees,
+        realizedR: 0,
+        fees: safeFees,
+        slippage: 0,
+        fxRateUsed: fxRate,
+        accountingSnapshotHash: snapshotHash,
+        cashDelta: -safeFees,
+        realizedPnLDelta: -safeFees,
+      };
+    }
+
+    const hasValidStop = initialStopLoss !== undefined && initialStopLoss > 0;
+    const riskDistance = hasValidStop ? Math.abs(entryPrice - initialStopLoss) : 0;
+    const initialRiskAccount =
+      hasValidStop && riskDistance > 0
+        ? this.calculateStopRisk(entryPrice, initialStopLoss, quantity, accountingSnapshot ?? 1, fxRate)
+        : undefined;
+
+    const pnlCalc = this.calculateTradePnl({
+      entryPrice,
+      exitPrice: fillPrice,
+      quantity,
+      direction,
+      fxRate,
+      fees,
+      slippage,
+      initialRiskAccount,
+      accountingSnapshot,
+    });
+
+    return {
+      role,
+      grossPnL: pnlCalc.grossPnlAccount,
+      netPnL: pnlCalc.netPnlAccount,
+      realizedR: pnlCalc.realizedR,
+      fees: pnlCalc.fees,
+      slippage: pnlCalc.slippage,
+      fxRateUsed: fxRate,
+      accountingSnapshotHash: snapshotHash,
+      cashDelta: pnlCalc.netPnlAccount,
+      realizedPnLDelta: pnlCalc.netPnlAccount,
     };
   }
 }

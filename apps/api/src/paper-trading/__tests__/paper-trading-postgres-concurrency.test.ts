@@ -354,27 +354,27 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         prismaA.auditEvent.createMany = origCreateMany;
       }
 
-      // Assert 100% atomic rollback in real PostgreSQL database
-      const finalAccount = await prismaA.paperAccount.findUnique({ where: { id: account.id } });
-      expect(Number(finalAccount!.cashBalance)).toBe(initCash);
-      expect(Number(finalAccount!.realizedPnL)).toBe(0.0);
-      expect(Number(finalAccount!.usedMargin)).toBe(0.0);
-      expect(Number(finalAccount!.totalChargesPaid)).toBe(0.0);
+      // Assert 100% atomic rollback in real PostgreSQL database via independent client prismaB
+      const finalAccountB = await prismaB.paperAccount.findUnique({ where: { id: account.id } });
+      expect(Number(finalAccountB!.cashBalance)).toBe(initCash);
+      expect(Number(finalAccountB!.realizedPnL)).toBe(0.0);
+      expect(Number(finalAccountB!.usedMargin)).toBe(0.0);
+      expect(Number(finalAccountB!.totalChargesPaid)).toBe(0.0);
 
-      const orders = await prismaA.paperOrder.findMany({ where: { accountId: account.id } });
-      expect(orders.length).toBe(0);
+      const ordersB = await prismaB.paperOrder.findMany({ where: { accountId: account.id } });
+      expect(ordersB.length).toBe(0);
 
-      const fills = await prismaA.paperFill.findMany({ where: { orderId: { in: orders.map((o) => o.id) } } });
-      expect(fills.length).toBe(0);
+      const fillsB = await prismaB.paperFill.findMany({ where: { orderId: { in: ordersB.map((o) => o.id) } } });
+      expect(fillsB.length).toBe(0);
 
-      const positions = await prismaA.paperPosition.findMany({ where: { accountId: account.id } });
-      expect(positions.length).toBe(0);
+      const positionsB = await prismaB.paperPosition.findMany({ where: { accountId: account.id } });
+      expect(positionsB.length).toBe(0);
 
-      const trades = await prismaA.paperTrade.findMany({ where: { accountId: account.id } });
-      expect(trades.length).toBe(0);
+      const tradesB = await prismaB.paperTrade.findMany({ where: { accountId: account.id } });
+      expect(tradesB.length).toBe(0);
 
-      const audits = await prismaA.auditEvent.findMany({ where: { entityId: account.id } });
-      expect(audits.length).toBe(0);
+      const auditsB = await prismaB.auditEvent.findMany({ where: { entityId: account.id } });
+      expect(auditsB.length).toBe(0);
     } finally {
       await prismaA.paperAccount.delete({ where: { id: account.id } });
     }
@@ -428,19 +428,19 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         prismaA.paperTrade.create = origTradeCreate;
       }
 
-      // Assert 100% atomic rollback: position remains OPEN, balance/margin/charges/realizedPnL unchanged
-      const finalPosition = await prismaA.paperPosition.findUnique({ where: { id: position.id } });
-      expect(finalPosition!.status).toBe('OPEN');
-      expect(Number(finalPosition!.usedMargin)).toBe(20000.0);
+      // Assert 100% atomic rollback via independent client prismaB: position remains OPEN, balance/margin/charges/realizedPnL unchanged
+      const finalPositionB = await prismaB.paperPosition.findUnique({ where: { id: position.id } });
+      expect(finalPositionB!.status).toBe('OPEN');
+      expect(Number(finalPositionB!.usedMargin)).toBe(20000.0);
 
-      const finalAccount = await prismaA.paperAccount.findUnique({ where: { id: account.id } });
-      expect(Number(finalAccount!.cashBalance)).toBe(999900.0);
-      expect(Number(finalAccount!.usedMargin)).toBe(20000.0);
-      expect(Number(finalAccount!.realizedPnL)).toBe(-100.0);
-      expect(Number(finalAccount!.totalChargesPaid)).toBe(100.0);
+      const finalAccountB = await prismaB.paperAccount.findUnique({ where: { id: account.id } });
+      expect(Number(finalAccountB!.cashBalance)).toBe(999900.0);
+      expect(Number(finalAccountB!.usedMargin)).toBe(20000.0);
+      expect(Number(finalAccountB!.realizedPnL)).toBe(-100.0);
+      expect(Number(finalAccountB!.totalChargesPaid)).toBe(100.0);
 
-      const trades = await prismaA.paperTrade.findMany({ where: { positionId: position.id } });
-      expect(trades.length).toBe(0);
+      const tradesB = await prismaB.paperTrade.findMany({ where: { positionId: position.id } });
+      expect(tradesB.length).toBe(0);
     } finally {
       await prismaA.paperOrder.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperPosition.deleteMany({ where: { accountId: account.id } });

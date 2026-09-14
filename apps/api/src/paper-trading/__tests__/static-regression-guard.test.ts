@@ -50,12 +50,13 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     }
   });
 
-  it('RULE 2: Zero occurrences of hardcoded FX rate 92.0 in production code', () => {
+  it('RULE 2: Zero occurrences of hardcoded FX rate 92.0 or 87.0 in production code', () => {
     for (const file of productionFiles) {
       const content = fs.readFileSync(file, 'utf8');
-      // Look for 92.0 used as a numeric literal (not in comments or as part of larger numbers)
-      const matches = /\b92\.0\b/.test(content);
-      expect({ file, matches }).toEqual({ file, matches: false });
+      // Look for 92.0 or standalone 87.0 used as a numeric literal (not part of larger numbers like 1287.0)
+      const matches92 = /(?<!\d)92\.0(?!\d)/.test(content);
+      const matches87 = /(?<!\d)87\.0(?!\d)/.test(content);
+      expect({ file, matches92, matches87 }).toEqual({ file, matches92: false, matches87: false });
     }
   });
 

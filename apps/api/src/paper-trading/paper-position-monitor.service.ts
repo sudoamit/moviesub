@@ -296,24 +296,21 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', marketEventTime.getTime()).fxRate;
 
     const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
-    const riskDistance = initialSL !== undefined && initialSL > 0 ? Math.abs(entryPrice - initialSL) : 0;
-    const initialRiskAccount = initialSL !== undefined && initialSL > 0 && riskDistance > 0
-      ? TradeAccountingEngine.calculateStopRisk(entryPrice, initialSL, partialQty, openingSnapshot ?? 1, fxRate)
-      : undefined;
 
-    const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+    const legSettlement = TradeAccountingEngine.settleExecutionLeg({
+      role: 'TP1_PARTIAL',
       entryPrice,
-      exitPrice: livePrice,
+      fillPrice: livePrice,
       quantity: partialQty,
       direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+      accountingSnapshot: openingSnapshot ?? undefined,
       fxRate,
       fees: exitCharges.totalCharges,
-      initialRiskAccount,
-      accountingSnapshot: openingSnapshot ?? undefined,
+      initialStopLoss: initialSL,
     });
-    const partialGrossPnL = pnlCalc.grossPnlAccount;
-    const partialNetPnL = pnlCalc.netPnlAccount;
-    const partialRealizedR = pnlCalc.realizedR;
+    const partialGrossPnL = legSettlement.grossPnL;
+    const partialNetPnL = legSettlement.netPnL;
+    const partialRealizedR = legSettlement.realizedR;
     const releasedMargin = Number((Number(pos.usedMargin) * partialRatio).toFixed(2));
 
     const existingEvents = (pos.executionEventsJson as any) || {};
@@ -344,7 +341,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       executionTime: execTimeStr,
       timestamp: marketTimeStr,
       fxRate,
-      accountingSnapshotHash: openingSnapshot?.snapshotHash,
+      accountingSnapshotHash: legSettlement.accountingSnapshotHash ?? openingSnapshot?.snapshotHash,
     });
 
     try {
@@ -414,9 +411,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         await tx.paperAccount.update({
           where: { id: pos.accountId },
           data: {
-            cashBalance: { increment: new Decimal(partialNetPnL) },
+            cashBalance: { increment: new Decimal(legSettlement.cashDelta) },
             usedMargin: { decrement: new Decimal(releasedMargin) },
-            realizedPnL: { increment: new Decimal(partialNetPnL) },
+            realizedPnL: { increment: new Decimal(legSettlement.realizedPnLDelta) },
             totalChargesPaid: { increment: new Decimal(exitCharges.totalCharges) },
           },
         });

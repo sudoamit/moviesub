@@ -1200,7 +1200,7 @@ export class PaperTradingService implements IExecutionProvider {
       pos.direction === Direction.BULLISH ? 'SELL' : 'BUY',
       config.maxSlippageBps ?? 50,
     );
-    const finalExitPrice = exitSlippage.fillPrice;
+    const finalExitPrice = Number(exitSlippage.fillPrice.toFixed(2));
 
     const exitTime = new Date();
     const quantity = Number(pos.quantity);
@@ -1388,59 +1388,42 @@ export class PaperTradingService implements IExecutionProvider {
       const finalTurnover = finalExitPrice * finalQty;
       const finalExitCharges = exitCharges.totalCharges;
       const entryPrice = Number(pos.entryPrice);
-      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
-      const riskDistance = initialSL !== undefined && initialSL > 0 ? Math.abs(entryPrice - initialSL) : 0;
-      const initialRiskAccount = initialSL !== undefined && initialSL > 0 && riskDistance > 0
-        ? TradeAccountingEngine.calculateStopRisk(entryPrice, initialSL, finalQty, snapshot, snapshot.fxRate)
-        : undefined;
-
-      const finalPnlCalc = TradeAccountingEngine.calculateTradePnl({
-        entryPrice,
-        exitPrice: finalExitPrice,
-        quantity: finalQty,
-        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-        fxRate: snapshot.fxRate,
-        fees: finalExitCharges,
-        initialRiskAccount,
-        accountingSnapshot: snapshot,
-      });
-      const finalGrossPnL = finalPnlCalc.grossPnlAccount;
-      const finalNetPnL = finalPnlCalc.netPnlAccount;
-      const finalRealizedR = finalPnlCalc.realizedR;
 
       const totalPositionQuantity = partialQtyTotal + finalQty;
-      const totalWeightedRSum = partialWeightedRSum + (finalRealizedR * finalQty);
-      const weightedLifecycleR = totalPositionQuantity > 0 ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2)) : 0;
       const totalLifecycleCharges = Number((entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2));
-      // Canonical lifecycle P&L:
-      // When partial legs exist: sum of canonical leg netPnL (-entryFees + partialNetPnLTotal + finalNetPnL)
       const effectiveExitPrice = totalPositionQuantity > 0
         ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price ?? l.fillPrice) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
         : finalExitPrice;
       const effectiveEntryPrice = hasAuthoritativeEntryFills && aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
+      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
 
-      let canonicalRealizedPnL = partialLegs.length > 0
-        ? Number((-entryCharges.totalCharges + partialNetPnLTotal + finalNetPnL).toFixed(2))
-        : Number((finalGrossPnL - totalLifecycleCharges).toFixed(2));
+      const finalLegSettlement = TradeAccountingEngine.settleExecutionLeg({
+        role: 'FINAL_EXIT',
+        entryPrice: effectiveEntryPrice,
+        fillPrice: finalExitPrice,
+        quantity: finalQty,
+        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+        accountingSnapshot: snapshot,
+        fees: finalExitCharges,
+        initialStopLoss: initialSL,
+      });
+      const finalGrossPnL = finalLegSettlement.grossPnL;
+      const finalNetPnL = finalLegSettlement.netPnL;
+      const finalRealizedR = finalLegSettlement.realizedR;
 
-      if (hasAuthoritativeEntryFills && aggregated.entry && partialLegs.length === 0) {
-        const fullLifecycleCalc = TradeAccountingEngine.calculateTradePnl({
-          entryPrice: effectiveEntryPrice,
-          exitPrice: effectiveExitPrice,
-          quantity: totalPositionQuantity,
-          direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-          accountingSnapshot: snapshot,
-          fees: totalLifecycleCharges,
-          initialRiskAccount,
-        });
-        canonicalRealizedPnL = fullLifecycleCalc.netPnlAccount;
-      }
+      const totalWeightedRSum = partialWeightedRSum + (finalRealizedR * finalQty);
+      const weightedLifecycleR = totalPositionQuantity > 0 ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2)) : 0;
 
-      const canonicalRealizedR = weightedLifecycleR;
-      const pnlCalc: any = finalPnlCalc;
-
-      canonicalRealizedPnLLog = canonicalRealizedPnL;
-      canonicalRealizedRLog = canonicalRealizedR;
+      const entryLegSettlement = TradeAccountingEngine.settleExecutionLeg({
+        role: 'ENTRY',
+        entryPrice: effectiveEntryPrice,
+        fillPrice: effectiveEntryPrice,
+        quantity: totalPositionQuantity,
+        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+        accountingSnapshot: snapshot,
+        fees: entryCharges.totalCharges,
+        initialStopLoss: initialSL,
+      });
 
       const allLegsBreakdown = [
         ...(hasAuthoritativeEntryFills && aggregated.entry
@@ -1455,14 +1438,16 @@ export class PaperTradingService implements IExecutionProvider {
                 receivedAt: new Date(aggregated.entry.earliestFillTimestamp).toISOString(),
                 fee: entryCharges.totalCharges,
                 feeBreakdown: entryCharges,
-                grossPnL: 0,
-                netPnL: -entryCharges.totalCharges,
-                realizedR: 0,
+                grossPnL: entryLegSettlement.grossPnL,
+                netPnL: entryLegSettlement.netPnL,
+                realizedR: entryLegSettlement.realizedR,
                 executionPriceSource: priceSource,
                 slippage: 0,
                 correlationId: pos.correlationId,
                 price: effectiveEntryPrice,
                 timestamp: pos.entryTime,
+                fxRate: snapshot.fxRate,
+                accountingSnapshotHash: entryLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
               },
             ]
           : []),
@@ -1490,9 +1475,20 @@ export class PaperTradingService implements IExecutionProvider {
           price: finalExitPrice,
           timestamp: exitTime.toISOString(),
           fxRate: snapshot.fxRate,
-          accountingSnapshotHash: snapshot.snapshotHash,
+          accountingSnapshotHash: finalLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
         },
       ];
+
+      // Canonical lifecycle P&L derived from sum of canonical leg settlements:
+      const canonicalRealizedPnL = Number(
+        allLegsBreakdown.reduce((sum, leg) => sum + Number(leg.netPnL || 0), 0).toFixed(2),
+      );
+
+      const canonicalRealizedR = weightedLifecycleR;
+      const pnlCalc: any = finalLegSettlement;
+
+      canonicalRealizedPnLLog = canonicalRealizedPnL;
+      canonicalRealizedRLog = canonicalRealizedR;
 
       // 6. Mark Position CLOSED
       await tx.paperPosition.update({
@@ -1592,10 +1588,10 @@ export class PaperTradingService implements IExecutionProvider {
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
-          cashBalance: { increment: finalNetPnL },
+          cashBalance: { increment: new Decimal(finalLegSettlement.cashDelta) },
           usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: finalNetPnL },
-          totalChargesPaid: { increment: finalExitCharges },
+          realizedPnL: { increment: new Decimal(finalLegSettlement.realizedPnLDelta) },
+          totalChargesPaid: { increment: new Decimal(finalExitCharges) },
         },
       });
 

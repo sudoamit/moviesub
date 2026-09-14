@@ -398,6 +398,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       receivedAt: tick.receivedAt ?? now,
     };
     this.tickers.set(sym, updated);
+    if (provenance === 'LIVE_PROVIDER') {
+      this.freshSymbolsAfterReconnect.add(sym);
+    }
     return updated;
   }
 
@@ -408,9 +411,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   private providerConnected = true;
+  private reconnectedAt: number | null = null;
+  private freshSymbolsAfterReconnect = new Set<string>();
 
   public setProviderConnected(connected: boolean): void {
+    const wasDisconnected = !this.providerConnected;
     this.providerConnected = connected;
+    if (connected && wasDisconnected) {
+      this.reconnectedAt = Date.now();
+      this.freshSymbolsAfterReconnect.clear();
+    }
   }
 
   public disconnectProvider(): void {
@@ -425,6 +435,18 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     const rawCloseTime = data.closeTime ?? data.C;
     const marketEventTime = Number(rawCloseTime);
+
+    // If incoming tick has a timestamp strictly older than existing valid marketEventTime,
+    // ignore it completely — do NOT degrade a fresh existing ticker with an old out-of-order tick!
+    if (
+      existing &&
+      existing.marketEventTime &&
+      Number.isFinite(marketEventTime) &&
+      marketEventTime < existing.marketEventTime
+    ) {
+      return null;
+    }
+
     if (!Number.isFinite(marketEventTime) || marketEventTime <= 0) {
       if (existing) {
         existing.provenance = 'DEGRADED';
@@ -458,9 +480,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return null; // Reject tick: Invalid or non-positive execution price
     }
     if (existing && existing.marketEventTime) {
-      if (marketEventTime < existing.marketEventTime) {
-        return null; // Reject out-of-order tick: cached ticker has newer provider timestamp
-      }
       if (marketEventTime === existing.marketEventTime && livePrice === existing.price) {
         return existing; // Duplicate payload: return existing without mutating
       }
@@ -508,6 +527,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
 
     this.tickers.set(sym, updated);
+    this.freshSymbolsAfterReconnect.add(sym);
     return updated;
   }
 
@@ -556,6 +576,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       receivedAt: tick.receivedAt ?? now,
     };
     this.optionTickers.set(key, updated);
+    if (provenance === 'LIVE_PROVIDER') {
+      this.freshSymbolsAfterReconnect.add(key);
+    }
     return updated;
   }
 
@@ -582,6 +605,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       throw new MarketDataUnavailableError(
         sym,
         'Market data provider is disconnected. Trade execution blocked.',
+      );
+    }
+
+    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(sym)) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is a cached tick from before provider reconnection. A fresh valid tick is required after reconnection.`,
       );
     }
 
