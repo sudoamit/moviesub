@@ -194,15 +194,24 @@ export class ChartSnapshotValidator {
       errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be strictly after server observation observedAt (${snapshot.observedAt || snapshot.asOfTimestamp}).`);
     }
 
-    // Validate Stream State Watermarks & Consistency Invariants if present
+    // Validate Stream State Watermarks & Single Ownership Consistency Invariants
     if (snapshot.streamState) {
-      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch, marketAsOf, sessionKey, providerId } = snapshot.streamState;
+      const { sessionVolumeWatermark, lastSequenceNumber, connectionEpoch, marketAsOf, observedAt: streamObservedAt, sessionKey, providerId } = snapshot.streamState;
+
+      if (!streamObservedAt) {
+        errors.push('Stream state observedAt missing');
+      }
 
       if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && sessionVolumeWatermark < 0) {
         errors.push(`streamState sessionVolumeWatermark < 0: ${sessionVolumeWatermark}`);
       }
       if (sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null && (!snapshot.sessionKey || snapshot.sessionKey.trim() === '')) {
         errors.push('streamState sessionVolumeWatermark specified without sessionKey');
+      }
+      if (snapshot.sessionVolumeWatermark !== undefined && snapshot.sessionVolumeWatermark !== null && sessionVolumeWatermark !== undefined && sessionVolumeWatermark !== null) {
+        if (snapshot.sessionVolumeWatermark !== sessionVolumeWatermark) {
+          errors.push(`snapshot.sessionVolumeWatermark (${snapshot.sessionVolumeWatermark}) does not match streamState.sessionVolumeWatermark (${sessionVolumeWatermark})`);
+        }
       }
       if (lastSequenceNumber !== undefined && lastSequenceNumber !== null && !connectionEpoch) {
         errors.push('streamState sequence number specified without connectionEpoch');
@@ -239,6 +248,13 @@ export class ChartSnapshotValidator {
           errors.push(
             `smcSnapshot structureAsOf (${smcSnapshot.structureAsOf}) is strictly after computedAt (${smcSnapshot.computedAt}).`,
           );
+        }
+      }
+
+      if (smcSnapshot.structureAsOf && snapshot.marketAsOf) {
+        const structMs = new Date(smcSnapshot.structureAsOf).getTime();
+        if (!isNaN(structMs) && !isNaN(marketAsOfMs) && structMs > marketAsOfMs) {
+          errors.push(`smcSnapshot structureAsOf (${smcSnapshot.structureAsOf}) cannot be strictly after marketAsOf (${snapshot.marketAsOf}).`);
         }
       }
 

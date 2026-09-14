@@ -330,8 +330,8 @@ describe('AI FIX 127 — Canonical Market Event & Session Watermark Correction S
   describe('Provider Capabilities & Stream State Invariants', () => {
     test('11. Unknown provider identity degrades to UNKNOWN_PROVIDER', () => {
       const policy = ProviderSequenceCapabilityRegistry.getPolicy('UNKNOWN_PROVIDER');
-      expect(policy.scope).toBe('NONE');
-      expect(policy.supportsSequenceNumber).toBe(false);
+      expect(policy.sequence.scope).toBe('NONE');
+      expect(policy.sequence.supportsSequenceNumber).toBe(false);
     });
 
     test('12. Stream state snapshot metadata consistency validator checks', () => {

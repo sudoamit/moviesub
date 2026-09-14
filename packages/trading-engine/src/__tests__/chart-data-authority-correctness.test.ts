@@ -863,6 +863,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         timestamp: '2026-09-13T09:40:00.000Z',
         sessionVolume: 1000,
         volumeType: 'SESSION_CUMULATIVE',
+        providerId: 'NSE_TRUE_DATA',
       });
 
       const s2 = aggregator.processTick(s1, {
@@ -871,6 +872,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         timestamp: '2026-09-13T09:41:00.000Z',
         sessionVolume: 1250,
         volumeType: 'SESSION_CUMULATIVE',
+        providerId: 'NSE_TRUE_DATA',
       });
 
       // Session volume jumped 1000 -> 1250 (delta = 250)
@@ -968,6 +970,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         timestamp: '2026-09-13T15:15:00.000Z',
         volume: 5000000,
         volumeType: 'SESSION_CUMULATIVE',
+        providerId: 'NSE_TRUE_DATA',
       });
 
       // Day 2 tick (new 1d session open)
@@ -977,6 +980,7 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         timestamp: '2026-09-14T09:16:00.000Z',
         volume: 100,
         volumeType: 'SESSION_CUMULATIVE',
+        providerId: 'NSE_TRUE_DATA',
       });
 
       // Baseline reset to 100 without negative overflow

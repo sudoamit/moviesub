@@ -41,12 +41,6 @@ export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): Norma
       ? rawVol
       : undefined;
 
-  const rawSessVol = Number(raw.sessionVolume);
-  const safeSessionVol =
-    typeof rawSessVol === 'number' && !isNaN(rawSessVol) && isFinite(rawSessVol) && rawSessVol >= 0
-      ? rawSessVol
-      : undefined;
-
   // 5. Volume Semantics Resolution
   let volumeType: TickVolumeType = 'UNKNOWN';
   const rawVolType = raw.volumeType as string | undefined;
@@ -57,9 +51,17 @@ export function normalizeProviderTick(raw: ProviderTick | NormalizedTick): Norma
   ) {
     volumeType = rawVolType as TickVolumeType;
   } else if (rawVolType === 'CUMULATIVE') {
-    // Backwards compatibility alias for BUCKET_CUMULATIVE
     volumeType = 'BUCKET_CUMULATIVE';
   }
+
+  const rawSessVol = raw.sessionVolume !== undefined && raw.sessionVolume !== null
+    ? Number(raw.sessionVolume)
+    : (volumeType === 'SESSION_CUMULATIVE' && safeVol !== undefined ? safeVol : undefined);
+  const safeSessionVol =
+    typeof rawSessVol === 'number' && !isNaN(rawSessVol) && isFinite(rawSessVol) && rawSessVol >= 0
+      ? rawSessVol
+      : undefined;
+
 
   return {
     symbol,

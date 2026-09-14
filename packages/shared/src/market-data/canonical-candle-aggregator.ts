@@ -8,19 +8,22 @@ import {
   ProviderTick,
 } from './chart-snapshot.interface';
 import { normalizeProviderTick } from './provider-tick-normalizer';
+import { ProviderSequenceCapabilityRegistry } from './provider-sequence-capability';
 import { VenueSessionCalendar } from './venue-session-calendar';
 
 /**
  * Canonical Live Candle Aggregator State Machine (Instance Scoped)
  *
  * Guarantees:
- * 1. Transactional Watermark Commits: `lastSequenceNumber`, `sessionVolumeWatermark`, and `lastAcceptedEventTimeMs`
+ * 1. Capability Policy Resolution & Enforcement: Uses `ProviderSequenceCapabilityRegistry` per provider ID.
+ *    - `supportsSequenceNumber === false` -> sequenceNumber is IGNORED and does not affect ordering.
+ *    - `supportsSessionVolume === false` -> SESSION_CUMULATIVE volume ticks are rejected.
+ * 2. Transactional Watermark Commits: `lastSequenceNumber`, `sessionVolumeWatermark`, and `lastAcceptedEventTimeMs`
  *    are ONLY committed at the very end of processing when the tick successfully passes all validations.
- * 2. True `SESSION_CUMULATIVE` Volume Watermark: `sessionVolumeWatermark` is NEVER initialized to `formingCandle.volume`.
- *    Requires explicit `sessionVolume` on ticks. If `sessionVolume` is absent, volume update is fail-closed rejected.
- * 3. REST Bootstrap vs LIVE Stream Epochs: Initial REST snapshots set `connectionEpoch = 'REST_BOOTSTRAP'`. LIVE provider streams set actual connection epochs, transitioning explicitly.
- * 4. Session-Scoped Watermarks: `sessionVolumeWatermark` + `sessionKey` form an atomic unit. Watermarks NEVER cross session keys.
- * 5. UNKNOWN_PROVIDER Degradation: Removes generic 'default' fallback. Uses 'UNKNOWN_PROVIDER' when provider ID is unspecified.
+ * 3. Sequence Requires Epoch Invariant: `lastSequenceNumber != null ⇒ connectionEpoch != null`.
+ * 4. REST_BOOTSTRAP Non-Reusability State Machine: `REST_BOOTSTRAP` is an origin-only state. Once a live WS epoch
+ *    is established, REST_BOOTSTRAP ticks/state are rejected unless `syncFromSnapshot()` explicitly resynchronizes state.
+ * 5. Bounded FIFO Idempotency Cache (500 items): Provides secondary duplicate replay protection.
  */
 export class CanonicalCandleAggregator {
   private processedTickSignatures = new Set<string>();
@@ -56,14 +59,21 @@ export class CanonicalCandleAggregator {
    */
   setConnectionEpoch(epoch: string | null): void {
     this.connectionEpoch = epoch;
-    this.lastSequenceNumber = null;
+    if (!epoch || epoch === 'REST_BOOTSTRAP') {
+      this.lastSequenceNumber = null;
+    }
   }
 
   /**
-   * Resets sequence watermark (e.g. after socket reconnect or stream failover).
+   * Resets sequence watermark ONLY when a new connection epoch is provided.
    */
-  resetSequenceWatermark(seq?: number): void {
-    this.lastSequenceNumber = seq ?? null;
+  resetSequenceWatermark(epoch?: string, seq?: number): void {
+    if (epoch) {
+      this.connectionEpoch = epoch;
+      this.lastSequenceNumber = seq ?? null;
+    } else {
+      this.lastSequenceNumber = null;
+    }
   }
 
   /**
@@ -128,8 +138,8 @@ export class CanonicalCandleAggregator {
       this.sessionVolumeWatermark = null;
     }
 
-    // 5. Restore Sequence Watermark if present on streamState
-    if (state?.lastSequenceNumber !== undefined && state.lastSequenceNumber !== null) {
+    // 5. Restore Sequence Watermark if present on streamState and valid connectionEpoch exists
+    if (state?.lastSequenceNumber !== undefined && state.lastSequenceNumber !== null && this.connectionEpoch && this.connectionEpoch !== 'REST_BOOTSTRAP') {
       this.lastSequenceNumber = state.lastSequenceNumber;
     } else {
       this.lastSequenceNumber = null;
@@ -161,25 +171,53 @@ export class CanonicalCandleAggregator {
     const tickProviderId = (rawTick as ProviderTick).providerId || (tick.providerId) || this.providerId || 'UNKNOWN_PROVIDER';
     const tickEpoch = (rawTick as ProviderTick).connectionEpoch || (tick.connectionEpoch);
     const isReconnect = Boolean((rawTick as ProviderTick).isReconnect || tick.isReconnect);
-    const seqNum = (rawTick as ProviderTick).sequenceNumber ?? tick.sequenceNumber;
+    const rawSeqNum = (rawTick as ProviderTick).sequenceNumber ?? tick.sequenceNumber;
     const explicitSessionVol = (rawTick as ProviderTick).sessionVolume ?? tick.sessionVolume;
+
+    // Resolve Provider Capability Policy
+    const capability = ProviderSequenceCapabilityRegistry.getPolicy(tickProviderId);
+
+    // Reject SESSION_CUMULATIVE tick if provider lacks support or explicit sessionVolume is missing
+    if (tick.volumeType === 'SESSION_CUMULATIVE') {
+      if (capability.volume.supportsSessionVolume === false || explicitSessionVol === undefined || explicitSessionVol === null) {
+        return snapshot;
+      }
+    }
+
+    // Enforce Sequence Capability: If provider does not support sequence numbers, ignore sequenceNumber completely
+    const seqNum = capability.sequence.supportsSequenceNumber ? rawSeqNum : undefined;
 
     let candidateEpoch = this.connectionEpoch;
     let candidateSequenceNum = this.lastSequenceNumber;
 
-    // 3. Connection Epoch & Sequence Monotonicity Verification
+    // 3. REST_BOOTSTRAP Non-Reusability & Connection Epoch Verification
+    if (candidateEpoch !== null && candidateEpoch !== '' && candidateEpoch !== 'REST_BOOTSTRAP') {
+      // Aggregator is in LIVE epoch state. Reject ticks attempting to claim REST_BOOTSTRAP without resynchronization!
+      if (tickEpoch === 'REST_BOOTSTRAP') {
+        return snapshot;
+      }
+    }
+
     if (tickEpoch && tickEpoch !== this.connectionEpoch) {
       if (isReconnect || this.connectionEpoch === null || this.connectionEpoch === 'REST_BOOTSTRAP' || this.connectionEpoch === '') {
-        // Accept new connection epoch from LIVE stream transition or reconnect
+        // Accept transition from REST_BOOTSTRAP or reconnect to new LIVE connection epoch
         candidateEpoch = tickEpoch;
         candidateSequenceNum = seqNum ?? null;
       } else {
-        // Reject tick from old / mismatched connection epoch
+        // Reject tick from mismatched / old connection epoch
         return snapshot;
       }
+    } else if (this.connectionEpoch === null || this.connectionEpoch === '' || this.connectionEpoch === 'REST_BOOTSTRAP') {
+      candidateEpoch = tickEpoch || `${tickProviderId}_epoch`;
+      candidateSequenceNum = seqNum ?? null;
     } else if (isReconnect) {
       candidateSequenceNum = seqNum ?? null;
     } else if (seqNum !== undefined && seqNum !== null) {
+      // Sequence requires valid non-REST connectionEpoch invariant
+      if (!candidateEpoch || candidateEpoch === 'REST_BOOTSTRAP') {
+        return snapshot; // Reject sequence specified without live connectionEpoch
+      }
+
       if (candidateSequenceNum !== null && seqNum <= candidateSequenceNum) {
         return snapshot; // Reject stale or out-of-order sequence number -> watermarks UNCHANGED
       }
@@ -266,7 +304,7 @@ export class CanonicalCandleAggregator {
       this.lastSessionKey && this.lastSessionKey !== sessionKey,
     );
 
-    // 10. True Session Volume Watermark Rules (Fail-Closed if SESSION_CUMULATIVE missing sessionVolume)
+    // 10. True Session Volume Watermark & Provider Capability Enforcement
     const safeVol = tick.volume ?? 0;
     let candidateSessionVolumeWatermark = this.sessionVolumeWatermark;
 
@@ -284,9 +322,12 @@ export class CanonicalCandleAggregator {
       } else if (tick.volumeType === 'BUCKET_CUMULATIVE') {
         newVol = Math.max(currentForming.volume, safeVol);
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
-        // SESSION_CUMULATIVE requires explicit sessionVolume. If absent, fail closed on volume update!
-        if (explicitSessionVol === undefined || explicitSessionVol === null) {
-          newVol = currentForming.volume; // Keep volume unchanged without fabricating delta
+        // Enforce Volume Capability: If provider does not support session volume, reject SESSION_CUMULATIVE aggregation!
+        if (capability.volume.supportsSessionVolume === false) {
+          newVol = currentForming.volume; // Fail closed, volume unchanged
+        } else if (explicitSessionVol === undefined || explicitSessionVol === null) {
+          // Mandatory sessionVolume requirement: if absent, fail closed on volume update
+          newVol = currentForming.volume;
         } else {
           const baseline = candidateSessionVolumeWatermark;
           const delta =
@@ -322,7 +363,7 @@ export class CanonicalCandleAggregator {
         initialVol = safeVol;
       } else if (tick.volumeType === 'SESSION_CUMULATIVE') {
         initialVol = 0;
-        if (explicitSessionVol !== undefined && explicitSessionVol !== null) {
+        if (capability.volume.supportsSessionVolume !== false && explicitSessionVol !== undefined && explicitSessionVol !== null) {
           candidateSessionVolumeWatermark = explicitSessionVol;
         }
       }
@@ -341,7 +382,10 @@ export class CanonicalCandleAggregator {
     }
 
     // 11. Construct Candidate Snapshot & Stream State (No Date.now() for marketAsOf)
-    const marketAsOfIso = new Date(Math.max(this.lastAcceptedEventTimeMs, tickTimeMs)).toISOString();
+    const latestEventMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
+    const marketAsOfValue = typeof snapshot.marketAsOf === 'string' || typeof snapshot.latestMarketEventTimestamp === 'string'
+      ? new Date(latestEventMs).toISOString()
+      : latestEventMs;
     const observationIso = new Date().toISOString();
     const closedThrough =
       closedCandles.length > 0
@@ -349,7 +393,7 @@ export class CanonicalCandleAggregator {
         : snapshot.closedThrough;
 
     const candidateStreamState: CanonicalStreamState = {
-      marketAsOf: marketAsOfIso,
+      marketAsOf: marketAsOfValue,
       observedAt: observationIso,
       sessionKey,
       providerId: tickProviderId,
@@ -358,18 +402,23 @@ export class CanonicalCandleAggregator {
       sessionVolumeWatermark: candidateSessionVolumeWatermark,
     };
 
+    const nextProvenance = (candidateEpoch && candidateEpoch !== 'REST_BOOTSTRAP') ? 'LIVE' : snapshot.dataProvenance;
+
     const nextSnapshot: ChartMarketSnapshot = {
       ...snapshot,
       closedCandles,
       formingCandle: nextForming,
       livePrice: nextForming.close,
       closedThrough,
-      marketAsOf: marketAsOfIso,
+      marketAsOf: marketAsOfValue,
+      latestMarketEventTimestamp: marketAsOfValue,
       observedAt: observationIso,
       sessionKey,
       sessionVolumeWatermark: candidateSessionVolumeWatermark,
       streamState: candidateStreamState,
       asOfTimestamp: observationIso,
+      sourceIdentity: tickProviderId,
+      dataProvenance: nextProvenance,
     };
 
     // 12. TRANSACTIONAL COMMIT: Only update internal state AFTER tick processing succeeds

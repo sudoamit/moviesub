@@ -92,7 +92,7 @@ describe('AI FIX 125 — Canonical Market Stream Consistency Suite', () => {
         price: 50180,
         timestamp: '2026-09-15T10:23:00.000Z',
         volume: 12,
-        volumeType: 'SESSION_CUMULATIVE',
+        volumeType: 'INCREMENTAL',
       });
 
       expect(updated.marketAsOf).toBe('2026-09-15T10:23:00.000Z');
