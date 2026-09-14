@@ -4,7 +4,7 @@ import { PaperPositionMonitorService } from '../paper-position-monitor.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CandlesService } from '../../candles/candles.service';
 import { RealMarketStreamerService, ILiveRealTicker } from '../../market-data/real-market-streamer.service';
-import { Direction, PositionState, OrderState, MarketDataUnavailableError, StaleMarketDataError } from '@quant/shared';
+import { Direction, PositionState, OrderState, MarketDataUnavailableError, StaleMarketDataError, PointInTimeCurrencyConverter } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
 describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests A-O)', () => {
@@ -60,24 +60,32 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           if (acc) {
             if (args.data.cashBalance?.decrement) {
               acc.cashBalance = new Decimal(Number(acc.cashBalance) - Number(args.data.cashBalance.decrement));
-            }
-            if (args.data.cashBalance?.increment) {
+            } else if (args.data.cashBalance?.increment) {
               acc.cashBalance = new Decimal(Number(acc.cashBalance) + Number(args.data.cashBalance.increment));
+            } else if (args.data.cashBalance !== undefined) {
+              acc.cashBalance = new Decimal(args.data.cashBalance);
             }
-            if (args.data.usedMargin?.increment) {
-              acc.usedMargin = new Decimal(Number(acc.usedMargin) + Number(args.data.usedMargin.increment));
-            }
+
             if (args.data.usedMargin?.decrement) {
               acc.usedMargin = new Decimal(Number(acc.usedMargin) - Number(args.data.usedMargin.decrement));
+            } else if (args.data.usedMargin?.increment) {
+              acc.usedMargin = new Decimal(Number(acc.usedMargin) + Number(args.data.usedMargin.increment));
+            } else if (args.data.usedMargin !== undefined) {
+              acc.usedMargin = new Decimal(args.data.usedMargin);
             }
+
             if (args.data.realizedPnL?.decrement) {
               acc.realizedPnL = new Decimal(Number(acc.realizedPnL) - Number(args.data.realizedPnL.decrement));
-            }
-            if (args.data.realizedPnL?.increment) {
+            } else if (args.data.realizedPnL?.increment) {
               acc.realizedPnL = new Decimal(Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment));
+            } else if (args.data.realizedPnL !== undefined) {
+              acc.realizedPnL = new Decimal(args.data.realizedPnL);
             }
+
             if (args.data.totalChargesPaid?.increment) {
               acc.totalChargesPaid = new Decimal(Number(acc.totalChargesPaid) + Number(args.data.totalChargesPaid.increment));
+            } else if (args.data.totalChargesPaid !== undefined) {
+              acc.totalChargesPaid = new Decimal(args.data.totalChargesPaid);
             }
           }
           return Promise.resolve(acc);
@@ -2256,5 +2264,185 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(finalLeg.fillPrice).toBe(55000);
     expect(finalLeg.quantity).toBe(1.0);
     expect(finalLeg.fee).toBeGreaterThan(0);
+  });
+
+  // =========================================================================
+  // AI FIX 146 TESTS — FINAL PRODUCTION RELEASE GATE FOR PAPER TRADING
+  // =========================================================================
+
+  it('TEST 146-1: FX RATE REGRESSION — BTC/USDT P&L changes dynamically with PointInTimeCurrencyConverter FX rate without hardcoded 92.0', async () => {
+    const converter = PointInTimeCurrencyConverter.getInstance();
+    const now = Date.now();
+
+    // 1. Register FX rate USDT/INR = 95.0
+    converter.registerRate({
+      pair: 'USDT/INR',
+      rate: 95.0,
+      timestamp: now - 1000,
+      source: 'BINANCE_PIT',
+      version: '1.0',
+    });
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now,
+    });
+
+    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    const pos1 = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 1,
+      orderType: 'MARKET',
+      stopLoss: 48000,
+      target1: 55000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 55000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 1000,
+    });
+
+    await paperService.closePosition(pos1.id);
+    const trade1 = dbTrades.find((t) => t.positionId === pos1.id)!;
+    const grossPnL95 = (55000 - 50000) * 1 * 95.0; // ₹475,000
+
+    expect((trade1.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL).toBeCloseTo(grossPnL95, 2);
+
+    // 2. Register FX rate USDT/INR = 85.0
+    converter.registerRate({
+      pair: 'USDT/INR',
+      rate: 85.0,
+      timestamp: Date.now(),
+      source: 'BINANCE_PIT',
+      version: '1.0',
+    });
+
+    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].usedMargin = new Decimal(0.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 2500,
+    });
+
+    const pos2 = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 1,
+      orderType: 'MARKET',
+      stopLoss: 48000,
+      target1: 55000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'BTCUSDT',
+      price: 55000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now + 3000,
+    });
+
+    await paperService.closePosition(pos2.id);
+    const trade2 = dbTrades.find((t) => t.positionId === pos2.id)!;
+    const grossPnL85 = (55000 - 50000) * 1 * 85.0; // ₹425,000
+
+    expect((trade2.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL).toBeCloseTo(grossPnL85, 2);
+    expect(grossPnL95).not.toEqual(grossPnL85);
+  });
+
+  it('TEST 146-2: STRENGTHENED FAIL-CLOSED INVALID QUOTE MATRIX — missing, stale, invalid time/price/provenance produces ZERO executions or ledger mutations', async () => {
+    dbAccounts[0].cashBalance = new Decimal(500000.0);
+    dbAccounts[0].usedMargin = new Decimal(50000.0);
+    dbAccounts[0].realizedPnL = new Decimal(0.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+    const initOrders = dbOrders.length;
+    const initFills = dbFills.length;
+    const initTrades = dbTrades.length;
+    const now = Date.now();
+
+    const invalidQuoteCases = [
+      // 1. Missing ticker
+      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Stream disconnected'); },
+      // 2. Stale ticker (>5s)
+      () => { throw new StaleMarketDataError('BTCUSDT', 10, 5, new Date(now - 10000)); },
+      // 3. Future beyond skew (>5s)
+      () => ({ symbol: 'BTCUSDT', price: 55000, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now + 10000 }),
+      // 4. Non-finite price
+      () => ({ symbol: 'BTCUSDT', price: NaN, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now }),
+      // 5. Non-positive price
+      () => ({ symbol: 'BTCUSDT', price: 0, provenance: 'LIVE_PROVIDER' as const, marketEventTime: now }),
+      // 6. Wrong provenance
+      () => ({ symbol: 'BTCUSDT', price: 55000, provenance: 'REST_POLL' as const, marketEventTime: now }),
+    ];
+
+    for (const invalidCase of invalidQuoteCases) {
+      (streamerService.getValidatedTicker as jest.Mock).mockImplementation(invalidCase);
+      await monitorService.evaluateActivePositions();
+
+      // Zero order, fill, or trade creation
+      expect(dbOrders.length).toBe(initOrders);
+      expect(dbFills.length).toBe(initFills);
+      expect(dbTrades.length).toBe(initTrades);
+
+      // Zero account balance mutation
+      const acc = dbAccounts[0];
+      expect(Number(acc.cashBalance)).toBe(500000.0);
+      expect(Number(acc.realizedPnL)).toBe(0.0);
+      expect(Number(acc.usedMargin)).toBe(50000.0);
+      expect(Number(acc.totalChargesPaid)).toBe(0.0);
+    }
+  });
+
+  it('TEST 146-3: ACCOUNT RESET INTEGRITY — resetPortfolio invalidates positions without fake trades or half-booked state', async () => {
+    dbAccounts[0].cashBalance = new Decimal(450000.0);
+    dbAccounts[0].usedMargin = new Decimal(50000.0);
+    dbAccounts[0].realizedPnL = new Decimal(-50000.0);
+    dbAccounts[0].totalChargesPaid = new Decimal(200.0);
+
+    const initTradeCount = dbTrades.length;
+
+    // Create an open position
+    dbPositions.push({
+      id: 'pos_to_reset_1',
+      accountId: dbAccounts[0].id,
+      symbol: 'BTCUSDT',
+      status: PositionState.OPEN,
+    });
+
+    const portfolio = await paperService.resetPortfolio(1000000.0);
+
+    // Account balances reset to initial capital
+    const acc = dbAccounts[0];
+    expect(Number(acc.cashBalance)).toBe(1000000.0);
+    expect(Number(acc.usedMargin)).toBe(0.0);
+    expect(Number(acc.realizedPnL)).toBe(0.0);
+    expect(Number(acc.totalChargesPaid)).toBe(0.0);
+
+    // Position marked INVALIDATED
+    const resetPos = dbPositions.find((p) => p.id === 'pos_to_reset_1');
+    expect(resetPos.status).toBe(PositionState.INVALIDATED);
+
+    // Zero fake PaperTrade rows created
+    expect(dbTrades.length).toBe(initTradeCount);
+
+    // ACCOUNT_RESET audit log created
+    const resetAudit = dbAudits.find((a) => a.eventType === 'ACCOUNT_RESET');
+    expect(resetAudit).toBeDefined();
+    expect(resetAudit.actor).toBe('USER');
   });
 });

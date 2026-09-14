@@ -4,7 +4,7 @@ import { PaperTradingService } from './paper-trading.service';
 import { ExecutionMode } from './execution-provider.interface';
 import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
-import { Direction, PositionState, WS_EVENTS, getAuthoritativeInstrument } from '@quant/shared';
+import { Direction, PositionState, WS_EVENTS, getAuthoritativeInstrument, PointInTimeCurrencyConverter } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
 @Injectable()
@@ -285,8 +285,15 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const exitCharges = this.paperTradingService.calculateCharges(exitTurnover, isCrypto);
 
     const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
-    const USDT_INR_RATE = isCrypto ? 92.0 : 1.0;
-    const priceDiffINR = priceDiff * USDT_INR_RATE;
+    const inst = getAuthoritativeInstrument(pos.symbol);
+    const quoteCurrency = inst.currency;
+    const openingSnapshot =
+      (pos.executionEventsJson as any)?.accountingSnapshot ??
+      (pos.featureSnapshotJson as any)?.accountingSnapshot;
+    const fxRate =
+      openingSnapshot?.fxRate ??
+      PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', marketEventTime.getTime()).fxRate;
+    const priceDiffINR = priceDiff * fxRate;
     const partialGrossPnL = priceDiffINR * partialQty;
     const partialNetPnL = Number((partialGrossPnL - exitCharges.totalCharges).toFixed(2));
 
@@ -301,18 +308,24 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const marketTimeStr = marketEventTime.toISOString();
     partialLegs.push({
       role: 'TP1_PARTIAL',
+      quantity: partialQty,
       triggerPrice: target1,
       triggerMarketEventTime: marketTimeStr,
-      quotePrice: livePrice,
-      quoteMarketEventTime: marketTimeStr,
       fillPrice: livePrice,
       fillTimestamp: execTimeStr,
-      executionPriceSource: 'LIVE_TICK',
-      quantity: partialQty,
+      marketEventTime: marketTimeStr,
+      observedAt: execTimeStr,
+      receivedAt: execTimeStr,
+      quotePrice: livePrice,
+      quoteMarketEventTime: marketTimeStr,
       fee: exitCharges.totalCharges,
+      feeBreakdown: exitCharges,
       grossPnL: partialGrossPnL,
       netPnL: partialNetPnL,
       realizedR: partialRealizedR,
+      executionPriceSource: 'LIVE_TICK',
+      slippage: 0,
+      correlationId: pos.correlationId,
       price: livePrice,
       executionTime: execTimeStr,
       timestamp: marketTimeStr,

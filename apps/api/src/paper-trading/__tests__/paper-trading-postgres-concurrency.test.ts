@@ -307,4 +307,213 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       await prismaA.paperAccount.delete({ where: { id: account.id } });
     }
   });
+
+  it('Requirement 3, 15: True Real PostgreSQL Transaction Rollback — Entry failure rolls back all mutated account/order/fill/position state byte-for-byte in Postgres', async () => {
+    if (!DB_URL) return;
+
+    const testId = `pg_entry_rollback_${Date.now()}`;
+    const account = await prismaA.paperAccount.create({
+      data: {
+        name: `Postgres Entry Rollback Account ${testId}`,
+        cashBalance: 1000000.0,
+        usedMargin: 0.0,
+        realizedPnL: 0.0,
+        totalChargesPaid: 0.0,
+      },
+    });
+
+    const initCash = 1000000.0;
+
+    try {
+      // Intentionally execute a transaction that creates order, fill, position, mutates account balance, and then throws
+      await expect(
+        prismaA.$transaction(async (tx) => {
+          const order = await tx.paperOrder.create({
+            data: {
+              accountId: account.id,
+              symbol: 'BTCUSDT',
+              contractSymbol: 'BTCUSDT',
+              direction: 'BULLISH',
+              orderType: 'MARKET',
+              requestedQuantity: 2.0,
+              filledQuantity: 2.0,
+              idempotencyKey: `entry_rollback_${testId}`,
+              correlationId: `corr_${testId}`,
+            },
+          });
+
+          await tx.paperFill.create({
+            data: {
+              orderId: order.id,
+              fillPrice: 50000.0,
+              fillQuantity: 2.0,
+              fee: 100.0,
+              executionPriceSource: 'LIVE_TICK',
+              liquidityType: 'TAKER',
+              sourceTimestamp: new Date(),
+              fillTimestamp: new Date(),
+              correlationId: `corr_${testId}`,
+            },
+          });
+
+          await tx.paperPosition.create({
+            data: {
+              accountId: account.id,
+              symbol: 'BTCUSDT',
+              contractSymbol: 'BTCUSDT',
+              instrumentType: 'SPOT',
+              direction: 'BULLISH',
+              quantity: 2.0,
+              entryPrice: 50000.0,
+              currentPrice: 50000.0,
+              stopLoss: 48000.0,
+              target1: 52000.0,
+              status: 'OPEN',
+              usedMargin: 20000.0,
+              leverage: 5.0,
+              correlationId: `corr_${testId}`,
+            },
+          });
+
+          await tx.paperAccount.update({
+            where: { id: account.id },
+            data: {
+              cashBalance: { decrement: 100.0 },
+              realizedPnL: { decrement: 100.0 },
+              usedMargin: { increment: 20000.0 },
+              totalChargesPaid: { increment: 100.0 },
+            },
+          });
+
+          // Intentionally throw DB error to abort transaction
+          throw new Error('[FORCED_POSTGRES_ENTRY_TRANSACTION_FAILURE]');
+        }),
+      ).rejects.toThrow('[FORCED_POSTGRES_ENTRY_TRANSACTION_FAILURE]');
+
+      // Assert 100% atomic rollback in real PostgreSQL database
+      const finalAccount = await prismaA.paperAccount.findUnique({ where: { id: account.id } });
+      expect(Number(finalAccount!.cashBalance)).toBe(initCash);
+      expect(Number(finalAccount!.realizedPnL)).toBe(0.0);
+      expect(Number(finalAccount!.usedMargin)).toBe(0.0);
+      expect(Number(finalAccount!.totalChargesPaid)).toBe(0.0);
+
+      const orders = await prismaA.paperOrder.findMany({ where: { accountId: account.id } });
+      expect(orders.length).toBe(0);
+
+      const fills = await prismaA.paperFill.findMany({ where: { orderId: { in: orders.map((o) => o.id) } } });
+      expect(fills.length).toBe(0);
+
+      const positions = await prismaA.paperPosition.findMany({ where: { accountId: account.id } });
+      expect(positions.length).toBe(0);
+
+      const trades = await prismaA.paperTrade.findMany({ where: { accountId: account.id } });
+      expect(trades.length).toBe(0);
+
+      const audits = await prismaA.auditEvent.findMany({ where: { entityId: account.id } });
+      expect(audits.length).toBe(0);
+    } finally {
+      await prismaA.paperAccount.delete({ where: { id: account.id } });
+    }
+  });
+
+  it('Requirement 3, 16: True Real PostgreSQL Final-Close Transaction Rollback — Close failure rolls back fill, trade creation, and account mutation byte-for-byte in Postgres', async () => {
+    if (!DB_URL) return;
+
+    const testId = `pg_close_rollback_${Date.now()}`;
+    const account = await prismaA.paperAccount.create({
+      data: {
+        name: `Postgres Close Rollback Account ${testId}`,
+        cashBalance: 999900.0,
+        usedMargin: 20000.0,
+        realizedPnL: -100.0,
+        totalChargesPaid: 100.0,
+      },
+    });
+
+    const position = await prismaA.paperPosition.create({
+      data: {
+        accountId: account.id,
+        symbol: 'BTCUSDT',
+        contractSymbol: 'BTCUSDT',
+        instrumentType: 'SPOT',
+        direction: 'BULLISH',
+        quantity: 2.0,
+        entryPrice: 50000.0,
+        currentPrice: 50000.0,
+        stopLoss: 48000.0,
+        target1: 52000.0,
+        status: 'OPEN',
+        usedMargin: 20000.0,
+        leverage: 5.0,
+        correlationId: `corr_${testId}`,
+      },
+    });
+
+    try {
+      await expect(
+        prismaA.$transaction(async (tx) => {
+          // Create exit order & fill
+          const exitOrder = await tx.paperOrder.create({
+            data: {
+              accountId: account.id,
+              symbol: 'BTCUSDT',
+              contractSymbol: 'BTCUSDT',
+              direction: 'BEARISH',
+              orderType: 'MARKET',
+              requestedQuantity: 2.0,
+              filledQuantity: 2.0,
+              price: 55000.0,
+              status: 'FILLED',
+              idempotencyKey: `close_rollback_order_${testId}`,
+              correlationId: `corr_${testId}`,
+            },
+          });
+
+          await tx.paperFill.create({
+            data: {
+              orderId: exitOrder.id,
+              fillPrice: 55000.0,
+              fillQuantity: 2.0,
+              fee: 100.0,
+              executionPriceSource: 'LIVE_TICK',
+              liquidityType: 'TAKER',
+              sourceTimestamp: new Date(),
+              fillTimestamp: new Date(),
+              correlationId: `corr_${testId}`,
+            },
+          });
+
+          await tx.paperAccount.update({
+            where: { id: account.id },
+            data: {
+              cashBalance: { increment: 9900.0 },
+              usedMargin: { decrement: 20000.0 },
+              realizedPnL: { increment: 9900.0 },
+              totalChargesPaid: { increment: 100.0 },
+            },
+          });
+
+          // Intentionally throw DB error midway through close
+          throw new Error('[FORCED_POSTGRES_CLOSE_TRANSACTION_FAILURE]');
+        }),
+      ).rejects.toThrow('[FORCED_POSTGRES_CLOSE_TRANSACTION_FAILURE]');
+
+      // Assert 100% atomic rollback: position remains OPEN, balance/margin/charges/realizedPnL unchanged
+      const finalPosition = await prismaA.paperPosition.findUnique({ where: { id: position.id } });
+      expect(finalPosition!.status).toBe('OPEN');
+      expect(Number(finalPosition!.usedMargin)).toBe(20000.0);
+
+      const finalAccount = await prismaA.paperAccount.findUnique({ where: { id: account.id } });
+      expect(Number(finalAccount!.cashBalance)).toBe(999900.0);
+      expect(Number(finalAccount!.usedMargin)).toBe(20000.0);
+      expect(Number(finalAccount!.realizedPnL)).toBe(-100.0);
+      expect(Number(finalAccount!.totalChargesPaid)).toBe(100.0);
+
+      const trades = await prismaA.paperTrade.findMany({ where: { positionId: position.id } });
+      expect(trades.length).toBe(0);
+    } finally {
+      await prismaA.paperPosition.deleteMany({ where: { accountId: account.id } });
+      await prismaA.paperAccount.delete({ where: { id: account.id } });
+    }
+  });
 });

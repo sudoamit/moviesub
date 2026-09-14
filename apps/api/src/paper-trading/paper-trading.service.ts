@@ -243,10 +243,16 @@ export class PaperTradingService implements IExecutionProvider {
       const isBuy = pos.direction === Direction.BULLISH;
       const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
-      // BTC is USDT-quoted: convert price diff to INR before subtracting INR charges
-      const isCryptoPosUnrealized = pos.symbol === 'BTCUSDT' || pos.symbol === 'BTCUSD';
-      const USDT_INR_RATE = 92.0;
-      const priceDiffINR = isCryptoPosUnrealized ? priceDiff * USDT_INR_RATE : priceDiff;
+      // Quote-currency conversion via point-in-time FX rate
+      const inst = getAuthoritativeInstrument(pos.symbol);
+      const quoteCurrency = inst.currency;
+      const openingSnapshot =
+        (pos.executionEventsJson as any)?.accountingSnapshot ??
+        (pos.featureSnapshotJson as any)?.accountingSnapshot;
+      const fxRate =
+        openingSnapshot?.fxRate ??
+        PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
+      const priceDiffINR = priceDiff * fxRate;
       const unrealizedPnL = Number((priceDiffINR * quantity - charges.totalCharges).toFixed(2));
       const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
       const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
@@ -1340,10 +1346,9 @@ export class PaperTradingService implements IExecutionProvider {
       const finalQty = Number(pos.quantity);
       const finalTurnover = finalExitPrice * finalQty;
       const finalExitCharges = exitCharges.totalCharges;
-      const USDT_INR_RATE = isCrypto ? 92.0 : 1.0;
       const entryPrice = Number(pos.entryPrice);
       const finalPriceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
-      const finalGrossPnL = finalPriceDiff * USDT_INR_RATE * finalQty;
+      const finalGrossPnL = finalPriceDiff * snapshot.fxRate * finalQty;
       const finalNetPnL = Number((finalGrossPnL - finalExitCharges).toFixed(2));
 
       const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : entryPrice);
@@ -1381,18 +1386,51 @@ export class PaperTradingService implements IExecutionProvider {
       canonicalRealizedRLog = canonicalRealizedR;
 
       const allLegsBreakdown = [
-        ...(hasAuthoritativeEntryFills && aggregated.entry ? [{ role: 'ENTRY', price: effectiveEntryPrice, quantity: totalPositionQuantity, timestamp: pos.entryTime }] : []),
+        ...(hasAuthoritativeEntryFills && aggregated.entry
+          ? [
+              {
+                role: 'ENTRY',
+                quantity: totalPositionQuantity,
+                fillPrice: effectiveEntryPrice,
+                fillTimestamp: new Date(aggregated.entry.earliestFillTimestamp).toISOString(),
+                marketEventTime: sourceTimestamp.toISOString(),
+                observedAt: new Date(aggregated.entry.earliestFillTimestamp).toISOString(),
+                receivedAt: new Date(aggregated.entry.earliestFillTimestamp).toISOString(),
+                fee: entryCharges.totalCharges,
+                feeBreakdown: entryCharges,
+                grossPnL: 0,
+                netPnL: -entryCharges.totalCharges,
+                realizedR: 0,
+                executionPriceSource: priceSource,
+                slippage: 0,
+                correlationId: pos.correlationId,
+                price: effectiveEntryPrice,
+                timestamp: pos.entryTime,
+              },
+            ]
+          : []),
         ...partialLegs,
         {
           role: 'FINAL_EXIT',
-          price: finalExitPrice,
-          fillPrice: finalExitPrice,
-          executionPriceSource: priceSource,
           quantity: finalQty,
+          triggerPrice: triggerPriceOpt ?? null,
+          triggerMarketEventTime: triggerMarketEventTimeOpt ? new Date(triggerMarketEventTimeOpt).toISOString() : null,
+          fillPrice: finalExitPrice,
+          fillTimestamp: exitTime.toISOString(),
+          marketEventTime: sourceTimestamp.toISOString(),
+          observedAt: exitTime.toISOString(),
+          receivedAt: exitTime.toISOString(),
+          quotePrice: exitPrice,
+          quoteMarketEventTime: sourceTimestamp.toISOString(),
           fee: finalExitCharges,
+          feeBreakdown: exitCharges,
           grossPnL: finalGrossPnL,
           netPnL: finalNetPnL,
           realizedR: finalRealizedR,
+          executionPriceSource: priceSource,
+          slippage: 0,
+          correlationId: pos.correlationId,
+          price: finalExitPrice,
           timestamp: exitTime.toISOString(),
         },
       ];
