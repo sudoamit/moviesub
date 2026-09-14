@@ -11,6 +11,7 @@ import {
   getAuthoritativeInstrument,
   PointInTimeCurrencyConverter,
   parseAndValidateRedisOptionQuote,
+  validateAuthoritativeExecutionQuote,
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { Decimal } from '@prisma/client/runtime/library';

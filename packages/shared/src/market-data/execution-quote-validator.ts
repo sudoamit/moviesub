@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { MarketDataUnavailableError, StaleMarketDataError } from '../errors';
 
 export const MAX_FUTURE_SKEW_MS = 5000;
@@ -5,7 +6,31 @@ export const DEFAULT_MAX_AGE_MS = 5000;
 
 export const CANONICAL_OPTION_QUOTE_SCHEMA = 'CANONICAL_OPTION_QUOTE_V1' as const;
 export const CANONICAL_WRITER_ORIGIN = 'CANONICAL_REAL_MARKET_STREAMER' as const;
-const CANONICAL_SECRET = 'CANONICAL_INTERNAL_PRODUCER_AUTH_TOKEN_V1';
+
+let canonicalSigningSecret: string | null = null;
+
+export function setCanonicalSigningSecret(secret: string): void {
+  if (!secret || secret.trim().length === 0) {
+    throw new Error('Canonical signing secret cannot be empty');
+  }
+  canonicalSigningSecret = secret.trim();
+}
+
+export function getCanonicalSigningSecret(): string {
+  if (canonicalSigningSecret) {
+    return canonicalSigningSecret;
+  }
+  const envSecret =
+    process.env.CANONICAL_OPTION_QUOTE_SECRET ||
+    process.env.JWT_SECRET ||
+    process.env.SESSION_SECRET;
+  if (envSecret && envSecret.trim().length > 0) {
+    return envSecret.trim();
+  }
+  throw new Error(
+    '[CANONICAL_SECRET_UNCONFIGURED] Runtime canonical signing secret must be configured via environment variable (CANONICAL_OPTION_QUOTE_SECRET) or setCanonicalSigningSecret(). Hardcoded secrets in source code are strictly prohibited.',
+  );
+}
 
 export function computeCanonicalSignature(
   contractSymbol: string,
@@ -13,15 +38,13 @@ export function computeCanonicalSignature(
   marketEventTime: number,
   connectionEpoch: number,
   providerId: string,
+  customSecret?: string,
 ): string {
-  let hash = 0x811c9dc5;
-  const str = `${contractSymbol}:${price.toFixed(4)}:${marketEventTime}:${connectionEpoch}:${providerId}:${CANONICAL_SECRET}`;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `sig_${(hash >>> 0).toString(16)}`;
+  const secret = customSecret ?? getCanonicalSigningSecret();
+  const payload = `${contractSymbol}:${price.toFixed(4)}:${marketEventTime}:${connectionEpoch}:${providerId}`;
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
 }
+
 
 export interface ICanonicalOptionQuoteRecord {
   schemaVersion: typeof CANONICAL_OPTION_QUOTE_SCHEMA;
@@ -67,14 +90,34 @@ export function createCanonicalOptionQuoteRecord(params: {
   changeAmount?: number;
   volatility?: number;
   tickSize?: number;
+  signingSecret?: string;
 }): ICanonicalOptionQuoteRecord {
+  if (!params.contractSymbol || typeof params.contractSymbol !== 'string') {
+    throw new Error('Canonical option quote requires valid contractSymbol');
+  }
+  if (typeof params.price !== 'number' || !Number.isFinite(params.price) || params.price <= 0) {
+    throw new Error(`Canonical option quote requires positive finite price, got: ${params.price}`);
+  }
+  if (!params.providerId || typeof params.providerId !== 'string' || params.providerId.trim().length === 0) {
+    throw new Error('Canonical option quote requires non-empty authenticated providerId');
+  }
+  if (typeof params.connectionEpoch !== 'number' || !Number.isFinite(params.connectionEpoch) || params.connectionEpoch <= 0) {
+    throw new Error(`Canonical option quote requires positive connectionEpoch, got: ${params.connectionEpoch}`);
+  }
+
   const now = Date.now();
+  const tsValidation = validateExecutionQuoteTimestamp(params.marketEventTime, now);
+  if (!tsValidation.valid) {
+    throw new Error(`Canonical option quote timestamp rejected: ${tsValidation.reason}`);
+  }
+
   const signatureToken = computeCanonicalSignature(
     params.contractSymbol.toUpperCase(),
     params.price,
     params.marketEventTime,
     params.connectionEpoch,
     params.providerId,
+    params.signingSecret,
   );
 
   return {

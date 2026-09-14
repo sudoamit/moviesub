@@ -241,12 +241,12 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           const changePercent = parseFloat(paxgData.priceChangePercent);
           const changeAmount = parseFloat(paxgData.priceChange);
 
-          const ticker = this.tickers.get('PAXGUSDT') || {
+          const updatedTicker: ILiveRealTicker = {
             symbol: 'PAXGUSDT',
             price: livePrice,
             open,
-            high,
-            low,
+            high: Math.max(ticker?.high ?? high, high),
+            low: Math.min(ticker?.low ?? low, low),
             close: livePrice,
             volume: Math.round(volume),
             prevClose: open,
@@ -256,24 +256,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             volatility: 1.2,
             lastUpdated: now,
             provenance: 'LIVE_PROVIDER',
+            marketEventTime: eventTime,
+            connectionEpoch: this.providerConnectionEpoch,
+            providerId: 'BINANCE_DIRECT',
+            observedAt: now,
+            receivedAt: now,
           };
 
-          ticker.price = livePrice;
-          ticker.close = livePrice;
-          ticker.high = Math.max(ticker.high ?? high, high);
-          ticker.low = Math.min(ticker.low ?? low, low);
-          ticker.volume = Math.round(volume);
-          ticker.changePercent = changePercent;
-          ticker.changeAmount = changeAmount;
-          ticker.lastUpdated = now;
-          ticker.provenance = 'LIVE_PROVIDER';
-          ticker.marketEventTime = eventTime;
-          ticker.connectionEpoch = this.providerConnectionEpoch;
-          ticker.observedAt = now;
-          ticker.receivedAt = now;
-
-          this.tickers.set('PAXGUSDT', ticker);
-          await this.broadcastTick(ticker);
+          this.tickers.set('PAXGUSDT', updatedTicker);
+          await this.broadcastTick(updatedTicker);
         }
       }
     } catch (err) {
@@ -335,6 +326,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             ticker.lastUpdated = now;
             ticker.provenance = 'LIVE_PROVIDER';
             ticker.marketEventTime = marketEventTime;
+            ticker.connectionEpoch = this.providerConnectionEpoch;
+            ticker.providerId = 'NSE_YAHOO_REST';
             ticker.observedAt = now;
             ticker.receivedAt = now;
             await this.broadcastTick(ticker);
@@ -411,6 +404,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       }
     }
 
+    const connectionEpoch = provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined;
+    const providerId = provenance === 'LIVE_PROVIDER' ? (tick.providerId || 'REAL_MARKET_STREAMER') : undefined;
+
     const updated: ILiveRealTicker = {
       symbol: sym,
       price: tick.price,
@@ -427,13 +423,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       lastUpdated: tick.lastUpdated ?? now,
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
+      connectionEpoch,
+      providerId,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
     };
     this.tickers.set(sym, updated);
     if (provenance === 'LIVE_PROVIDER') {
-      updated.connectionEpoch = this.providerConnectionEpoch;
       this.freshSymbolsAfterReconnect.add(`SPOT:${sym}`);
     }
     return updated;
@@ -629,6 +626,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       provenance: 'LIVE_PROVIDER',
       marketEventTime,
       connectionEpoch: this.providerConnectionEpoch,
+      providerId: 'BINANCE_DIRECT',
       observedAt: now,
       receivedAt: now,
     };
@@ -679,6 +677,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
       connectionEpoch: provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined,
+      providerId: provenance === 'LIVE_PROVIDER' ? (tick.providerId || 'NSE_OPTION_PROVIDER') : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
@@ -775,19 +774,17 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const now = Date.now();
-    const eventTime = ticker.marketEventTime;
-    const maxClockSkewMs = 5000;
-    if (eventTime > now + maxClockSkewMs) {
-      throw new StaleMarketDataError(sym, (eventTime - now) / 1000, maxAgeSeconds, new Date(eventTime));
-    }
-
-    const ageMs = now - eventTime;
-    if (ageMs < 0 && Math.abs(ageMs) > maxClockSkewMs) {
-      throw new StaleMarketDataError(sym, (eventTime - now) / 1000, maxAgeSeconds, new Date(eventTime));
-    }
-    const ageSeconds = Math.max(0, ageMs) / 1000;
-    if (ageSeconds > maxAgeSeconds) {
-      throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(eventTime));
+    const maxAgeMs = maxAgeSeconds * 1000;
+    const tsValidation = validateExecutionQuoteTimestamp(ticker.marketEventTime, now, maxAgeMs, 5000);
+    if (!tsValidation.valid) {
+      if (tsValidation.errorType === 'FUTURE_SKEW') {
+        throw new StaleMarketDataError(sym, (ticker.marketEventTime - now) / 1000, maxAgeSeconds, new Date(ticker.marketEventTime));
+      }
+      if (tsValidation.errorType === 'STALE_QUOTE') {
+        const ageSeconds = (tsValidation.ageMs ?? (now - ticker.marketEventTime)) / 1000;
+        throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(ticker.marketEventTime));
+      }
+      throw new MarketDataUnavailableError(sym, `Market quote timestamp rejected: ${tsValidation.reason}`);
     }
 
     return ticker;
@@ -814,6 +811,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): Promise<ICanonicalOptionQuoteRecord | null> {
+    if (!this.isExecutionDataHealthy()) {
+      this.logger.warn(`Cannot publish canonical option quote for ${params.contractSymbol}: provider is in '${this.providerState}' state`);
+      return null;
+    }
+
     const redisClient = this.redis.getClient();
     if (!redisClient || redisClient.status !== 'ready') return null;
 
