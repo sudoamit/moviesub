@@ -3,7 +3,12 @@ import { PaperPositionMonitorService } from '../paper-position-monitor.service';
 import { PaperTradingService } from '../paper-trading.service';
 import { RealMarketStreamerService } from '../../market-data/real-market-streamer.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { PointInTimeCurrencyConverter } from '@quant/shared';
+import {
+  PointInTimeCurrencyConverter,
+  buildAccountingSnapshot,
+  getAuthoritativeInstrument,
+  resolveMarginModel,
+} from '@quant/shared';
 
 describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration Test Suite', () => {
   let prismaA: PrismaClient;
@@ -102,6 +107,18 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       },
     });
 
+    const inst1 = getAuthoritativeInstrument('BTCUSDT');
+    const entryTime1 = new Date();
+    const snap1 = buildAccountingSnapshot({
+      accountCurrency: 'INR',
+      quoteCurrency: 'USDT',
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime1.getTime()),
+      contractSize: 1,
+      lotSize: 10.0,
+      resolvedMarginModel: resolveMarginModel(inst1, { requestedLeverage: 1 }),
+      calculatedAt: entryTime1.getTime(),
+    });
+
     const position = await prismaA.paperPosition.create({
       data: {
         accountId: account.id,
@@ -120,6 +137,8 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         usedMargin: 50000.0,
         leverage: 1.0,
         correlationId: `corr_${testId}`,
+        executionEventsJson: { accountingSnapshot: snap1 as any },
+        featureSnapshotJson: { accountingSnapshot: snap1 as any },
       },
     });
 
@@ -194,6 +213,18 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       },
     });
 
+    const inst2 = getAuthoritativeInstrument('BTCUSDT');
+    const entryTime2 = new Date();
+    const snap2 = buildAccountingSnapshot({
+      accountCurrency: 'INR',
+      quoteCurrency: 'USDT',
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime2.getTime()),
+      contractSize: 1,
+      lotSize: 10.0,
+      resolvedMarginModel: resolveMarginModel(inst2, { requestedLeverage: 1 }),
+      calculatedAt: entryTime2.getTime(),
+    });
+
     const position = await prismaA.paperPosition.create({
       data: {
         accountId: account.id,
@@ -210,6 +241,8 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         usedMargin: 50000.0,
         leverage: 1.0,
         correlationId: `corr_${testId}`,
+        executionEventsJson: { accountingSnapshot: snap2 as any },
+        featureSnapshotJson: { accountingSnapshot: snap2 as any },
       },
     });
 
@@ -394,6 +427,18 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       },
     });
 
+    const inst3 = getAuthoritativeInstrument('BTCUSDT');
+    const entryTime3 = new Date();
+    const snap3 = buildAccountingSnapshot({
+      accountCurrency: 'INR',
+      quoteCurrency: 'USDT',
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime3.getTime()),
+      contractSize: 1,
+      lotSize: 2.0,
+      resolvedMarginModel: resolveMarginModel(inst3, { requestedLeverage: 5 }),
+      calculatedAt: entryTime3.getTime(),
+    });
+
     const position = await prismaA.paperPosition.create({
       data: {
         accountId: account.id,
@@ -410,6 +455,8 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         usedMargin: 20000.0,
         leverage: 5.0,
         correlationId: `corr_${testId}`,
+        executionEventsJson: { accountingSnapshot: snap3 as any },
+        featureSnapshotJson: { accountingSnapshot: snap3 as any },
       },
     });
 
@@ -445,6 +492,108 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       await prismaA.paperOrder.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperPosition.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperAccount.delete({ where: { id: account.id } });
+    }
+  });
+
+  it('Requirement 15: Real Market Streamer Reconnection Lifecycle with Production PaperTradingService against Real PostgreSQL', async () => {
+    if (!DB_URL) return;
+
+    const realStreamer = new RealMarketStreamerService({} as any);
+    const prodService = new PaperTradingService(
+      prismaA as unknown as PrismaService,
+      null as any,
+      realStreamer,
+    );
+
+    const testId = `pg_streamer_reconnect_${Date.now()}`;
+    const account = await prismaA.paperAccount.create({
+      data: {
+        name: `Postgres Reconnect Test Account ${testId}`,
+        cashBalance: 500000.0,
+        usedMargin: 50000.0,
+        realizedPnL: 0.0,
+        totalChargesPaid: 0.0,
+      },
+    });
+
+    const inst = getAuthoritativeInstrument('BTCUSDT');
+    const entryTime = new Date();
+    const snap = buildAccountingSnapshot({
+      accountCurrency: 'INR',
+      quoteCurrency: 'USDT',
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime.getTime()),
+      contractSize: 1,
+      lotSize: 1.0,
+      resolvedMarginModel: resolveMarginModel(inst, { requestedLeverage: 1 }),
+      calculatedAt: entryTime.getTime(),
+    });
+
+    const pos = await prismaA.paperPosition.create({
+      data: {
+        accountId: account.id,
+        symbol: 'BTCUSDT',
+        contractSymbol: 'BTCUSDT',
+        instrumentType: 'SPOT',
+        direction: 'BULLISH',
+        quantity: 1.0,
+        entryPrice: 50000.0,
+        currentPrice: 50000.0,
+        stopLoss: 48000.0,
+        target1: 52000.0,
+        status: 'OPEN',
+        usedMargin: 50000.0,
+        leverage: 1.0,
+        correlationId: `corr_${testId}`,
+        executionEventsJson: { accountingSnapshot: snap as any },
+        featureSnapshotJson: { accountingSnapshot: snap as any },
+      },
+    });
+
+    try {
+      // 1. Ingest initial quote then disconnect streamer -> closePosition rejected
+      const t0 = Date.now();
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        lastPrice: '51000.00',
+        closeTime: t0,
+      });
+
+      realStreamer.setProviderConnected(false);
+
+      await expect(
+        prodService.closePosition(pos.id, 'Disconnect Exit', { executionMode: 'LIVE_MARKET' as any }),
+      ).rejects.toThrow(/\[MARKET_DATA_UNAVAILABLE\]/);
+
+      // 2. Reconnect provider -> cached tick rejected
+      realStreamer.setProviderConnected(true);
+
+      await expect(
+        prodService.closePosition(pos.id, 'Cached Quote Exit', { executionMode: 'LIVE_MARKET' as any }),
+      ).rejects.toThrow(/cached tick from before provider reconnection/);
+
+      // 3. Ingest fresh valid tick -> closePosition against real PostgreSQL succeeds
+      const tFresh = Date.now() + 1000;
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        lastPrice: '53000.00',
+        closeTime: tFresh,
+      });
+
+      const trade = await prodService.closePosition(pos.id, 'Reconnected Valid Exit', { executionMode: 'LIVE_MARKET' as any });
+      expect(trade).toBeDefined();
+      expect(Number(trade.exitPrice)).toBe(53000.0);
+
+      // Verify PostgreSQL database state
+      const dbPos = await prismaA.paperPosition.findUnique({ where: { id: pos.id } });
+      expect(dbPos?.status).toBe('CLOSED');
+
+      const dbTrades = await prismaA.paperTrade.findMany({ where: { positionId: pos.id } });
+      expect(dbTrades.length).toBe(1);
+    } finally {
+      await prismaA.paperTrade.deleteMany({ where: { positionId: pos.id } }).catch(() => {});
+      await prismaA.paperOrder.deleteMany({ where: { accountId: account.id } }).catch(() => {});
+      await prismaA.paperPosition.delete({ where: { id: pos.id } }).catch(() => {});
+      await prismaA.paperAccount.delete({ where: { id: account.id } }).catch(() => {});
     }
   });
 });

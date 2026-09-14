@@ -3,26 +3,28 @@ import { RedisService } from '../common/redis/redis.service';
 import { WS_EVENTS, MarketDataUnavailableError, StaleMarketDataError, getAuthoritativeInstrument } from '@quant/shared';
 
 export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
+export type ProviderConnectionState = 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'RECONNECTED';
 
 export interface ILiveRealTicker {
   symbol: string;
   price: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  prevClose: number;
-  changePercent: number;
-  changeAmount: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  volume?: number;
+  prevClose?: number;
+  changePercent?: number;
+  changeAmount?: number;
   tickSize?: number;
-  volatility: number;
+  volatility?: number;
   lastUpdated: number;
   provenance: QuoteProvenance;
   marketEventTime?: number;
   sequence?: number;
   observedAt?: number;
   receivedAt?: number;
+  isDerivedFields?: boolean;
 }
 
 @Injectable()
@@ -198,60 +200,67 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const now = Date.now();
     try {
       const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+      if (!res.ok) {
+        this.handleProviderDisconnect(`Binance HTTP status ${res.status}`);
+        return;
+      }
       const data = await res.json();
 
       if (data && (data.lastPrice || data.c)) {
+        this.handleProviderReconnect();
         const ticker = this.ingestBinanceTickerData(data);
         if (ticker) await this.broadcastTick(ticker);
       }
 
       // Fetch Binance PAXGUSDT Price
       const paxgRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
-      const paxgData = await paxgRes.json();
+      if (paxgRes.ok) {
+        const paxgData = await paxgRes.json();
+        if (paxgData && paxgData.lastPrice) {
+          const livePrice = parseFloat(paxgData.lastPrice);
+          const open = parseFloat(paxgData.openPrice);
+          const high = parseFloat(paxgData.highPrice);
+          const low = parseFloat(paxgData.lowPrice);
+          const volume = parseFloat(paxgData.volume);
+          const changePercent = parseFloat(paxgData.priceChangePercent);
+          const changeAmount = parseFloat(paxgData.priceChange);
 
-      if (paxgData && paxgData.lastPrice) {
-        const livePrice = parseFloat(paxgData.lastPrice);
-        const open = parseFloat(paxgData.openPrice);
-        const high = parseFloat(paxgData.highPrice);
-        const low = parseFloat(paxgData.lowPrice);
-        const volume = parseFloat(paxgData.volume);
-        const changePercent = parseFloat(paxgData.priceChangePercent);
-        const changeAmount = parseFloat(paxgData.priceChange);
+          const ticker = this.tickers.get('PAXGUSDT') || {
+            symbol: 'PAXGUSDT',
+            price: livePrice,
+            open,
+            high,
+            low,
+            close: livePrice,
+            volume: Math.round(volume),
+            prevClose: open,
+            changePercent,
+            changeAmount,
+            tickSize: 0.01,
+            volatility: 1.2,
+            lastUpdated: now,
+            provenance: 'LIVE_PROVIDER',
+          };
 
-        const ticker = this.tickers.get('PAXGUSDT') || {
-          symbol: 'PAXGUSDT',
-          price: livePrice,
-          open,
-          high,
-          low,
-          close: livePrice,
-          volume: Math.round(volume),
-          prevClose: open,
-          changePercent,
-          changeAmount,
-          tickSize: 0.01,
-          volatility: 1.2,
-          lastUpdated: now,
-          provenance: 'LIVE_PROVIDER',
-        };
+          ticker.price = livePrice;
+          ticker.close = livePrice;
+          ticker.high = Math.max(ticker.high ?? high, high);
+          ticker.low = Math.min(ticker.low ?? low, low);
+          ticker.volume = Math.round(volume);
+          ticker.changePercent = changePercent;
+          ticker.changeAmount = changeAmount;
+          ticker.lastUpdated = now;
+          ticker.provenance = 'LIVE_PROVIDER';
+          ticker.marketEventTime = paxgData.closeTime ? Number(paxgData.closeTime) : now;
+          ticker.observedAt = now;
+          ticker.receivedAt = now;
 
-        ticker.price = livePrice;
-        ticker.close = livePrice;
-        ticker.high = Math.max(ticker.high, high);
-        ticker.low = Math.min(ticker.low, low);
-        ticker.volume = Math.round(volume);
-        ticker.changePercent = changePercent;
-        ticker.changeAmount = changeAmount;
-        ticker.lastUpdated = now;
-        ticker.provenance = 'LIVE_PROVIDER';
-        ticker.marketEventTime = paxgData.closeTime ? Number(paxgData.closeTime) : now;
-        ticker.observedAt = now;
-        ticker.receivedAt = now;
-
-        this.tickers.set('PAXGUSDT', ticker);
-        await this.broadcastTick(ticker);
+          this.tickers.set('PAXGUSDT', ticker);
+          await this.broadcastTick(ticker);
+        }
       }
     } catch (err) {
+      this.handleProviderDisconnect(`Binance connection error: ${(err as Error).message}`);
       this.logger.debug(`Binance real tick notice: ${(err as Error).message}`);
     }
   }
@@ -292,9 +301,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           if (ticker) {
             ticker.price = livePrice;
             ticker.close = livePrice;
-            ticker.open = Number((meta.regularMarketOpen || ticker.open).toFixed(2));
-            ticker.high = Math.max(ticker.high, high);
-            ticker.low = Math.min(ticker.low, low);
+            ticker.open = Number((meta.regularMarketOpen || ticker.open || livePrice).toFixed(2));
+            ticker.high = Math.max(ticker.high ?? high, high);
+            ticker.low = Math.min(ticker.low ?? low, low);
             ticker.volume = volume;
             ticker.prevClose = prevClose;
             ticker.changeAmount = changeAmount;
@@ -410,21 +419,54 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.tickers.get(symbol.toUpperCase());
   }
 
+  private providerState: ProviderConnectionState = 'CONNECTED';
   private providerConnected = true;
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
 
-  public setProviderConnected(connected: boolean): void {
-    const wasDisconnected = !this.providerConnected;
-    this.providerConnected = connected;
-    if (connected && wasDisconnected) {
+  public getProviderState(): ProviderConnectionState {
+    return this.providerState;
+  }
+
+  public handleProviderDisconnect(reason?: string): void {
+    if (this.providerConnected || this.providerState !== 'DISCONNECTED') {
+      this.logger.warn(`Market data provider disconnected: ${reason || 'Connection lost'}`);
+    }
+    this.providerState = 'DISCONNECTED';
+    this.providerConnected = false;
+    // Atomically invalidate execution freshness on disconnect
+    this.freshSymbolsAfterReconnect.clear();
+  }
+
+  public handleProviderReconnecting(): void {
+    this.providerState = 'RECONNECTING';
+    this.providerConnected = false;
+    // Atomically invalidate execution freshness on reconnecting
+    this.freshSymbolsAfterReconnect.clear();
+  }
+
+  public handleProviderReconnect(): void {
+    const wasNotConnected = !this.providerConnected || this.providerState !== 'CONNECTED';
+    if (wasNotConnected) {
+      this.providerState = 'RECONNECTED';
+      this.providerConnected = true;
       this.reconnectedAt = Date.now();
+      // Atomically invalidate execution freshness on reconnect
       this.freshSymbolsAfterReconnect.clear();
+      this.logger.log('Market data provider reconnected. Execution freshness invalidated until fresh ticks arrive.');
+    }
+  }
+
+  public setProviderConnected(connected: boolean): void {
+    if (connected) {
+      this.handleProviderReconnect();
+    } else {
+      this.handleProviderDisconnect('Explicit setProviderConnected(false)');
     }
   }
 
   public disconnectProvider(): void {
-    this.providerConnected = false;
+    this.handleProviderDisconnect('Explicit disconnectProvider()');
   }
 
   public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
@@ -558,16 +600,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const updated: ILiveRealTicker = {
       symbol: key,
       price: tick.price,
-      open: tick.open ?? existing?.open ?? tick.price,
-      high: tick.high ?? existing?.high ?? tick.price,
-      low: tick.low ?? existing?.low ?? tick.price,
-      close: tick.close ?? tick.price,
-      volume: tick.volume ?? existing?.volume ?? 1000,
-      prevClose: tick.prevClose ?? existing?.prevClose ?? tick.price,
-      changePercent: tick.changePercent ?? existing?.changePercent ?? 0,
-      changeAmount: tick.changeAmount ?? existing?.changeAmount ?? 0,
+      open: tick.open ?? existing?.open,
+      high: tick.high ?? existing?.high,
+      low: tick.low ?? existing?.low,
+      close: tick.close ?? existing?.close ?? tick.price,
+      volume: tick.volume ?? existing?.volume,
+      prevClose: tick.prevClose ?? existing?.prevClose,
+      changePercent: tick.changePercent ?? existing?.changePercent,
+      changeAmount: tick.changeAmount ?? existing?.changeAmount,
       tickSize: tick.tickSize ?? existing?.tickSize ?? undefined,
-      volatility: tick.volatility ?? existing?.volatility ?? 1.0,
+      volatility: tick.volatility ?? existing?.volatility,
       lastUpdated: tick.lastUpdated ?? now,
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
@@ -583,6 +625,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getOptionTicker(contractSymbol: string): ILiveRealTicker | null {
+    if (!this.providerConnected || this.providerState === 'DISCONNECTED') {
+      return null;
+    }
     const key = contractSymbol.toUpperCase();
     if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
       return null;

@@ -233,16 +233,16 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             return {
               symbol: pos.contractSymbol,
               price: parsed.price,
-              open: parsed.price,
-              high: parsed.price,
-              low: parsed.price,
-              close: parsed.price,
-              volume: 1000,
-              prevClose: parsed.price,
-              changePercent: 0,
-              changeAmount: 0,
+              open: parsed.open,
+              high: parsed.high,
+              low: parsed.low,
+              close: parsed.close ?? parsed.price,
+              volume: parsed.volume,
+              prevClose: parsed.prevClose,
+              changePercent: parsed.changePercent,
+              changeAmount: parsed.changeAmount,
               tickSize: (getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined),
-              volatility: 1.0,
+              volatility: parsed.volatility,
               lastUpdated: parsed.timestamp || Date.now(),
               provenance: 'LIVE_PROVIDER',
               marketEventTime: Number(eventTime),
@@ -262,7 +262,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     target1: number,
     livePrice: number,
     marketEventTime: Date,
-  ) {
+    partialRatio = 0.5,
+  ): Promise<void> {
     const idempotencyKey = `tp1_partial_${pos.id}`;
 
     // Deterministic check to avoid duplicate TP1 execution
@@ -275,8 +276,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     }
 
     const totalQuantity = Number(pos.quantity);
-    const partialRatio = 0.5;
-    const partialQty = totalQuantity * partialRatio;
+    const partialQty = Number((totalQuantity * partialRatio).toFixed(4));
     const remainingQty = totalQuantity - partialQty;
     const entryPrice = Number(pos.entryPrice);
     const isBuy = pos.direction === Direction.BULLISH;
@@ -286,14 +286,16 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const exitCharges = this.paperTradingService.calculateCharges(exitTurnover, isCrypto);
 
     // Canonical P&L via TradeAccountingEngine using the persisted lifecycle accounting snapshot
-    const inst = getAuthoritativeInstrument(pos.symbol);
-    const quoteCurrency = inst.currency;
     const openingSnapshot =
       (pos.executionEventsJson as any)?.accountingSnapshot ??
       (pos.featureSnapshotJson as any)?.accountingSnapshot;
-    const fxRate =
-      openingSnapshot?.fxRate ??
-      PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', marketEventTime.getTime()).fxRate;
+
+    if (!openingSnapshot) {
+      throw new Error(
+        `[MALFORMED_LIFECYCLE] Cannot execute partial TP1 scale-out for position '${pos.id}': Missing authoritative immutable opening accounting snapshot. Silently querying an ad-hoc FX rate during execution leg settlement is strictly prohibited.`,
+      );
+    }
+    const fxRate = openingSnapshot.fxRate;
 
     const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
 
@@ -303,7 +305,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       fillPrice: livePrice,
       quantity: partialQty,
       direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-      accountingSnapshot: openingSnapshot ?? undefined,
+      accountingSnapshot: openingSnapshot,
       fxRate,
       fees: exitCharges.totalCharges,
       initialStopLoss: initialSL,

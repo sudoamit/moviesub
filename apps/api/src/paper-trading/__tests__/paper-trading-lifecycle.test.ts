@@ -3520,5 +3520,101 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const closedPos = dbPositions.find((p) => p.id === pos.id);
       expect(closedPos.status).toBe(PositionState.CLOSED);
     });
+
+    it('TEST 149-6 (Semantic Accounting Authority): Enforces immutable openingSnapshot across legs and fails closed on missing snapshot', async () => {
+      // Setup test account
+      dbAccounts = [
+        {
+          id: 'acc_sem',
+          cashBalance: new Decimal(1000000.0),
+          usedMargin: new Decimal(0.0),
+          realizedPnL: new Decimal(0.0),
+          totalChargesPaid: new Decimal(0.0),
+        },
+      ];
+      dbPositions = [];
+      dbOrders = [];
+      dbFills = [];
+      dbTrades = [];
+
+      const t0 = Date.now();
+      const converter = PointInTimeCurrencyConverter.getInstance();
+      converter.seedFixtureRates([
+        { pair: 'USDT/INR', rate: 92.5, timestamp: t0 - 10000, source: 'TEST_FIXTURE', version: '1.0' },
+      ]);
+
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 50000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: t0,
+        lastUpdated: t0,
+      });
+
+      // 1. Enter position at time t0 (FX = 92.5)
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 1,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 52000,
+      });
+
+      const openingSnap = (pos.executionEventsJson as any)?.accountingSnapshot;
+      expect(openingSnap).toBeDefined();
+      expect(openingSnap.fxRate).toBe(92.5);
+
+      // 2. Simulate subsequent point in time where live market FX rate dropped to 75.0
+      const t1 = Date.now() + 1000;
+      converter.seedFixtureRates([
+        { pair: 'USDT/INR', rate: 75.0, timestamp: t1, source: 'TEST_FIXTURE', version: '1.0' },
+      ]);
+
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 52000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: t1,
+        lastUpdated: t1,
+      });
+
+      // Verify that PointInTimeCurrencyConverter returns 75.0 at timestamp t1
+      const currentRate = converter.getRate('USDT', 'INR', t1);
+      expect(currentRate.fxRate).toBe(75.0);
+
+      // Close position at timestamp 2000
+      const trade = await paperService.closePosition(pos.id, 'Target 1 Reached');
+      expect(trade).toBeDefined();
+
+      // Semantic Verification: TradeAccountingEngine settled the leg using the immutable openingSnapshot (92.5), NOT the live rate (75.0)
+      expect(dbFills.length).toBe(2); // 1 entry fill + 1 exit fill
+      expect(dbTrades.length).toBe(1);
+
+      // Check the leg snapshot in trade outcome metadata
+      const closeLeg = (dbTrades[0].outcomeSnapshotJson as any)?.legs?.find((l: any) => l.role === 'FINAL_EXIT');
+      expect(closeLeg).toBeDefined();
+      expect(closeLeg.fxRate).toBe(92.5);
+
+      // 3. Fail-Closed Verification: Create a malformed position missing accountingSnapshot
+      const malformedPos = {
+        ...pos,
+        id: 'pos_malformed',
+        status: PositionState.OPEN,
+        executionEventsJson: {},
+        featureSnapshotJson: {},
+      };
+      dbPositions.push(malformedPos);
+
+      // Attempting closePosition must reject immediately with [MALFORMED_LIFECYCLE]
+      await expect(
+        paperService.closePosition('pos_malformed', 'Exit Malformed'),
+      ).rejects.toThrow(/\[MALFORMED_LIFECYCLE\]/);
+
+      // Attempting monitor TP1 scale-out must reject immediately with [MALFORMED_LIFECYCLE]
+      await expect(
+        (monitorService as any).executePartialScaleOut(malformedPos, 52000.0, new Date(2000)),
+      ).rejects.toThrow(/\[MALFORMED_LIFECYCLE\]/);
+    });
   });
 });

@@ -1361,15 +1361,12 @@ export class PaperTradingService implements IExecutionProvider {
         (pos.executionEventsJson as any)?.accountingSnapshot ??
         (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
 
-      const snapshot = openingSnapshot ?? buildAccountingSnapshot({
-        accountCurrency: 'INR',
-        quoteCurrency,
-        fxResult: PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', exitTime.getTime()),
-        contractSize: inst.contractSize ?? 1,
-        lotSize: Number(pos.quantity),
-        resolvedMarginModel: resolveMarginModel(inst, { requestedLeverage: Number(pos.leverage) || 1 }),
-        calculatedAt: exitTime.getTime(),
-      });
+      if (!openingSnapshot) {
+        throw new BadRequestException(
+          `[MALFORMED_LIFECYCLE] Cannot close position '${pos.id}': Missing authoritative immutable opening accounting snapshot. Silently constructing an ad-hoc snapshot during close execution is strictly prohibited.`,
+        );
+      }
+      const snapshot = openingSnapshot;
 
       const partialLegs: any[] = (pos.executionEventsJson as any)?.partialLegs || [];
       let partialNetPnLTotal = 0;

@@ -93,26 +93,39 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(ExecutionMode.SIMULATED).toBe('SIMULATED');
   });
 
-  it('RULE 7: Single Accounting Authority Structural Invariant — PaperPositionMonitorService and PaperTradingService have zero local financial P&L math', () => {
+  it('RULE 7: Single Accounting Authority Structural Invariant — PaperPositionMonitorService and PaperTradingService have zero local financial P&L math and strictly require immutable lifecycle snapshots', () => {
     const monitorFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-position-monitor.service.ts');
     const monitorContent = fs.readFileSync(monitorFile, 'utf8');
 
     // 1. Monitor must invoke TradeAccountingEngine.settleExecutionLeg
     expect(monitorContent).toContain('TradeAccountingEngine.settleExecutionLeg');
-    // 2. Monitor must NOT have custom price diff calculations or calculateTradePnl calls
+    // 2. Monitor must NOT have custom price diff calculations, convertPnL, or calculateTradePnl calls
     expect(monitorContent).not.toContain('calculateTradePnl');
+    expect(monitorContent).not.toContain('convertPnL');
     expect(monitorContent).not.toMatch(/\b(livePrice\s*-\s*entryPrice)\s*\*/);
     expect(monitorContent).not.toMatch(/\b(entryPrice\s*-\s*livePrice)\s*\*/);
+    expect(monitorContent).not.toMatch(/\b(price\s*-\s*entry)\s*\*/);
+    expect(monitorContent).not.toMatch(/\bdelta\s*\*\s*fx/);
+    // 3. Monitor must strictly fail closed if openingSnapshot is missing during TP1 scale-out (NO silent converter.getRate fallback!)
+    expect(monitorContent).toContain('[MALFORMED_LIFECYCLE] Cannot execute partial TP1 scale-out');
+    expect(monitorContent).not.toMatch(/openingSnapshot\?\.fxRate\s*\?\?\s*PointInTimeCurrencyConverter/);
 
     const tradingFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-trading.service.ts');
     const tradingContent = fs.readFileSync(tradingFile, 'utf8');
 
-    // 3. Trading service must invoke TradeAccountingEngine.settleExecutionLeg
+    // 4. Trading service must invoke TradeAccountingEngine.settleExecutionLeg
     expect(tradingContent).toContain('TradeAccountingEngine.settleExecutionLeg');
-    // 4. closePosition derives canonicalRealizedPnL strictly from leg.netPnL sum
+    // 5. closePosition derives canonicalRealizedPnL strictly from leg.netPnL sum
     expect(tradingContent).toContain('allLegsBreakdown.reduce((sum, leg) => sum + Number(leg.netPnL || 0), 0)');
-    // 5. Zero fallback or ad-hoc calculation
+    // 6. Zero fallback or ad-hoc calculation in closePosition
     expect(tradingContent).not.toContain('fullLifecycleCalc');
+    expect(tradingContent).not.toContain('convertPnL');
+    expect(tradingContent).not.toMatch(/\b(exitPrice\s*-\s*entryPrice)\s*\*/);
+    expect(tradingContent).not.toMatch(/\b(entryPrice\s*-\s*exitPrice)\s*\*/);
+    expect(tradingContent).not.toMatch(/\bdelta\s*\*\s*fx/);
+    // 7. Trading service must strictly fail closed if openingSnapshot is missing during closePosition (NO ad-hoc snapshot building!)
+    expect(tradingContent).toContain('[MALFORMED_LIFECYCLE] Cannot close position');
+    expect(tradingContent).not.toMatch(/openingSnapshot\s*\?\?\s*buildAccountingSnapshot/);
   });
 
   it('RULE 8: Definitive Repository-Wide Mechanical Clean Scan across all production source files', () => {
