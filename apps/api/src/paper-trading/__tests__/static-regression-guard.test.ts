@@ -183,5 +183,27 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
     expect(streamerContent).toContain("providerState === 'CONNECTED' || this.providerState === 'RECONNECTED'");
   });
-});
 
+  it('RULE 10: AI FIX 155 Structural Guards — canonical option authority is provider-derived and explicitly signed', () => {
+    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorContent = fs.readFileSync(validatorFile, 'utf8');
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    expect(validatorContent).toContain('process.env.CANONICAL_OPTION_QUOTE_SECRET');
+    expect(validatorContent).not.toContain('process.env.JWT_SECRET');
+    expect(validatorContent).not.toContain('process.env.SESSION_SECRET');
+    expect(validatorContent).not.toContain('signingSecret?: string');
+    expect(validatorContent).toContain('crypto.timingSafeEqual');
+    expect(validatorContent).toContain('providerInstanceId');
+    expect(validatorContent).toContain('providerConnectionId');
+    expect(validatorContent).toContain('providerTransport');
+
+    expect(streamerContent).toContain('private async publishCanonicalOptionQuote');
+    expect(streamerContent).not.toMatch(/public async publishCanonicalOptionQuote/);
+    expect(streamerContent).not.toMatch(/providerId\s*:\s*params\.providerId/);
+    expect(streamerContent).not.toMatch(/providerId\s*=\s*params\.providerId/);
+    expect(streamerContent).toContain("providerId: 'NSE_STREAM_GATEWAY'");
+    expect(streamerContent).toContain("providerId: 'NSE_YAHOO_REST'");
+  });
+});

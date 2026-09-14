@@ -5,10 +5,10 @@ import {
   MarketDataUnavailableError,
   StaleMarketDataError,
   getAuthoritativeInstrument,
-  isProviderExecutionHealthy,
   validateExecutionQuoteTimestamp,
   createCanonicalOptionQuoteRecord,
   ICanonicalOptionQuoteRecord,
+  ValidatedCanonicalOptionProviderTick,
 } from '@quant/shared';
 
 export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
@@ -35,6 +35,9 @@ export interface ILiveRealTicker {
   receivedAt?: number;
   isDerivedFields?: boolean;
   connectionEpoch?: number;
+  providerInstanceId?: string;
+  providerConnectionId?: string;
+  providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
   providerId?: string;
 }
 
@@ -240,13 +243,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           const volume = parseFloat(paxgData.volume);
           const changePercent = parseFloat(paxgData.priceChangePercent);
           const changeAmount = parseFloat(paxgData.priceChange);
+          const existingPaxgTicker = this.tickers.get('PAXGUSDT');
 
           const updatedTicker: ILiveRealTicker = {
             symbol: 'PAXGUSDT',
             price: livePrice,
             open,
-            high: Math.max(ticker?.high ?? high, high),
-            low: Math.min(ticker?.low ?? low, low),
+            high: Math.max(existingPaxgTicker?.high ?? high, high),
+            low: Math.min(existingPaxgTicker?.low ?? low, low),
             close: livePrice,
             volume: Math.round(volume),
             prevClose: open,
@@ -259,6 +263,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             marketEventTime: eventTime,
             connectionEpoch: this.providerConnectionEpoch,
             providerId: 'BINANCE_DIRECT',
+            providerInstanceId: this.providerInstanceId,
+            providerConnectionId: this.providerConnectionId,
+            providerTransport: 'WEBSOCKET_STREAM',
             observedAt: now,
             receivedAt: now,
           };
@@ -328,6 +335,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             ticker.marketEventTime = marketEventTime;
             ticker.connectionEpoch = this.providerConnectionEpoch;
             ticker.providerId = 'NSE_YAHOO_REST';
+            ticker.providerInstanceId = this.providerInstanceId;
+            ticker.providerConnectionId = this.providerConnectionId;
+            ticker.providerTransport = 'REST_POLLING';
             ticker.observedAt = now;
             ticker.receivedAt = now;
             await this.broadcastTick(ticker);
@@ -405,7 +415,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const connectionEpoch = provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined;
-    const providerId = provenance === 'LIVE_PROVIDER' ? (tick.providerId || 'REAL_MARKET_STREAMER') : undefined;
+    const providerId = provenance === 'LIVE_PROVIDER' ? 'REAL_MARKET_STREAMER' : undefined;
 
     const updated: ILiveRealTicker = {
       symbol: sym,
@@ -425,6 +435,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       marketEventTime: tick.marketEventTime ?? undefined,
       connectionEpoch,
       providerId,
+      providerInstanceId: provenance === 'LIVE_PROVIDER' ? this.providerInstanceId : undefined,
+      providerConnectionId: provenance === 'LIVE_PROVIDER' ? this.providerConnectionId : undefined,
+      providerTransport: provenance === 'LIVE_PROVIDER' ? 'WEBSOCKET_STREAM' : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
@@ -447,8 +460,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private restHealthState: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' = 'HEALTHY';
   private providerConnected = true;
   private providerConnectionEpoch: number = 1;
+  private readonly providerInstanceId: string =
+    process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
+    `api-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  private providerConnectionId: string = this.createProviderConnectionId(1);
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
+
+  private createProviderConnectionId(epoch: number): string {
+    return `${this.providerInstanceId}:epoch:${epoch}`;
+  }
 
   public getProviderState(): ProviderConnectionState {
     return this.providerState;
@@ -482,6 +503,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.providerConnectionEpoch;
   }
 
+  public getProviderInstanceId(): string {
+    return this.providerInstanceId;
+  }
+
+  public getProviderConnectionId(): string {
+    return this.providerConnectionId;
+  }
+
   public handleProviderDisconnect(reason?: string): void {
     if (this.providerConnected || this.providerState !== 'DISCONNECTED') {
       this.logger.warn(`Market data provider disconnected: ${reason || 'Connection lost'}`);
@@ -513,6 +542,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       this.reconnectedAt = Date.now();
       // Exactly ONE new connection epoch is minted for the new provider connection lifecycle
       this.providerConnectionEpoch++;
+      this.providerConnectionId = this.createProviderConnectionId(this.providerConnectionEpoch);
       this.freshSymbolsAfterReconnect.clear();
       this.logger.log(`Market data provider reconnected. Exactly one new connection epoch assigned: ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
     }
@@ -627,6 +657,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       marketEventTime,
       connectionEpoch: this.providerConnectionEpoch,
       providerId: 'BINANCE_DIRECT',
+      providerInstanceId: this.providerInstanceId,
+      providerConnectionId: this.providerConnectionId,
+      providerTransport: 'WEBSOCKET_STREAM',
       observedAt: now,
       receivedAt: now,
     };
@@ -677,7 +710,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
       connectionEpoch: provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined,
-      providerId: provenance === 'LIVE_PROVIDER' ? (tick.providerId || 'NSE_OPTION_PROVIDER') : undefined,
+      providerId: provenance === 'LIVE_PROVIDER' ? 'NSE_OPTION_PROVIDER' : undefined,
+      providerInstanceId: provenance === 'LIVE_PROVIDER' ? this.providerInstanceId : undefined,
+      providerConnectionId: provenance === 'LIVE_PROVIDER' ? this.providerConnectionId : undefined,
+      providerTransport: provenance === 'LIVE_PROVIDER' ? 'WEBSOCKET_STREAM' : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
@@ -792,13 +828,64 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   /**
    * Canonical producer ingestion write to Redis:
-   * Serializes an authentic option quote with canonical schema and signature.
+   * Serializes an already validated provider-origin option quote with canonical schema and signature.
    */
-  public async publishCanonicalOptionQuote(params: {
+  private createValidatedOptionProviderTickFromNseStream(params: {
     contractSymbol: string;
     price: number;
     marketEventTime: number;
-    providerId?: string;
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+    volume?: number;
+    prevClose?: number;
+    changePercent?: number;
+    changeAmount?: number;
+    volatility?: number;
+    tickSize?: number;
+    sequence?: number;
+  }): ValidatedCanonicalOptionProviderTick {
+    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
+      ...params,
+      providerId: 'NSE_STREAM_GATEWAY',
+      connectionEpoch: this.providerConnectionEpoch,
+      providerInstanceId: this.providerInstanceId,
+      providerConnectionId: this.providerConnectionId,
+      providerTransport: 'WEBSOCKET_STREAM',
+    });
+  }
+
+  private createValidatedOptionProviderTickFromNseRest(params: {
+    contractSymbol: string;
+    price: number;
+    marketEventTime: number;
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+    volume?: number;
+    prevClose?: number;
+    changePercent?: number;
+    changeAmount?: number;
+    volatility?: number;
+    tickSize?: number;
+    sequence?: number;
+  }): ValidatedCanonicalOptionProviderTick {
+    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
+      ...params,
+      providerId: 'NSE_YAHOO_REST',
+      connectionEpoch: this.providerConnectionEpoch,
+      providerInstanceId: this.providerInstanceId,
+      providerConnectionId: this.providerConnectionId,
+      providerTransport: 'REST_POLLING',
+    });
+  }
+
+  public async publishNseStreamCanonicalOptionQuote(params: {
+    contractSymbol: string;
+    price: number;
+    marketEventTime: number;
     open?: number;
     high?: number;
     low?: number;
@@ -811,33 +898,55 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): Promise<ICanonicalOptionQuoteRecord | null> {
+    return this.publishCanonicalOptionQuote(this.createValidatedOptionProviderTickFromNseStream(params));
+  }
+
+  public async publishNseRestCanonicalOptionQuote(params: {
+    contractSymbol: string;
+    price: number;
+    marketEventTime: number;
+    open?: number;
+    high?: number;
+    low?: number;
+    close?: number;
+    volume?: number;
+    prevClose?: number;
+    changePercent?: number;
+    changeAmount?: number;
+    volatility?: number;
+    tickSize?: number;
+    sequence?: number;
+  }): Promise<ICanonicalOptionQuoteRecord | null> {
+    return this.publishCanonicalOptionQuote(this.createValidatedOptionProviderTickFromNseRest(params));
+  }
+
+  private async publishCanonicalOptionQuote(
+    providerTick: ValidatedCanonicalOptionProviderTick,
+  ): Promise<ICanonicalOptionQuoteRecord | null> {
+    if (!(providerTick instanceof ValidatedCanonicalOptionProviderTick)) {
+      throw new Error('Canonical option quote publication requires a validated provider-origin tick');
+    }
+
     if (!this.isExecutionDataHealthy()) {
-      this.logger.warn(`Cannot publish canonical option quote for ${params.contractSymbol}: provider is in '${this.providerState}' state`);
+      const tick = providerTick.toRecordInput();
+      this.logger.warn(`Cannot publish canonical option quote for ${tick?.contractSymbol || 'unknown'}: provider is in '${this.providerState}' state`);
       return null;
     }
 
     const redisClient = this.redis.getClient();
     if (!redisClient || redisClient.status !== 'ready') return null;
 
-    const providerId = params.providerId || 'CANONICAL_STREAMER';
-    const canonicalRecord = createCanonicalOptionQuoteRecord({
-      contractSymbol: params.contractSymbol,
-      price: params.price,
-      marketEventTime: params.marketEventTime,
-      providerId,
-      connectionEpoch: this.providerConnectionEpoch,
-      open: params.open,
-      high: params.high,
-      low: params.low,
-      close: params.close,
-      volume: params.volume,
-      prevClose: params.prevClose,
-      changePercent: params.changePercent,
-      changeAmount: params.changeAmount,
-      volatility: params.volatility,
-      tickSize: params.tickSize,
-      sequence: params.sequence,
-    });
+    const params = providerTick.toRecordInput();
+    if (
+      params.connectionEpoch !== this.providerConnectionEpoch ||
+      params.providerInstanceId !== this.providerInstanceId ||
+      params.providerConnectionId !== this.providerConnectionId
+    ) {
+      this.logger.warn(`Cannot publish canonical option quote for ${params.contractSymbol}: provider connection identity is not current`);
+      return null;
+    }
+
+    const canonicalRecord = createCanonicalOptionQuoteRecord(providerTick);
 
     const key = `option:ltp:${params.contractSymbol.toUpperCase()}`;
     await redisClient.set(key, JSON.stringify(canonicalRecord), 'EX', 60);

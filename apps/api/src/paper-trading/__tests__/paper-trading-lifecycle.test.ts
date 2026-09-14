@@ -12,6 +12,8 @@ import {
   StaleMarketDataError,
   PointInTimeCurrencyConverter,
   createCanonicalOptionQuoteRecord,
+  setCanonicalSigningSecret,
+  ValidatedCanonicalOptionProviderTick,
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
@@ -30,6 +32,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
   let entitySeq = 1;
 
   beforeEach(async () => {
+    setCanonicalSigningSecret('test-canonical-option-quote-secret');
     entitySeq = 1;
     const converter = PointInTimeCurrencyConverter.getInstance();
     converter.resetRates();
@@ -3652,6 +3655,20 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     it('TEST 149-7 (Option Provenance Authority & Connection Epoch Coupling): Redis option quote without authentic provider origin and matching epoch is degraded', async () => {
       const realStreamer = new RealMarketStreamerService({} as any);
       const activeEpoch = realStreamer.getConnectionEpoch();
+      const providerInstanceId = realStreamer.getProviderInstanceId();
+      const providerConnectionId = realStreamer.getProviderConnectionId();
+
+      const makeValidatedTick = (overrides: any = {}) => ValidatedCanonicalOptionProviderTick.fromProviderEvent({
+        contractSymbol: 'NIFTY26SEP24500CE',
+        price: 160.0,
+        marketEventTime: Date.now() - 200,
+        providerId: 'NSE_DIRECT',
+        connectionEpoch: activeEpoch,
+        providerInstanceId,
+        providerConnectionId,
+        providerTransport: 'WEBSOCKET_STREAM',
+        ...overrides,
+      });
 
       const mockRedisClient = {
         get: jest.fn(),
@@ -3709,13 +3726,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(forgedQuote.provenance).toBe('DEGRADED');
 
       // 3. Authentic canonical payload with valid cryptographic signature and matching epoch
-      const authenticRecord = createCanonicalOptionQuoteRecord({
-        contractSymbol: 'NIFTY26SEP24500CE',
-        price: 160.0,
-        marketEventTime: Date.now() - 200,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: activeEpoch,
-      });
+      const authenticRecord = createCanonicalOptionQuoteRecord(makeValidatedTick());
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
 
       const authQuote = await (testMonitor as any).getOptionContractQuote(pos);
@@ -3747,6 +3758,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // Provider finishes reconnection -> exactly one epoch increment
       realStreamer.handleProviderReconnect();
       const newEpoch = realStreamer.getConnectionEpoch();
+      const newProviderConnectionId = realStreamer.getProviderConnectionId();
       expect(newEpoch).toBe(activeEpoch + 1);
       expect(realStreamer.getProviderState()).toBe('RECONNECTED');
       expect(realStreamer.isExecutionDataHealthy()).toBe(true);
@@ -3757,13 +3769,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(obsoleteEpochQuote.provenance).toBe('DEGRADED');
 
       // Fresh quote produced on new connection epoch is accepted as LIVE_PROVIDER
-      const freshRecord = createCanonicalOptionQuoteRecord({
+      const freshRecord = createCanonicalOptionQuoteRecord(makeValidatedTick({
         contractSymbol: 'NIFTY26SEP24500CE',
         price: 165.0,
         marketEventTime: Date.now() - 100,
-        providerId: 'NSE_DIRECT',
         connectionEpoch: newEpoch,
-      });
+        providerConnectionId: newProviderConnectionId,
+      }));
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(freshRecord));
       const freshEpochQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(freshEpochQuote.provenance).toBe('LIVE_PROVIDER');
@@ -3861,11 +3873,10 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const now = Date.now();
 
       // 1. Canonical provider ingestion publishes authentic option quote
-      const published = await realStreamer.publishCanonicalOptionQuote({
+      const published = await realStreamer.publishNseStreamCanonicalOptionQuote({
         contractSymbol: contract,
         price: 210.5,
         marketEventTime: now - 300,
-        providerId: 'NSE_STREAM_GATEWAY',
       });
       expect(published).toBeDefined();
       expect(published?.signatureToken).toBeDefined();
@@ -3886,6 +3897,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(retrievedQuote.provenance).toBe('LIVE_PROVIDER');
       expect(retrievedQuote.price).toBe(210.5);
       expect(retrievedQuote.providerId).toBe('NSE_STREAM_GATEWAY');
+      expect(retrievedQuote.providerConnectionId).toBe(realStreamer.getProviderConnectionId());
+      expect(retrievedQuote.providerInstanceId).toBe(realStreamer.getProviderInstanceId());
 
       // 3. Round-trip fails when payload signature is tampered/forged
       const storedJson = JSON.parse(redisStore[`option:ltp:${contract}`]);
@@ -3896,27 +3909,42 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(tamperedQuote.provenance).toBe('DEGRADED');
 
       // 4. Round-trip fails when future-skewed beyond limit
-      const futureSkewed = await realStreamer.publishCanonicalOptionQuote({
+      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
         contractSymbol: contract,
         price: 212.0,
-        marketEventTime: Date.now() + 10000, // +10s in future
-        providerId: 'NSE_STREAM_GATEWAY',
-      });
-      expect(futureSkewed).toBeDefined();
-      const futureQuote = await (testMonitor as any).getOptionContractQuote(pos);
-      expect(futureQuote.provenance).toBe('DEGRADED');
+        marketEventTime: Date.now() + 10000,
+      })).rejects.toThrow(/timestamp rejected/);
 
       // 5. Round-trip fails when stale beyond limit
-      const staleSkewed = await realStreamer.publishCanonicalOptionQuote({
+      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
         contractSymbol: contract,
         price: 212.0,
-        marketEventTime: Date.now() - 10000, // 10s old
+        marketEventTime: Date.now() - 10000,
+      })).rejects.toThrow(/timestamp rejected/);
+
+      // Public writer surface does not accept arbitrary providerId/price/event-time primitives.
+      expect(typeof (realStreamer as any).publishCanonicalOptionQuote).toBe('function');
+      await expect((realStreamer as any).publishCanonicalOptionQuote({
+        contractSymbol: contract,
+        price: 999.0,
+        marketEventTime: Date.now() - 100,
+        providerId: 'NSE_DIRECT',
+      })).rejects.toThrow(/validated provider-origin tick/);
+
+      // 7. Production path rejects same numeric epoch from a different provider connection identity
+      const wrongConnectionRecord = createCanonicalOptionQuoteRecord(ValidatedCanonicalOptionProviderTick.fromProviderEvent({
+        contractSymbol: contract,
+        price: 214.0,
+        marketEventTime: Date.now() - 100,
         providerId: 'NSE_STREAM_GATEWAY',
-      });
-      expect(staleSkewed).toBeDefined();
-      const staleQuote = await (testMonitor as any).getOptionContractQuote(pos);
-      expect(staleQuote.provenance).toBe('DEGRADED');
+        connectionEpoch: realStreamer.getConnectionEpoch(),
+        providerInstanceId: 'other-api-instance',
+        providerConnectionId: 'other-api-instance:epoch:1',
+        providerTransport: 'WEBSOCKET_STREAM',
+      }));
+      redisStore[`option:ltp:${contract}`] = JSON.stringify(wrongConnectionRecord);
+      const wrongConnectionQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(wrongConnectionQuote.provenance).toBe('DEGRADED');
     });
   });
 });
-

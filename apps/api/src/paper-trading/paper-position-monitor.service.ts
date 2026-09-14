@@ -236,12 +236,17 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         if (cached) {
           const currentEpoch = this.realMarketStreamer?.getConnectionEpoch() ?? 0;
           const isStreamerHealthy = this.realMarketStreamer?.isExecutionDataHealthy() ?? false;
+          const activeProviderConnectionId = this.realMarketStreamer?.getProviderConnectionId();
+          const activeProviderInstanceId = this.realMarketStreamer?.getProviderInstanceId();
 
           const validation = parseAndValidateRedisOptionQuote(
             cached,
             pos.contractSymbol,
             currentEpoch,
             isStreamerHealthy,
+            Date.now(),
+            activeProviderConnectionId,
+            activeProviderInstanceId,
           );
 
           if (validation.valid && validation.quote) {
@@ -272,6 +277,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               marketEventTime: eventTime,
               connectionEpoch: parsed.connectionEpoch,
               providerId: parsed.providerId || parsed.providerOrigin,
+              providerInstanceId: parsed.providerInstanceId,
+              providerConnectionId: parsed.providerConnectionId,
+              providerTransport: parsed.providerTransport,
             };
           }
         }

@@ -6,6 +6,7 @@ export const DEFAULT_MAX_AGE_MS = 5000;
 
 export const CANONICAL_OPTION_QUOTE_SCHEMA = 'CANONICAL_OPTION_QUOTE_V1' as const;
 export const CANONICAL_WRITER_ORIGIN = 'CANONICAL_REAL_MARKET_STREAMER' as const;
+export type CanonicalProviderTransport = 'WEBSOCKET_STREAM' | 'REST_POLLING';
 
 let canonicalSigningSecret: string | null = null;
 
@@ -16,14 +17,15 @@ export function setCanonicalSigningSecret(secret: string): void {
   canonicalSigningSecret = secret.trim();
 }
 
+export function resetCanonicalSigningSecretForTests(): void {
+  canonicalSigningSecret = null;
+}
+
 export function getCanonicalSigningSecret(): string {
   if (canonicalSigningSecret) {
     return canonicalSigningSecret;
   }
-  const envSecret =
-    process.env.CANONICAL_OPTION_QUOTE_SECRET ||
-    process.env.JWT_SECRET ||
-    process.env.SESSION_SECRET;
+  const envSecret = process.env.CANONICAL_OPTION_QUOTE_SECRET;
   if (envSecret && envSecret.trim().length > 0) {
     return envSecret.trim();
   }
@@ -38,13 +40,107 @@ export function computeCanonicalSignature(
   marketEventTime: number,
   connectionEpoch: number,
   providerId: string,
-  customSecret?: string,
+  providerInstanceId: string,
+  providerConnectionId: string,
+  providerTransport: CanonicalProviderTransport,
 ): string {
-  const secret = customSecret ?? getCanonicalSigningSecret();
-  const payload = `${contractSymbol}:${price.toFixed(4)}:${marketEventTime}:${connectionEpoch}:${providerId}`;
+  const payload = [
+    CANONICAL_OPTION_QUOTE_SCHEMA,
+    contractSymbol.toUpperCase(),
+    price.toFixed(4),
+    marketEventTime,
+    connectionEpoch,
+    providerId,
+    providerInstanceId,
+    providerConnectionId,
+    providerTransport,
+  ].join(':');
+  const secret = getCanonicalSigningSecret();
   return crypto.createHmac('sha256', secret).update(payload).digest('hex');
 }
 
+function timingSafeSignatureEqual(actual: unknown, expected: string): boolean {
+  if (typeof actual !== 'string' || !/^[a-f0-9]{64}$/i.test(actual) || !/^[a-f0-9]{64}$/i.test(expected)) {
+    return false;
+  }
+  const actualBuf = Buffer.from(actual, 'hex');
+  const expectedBuf = Buffer.from(expected, 'hex');
+  return actualBuf.length === expectedBuf.length && crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
+export interface ICanonicalOptionProviderTickInput {
+  contractSymbol: string;
+  price: number;
+  marketEventTime: number;
+  providerId: string;
+  connectionEpoch: number;
+  providerInstanceId: string;
+  providerConnectionId: string;
+  providerTransport: CanonicalProviderTransport;
+  observedAt?: number;
+  receivedAt?: number;
+  sequence?: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  volume?: number;
+  prevClose?: number;
+  changePercent?: number;
+  changeAmount?: number;
+  volatility?: number;
+  tickSize?: number;
+}
+
+export class ValidatedCanonicalOptionProviderTick {
+  private readonly canonicalProviderTickBrand = true;
+  private constructor(private readonly input: ICanonicalOptionProviderTickInput) {}
+
+  public static fromProviderEvent(input: ICanonicalOptionProviderTickInput): ValidatedCanonicalOptionProviderTick {
+    validateCanonicalProviderTickInput(input);
+    return new ValidatedCanonicalOptionProviderTick({
+      ...input,
+      contractSymbol: input.contractSymbol.toUpperCase(),
+      providerId: input.providerId.trim(),
+      providerInstanceId: input.providerInstanceId.trim(),
+      providerConnectionId: input.providerConnectionId.trim(),
+    });
+  }
+
+  public toRecordInput(): ICanonicalOptionProviderTickInput {
+    return { ...this.input };
+  }
+}
+
+function validateCanonicalProviderTickInput(input: ICanonicalOptionProviderTickInput): void {
+  if (!input.contractSymbol || typeof input.contractSymbol !== 'string') {
+    throw new Error('Canonical option quote requires valid contractSymbol');
+  }
+  if (typeof input.price !== 'number' || !Number.isFinite(input.price) || input.price <= 0) {
+    throw new Error(`Canonical option quote requires positive finite price, got: ${input.price}`);
+  }
+  if (!input.providerId || typeof input.providerId !== 'string' || input.providerId.trim().length === 0) {
+    throw new Error('Canonical option quote requires non-empty authenticated providerId');
+  }
+  if (typeof input.connectionEpoch !== 'number' || !Number.isFinite(input.connectionEpoch) || input.connectionEpoch <= 0) {
+    throw new Error(`Canonical option quote requires positive connectionEpoch, got: ${input.connectionEpoch}`);
+  }
+  if (!input.providerInstanceId || typeof input.providerInstanceId !== 'string' || input.providerInstanceId.trim().length === 0) {
+    throw new Error('Canonical option quote requires non-empty providerInstanceId');
+  }
+  if (!input.providerConnectionId || typeof input.providerConnectionId !== 'string' || input.providerConnectionId.trim().length === 0) {
+    throw new Error('Canonical option quote requires non-empty providerConnectionId');
+  }
+  if (input.providerTransport !== 'WEBSOCKET_STREAM' && input.providerTransport !== 'REST_POLLING') {
+    throw new Error(`Canonical option quote requires explicit providerTransport, got: ${input.providerTransport}`);
+  }
+
+  const now = Date.now();
+  const tsValidation = validateExecutionQuoteTimestamp(input.marketEventTime, now);
+  if (!tsValidation.valid) {
+    throw new Error(`Canonical option quote timestamp rejected: ${tsValidation.reason}`);
+  }
+}
 
 export interface ICanonicalOptionQuoteRecord {
   schemaVersion: typeof CANONICAL_OPTION_QUOTE_SCHEMA;
@@ -56,6 +152,9 @@ export interface ICanonicalOptionQuoteRecord {
   receivedAt: number;
   providerId: string;
   connectionEpoch: number;
+  providerInstanceId: string;
+  providerConnectionId: string;
+  providerTransport: CanonicalProviderTransport;
   provenance: 'LIVE_PROVIDER';
   sequence?: number;
   signatureToken: string;
@@ -71,45 +170,16 @@ export interface ICanonicalOptionQuoteRecord {
   tickSize?: number;
 }
 
-export function createCanonicalOptionQuoteRecord(params: {
-  contractSymbol: string;
-  price: number;
-  marketEventTime: number;
-  providerId: string;
-  connectionEpoch: number;
-  observedAt?: number;
-  receivedAt?: number;
-  sequence?: number;
-  open?: number;
-  high?: number;
-  low?: number;
-  close?: number;
-  volume?: number;
-  prevClose?: number;
-  changePercent?: number;
-  changeAmount?: number;
-  volatility?: number;
-  tickSize?: number;
-  signingSecret?: string;
-}): ICanonicalOptionQuoteRecord {
-  if (!params.contractSymbol || typeof params.contractSymbol !== 'string') {
-    throw new Error('Canonical option quote requires valid contractSymbol');
-  }
-  if (typeof params.price !== 'number' || !Number.isFinite(params.price) || params.price <= 0) {
-    throw new Error(`Canonical option quote requires positive finite price, got: ${params.price}`);
-  }
-  if (!params.providerId || typeof params.providerId !== 'string' || params.providerId.trim().length === 0) {
-    throw new Error('Canonical option quote requires non-empty authenticated providerId');
-  }
-  if (typeof params.connectionEpoch !== 'number' || !Number.isFinite(params.connectionEpoch) || params.connectionEpoch <= 0) {
-    throw new Error(`Canonical option quote requires positive connectionEpoch, got: ${params.connectionEpoch}`);
+export function createCanonicalOptionQuoteRecord(
+  providerTick: ValidatedCanonicalOptionProviderTick,
+): ICanonicalOptionQuoteRecord {
+  if (!(providerTick instanceof ValidatedCanonicalOptionProviderTick)) {
+    throw new Error('Canonical option quote requires a validated provider-origin tick');
   }
 
+  const params = providerTick.toRecordInput();
+  validateCanonicalProviderTickInput(params);
   const now = Date.now();
-  const tsValidation = validateExecutionQuoteTimestamp(params.marketEventTime, now);
-  if (!tsValidation.valid) {
-    throw new Error(`Canonical option quote timestamp rejected: ${tsValidation.reason}`);
-  }
 
   const signatureToken = computeCanonicalSignature(
     params.contractSymbol.toUpperCase(),
@@ -117,7 +187,9 @@ export function createCanonicalOptionQuoteRecord(params: {
     params.marketEventTime,
     params.connectionEpoch,
     params.providerId,
-    params.signingSecret,
+    params.providerInstanceId,
+    params.providerConnectionId,
+    params.providerTransport,
   );
 
   return {
@@ -130,6 +202,9 @@ export function createCanonicalOptionQuoteRecord(params: {
     receivedAt: params.receivedAt ?? now,
     providerId: params.providerId,
     connectionEpoch: params.connectionEpoch,
+    providerInstanceId: params.providerInstanceId,
+    providerConnectionId: params.providerConnectionId,
+    providerTransport: params.providerTransport,
     provenance: 'LIVE_PROVIDER',
     sequence: params.sequence,
     signatureToken,
@@ -208,6 +283,8 @@ export function validateExecutionQuoteTimestamp(
 export interface IExecutionQuoteValidationContext {
   expectedSymbol?: string;
   activeConnectionEpoch?: number;
+  activeProviderConnectionId?: string;
+  activeProviderInstanceId?: string;
   providerState?: ProviderConnectionState | string;
   isProviderConnected?: boolean;
   maxAgeMs?: number;
@@ -304,6 +381,20 @@ export function validateAuthoritativeExecutionQuote(
       };
     }
   }
+  if (ctx.activeProviderConnectionId !== undefined && quote.providerConnectionId !== ctx.activeProviderConnectionId) {
+    return {
+      valid: false,
+      reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${ctx.activeProviderConnectionId}).`,
+      errorType: 'EPOCH_MISMATCH',
+    };
+  }
+  if (ctx.activeProviderInstanceId !== undefined && quote.providerInstanceId !== ctx.activeProviderInstanceId) {
+    return {
+      valid: false,
+      reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${ctx.activeProviderInstanceId}).`,
+      errorType: 'EPOCH_MISMATCH',
+    };
+  }
 
   const tsResult = validateExecutionQuoteTimestamp(
     quote.marketEventTime,
@@ -328,6 +419,8 @@ export function parseAndValidateRedisOptionQuote(
   activeEpoch: number,
   isStreamerHealthy: boolean,
   currentTimeMs = Date.now(),
+  activeProviderConnectionId?: string,
+  activeProviderInstanceId?: string,
 ): { valid: boolean; quote?: any; reason?: string } {
   if (!rawJson) {
     return { valid: false, reason: 'Redis key is empty or null' };
@@ -380,6 +473,21 @@ export function parseAndValidateRedisOptionQuote(
       reason: `Redis option quote is from obsolete connection epoch ${parsed.connectionEpoch} (active epoch: ${activeEpoch})`,
     };
   }
+  if (activeProviderConnectionId !== undefined && parsed.providerConnectionId !== activeProviderConnectionId) {
+    return {
+      valid: false,
+      reason: `Redis option quote is from obsolete provider connection ${parsed.providerConnectionId ?? 'none'} (active provider connection: ${activeProviderConnectionId})`,
+    };
+  }
+  if (activeProviderInstanceId !== undefined && parsed.providerInstanceId !== activeProviderInstanceId) {
+    return {
+      valid: false,
+      reason: `Redis option quote is from provider instance ${parsed.providerInstanceId ?? 'none'} (active provider instance: ${activeProviderInstanceId})`,
+    };
+  }
+  if (parsed.providerTransport !== 'WEBSOCKET_STREAM' && parsed.providerTransport !== 'REST_POLLING') {
+    return { valid: false, reason: `Redis option quote has invalid providerTransport: ${parsed.providerTransport}` };
+  }
 
   // Signature verification to prevent arbitrary/forged Redis JSON elevation
   const expectedSig = computeCanonicalSignature(
@@ -388,8 +496,11 @@ export function parseAndValidateRedisOptionQuote(
     parsed.marketEventTime,
     parsed.connectionEpoch,
     parsed.providerId,
+    parsed.providerInstanceId,
+    parsed.providerConnectionId,
+    parsed.providerTransport,
   );
-  if (parsed.signatureToken !== expectedSig) {
+  if (!timingSafeSignatureEqual(parsed.signatureToken, expectedSig)) {
     return { valid: false, reason: 'Cryptographic signature mismatch in Redis option quote payload' };
   }
 
@@ -419,6 +530,9 @@ export function parseAndValidateRedisOptionQuote(
       marketEventTime: parsed.marketEventTime,
       connectionEpoch: parsed.connectionEpoch,
       providerId: parsed.providerId,
+      providerInstanceId: parsed.providerInstanceId,
+      providerConnectionId: parsed.providerConnectionId,
+      providerTransport: parsed.providerTransport,
     },
   };
 }

@@ -2,16 +2,40 @@ import {
   validateExecutionQuoteTimestamp,
   validateAuthoritativeExecutionQuote,
   createCanonicalOptionQuoteRecord,
+  getCanonicalSigningSecret,
   parseAndValidateRedisOptionQuote,
   isProviderExecutionHealthy,
+  resetCanonicalSigningSecretForTests,
+  setCanonicalSigningSecret,
   MAX_FUTURE_SKEW_MS,
   DEFAULT_MAX_AGE_MS,
   CANONICAL_OPTION_QUOTE_SCHEMA,
   CANONICAL_WRITER_ORIGIN,
+  ValidatedCanonicalOptionProviderTick,
 } from '../execution-quote-validator';
 
 describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () => {
   const now = 1700000000000;
+  const providerInstanceId = 'api-test-instance-1';
+  const providerConnectionId = 'api-test-instance-1:epoch:5';
+
+  beforeEach(() => {
+    setCanonicalSigningSecret('test-canonical-option-quote-secret');
+  });
+
+  function makeValidatedTick(overrides: Partial<Parameters<typeof ValidatedCanonicalOptionProviderTick.fromProviderEvent>[0]> = {}) {
+    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
+      contractSymbol: 'NIFTY24SEP25000CE',
+      price: 150.0,
+      marketEventTime: Date.now() - 500,
+      providerId: 'NSE_DIRECT',
+      connectionEpoch: 5,
+      providerInstanceId,
+      providerConnectionId,
+      providerTransport: 'WEBSOCKET_STREAM',
+      ...overrides,
+    });
+  }
 
   describe('1. Future-Skew & Timestamp Validation Everywhere', () => {
     it('accepts exact current time', () => {
@@ -264,6 +288,9 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         provenance: 'LIVE_PROVIDER',
         providerId: 'NSE_DIRECT',
         connectionEpoch: epoch,
+        providerInstanceId,
+        providerConnectionId,
+        providerTransport: 'WEBSOCKET_STREAM',
         marketEventTime: now,
         signatureToken: 'forged_fake_sig',
       });
@@ -273,88 +300,120 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
     });
 
     it('4. authentic canonical writer payload => validated as LIVE_PROVIDER', () => {
-      const record = createCanonicalOptionQuoteRecord({
-        contractSymbol: contract,
-        price: 150.0,
-        marketEventTime: now - 500,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: epoch,
-      });
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({ contractSymbol: contract, connectionEpoch: epoch }));
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, now);
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now(), providerConnectionId, providerInstanceId);
       expect(res.valid).toBe(true);
       expect(res.quote?.provenance).toBe('LIVE_PROVIDER');
       expect(res.quote?.price).toBe(150.0);
       expect(res.quote?.connectionEpoch).toBe(epoch);
       expect(res.quote?.providerId).toBe('NSE_DIRECT');
+      expect(res.quote?.providerInstanceId).toBe(providerInstanceId);
+      expect(res.quote?.providerConnectionId).toBe(providerConnectionId);
+      expect(res.quote?.providerTransport).toBe('WEBSOCKET_STREAM');
     });
 
     it('5. authentic payload from obsolete epoch => fails validation', () => {
-      const record = createCanonicalOptionQuoteRecord({
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({
         contractSymbol: contract,
-        price: 150.0,
-        marketEventTime: now - 500,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: epoch - 1, // obsolete epoch
-      });
+        connectionEpoch: epoch - 1,
+        providerConnectionId: 'api-test-instance-1:epoch:4',
+      }));
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, now);
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now());
       expect(res.valid).toBe(false);
       expect(res.reason).toContain('obsolete connection epoch');
     });
 
     it('6. authentic payload while streamer is RECONNECTING or unhealthy => fails validation', () => {
-      const record = createCanonicalOptionQuoteRecord({
-        contractSymbol: contract,
-        price: 150.0,
-        marketEventTime: now - 500,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: epoch,
-      });
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({ contractSymbol: contract, connectionEpoch: epoch }));
 
       const res = parseAndValidateRedisOptionQuote(
         JSON.stringify(record),
         contract,
         epoch,
         false, // streamer not healthy!
-        now,
+        Date.now(),
       );
       expect(res.valid).toBe(false);
       expect(res.reason).toContain('not in an execution-healthy state');
     });
 
     it('7. authentic payload while DISCONNECTED => fails validation', () => {
-      const record = createCanonicalOptionQuoteRecord({
-        contractSymbol: contract,
-        price: 150.0,
-        marketEventTime: now - 500,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: epoch,
-      });
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({ contractSymbol: contract, connectionEpoch: epoch }));
 
       const res = parseAndValidateRedisOptionQuote(
         JSON.stringify(record),
         contract,
         epoch,
         false,
-        now,
+        Date.now(),
       );
       expect(res.valid).toBe(false);
       expect(res.reason).toContain('not in an execution-healthy state');
     });
 
     it('fails when contract symbol does not match', () => {
-      const record = createCanonicalOptionQuoteRecord({
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({
         contractSymbol: 'BANKNIFTY24SEP50000CE',
         price: 250.0,
+        connectionEpoch: epoch,
+      }));
+
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now());
+      expect(res.valid).toBe(false);
+      expect(res.reason).toContain('Contract mismatch');
+    });
+
+    it('rejects providerId, connection identity, contract, price, event-time, and signature tampering', () => {
+      const record = createCanonicalOptionQuoteRecord(makeValidatedTick({ contractSymbol: contract, connectionEpoch: epoch }));
+      for (const patch of [
+        { providerId: 'ATTACKER_PROVIDER' },
+        { providerInstanceId: 'other-api-instance' },
+        { providerConnectionId: 'other-api-instance:epoch:5' },
+        { contractSymbol: 'NIFTY24SEP26000CE' },
+        { price: 151.0 },
+        { marketEventTime: Date.now() - 250 },
+        { signatureToken: '0'.repeat(64) },
+        { providerTransport: 'REST_POLLING' },
+      ]) {
+        const tampered = { ...record, ...patch };
+        const res = parseAndValidateRedisOptionQuote(JSON.stringify(tampered), contract, epoch, true, Date.now(), providerConnectionId, providerInstanceId);
+        expect(res.valid).toBe(false);
+      }
+    });
+
+    it('requires a runtime-branded provider tick instead of arbitrary caller primitives', () => {
+      expect(() => createCanonicalOptionQuoteRecord({
+        contractSymbol: contract,
+        price: 150.0,
         marketEventTime: now - 500,
         providerId: 'NSE_DIRECT',
         connectionEpoch: epoch,
-      });
+        providerInstanceId,
+        providerConnectionId,
+        providerTransport: 'WEBSOCKET_STREAM',
+      } as any)).toThrow(/validated provider-origin tick/);
+    });
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, now);
-      expect(res.valid).toBe(false);
-      expect(res.reason).toContain('Contract mismatch');
+    it('uses only CANONICAL_OPTION_QUOTE_SECRET and does not fall back to JWT/session secrets', () => {
+      const oldCanonical = process.env.CANONICAL_OPTION_QUOTE_SECRET;
+      const oldJwt = process.env.JWT_SECRET;
+      const oldSession = process.env.SESSION_SECRET;
+      resetCanonicalSigningSecretForTests();
+      delete process.env.CANONICAL_OPTION_QUOTE_SECRET;
+      process.env.JWT_SECRET = 'jwt-secret-must-not-sign-market-data';
+      process.env.SESSION_SECRET = 'session-secret-must-not-sign-market-data';
+
+      expect(() => getCanonicalSigningSecret()).toThrow(/CANONICAL_SECRET_UNCONFIGURED/);
+
+      if (oldCanonical === undefined) delete process.env.CANONICAL_OPTION_QUOTE_SECRET;
+      else process.env.CANONICAL_OPTION_QUOTE_SECRET = oldCanonical;
+      if (oldJwt === undefined) delete process.env.JWT_SECRET;
+      else process.env.JWT_SECRET = oldJwt;
+      if (oldSession === undefined) delete process.env.SESSION_SECRET;
+      else process.env.SESSION_SECRET = oldSession;
+      setCanonicalSigningSecret('test-canonical-option-quote-secret');
     });
   });
 });
