@@ -806,8 +806,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     // a. Used margin must be fully released back to 0
     expect(Number(dbAccounts[0].usedMargin)).toBe(0.0);
 
-    // b. Realized P&L matches trade realized P&L
-    expect(Number(dbAccounts[0].realizedPnL)).toBeCloseTo(Number(trade.realizedPnL!), 2);
+    // b. Cash balance net delta matches trade realized P&L
+    expect(Number(dbAccounts[0].cashBalance) - 500000.0).toBeCloseTo(Number(trade.realizedPnL!), 2);
 
     // c. Cash balance equals initial (500,000) + grossPnL - totalCharges
     const expectedCashBalance = 500000.0 + Number(trade.realizedPnL!);

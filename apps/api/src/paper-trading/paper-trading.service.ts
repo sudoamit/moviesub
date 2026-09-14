@@ -1340,7 +1340,7 @@ export class PaperTradingService implements IExecutionProvider {
       const totalLifecycleCharges = Number((entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2));
 
       const effectiveExitPrice = totalPositionQuantity > 0
-        ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
+        ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price ?? l.fillPrice) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
         : finalExitPrice;
       let effectiveEntryPrice = Number(pos.entryPrice);
       let canonicalRealizedPnL = totalLifecyclePnL;
@@ -1470,15 +1470,13 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin for final leg (Unified Accounting Equation: ΔcashBalance == ΔrealizedPnL == PaperTrade.realizedPnL)
-      const finalLegRealizedPnLIncrement = Number((finalNetPnL - entryCharges.totalCharges).toFixed(2));
-
+      // 8. Update PaperAccount Balance & Release Margin for final leg (Authoritative Accounting Ledger Model)
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
           cashBalance: { increment: finalNetPnL },
           usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: finalLegRealizedPnLIncrement },
+          realizedPnL: { increment: finalNetPnL },
           totalChargesPaid: { increment: finalExitCharges },
         },
       });

@@ -1042,7 +1042,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const finalLegNetPnL = (52000 - 50000) * 5 - Number(finalFill.fee);
     const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
 
-    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(tp1NetPnL + finalLegNetPnL, 2);
+    expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(totalLifecycleNetPnL, 2);
     expect(Number(finalAccount.usedMargin)).toBe(0);
 
     const trades = dbTrades.filter((t) => t.positionId === pos.id);
@@ -1107,6 +1108,10 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       realStreamer,
     );
     (paperService as any).realMarketStreamer = realStreamer;
+
+    // Test rejection of malformed provider tick without timestamp or with invalid price
+    const invalidTickResult = (realStreamer as any).ingestBinanceTickerData({ s: 'BTCUSDT', c: '80000.00' });
+    expect(invalidTickResult).toBeNull(); // Rejected: missing closeTime / C
 
     const providerTime = Date.now() - 500;
     realStreamer.updateTicker('BTCUSDT', {
