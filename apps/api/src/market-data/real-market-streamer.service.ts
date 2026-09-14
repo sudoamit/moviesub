@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { RedisService } from '../common/redis/redis.service';
 import { WS_EVENTS, MarketDataUnavailableError, StaleMarketDataError, getAuthoritativeInstrument } from '@quant/shared';
 
-export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'UNKNOWN';
+export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
 
 export interface ILiveRealTicker {
   symbol: string;
@@ -407,30 +407,56 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.tickers.get(symbol.toUpperCase());
   }
 
+  private providerConnected = true;
+
+  public setProviderConnected(connected: boolean): void {
+    this.providerConnected = connected;
+  }
+
+  public disconnectProvider(): void {
+    this.providerConnected = false;
+  }
+
   public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
     if (!data) return null;
+
+    const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
+    const existing = this.tickers.get(sym);
 
     const rawCloseTime = data.closeTime ?? data.C;
     const marketEventTime = Number(rawCloseTime);
     if (!Number.isFinite(marketEventTime) || marketEventTime <= 0) {
+      if (existing) {
+        existing.provenance = 'DEGRADED';
+      }
       return null; // Reject tick: Provider timestamp missing, zero, negative, or invalid
     }
 
     const now = Date.now();
     const maxClockSkewMs = 5000;
     if (marketEventTime > now + maxClockSkewMs) {
+      if (existing) {
+        existing.provenance = 'DEGRADED';
+      }
       return null; // Reject tick: Provider timestamp is from future beyond clock skew limit (5s)
     }
 
-    const rawPrice = data.lastPrice ?? data.c;
-    const livePrice = rawPrice !== undefined && rawPrice !== null ? parseFloat(rawPrice) : NaN;
-    if (!Number.isFinite(livePrice) || livePrice <= 0) {
-      return null; // Reject tick: Invalid or non-positive execution price
+    const rawProvenance = data.provenance;
+    if (rawProvenance && rawProvenance !== 'LIVE_PROVIDER') {
+      if (existing) {
+        existing.provenance = 'DEGRADED';
+      }
+      return null; // Reject tick: Non-LIVE_PROVIDER provenance
     }
 
-    const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
-
-    const existing = this.tickers.get(sym);
+    const rawPrice = data.lastPrice ?? data.c ?? data.price;
+    const livePrice = rawPrice !== undefined && rawPrice !== null ? parseFloat(rawPrice) : NaN;
+    if (!Number.isFinite(livePrice) || livePrice <= 0) {
+      if (existing) {
+        existing.provenance = 'DEGRADED';
+      }
+      return null; // Reject tick: Invalid or non-positive execution price
+    }
     if (existing && existing.marketEventTime) {
       if (marketEventTime < existing.marketEventTime) {
         return null; // Reject out-of-order tick: cached ticker has newer provider timestamp
@@ -551,6 +577,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     maxAgeSeconds = 5,
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
+
+    if (!this.providerConnected) {
+      throw new MarketDataUnavailableError(
+        sym,
+        'Market data provider is disconnected. Trade execution blocked.',
+      );
+    }
+
     const ticker = this.tickers.get(sym);
 
     if (!ticker) {

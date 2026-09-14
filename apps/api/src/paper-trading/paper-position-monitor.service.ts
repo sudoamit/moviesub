@@ -5,6 +5,7 @@ import { ExecutionMode } from './execution-provider.interface';
 import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
 import { Direction, PositionState, WS_EVENTS, getAuthoritativeInstrument, PointInTimeCurrencyConverter } from '@quant/shared';
+import { TradeAccountingEngine } from '@quant/risk-engine';
 import { Decimal } from '@prisma/client/runtime/library';
 
 @Injectable()
@@ -284,7 +285,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const exitTurnover = livePrice * partialQty;
     const exitCharges = this.paperTradingService.calculateCharges(exitTurnover, isCrypto);
 
-    const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
+    // Canonical P&L via TradeAccountingEngine using the persisted lifecycle accounting snapshot
     const inst = getAuthoritativeInstrument(pos.symbol);
     const quoteCurrency = inst.currency;
     const openingSnapshot =
@@ -293,13 +294,26 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const fxRate =
       openingSnapshot?.fxRate ??
       PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', marketEventTime.getTime()).fxRate;
-    const priceDiffINR = priceDiff * fxRate;
-    const partialGrossPnL = priceDiffINR * partialQty;
-    const partialNetPnL = Number((partialGrossPnL - exitCharges.totalCharges).toFixed(2));
 
-    const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : entryPrice);
-    const riskDistance = initialSL ? Math.abs(entryPrice - initialSL) : 0;
-    const partialRealizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
+    const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
+    const riskDistance = initialSL !== undefined && initialSL > 0 ? Math.abs(entryPrice - initialSL) : 0;
+    const initialRiskAccount = initialSL !== undefined && initialSL > 0 && riskDistance > 0
+      ? TradeAccountingEngine.calculateStopRisk(entryPrice, initialSL, partialQty, openingSnapshot ?? 1, fxRate)
+      : undefined;
+
+    const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+      entryPrice,
+      exitPrice: livePrice,
+      quantity: partialQty,
+      direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+      fxRate,
+      fees: exitCharges.totalCharges,
+      initialRiskAccount,
+      accountingSnapshot: openingSnapshot ?? undefined,
+    });
+    const partialGrossPnL = pnlCalc.grossPnlAccount;
+    const partialNetPnL = pnlCalc.netPnlAccount;
+    const partialRealizedR = pnlCalc.realizedR;
     const releasedMargin = Number((Number(pos.usedMargin) * partialRatio).toFixed(2));
 
     const existingEvents = (pos.executionEventsJson as any) || {};
@@ -329,6 +343,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       price: livePrice,
       executionTime: execTimeStr,
       timestamp: marketTimeStr,
+      fxRate,
+      accountingSnapshotHash: openingSnapshot?.snapshotHash,
     });
 
     try {
@@ -350,6 +366,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
             executionEventsJson: {
               ...existingEvents,
+              accountingSnapshot: openingSnapshot ?? existingEvents.accountingSnapshot,
+              accountingSnapshotHash: openingSnapshot?.snapshotHash ?? existingEvents.accountingSnapshotHash,
               partialLegs,
             } as any,
           },

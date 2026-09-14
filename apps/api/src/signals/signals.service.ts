@@ -8,7 +8,7 @@ import {
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
 import { SignalGenerator, SaiyanOCCEngine } from '@quant/trading-engine';
-import { PositionSizer, TradeLifecycleManager } from '@quant/risk-engine';
+import { PositionSizer, TradeLifecycleManager, TradeAccountingEngine } from '@quant/risk-engine';
 import {
   ISignalSetup,
   Timeframe,
@@ -945,13 +945,19 @@ export class SignalsService implements OnModuleInit {
       const sebiTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.000001).toFixed(2));
 
       const isBull = t.direction === 'BULLISH';
-      const priceDiff = isBull ? exitP - entryP : entryP - exitP;
-      const grossPnL = Number((priceDiff * qty).toFixed(2));
+      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+        entryPrice: entryP,
+        exitPrice: exitP,
+        quantity: qty,
+        direction: isBull ? Direction.BULLISH : Direction.BEARISH,
+        fees: totalCharges,
+      });
+      const grossPnL = pnlCalc.grossPnlAccount;
       const netPnL = t.netPnlAccount !== null && t.netPnlAccount !== undefined
         ? Number(t.netPnlAccount)
         : t.pnlAmount !== null && t.pnlAmount !== undefined
           ? Number(t.pnlAmount)
-          : Number((grossPnL - totalCharges).toFixed(2));
+          : pnlCalc.netPnlAccount;
 
       return [
         escapeCsv(t.id),
@@ -1292,9 +1298,15 @@ export class SignalsService implements OnModuleInit {
 
               if (closedState) {
                 const isLong = activeTrade.dir === 'BULLISH';
-                const priceDiff = isLong ? exitP - activeTrade.entry : activeTrade.entry - exitP;
                 const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
-                const pnlAmount = Number((priceDiff * 0.2 * btcFxRate).toFixed(2));
+                const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+                  entryPrice: activeTrade.entry,
+                  exitPrice: exitP,
+                  quantity: 0.2,
+                  direction: isLong ? Direction.BULLISH : Direction.BEARISH,
+                  fxRate: btcFxRate,
+                });
+                const pnlAmount = pnlCalc.netPnlAccount;
 
                 await this.recordCompletedTrade({
                   symbol: 'BTCUSDT',
@@ -1374,16 +1386,15 @@ export class SignalsService implements OnModuleInit {
                 if (entryTime && entryPrice > 0) {
                   const isLong = activeSignal.direction === 'BULLISH';
                   const exitPrice = update.currentPrice;
-                  const priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
                   const quoteCurr = sym === 'XAUUSD' || sym === 'GOLD' ? 'USD' : sym === 'BTCUSDT' || sym?.includes('BTC') ? 'USDT' : 'INR';
                   const goldFxRate = quoteCurr === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurr, 'INR', Date.now()).fxRate;
-                  const lotMultiplier =
+                  const baseContractSize =
                     sym === 'NIFTY'
                       ? 65
                       : sym === 'BANKNIFTY'
                         ? 15
                         : sym === 'XAUUSD' || sym === 'GOLD'
-                          ? 10 * goldFxRate
+                          ? 10
                           : sym === 'RELIANCE'
                             ? 250
                             : sym === 'HDFCBANK'
@@ -1391,8 +1402,17 @@ export class SignalsService implements OnModuleInit {
                               : sym === 'INFY'
                                 ? 400
                                 : 100;
-                  const pnlAmount = Number((priceDiff * lotMultiplier).toFixed(2));
+                  const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+                    entryPrice,
+                    exitPrice,
+                    quantity: 1.0,
+                    contractSize: baseContractSize,
+                    direction: isLong ? Direction.BULLISH : Direction.BEARISH,
+                    fxRate: goldFxRate,
+                  });
+                  const pnlAmount = pnlCalc.netPnlAccount;
                   const riskPerUnit = Math.abs(entryPrice - activeSignal.stopLoss);
+                  const priceDiff = isLong ? exitPrice - entryPrice : entryPrice - exitPrice;
                   const pnlRMultiple =
                     riskPerUnit > 0
                       ? Number((priceDiff / riskPerUnit).toFixed(2))

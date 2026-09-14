@@ -241,7 +241,6 @@ export class PaperTradingService implements IExecutionProvider {
       const entryPrice = Number(pos.entryPrice);
       const quantity = Number(pos.quantity);
       const isBuy = pos.direction === Direction.BULLISH;
-      const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
       // Quote-currency conversion via point-in-time FX rate
       const inst = getAuthoritativeInstrument(pos.symbol);
@@ -252,13 +251,25 @@ export class PaperTradingService implements IExecutionProvider {
       const fxRate =
         openingSnapshot?.fxRate ??
         PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
-      const priceDiffINR = priceDiff * fxRate;
-      const unrealizedPnL = Number((priceDiffINR * quantity - charges.totalCharges).toFixed(2));
+
+      const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+        entryPrice,
+        exitPrice: livePrice,
+        quantity,
+        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+        fxRate,
+        fees: charges.totalCharges,
+        accountingSnapshot: openingSnapshot ?? undefined,
+      });
+      const unrealizedPnL = pnlCalc.netPnlAccount;
       const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
       const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
       const riskAnchor = initialStopLoss ?? stopLoss;
       const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
-      const unrealizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
+      const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
+      const unrealizedR = pnlCalc.realizedR !== undefined && Number.isFinite(pnlCalc.realizedR) && pnlCalc.realizedR !== 0
+        ? pnlCalc.realizedR
+        : (riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0);
       const notionalValue = Number((livePrice * quantity).toFixed(2));
       const usedMargin = Number(pos.usedMargin);
 
@@ -317,6 +328,11 @@ export class PaperTradingService implements IExecutionProvider {
         featureSnapshotJson: pos.featureSnapshotJson || undefined,
         trailingStopState,
         charges,
+        accountCurrency: openingSnapshot?.accountCurrency || 'INR',
+        quoteCurrency,
+        fxRateUsed: fxRate,
+        fxRateTimestamp: openingSnapshot?.calculatedAt || Date.now(),
+        accountingSnapshotHash: openingSnapshot?.snapshotHash,
       });
 
       totalUnrealized += unrealizedPnL;
@@ -354,6 +370,11 @@ export class PaperTradingService implements IExecutionProvider {
         featureSnapshotJson: (t.featureSnapshotJson as any) || undefined,
         outcomeSnapshotJson: (t.outcomeSnapshotJson as any) || undefined,
         correlationId: t.correlationId,
+        accountCurrency: (t.outcomeSnapshotJson as any)?.accountCurrency || 'INR',
+        quoteCurrency: (t.outcomeSnapshotJson as any)?.quoteCurrency || 'INR',
+        fxRateUsed: (t.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ?? (t.outcomeSnapshotJson as any)?.fxRateUsed,
+        fxRateTimestamp: (t.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ?? (t.outcomeSnapshotJson as any)?.fxRateTimestamp,
+        accountingSnapshotHash: (t.outcomeSnapshotJson as any)?.accountingSnapshotHash || (t.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
       };
     });
 
@@ -952,6 +973,7 @@ export class PaperTradingService implements IExecutionProvider {
           featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
           executionEventsJson: {
             accountingSnapshot: openingAccountingSnapshot as any,
+            accountingSnapshotHash: openingAccountingSnapshot.snapshotHash,
           } as any,
           openedAt: fill.fillTimestamp,
           correlationId,
@@ -1044,6 +1066,11 @@ export class PaperTradingService implements IExecutionProvider {
       featureSnapshotJson: (trade.featureSnapshotJson as any) || undefined,
       outcomeSnapshotJson: (trade.outcomeSnapshotJson as any) || undefined,
       correlationId: trade.correlationId,
+      accountCurrency: (trade.outcomeSnapshotJson as any)?.accountCurrency || 'INR',
+      quoteCurrency: (trade.outcomeSnapshotJson as any)?.quoteCurrency || 'INR',
+      fxRateUsed: (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ?? (trade.outcomeSnapshotJson as any)?.fxRateUsed,
+      fxRateTimestamp: (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ?? (trade.outcomeSnapshotJson as any)?.fxRateTimestamp,
+      accountingSnapshotHash: (trade.outcomeSnapshotJson as any)?.accountingSnapshotHash || (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
     };
   }
 
@@ -1124,9 +1151,23 @@ export class PaperTradingService implements IExecutionProvider {
     let priceSource = ExecutionPriceSource.LIVE_TICK;
 
     const effectiveExecutionMode = executionModeOpt || (pos as any).executionMode;
+    const isLiveMode =
+      effectiveExecutionMode === ExecutionMode.LIVE_MARKET ||
+      effectiveExecutionMode === ExecutionMode.LIVE ||
+      effectiveExecutionMode === 'LIVE' ||
+      effectiveExecutionMode === 'LIVE_MARKET';
     const isTestOrSimulated =
       effectiveExecutionMode === ExecutionMode.TEST ||
-      effectiveExecutionMode === ExecutionMode.SIMULATED;
+      effectiveExecutionMode === ExecutionMode.SIMULATED ||
+      effectiveExecutionMode === 'TEST' ||
+      effectiveExecutionMode === 'SIMULATED';
+
+    // LIVE mode MUST reject any price override — only validated market quote is authoritative
+    if (isLiveMode && exitPriceOverride !== undefined && exitPriceOverride > 0) {
+      throw new BadRequestException(
+        `[LIVE_OVERRIDE_REJECTED] ExecutionMode.LIVE does not permit exitPriceOverride. Only validated live market quotes are authoritative for LIVE execution.`,
+      );
+    }
 
     if (allowPriceOverride && (isInternalCall || isTestOrSimulated) && exitPriceOverride && exitPriceOverride > 0) {
       exitPrice = exitPriceOverride;
@@ -1347,40 +1388,56 @@ export class PaperTradingService implements IExecutionProvider {
       const finalTurnover = finalExitPrice * finalQty;
       const finalExitCharges = exitCharges.totalCharges;
       const entryPrice = Number(pos.entryPrice);
-      const finalPriceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
-      const finalGrossPnL = finalPriceDiff * snapshot.fxRate * finalQty;
-      const finalNetPnL = Number((finalGrossPnL - finalExitCharges).toFixed(2));
+      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
+      const riskDistance = initialSL !== undefined && initialSL > 0 ? Math.abs(entryPrice - initialSL) : 0;
+      const initialRiskAccount = initialSL !== undefined && initialSL > 0 && riskDistance > 0
+        ? TradeAccountingEngine.calculateStopRisk(entryPrice, initialSL, finalQty, snapshot, snapshot.fxRate)
+        : undefined;
 
-      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : entryPrice);
-      const riskDistance = initialSL ? Math.abs(entryPrice - initialSL) : 0;
-      const finalRealizedR = riskDistance > 0 ? Number((finalPriceDiff / riskDistance).toFixed(2)) : 0;
+      const finalPnlCalc = TradeAccountingEngine.calculateTradePnl({
+        entryPrice,
+        exitPrice: finalExitPrice,
+        quantity: finalQty,
+        direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+        fxRate: snapshot.fxRate,
+        fees: finalExitCharges,
+        initialRiskAccount,
+        accountingSnapshot: snapshot,
+      });
+      const finalGrossPnL = finalPnlCalc.grossPnlAccount;
+      const finalNetPnL = finalPnlCalc.netPnlAccount;
+      const finalRealizedR = finalPnlCalc.realizedR;
 
       const totalPositionQuantity = partialQtyTotal + finalQty;
-      const totalLifecyclePnL = Number((partialNetPnLTotal + finalNetPnL).toFixed(2));
       const totalWeightedRSum = partialWeightedRSum + (finalRealizedR * finalQty);
       const weightedLifecycleR = totalPositionQuantity > 0 ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2)) : 0;
       const totalLifecycleCharges = Number((entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2));
-
+      // Canonical lifecycle P&L:
+      // When partial legs exist: sum of canonical leg netPnL (-entryFees + partialNetPnLTotal + finalNetPnL)
       const effectiveExitPrice = totalPositionQuantity > 0
         ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price ?? l.fillPrice) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
         : finalExitPrice;
-      let effectiveEntryPrice = Number(pos.entryPrice);
-      let canonicalRealizedPnL = totalLifecyclePnL;
-      let canonicalRealizedR = weightedLifecycleR;
-      let pnlCalc: any = null;
+      const effectiveEntryPrice = hasAuthoritativeEntryFills && aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
 
-      if (hasAuthoritativeEntryFills && aggregated.entry) {
-        effectiveEntryPrice = aggregated.entry.weightedPrice;
-        pnlCalc = TradeAccountingEngine.calculateTradePnl({
+      let canonicalRealizedPnL = partialLegs.length > 0
+        ? Number((-entryCharges.totalCharges + partialNetPnLTotal + finalNetPnL).toFixed(2))
+        : Number((finalGrossPnL - totalLifecycleCharges).toFixed(2));
+
+      if (hasAuthoritativeEntryFills && aggregated.entry && partialLegs.length === 0) {
+        const fullLifecycleCalc = TradeAccountingEngine.calculateTradePnl({
           entryPrice: effectiveEntryPrice,
           exitPrice: effectiveExitPrice,
           quantity: totalPositionQuantity,
           direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
           accountingSnapshot: snapshot,
           fees: totalLifecycleCharges,
+          initialRiskAccount,
         });
-        canonicalRealizedPnL = pnlCalc.netPnlAccount;
+        canonicalRealizedPnL = fullLifecycleCalc.netPnlAccount;
       }
+
+      const canonicalRealizedR = weightedLifecycleR;
+      const pnlCalc: any = finalPnlCalc;
 
       canonicalRealizedPnLLog = canonicalRealizedPnL;
       canonicalRealizedRLog = canonicalRealizedR;
@@ -1432,6 +1489,8 @@ export class PaperTradingService implements IExecutionProvider {
           correlationId: pos.correlationId,
           price: finalExitPrice,
           timestamp: exitTime.toISOString(),
+          fxRate: snapshot.fxRate,
+          accountingSnapshotHash: snapshot.snapshotHash,
         },
       ];
 
@@ -1733,6 +1792,11 @@ export class PaperTradingService implements IExecutionProvider {
       featureSnapshotJson: pos.featureSnapshotJson || undefined,
       executionEventsJson: pos.executionEventsJson || undefined,
       charges,
+      accountCurrency: (pos.executionEventsJson as any)?.accountingSnapshot?.accountCurrency || 'INR',
+      quoteCurrency: (pos.executionEventsJson as any)?.accountingSnapshot?.quoteCurrency || (pos.symbol === 'BTCUSDT' ? 'USDT' : (pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD' ? 'USD' : 'INR')),
+      fxRateUsed: (pos.executionEventsJson as any)?.accountingSnapshot?.fxRate ?? 1.0,
+      fxRateTimestamp: (pos.executionEventsJson as any)?.accountingSnapshot?.calculatedAt,
+      accountingSnapshotHash: (pos.executionEventsJson as any)?.accountingSnapshot?.snapshotHash ?? (pos.executionEventsJson as any)?.accountingSnapshotHash,
     };
   }
 }

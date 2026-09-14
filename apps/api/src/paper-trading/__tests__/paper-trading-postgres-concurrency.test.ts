@@ -29,6 +29,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       return;
     }
 
+    PointInTimeCurrencyConverter.getInstance().seedFixtureRates([
+      { pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+      { pair: 'USD/INR', rate: 87.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+    ]);
+
     prismaA = new PrismaClient({ datasources: { db: { url: DB_URL } } });
     prismaB = new PrismaClient({ datasources: { db: { url: DB_URL } } });
 

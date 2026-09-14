@@ -2,6 +2,7 @@ import { Direction, OrderState, PositionState, TradingMode } from '@quant/shared
 
 export enum ExecutionMode {
   LIVE_MARKET = 'LIVE_MARKET',
+  LIVE = 'LIVE',
   PAPER_MARKET = 'PAPER_MARKET',
   SIMULATED = 'SIMULATED',
   TEST = 'TEST',
@@ -85,6 +86,11 @@ export interface IPaperPosition {
   };
   /** Raw execution events JSON including persisted accountingSnapshot at entry */
   executionEventsJson?: any;
+  accountCurrency?: string;
+  quoteCurrency?: string;
+  fxRateUsed?: number;
+  fxRateTimestamp?: number;
+  accountingSnapshotHash?: string;
 }
 
 export interface IPaperTradeHistory {
@@ -112,6 +118,11 @@ export interface IPaperTradeHistory {
   featureSnapshotJson?: any;
   outcomeSnapshotJson?: any;
   correlationId?: string;
+  accountCurrency?: string;
+  quoteCurrency?: string;
+  fxRateUsed?: number;
+  fxRateTimestamp?: number;
+  accountingSnapshotHash?: string;
 }
 
 export interface IPaperPortfolio {

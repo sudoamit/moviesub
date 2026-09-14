@@ -41,7 +41,7 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
   private readonly rateHistory: Map<string, IFxRateRecord[]> = new Map();
 
   constructor() {
-    this.seedDefaultRates();
+    // Strict runtime: starts empty without hardcoded fallback rates. Production code registers rates explicitly.
   }
 
   public static getInstance(): PointInTimeCurrencyConverter {
@@ -74,11 +74,10 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
   }
 
   /**
-   * Clears all registered rates and reseeds default rates.
+   * Clears all registered rates.
    */
   public resetRates(): void {
     this.rateHistory.clear();
-    this.seedDefaultRates();
   }
 
   /**
@@ -206,30 +205,13 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
     return cleaned;
   }
 
-  private seedDefaultRates(): void {
-    // Default baseline rates starting from early timestamps
-    const baseTime = 0; // Epoch start for baseline availability
-    this.registerRate({
-      pair: 'USDT/INR',
-      rate: 92.0,
-      timestamp: baseTime,
-      source: 'RBI_MARKET_BASELINE',
-      version: '1.0',
-    });
-    this.registerRate({
-      pair: 'USD/INR',
-      rate: 87.0,
-      timestamp: baseTime,
-      source: 'RBI_MARKET_BASELINE',
-      version: '1.0',
-    });
-    this.registerRate({
-      pair: 'EUR/INR',
-      rate: 95.0,
-      timestamp: baseTime,
-      source: 'RBI_MARKET_BASELINE',
-      version: '1.0',
-    });
+  /**
+   * Helper for deterministic test fixtures to register mock rates in bulk.
+   */
+  public seedFixtureRates(rates: IFxRateRecord[]): void {
+    for (const r of rates) {
+      this.registerRate(r);
+    }
   }
 }
 

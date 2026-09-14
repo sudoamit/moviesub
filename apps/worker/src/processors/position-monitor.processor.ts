@@ -12,7 +12,6 @@ import {
   ValidatedLiveTickerResult,
   buildAccountingSnapshot,
   getAuthoritativeInstrument,
-  hasInstrument,
   PointInTimeCurrencyConverter,
   resolveMarginModel,
   ExecutionAggregator,
@@ -349,7 +348,25 @@ export class PositionMonitorProcessor extends WorkerHost {
 
     // Update ongoing unrealized P&L, MFE/MAE, and trailing stop in PostgreSQL
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
-    const unrealizedPnL = Number((priceDiff * quantity - entryCharges.totalCharges).toFixed(2));
+    const inst = getAuthoritativeInstrument(pos.symbol);
+    const quoteCurrency = inst?.currency ?? 'INR';
+    const openingSnapshot =
+      (pos.executionEventsJson as any)?.accountingSnapshot ??
+      (pos.featureSnapshotJson as any)?.accountingSnapshot;
+    const fxRate =
+      openingSnapshot?.fxRate ??
+      PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', tickTimestamp ? tickTimestamp.getTime() : Date.now()).fxRate;
+
+    const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+      entryPrice,
+      exitPrice: livePrice,
+      quantity,
+      direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+      fxRate,
+      fees: entryCharges.totalCharges,
+      accountingSnapshot: openingSnapshot ?? undefined,
+    });
+    const unrealizedPnL = pnlCalc.netPnlAccount;
 
     await this.prisma.paperPosition.update({
       where: { id: pos.id },

@@ -22,7 +22,7 @@ import {
   Check,
   DollarSign,
 } from 'lucide-react';
-import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
+import { ISignalSetup } from '@quant/shared';
 
 interface PaperTradingWidgetProps {
   currentSymbol: string;
@@ -37,12 +37,11 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
 }) => {
   const isCrypto = currentSymbol === 'BTCUSDT';
   const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
-  const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
-  // Dynamic FX rates from PointInTimeCurrencyConverter
+  const currencySymbol = '₹';
+  // Quote currency identifier
   const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
-  const fxRate = quoteCurrency === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
-  // Display price helper: converts USD/USDT prices to INR for BTC/Gold
-  const dp = (price: number) => (isCrypto || isGold ? price * fxRate : price);
+  // Display price helper
+  const dp = (price: number) => price;
 
   const [portfolio, setPortfolio] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'analytics'>('positions');
@@ -94,9 +93,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const totalQuantity = customQty > 0 ? customQty : lots * lotMultiplier;
 
   const cmp = livePrice || activeSignal?.entryZone?.optimal || 100.0;
-  const cmpINR = dp(cmp); // CMP in INR for display (BTC: USDT*92, Gold: USD*87, others: as-is)
+  const cmpINR = cmp; // CMP display in native currency
   const notionalTurnover = cmp * totalQuantity;
-  const notionalTurnoverINR = dp(notionalTurnover); // Notional in INR for display
+  const notionalTurnoverINR = notionalTurnover;
   const estimatedCharges = isCrypto
     ? Number((notionalTurnover * 0.001).toFixed(2))   // 0.1% Binance flat rate (matches API)
     : Number((20.0 + notionalTurnover * 0.00016).toFixed(2));
@@ -515,8 +514,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                     {portfolio?.openPositions?.map((pos: any) => {
                       const isCryptoPos = pos.symbol === 'BTCUSDT' || pos.symbol?.includes('BTC');
                       const isGoldPos = pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD';
-                      const posQuote = isCryptoPos ? 'USDT' : isGoldPos ? 'USD' : 'INR';
-                      const posFx = posQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(posQuote, 'INR', Date.now()).fxRate;
+                      const posFx = pos.fxRateUsed ?? 1.0;
                       const dpPos = (p: number) => (isCryptoPos || isGoldPos ? p * posFx : p);
                       return (
                         <tr key={pos.id} className="hover:bg-slate-900/50 transition-colors">
@@ -616,9 +614,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                       const isCryptoTrade =
                         trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
                       const isGoldTrade = trade.symbol === 'XAUUSD' || trade.symbol === 'GOLD';
-                      const tradeQuote = isCryptoTrade ? 'USDT' : isGoldTrade ? 'USD' : 'INR';
-                      const tradeTimestamp = trade.closedAt ? new Date(trade.closedAt).getTime() : Date.now();
-                      const tradeFx = tradeQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(tradeQuote, 'INR', tradeTimestamp).fxRate;
+                      const tradeFx = trade.fxRateUsed ?? 1.0;
                       const dpTrade = (p: number) => (isCryptoTrade || isGoldTrade ? p * tradeFx : p);
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">

@@ -25,7 +25,7 @@ import {
   Radio,
   Sliders,
 } from 'lucide-react';
-import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
+import { ISignalSetup } from '@quant/shared';
 
 interface LivePositionTrackerProps {
   symbol: string;
@@ -543,9 +543,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? currentSL > effectiveEntryPrice
         : currentSL < effectiveEntryPrice;
 
-  // Dynamic FX rates from PointInTimeCurrencyConverter
-  const trackerQuote = isGold ? 'USD' : isCrypto ? 'USDT' : 'INR';
-  const cryptoFxRate = trackerQuote === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(trackerQuote, 'INR', Date.now()).fxRate;
+  // FX rates from backend running position
+  const cryptoFxRate = (paperPosition as any)?.fxRateUsed ?? 1.0;
 
   // Read leverage from localStorage (written by PaperTradingWidget) or fall back to 5x default
   const [activeLeverage, setActiveLeverage] = React.useState<number>(5);
@@ -602,25 +601,21 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const tp2 = isOptionMode && !isCrypto ? optionTP2 : validTP2;
   const tp3 = isOptionMode && !isCrypto ? optionTP3 : validTP3;
 
-  // Live Running P&L Calculation
-  const priceDifference =
-    isOptionMode && !isCrypto
-      ? effectiveCurrentPrice - effectiveEntryPrice
-      : isBull
-        ? effectiveCurrentPrice - effectiveEntryPrice
-        : effectiveEntryPrice - effectiveCurrentPrice;
+  // Presentation-only Running P&L: consume backend authoritative unrealized P&L
+  const runningPnL = (paperPosition as any)?.unrealizedPnL !== undefined
+    ? Number((paperPosition as any).unrealizedPnL)
+    : 0;
 
-  const rawPnL = priceDifference * numericQty;
-  const inrPnL = isCrypto || isGold ? rawPnL * cryptoFxRate : rawPnL;
-  const runningPnL = Number((inrPnL + scaledOutPnL).toFixed(2));
+  // Margin used: consume backend authoritative usedMargin
+  const totalMarginUsed = (paperPosition as any)?.usedMargin !== undefined
+    ? Number((paperPosition as any).usedMargin)
+    : 0;
 
-  // Margin used: notional (in INR for crypto, direct for INR instruments) divided by active leverage
-  const notionalINR = isCrypto || isGold
-    ? effectiveEntryPrice * numericQty * cryptoFxRate
-    : effectiveEntryPrice * numericQty;
-  const totalMarginUsed = Number((notionalINR / activeLeverage).toFixed(2));
+  const priceDifference = isBull ? effectiveCurrentPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveCurrentPrice;
 
-  const runningRMultiple = riskPerUnit > 0 ? Number((priceDifference / riskPerUnit).toFixed(2)) : 0;
+  const runningRMultiple = (paperPosition as any)?.unrealizedR !== undefined
+    ? Number((paperPosition as any).unrealizedR)
+    : (riskPerUnit > 0 ? Number((priceDifference / riskPerUnit).toFixed(2)) : 0);
   const returnPercentage =
     totalMarginUsed > 0
       ? Number(((runningPnL / totalMarginUsed) * 100).toFixed(2))

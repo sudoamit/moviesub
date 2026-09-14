@@ -23,6 +23,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
   beforeEach(async () => {
     entitySeq = 1;
+    const converter = PointInTimeCurrencyConverter.getInstance();
+    converter.resetRates();
+    converter.seedFixtureRates([
+      { pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+      { pair: 'USD/INR', rate: 87.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+      { pair: 'EUR/INR', rate: 95.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+    ]);
     dbAccounts = [
       {
         id: 'acc-1',
@@ -2651,5 +2658,342 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const idx = dbPositions.findIndex((p) => p.id === 'pos_real_streamer_test');
       if (idx !== -1) dbPositions.splice(idx, 1);
     }
+  });
+
+  // =========================================================================
+  // AI FIX 148 TESTS — HARD SINGLE-AUTHORITY ARCHITECTURE & INVARIANT GATES
+  // =========================================================================
+
+  describe('AI FIX 148 — Single Accounting Authority & Fail-Closed Release Gates', () => {
+    it('TEST 148-1: OVERRIDE & PROVENANCE STRICTNESS (A: TEST succeeds, B: LIVE rejects override, C: LIVE executes with quote, D: LIVE invalid quote fails closed)', async () => {
+      const now = Date.now();
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'NIFTY',
+        price: 24000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now,
+        lastUpdated: now,
+      });
+
+      // TEST A: ExecutionMode.TEST + allowed simulated fill override => succeeds
+      const posTest = await paperService.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 10,
+        orderType: 'MARKET',
+        stopLoss: 23500,
+        target1: 24500,
+        executionMode: ExecutionMode.TEST,
+      });
+      const closedTest = await paperService.closePosition(posTest.id, 'Test Close', {
+        allowPriceOverride: true,
+        exitPriceOverride: 24200.0,
+        executionMode: ExecutionMode.TEST,
+      });
+      expect(closedTest.exitPrice).toBe(24200.0);
+
+      // TEST B: ExecutionMode.LIVE + exitPriceOverride => explicitly rejected with [LIVE_OVERRIDE_REJECTED]
+      const posLive = await paperService.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 10,
+        orderType: 'MARKET',
+        stopLoss: 23500,
+        target1: 24500,
+        executionMode: ExecutionMode.LIVE_MARKET,
+      });
+      await expect(
+        paperService.closePosition(posLive.id, 'Test Close', {
+          allowPriceOverride: true,
+          exitPriceOverride: 24300.0,
+          executionMode: ExecutionMode.LIVE_MARKET,
+        }),
+      ).rejects.toThrow(/LIVE_OVERRIDE_REJECTED/);
+
+      // TEST C: ExecutionMode.LIVE + fresh validated quote => executes correctly
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'NIFTY',
+        price: 24150.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now,
+        lastUpdated: now,
+      });
+      const closedLive = await paperService.closePosition(posLive.id, 'Test Close', {
+        executionMode: ExecutionMode.LIVE_MARKET,
+      });
+      expect(closedLive.exitPrice).toBe(24150.0);
+      expect(closedLive.realizedPnL).toBeDefined();
+
+      // TEST D: ExecutionMode.LIVE + stale/missing quote => zero execution & zero ledger mutation
+      const posLive2 = await paperService.placeOrder({
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 10,
+        orderType: 'MARKET',
+        stopLoss: 23500,
+        target1: 24500,
+        executionMode: ExecutionMode.LIVE_MARKET,
+      });
+
+      const initialCash = Number(dbAccounts[0].cashBalance);
+      const initialRealized = Number(dbAccounts[0].realizedPnL);
+      const initialTradesCount = dbTrades.length;
+
+      (streamerService.getValidatedTicker as jest.Mock).mockImplementation(() => {
+        throw new MarketDataUnavailableError('NIFTY', 'Missing quote');
+      });
+      await expect(
+        paperService.closePosition(posLive2.id, 'Test Close', { executionMode: ExecutionMode.LIVE_MARKET }),
+      ).rejects.toThrow();
+
+      expect(Number(dbAccounts[0].cashBalance)).toBe(initialCash);
+      expect(Number(dbAccounts[0].realizedPnL)).toBe(initialRealized);
+      expect(dbTrades.length).toBe(initialTradesCount);
+    });
+
+    it('TEST 148-2: STREAMER FAIL-CLOSED MATRIX (valid quote executes, degraded blocks, disconnected blocks)', async () => {
+      const realStreamer = new RealMarketStreamerService(null as any);
+      realStreamer.setProviderConnected(true);
+      const now = Date.now();
+
+      // 1. Ingest valid quote
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        price: '50000',
+        closeTime: now,
+        provenance: 'LIVE_PROVIDER',
+      });
+      const validQuote = realStreamer.getValidatedTicker('BTCUSDT');
+      expect(validQuote.price).toBe(50000);
+      expect(validQuote.provenance).toBe('LIVE_PROVIDER');
+
+      // 2. Ingest invalid quote (future timestamp) -> degrades ticker immediately
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        price: '51000',
+        closeTime: now + 30000,
+        provenance: 'LIVE_PROVIDER',
+      });
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow();
+
+      // 3. Provider disconnected blocks execution even if fresh quote ingested
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        price: '50000',
+        closeTime: now,
+        provenance: 'LIVE_PROVIDER',
+      });
+      realStreamer.disconnectProvider();
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
+    });
+
+    it('TEST 148-3: COMPREHENSIVE 6-EXIT-PATH INVARIANT MATRIX FOR BOTH BUY AND SELL', async () => {
+      const directions: ('BUY' | 'SELL')[] = ['BUY', 'SELL'];
+
+      for (const dir of directions) {
+        for (let path = 1; path <= 6; path++) {
+          const now = Date.now();
+          const entryPrice = 50000.0;
+          const slPrice = dir === 'BUY' ? 49000.0 : 51000.0;
+          const tp1Price = dir === 'BUY' ? 51000.0 : 49000.0;
+          const tp2Price = dir === 'BUY' ? 52000.0 : 48000.0;
+
+          // Fresh account state
+          dbAccounts[0].cashBalance = new Decimal(1000000.0);
+          dbAccounts[0].usedMargin = new Decimal(0.0);
+          dbAccounts[0].realizedPnL = new Decimal(0.0);
+          dbAccounts[0].totalChargesPaid = new Decimal(0.0);
+
+          const initialCash = Number(dbAccounts[0].cashBalance);
+          const initialRealized = Number(dbAccounts[0].realizedPnL);
+          const initialCharges = Number(dbAccounts[0].totalChargesPaid);
+
+          (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+            symbol: 'NIFTY',
+            price: entryPrice,
+            provenance: 'LIVE_PROVIDER',
+            marketEventTime: now,
+            lastUpdated: now,
+          });
+
+          const pos = await paperService.placeOrder({
+            symbol: 'NIFTY',
+            direction: dir,
+            quantity: 10,
+            orderType: 'MARKET',
+            stopLoss: slPrice,
+            target1: tp1Price,
+            target2: tp2Price,
+            executionMode: ExecutionMode.TEST,
+          });
+
+          if (path === 1) {
+            // Direct TP2
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp2Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 2) {
+            // TP1 then TP2
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp2Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 3) {
+            // TP1 then SL
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: slPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 4) {
+            // TP1 then Breakeven (entryPrice)
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: entryPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await monitorService.evaluateActivePositions();
+          } else if (path === 5) {
+            // TP1 then manual closePosition
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: tp1Price,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: entryPrice + (dir === 'BUY' ? 500 : -500),
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 2000,
+              lastUpdated: now + 2000,
+            });
+            await paperService.closePosition(pos.id, 'Manual Exit');
+          } else if (path === 6) {
+            // Direct SL
+            (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+              symbol: 'NIFTY',
+              price: slPrice,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: now + 1000,
+              lastUpdated: now + 1000,
+            });
+            await monitorService.evaluateActivePositions();
+          }
+
+          const finalCash = Number(dbAccounts[0].cashBalance);
+          const finalRealized = Number(dbAccounts[0].realizedPnL);
+          const finalCharges = Number(dbAccounts[0].totalChargesPaid);
+          const finalMargin = Number(dbAccounts[0].usedMargin);
+
+          const trade = dbTrades.find((t) => t.positionId === pos.id);
+          expect(trade).toBeDefined();
+
+          const cashDelta = Number((finalCash - initialCash).toFixed(2));
+          const realizedDelta = Number((finalRealized - initialRealized).toFixed(2));
+          const chargesDelta = Number((finalCharges - initialCharges).toFixed(2));
+          const tradePnl = Number(Number(trade.realizedPnL).toFixed(2));
+
+          expect(cashDelta).toBeCloseTo(tradePnl, 1);
+          expect(realizedDelta).toBeCloseTo(tradePnl, 1);
+
+          const legs: any[] = trade.outcomeSnapshotJson?.legs || [];
+          expect(legs.length).toBeGreaterThanOrEqual(1);
+          const sumLegsNetPnL = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2));
+          expect(tradePnl).toBeCloseTo(sumLegsNetPnL, 1);
+
+          const sumLegFees = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.fee || 0), 0).toFixed(2));
+          expect(chargesDelta).toBeCloseTo(sumLegFees, 1);
+
+          expect(finalMargin).toBe(0.0);
+        }
+      }
+    });
+
+    it('TEST 148-4: SINGLE ACCOUNTING AUTHORITY PRESENTATION FIELDS — getPortfolio and trade mappers expose complete presentation snapshot fields', async () => {
+      const now = Date.now();
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 50000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now,
+        lastUpdated: now,
+      });
+
+      const pos = await paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 1,
+        orderType: 'MARKET',
+        stopLoss: 49000,
+        target1: 52000,
+        executionMode: ExecutionMode.TEST,
+      });
+
+      const portfolio = await paperService.getPortfolio();
+      const activeMapped = portfolio.openPositions.find((p) => p.id === pos.id);
+      expect(activeMapped).toBeDefined();
+      expect(activeMapped!.accountCurrency).toBe('INR');
+      expect(activeMapped!.quoteCurrency).toBe('USDT');
+      expect(activeMapped!.fxRateUsed).toBe(92.0);
+      expect(activeMapped!.accountingSnapshotHash).toBeDefined();
+
+      (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+        symbol: 'BTCUSDT',
+        price: 51000.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: now + 5000,
+        lastUpdated: now + 5000,
+      });
+      const closedTrade = await paperService.closePosition(pos.id, 'Test Close');
+      expect(closedTrade.accountCurrency).toBe('INR');
+      expect(closedTrade.quoteCurrency).toBe('USDT');
+      expect(closedTrade.fxRateUsed).toBe(92.0);
+      expect(closedTrade.accountingSnapshotHash).toBeDefined();
+    });
   });
 });

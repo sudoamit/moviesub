@@ -16,6 +16,13 @@ import {
 import { TradeAccountingEngine } from '../trade-accounting-engine';
 
 describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () => {
+  beforeEach(() => {
+    PointInTimeCurrencyConverter.getInstance().seedFixtureRates([
+      { pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+      { pair: 'USD/INR', rate: 87.0, timestamp: 0, source: 'TEST_FIXTURE', version: '1.0' },
+    ]);
+  });
+
   describe('1. Cash Parity & Fee Accounting Invariant', () => {
     it('proves lifecycle invariant: (opening cash delta) + (closing cash delta) = netPnlAccount', () => {
       // Scenario: NIFTY Long Position

@@ -422,7 +422,8 @@ export class TradeAccountingEngine {
     const netPnlAccount = Number((grossPnlAccount - safeFees - slippageAccountCost).toFixed(2));
 
     const effRisk = Math.max(1, riskAcct > 0 && Number.isFinite(riskAcct) ? riskAcct : Math.abs(grossPnlAccount));
-    const realizedR = Number((netPnlAccount / effRisk).toFixed(2));
+    const rNumerator = riskAcct > 0 && Number.isFinite(riskAcct) ? grossPnlAccount : netPnlAccount;
+    const realizedR = Number((rNumerator / effRisk).toFixed(2));
 
     return {
       grossPnlQuote,

@@ -20,7 +20,7 @@ import {
   RotateCcw,
   Check,
 } from 'lucide-react';
-import { ISignalSetup, PointInTimeCurrencyConverter } from '@quant/shared';
+import { ISignalSetup } from '@quant/shared';
 
 interface RiskWidgetProps {
   selectedSignal: ISignalSetup | null;
@@ -143,11 +143,26 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     }
   }, [selectedSignal]);
 
-  // Dynamic point-in-time FX rate resolution from PointInTimeCurrencyConverter
+  // Presentation quote currency identifier
   const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
-  const cryptoInrRate = quoteCurrency === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, 'INR', Date.now()).fxRate;
-  // Display price helper: converts USD/USDT prices to INR for BTC and Gold display
-  const dp = (price: number) => (isCrypto || isGold ? price * cryptoInrRate : price);
+  const [cryptoInrRate, setCryptoInrRate] = useState<number>(1.0);
+  useEffect(() => {
+    if (quoteCurrency === 'INR') {
+      setCryptoInrRate(1.0);
+      return;
+    }
+    fetch('http://localhost:3001/api/paper-trading/portfolio')
+      .then((res) => res.json())
+      .then((data) => {
+        const matchingPos = data?.openPositions?.find((p: any) => p.symbol === selectedSignal?.symbol);
+        if (matchingPos?.fxRateUsed) {
+          setCryptoInrRate(matchingPos.fxRateUsed);
+        }
+      })
+      .catch(() => {});
+  }, [selectedSignal, quoteCurrency]);
+
+  const dp = (price: number) => price;
   const riskPerUnit = Math.abs(entryPrice - stopLoss);
   const target1Distance = Math.abs(tp1Price - entryPrice);
   const target2Distance = Math.abs(tp2Price - entryPrice);
@@ -306,7 +321,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
             {/* 3. Entry Price */}
             <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl space-y-1.5">
               <label className="text-[10px] uppercase text-slate-400 font-bold block">
-                Entry Price ({currencySymbol}{isCrypto ? ' · USD×92' : isGold ? ' · USD×87' : ''})
+                Entry Price ({currencySymbol}{isCrypto ? ' · USDT→INR' : isGold ? ' · USD→INR' : ''})
               </label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cyan-400 text-xs font-black">{currencySymbol}</span>
