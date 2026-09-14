@@ -1470,15 +1470,15 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin for final leg (Incremental final-leg parity without double-counting TP1)
-      const finalLegNetPnLIncrement = Number((canonicalRealizedPnL - partialNetPnLTotal).toFixed(2));
+      // 8. Update PaperAccount Balance & Release Margin for final leg (Unified Accounting Equation: ΔcashBalance == ΔrealizedPnL == PaperTrade.realizedPnL)
+      const finalLegRealizedPnLIncrement = Number((finalNetPnL - entryCharges.totalCharges).toFixed(2));
 
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
           cashBalance: { increment: finalNetPnL },
           usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: finalLegNetPnLIncrement },
+          realizedPnL: { increment: finalLegRealizedPnLIncrement },
           totalChargesPaid: { increment: finalExitCharges },
         },
       });

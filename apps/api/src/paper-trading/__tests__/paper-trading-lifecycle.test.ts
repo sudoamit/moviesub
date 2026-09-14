@@ -103,6 +103,11 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           return Promise.resolve(order || null);
         }),
         create: jest.fn().mockImplementation((args) => {
+          if (args.data.idempotencyKey && dbOrders.some((o) => o.idempotencyKey === args.data.idempotencyKey)) {
+            const err: any = new Error('Unique constraint failed on the fields: (`idempotencyKey`)');
+            err.code = 'P2002';
+            return Promise.reject(err);
+          }
           const order = { id: `ord_${entitySeq++}`, positions: [], ...args.data };
           dbOrders.push(order);
           return Promise.resolve(order);
@@ -1121,9 +1126,10 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       executionMode: ExecutionMode.TEST,
     });
 
-    // Simulate Binance raw ticker payload event passing into RealMarketStreamerService
+    // Strictly test Binance raw ticker ingestion method without fallback
     const binanceCloseTime = Date.now();
-    (realStreamer as any).handleBinanceTickerData?.({
+    expect(typeof (realStreamer as any).handleBinanceTickerData).toBe('function');
+    await (realStreamer as any).handleBinanceTickerData({
       s: 'BTCUSDT',
       c: '82500.00',
       o: '80000.00',
@@ -1133,11 +1139,11 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       P: '3.125',
       p: '2500.00',
       C: binanceCloseTime,
-    }) || realStreamer.updateTicker('BTCUSDT', {
-      price: 82500,
-      provenance: 'LIVE_PROVIDER',
-      marketEventTime: binanceCloseTime,
     });
+
+    const ticker = realStreamer.getValidatedTicker('BTCUSDT', 5);
+    expect(ticker.price).toBe(82500);
+    expect(ticker.marketEventTime).toBe(binanceCloseTime);
 
     await realMonitor.evaluateActivePositions();
 
@@ -1205,8 +1211,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(closedTrades.length).toBe(0);
   });
 
-  // TEST Z: TP1 CONCURRENT EXECUTION SAFETY
-  it('TEST Z: TP1 CONCURRENT EXECUTION SAFETY — concurrent evaluateActivePositions calls produce exactly ONE partial scale-out leg', async () => {
+  // TEST Z: TP1 CONCURRENT EXECUTION SAFETY ACROSS INDEPENDENT WORKERS
+  it('TEST Z: TP1 CONCURRENT EXECUTION SAFETY — concurrent evaluateActivePositions across separate worker instances produce exactly ONE partial scale-out leg', async () => {
     (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
       symbol: 'NIFTY',
       price: 50000,
@@ -1232,10 +1238,22 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: Date.now(),
     });
 
-    // Run parallel monitor checks concurrently
+    // Create two separate monitor service instances simulating independent Worker A and Worker B
+    const monitorA = new PaperPositionMonitorService(
+      mockPrisma as any,
+      paperService,
+      streamerService,
+    );
+    const monitorB = new PaperPositionMonitorService(
+      mockPrisma as any,
+      paperService,
+      streamerService,
+    );
+
+    // Run parallel monitor checks concurrently across Worker A and Worker B
     await Promise.all([
-      monitorService.evaluateActivePositions(),
-      monitorService.evaluateActivePositions(),
+      monitorA.evaluateActivePositions(),
+      monitorB.evaluateActivePositions(),
     ]);
 
     const partialFills = dbFills.filter((f) => f.orderId !== dbOrders[0].id);

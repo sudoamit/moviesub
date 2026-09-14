@@ -297,15 +297,24 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
 
     const existingEvents = (pos.executionEventsJson as any) || {};
     const partialLegs = existingEvents.partialLegs || [];
+    const execTimeStr = new Date().toISOString();
+    const marketTimeStr = marketEventTime.toISOString();
     partialLegs.push({
       role: 'TP1_PARTIAL',
+      triggerPrice: target1,
+      triggerMarketEventTime: marketTimeStr,
+      quotePrice: livePrice,
+      quoteMarketEventTime: marketTimeStr,
+      fillPrice: livePrice,
+      executionTime: execTimeStr,
+      executionPriceSource: 'LIVE_TICK',
       price: livePrice,
       quantity: partialQty,
       fee: exitCharges.totalCharges,
       grossPnL: partialGrossPnL,
       netPnL: partialNetPnL,
       realizedR: partialRealizedR,
-      timestamp: marketEventTime.toISOString(),
+      timestamp: marketTimeStr,
     });
 
     await this.prisma.$transaction(async (tx) => {

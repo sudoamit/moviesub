@@ -199,47 +199,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
       const data = await res.json();
 
-      if (data && data.lastPrice) {
-        const livePrice = parseFloat(data.lastPrice);
-        const open = parseFloat(data.openPrice);
-        const high = parseFloat(data.highPrice);
-        const low = parseFloat(data.lowPrice);
-        const volume = parseFloat(data.volume);
-        const changePercent = parseFloat(data.priceChangePercent);
-        const changeAmount = parseFloat(data.priceChange);
-
-        const ticker = this.tickers.get('BTCUSDT') || {
-          symbol: 'BTCUSDT',
-          price: livePrice,
-          open,
-          high,
-          low,
-          close: livePrice,
-          volume: Math.round(volume),
-          prevClose: open,
-          changePercent,
-          changeAmount,
-          tickSize: 0.1,
-          volatility: 8.5,
-          lastUpdated: now,
-          provenance: 'LIVE_PROVIDER',
-        };
-
-        ticker.price = livePrice;
-        ticker.close = livePrice;
-        ticker.high = Math.max(ticker.high, high);
-        ticker.low = Math.min(ticker.low, low);
-        ticker.volume = Math.round(volume);
-        ticker.changePercent = changePercent;
-        ticker.changeAmount = changeAmount;
-        ticker.lastUpdated = now;
-        ticker.provenance = 'LIVE_PROVIDER';
-        ticker.marketEventTime = data.closeTime ? Number(data.closeTime) : now;
-        ticker.observedAt = now;
-        ticker.receivedAt = now;
-
-        this.tickers.set('BTCUSDT', ticker);
-        await this.broadcastTick(ticker);
+      if (data && (data.lastPrice || data.c)) {
+        const ticker = this.ingestBinanceTickerData(data);
+        if (ticker) await this.broadcastTick(ticker);
       }
 
       // Fetch Binance PAXGUSDT Price
@@ -411,6 +373,52 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   getTicker(symbol: string) {
     return this.tickers.get(symbol.toUpperCase());
+  }
+
+  public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
+    if (!data || (!data.lastPrice && !data.c)) return null;
+    const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
+    const livePrice = parseFloat(data.lastPrice || data.c);
+    const open = parseFloat(data.openPrice || data.o || livePrice);
+    const high = parseFloat(data.highPrice || data.h || livePrice);
+    const low = parseFloat(data.lowPrice || data.l || livePrice);
+    const volume = parseFloat(data.volume || data.v || 1000);
+    const changePercent = parseFloat(data.priceChangePercent || data.P || 0);
+    const changeAmount = parseFloat(data.priceChange || data.p || 0);
+    const closeTime = data.closeTime || data.C || Date.now();
+    const now = Date.now();
+
+    const existing = this.tickers.get(sym);
+    const updated: ILiveRealTicker = {
+      symbol: sym,
+      price: livePrice,
+      open: open || existing?.open || livePrice,
+      high: high || existing?.high || livePrice,
+      low: low || existing?.low || livePrice,
+      close: livePrice,
+      volume: Math.round(volume) || existing?.volume || 1000,
+      prevClose: open || existing?.prevClose || livePrice,
+      changePercent: changePercent || existing?.changePercent || 0,
+      changeAmount: changeAmount || existing?.changeAmount || 0,
+      tickSize: sym.includes('BTC') ? 0.1 : 0.01,
+      volatility: existing?.volatility || 1.0,
+      lastUpdated: now,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Number(closeTime),
+      observedAt: now,
+      receivedAt: now,
+    };
+
+    this.tickers.set(sym, updated);
+    return updated;
+  }
+
+  public async handleBinanceTickerData(data: any) {
+    const ticker = this.ingestBinanceTickerData(data);
+    if (ticker) {
+      await this.broadcastTick(ticker);
+    }
+    return ticker;
   }
 
   public updateOptionTicker(
