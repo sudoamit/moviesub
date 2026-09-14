@@ -539,7 +539,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const eventTime = ticker.marketEventTime || ticker.lastUpdated;
-    const ageSeconds = (Date.now() - eventTime) / 1000;
+    const ageMs = Math.max(0, Date.now() - eventTime);
+    const ageSeconds = ageMs / 1000;
     if (ageSeconds > maxAgeSeconds) {
       throw new StaleMarketDataError(sym, ageSeconds, maxAgeSeconds, new Date(eventTime));
     }
