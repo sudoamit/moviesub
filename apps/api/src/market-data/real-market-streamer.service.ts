@@ -234,7 +234,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         ticker.changeAmount = changeAmount;
         ticker.lastUpdated = now;
         ticker.provenance = 'LIVE_PROVIDER';
-        ticker.marketEventTime = now;
+        ticker.marketEventTime = data.closeTime ? Number(data.closeTime) : now;
         ticker.observedAt = now;
         ticker.receivedAt = now;
 
@@ -281,7 +281,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         ticker.changeAmount = changeAmount;
         ticker.lastUpdated = now;
         ticker.provenance = 'LIVE_PROVIDER';
-        ticker.marketEventTime = now;
+        ticker.marketEventTime = paxgData.closeTime ? Number(paxgData.closeTime) : now;
         ticker.observedAt = now;
         ticker.receivedAt = now;
 
@@ -407,8 +407,45 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return updated;
   }
 
+  private optionTickers: Map<string, ILiveRealTicker> = new Map();
+
   getTicker(symbol: string) {
     return this.tickers.get(symbol.toUpperCase());
+  }
+
+  public updateOptionTicker(
+    contractSymbol: string,
+    tick: Partial<ILiveRealTicker> & { price: number },
+  ) {
+    const key = contractSymbol.toUpperCase();
+    const now = Date.now();
+    const existing = this.optionTickers.get(key);
+    const updated: ILiveRealTicker = {
+      symbol: key,
+      price: tick.price,
+      open: tick.open ?? existing?.open ?? tick.price,
+      high: tick.high ?? existing?.high ?? tick.price,
+      low: tick.low ?? existing?.low ?? tick.price,
+      close: tick.close ?? tick.price,
+      volume: tick.volume ?? existing?.volume ?? 1000,
+      prevClose: tick.prevClose ?? existing?.prevClose ?? tick.price,
+      changePercent: tick.changePercent ?? existing?.changePercent ?? 0,
+      changeAmount: tick.changeAmount ?? existing?.changeAmount ?? 0,
+      tickSize: tick.tickSize ?? existing?.tickSize ?? 0.05,
+      volatility: tick.volatility ?? existing?.volatility ?? 1.0,
+      lastUpdated: tick.lastUpdated ?? now,
+      provenance: tick.provenance ?? 'LIVE_PROVIDER',
+      marketEventTime: tick.marketEventTime ?? tick.lastUpdated ?? now,
+      observedAt: tick.observedAt ?? now,
+      receivedAt: tick.receivedAt ?? now,
+    };
+    this.optionTickers.set(key, updated);
+    return updated;
+  }
+
+  public getOptionTicker(contractSymbol: string): ILiveRealTicker | null {
+    const key = contractSymbol.toUpperCase();
+    return this.optionTickers.get(key) || null;
   }
 
   /**

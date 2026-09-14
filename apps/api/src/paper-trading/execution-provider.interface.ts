@@ -1,5 +1,12 @@
 import { Direction, OrderState, PositionState, TradingMode } from '@quant/shared';
 
+export enum ExecutionMode {
+  LIVE_MARKET = 'LIVE_MARKET',
+  PAPER_MARKET = 'PAPER_MARKET',
+  SIMULATED = 'SIMULATED',
+  TEST = 'TEST',
+}
+
 export interface IPaperOrderRequest {
   symbol: string;
   direction: 'BUY' | 'SELL';
@@ -7,6 +14,7 @@ export interface IPaperOrderRequest {
   orderType: 'MARKET' | 'LIMIT';
   price?: number;
   allowPriceOverride?: boolean;
+  executionMode?: ExecutionMode;
   signalPrice?: number;
   signalTime?: string;
   stopLoss?: number;
@@ -127,6 +135,7 @@ export interface IPaperPortfolio {
 export interface IClosePositionOptions {
   exitPriceOverride?: number;
   allowPriceOverride?: boolean;
+  executionMode?: ExecutionMode;
   triggerPrice?: number;
   triggerMarketEventTime?: Date | string;
   correlationId?: string;

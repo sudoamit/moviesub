@@ -131,6 +131,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           {
             triggerPrice: stopLoss!,
             triggerMarketEventTime: marketEventTime,
+            exitPriceOverride: livePrice,
+            allowPriceOverride: true,
             correlationId: pos.correlationId,
           },
         );
@@ -166,6 +168,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           {
             triggerPrice: activeFullTarget!,
             triggerMarketEventTime: marketEventTime,
+            exitPriceOverride: livePrice,
+            allowPriceOverride: true,
             correlationId: pos.correlationId,
           },
         );
@@ -204,6 +208,12 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
    * Fetches real option contract LTP. Spot price is strictly NEVER used as an option LTP.
    */
   private async getOptionContractLtp(pos: any): Promise<number> {
+    if (this.realMarketStreamer) {
+      const optionTicker = this.realMarketStreamer.getOptionTicker(pos.contractSymbol);
+      if (optionTicker && optionTicker.provenance === 'LIVE_PROVIDER' && optionTicker.price > 0) {
+        return optionTicker.price;
+      }
+    }
     if (this.redis) {
       try {
         const cached = await this.redis.getClient().get(`option:ltp:${pos.contractSymbol}`);
@@ -219,7 +229,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
   }
 
   /**
-   * Backend Real Partial Scale-Out at TP1
+   * Backend Real Partial Scale-Out at TP1 with Full Accounting & Journal Record
    */
   private async executePartialScaleOut(
     pos: any,
@@ -227,6 +237,17 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     livePrice: number,
     marketEventTime: Date,
   ) {
+    const idempotencyKey = `tp1_partial_${pos.id}`;
+
+    // Deterministic check to avoid duplicate TP1 execution
+    const existingOrder = await this.prisma.paperOrder.findUnique({
+      where: { idempotencyKey },
+    });
+    if (existingOrder) {
+      this.logger.log(`[TP1 IDEMPOTENCY] Partial scale-out already executed for position '${pos.id}'.`);
+      return;
+    }
+
     const totalQuantity = Number(pos.quantity);
     const partialRatio = 0.5;
     const partialQty = totalQuantity * partialRatio;
@@ -238,17 +259,28 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const exitTurnover = livePrice * partialQty;
     const exitCharges = this.paperTradingService.calculateCharges(exitTurnover, isCrypto);
 
+    const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
+    const USDT_INR_RATE = isCrypto ? 92.0 : 1.0;
+    const priceDiffINR = priceDiff * USDT_INR_RATE;
+    const partialGrossPnL = priceDiffINR * partialQty;
+    const partialNetPnL = Number((partialGrossPnL - exitCharges.totalCharges).toFixed(2));
+
+    const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : entryPrice);
+    const riskDistance = initialSL ? Math.abs(entryPrice - initialSL) : 0;
+    const partialRealizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
+    const releasedMargin = Number((Number(pos.usedMargin) * partialRatio).toFixed(2));
+
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.paperPosition.updateMany({
         where: {
           id: pos.id,
-          status: PositionState.OPEN,
+          status: { in: [PositionState.OPEN] },
         },
         data: {
           status: PositionState.PARTIALLY_CLOSED,
           quantity: new Decimal(remainingQty),
-          stopLoss: new Decimal(entryPrice),
-          usedMargin: { multiply: 0.5 },
+          stopLoss: new Decimal(entryPrice), // Move SL to breakeven
+          usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
         },
       });
 
@@ -266,7 +298,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           filledQuantity: new Decimal(partialQty),
           price: new Decimal(livePrice),
           status: 'FILLED',
-          idempotencyKey: `tp1_partial_${pos.id}_${Date.now()}`,
+          idempotencyKey,
           correlationId: pos.correlationId,
         },
       });
@@ -286,10 +318,60 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           correlationId: pos.correlationId,
         },
       });
+
+      // Create Partial PaperTrade Journal Record
+      const partialTrade = await tx.paperTrade.create({
+        data: {
+          accountId: pos.accountId,
+          positionId: pos.id,
+          symbol: pos.symbol,
+          contractSymbol: pos.contractSymbol,
+          instrumentType: pos.instrumentType,
+          strike: pos.strike,
+          optionType: pos.optionType,
+          direction: pos.direction,
+          quantity: new Decimal(partialQty),
+          entryPrice: new Decimal(entryPrice),
+          exitPrice: new Decimal(livePrice),
+          realizedPnL: new Decimal(partialNetPnL),
+          realizedR: new Decimal(partialRealizedR),
+          entryTime: pos.entryTime,
+          exitTime: new Date(),
+          exitReason: 'Target 1 Partial Exit (50%)',
+          chargesJson: {
+            exitCharges,
+            totalCharges: exitCharges.totalCharges,
+          },
+          outcomeClassification: 'WIN_TP1',
+          outcomeSnapshotJson: {
+            isPartial: true,
+            leg: 'TP1_PARTIAL',
+            triggerPrice: target1,
+            triggerMarketEventTime: marketEventTime.toISOString(),
+            exitPrice: livePrice,
+            partialQty,
+            remainingQty,
+            netPnL: partialNetPnL,
+            realizedR: partialRealizedR,
+          },
+          correlationId: pos.correlationId,
+        },
+      });
+
+      // Update PaperAccount balance, realized P&L, and total charges paid
+      await tx.paperAccount.update({
+        where: { id: pos.accountId },
+        data: {
+          cashBalance: { increment: new Decimal(partialNetPnL) },
+          usedMargin: { decrement: new Decimal(releasedMargin) },
+          realizedPnL: { increment: new Decimal(partialNetPnL) },
+          totalChargesPaid: { increment: new Decimal(exitCharges.totalCharges) },
+        },
+      });
     });
 
     this.logger.log(
-      `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}).`,
+      `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}). Realized P&L: ₹${partialNetPnL}.`,
     );
   }
 

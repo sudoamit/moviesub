@@ -37,6 +37,7 @@ import {
   IPaperTradeHistory,
   IPaperPortfolio,
   IClosePositionOptions,
+  ExecutionMode,
 } from './execution-provider.interface';
 import * as crypto from 'crypto';
 
@@ -450,9 +451,11 @@ export class PaperTradingService implements IExecutionProvider {
     let executionPrice: number | undefined;
     let sourceTimestamp = new Date();
 
+    const isLiveMarket = req.executionMode === ExecutionMode.LIVE_MARKET;
+
     if (!isMarketOrder && req.price && req.price > 0) {
       executionPrice = req.price;
-    } else if (req.allowPriceOverride && req.price && req.price > 0) {
+    } else if (!isLiveMarket && req.allowPriceOverride && req.price && req.price > 0) {
       executionPrice = req.price;
     }
 
@@ -1372,6 +1375,9 @@ export class PaperTradingService implements IExecutionProvider {
             sourceTimestamp: sourceTimestamp.toISOString(),
             triggerPrice: triggerPriceOpt ?? null,
             triggerMarketEventTime: triggerMarketEventTimeOpt ? new Date(triggerMarketEventTimeOpt).toISOString() : null,
+            exitQuotePrice: exitPrice,
+            exitExecutionTime: exitTime.toISOString(),
+            exitFillPrice: finalExitPrice,
             livePrice: exitPrice,
             exitPrice: effectiveExitPrice,
             entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? effectiveEntryPrice : Number(pos.entryPrice),

@@ -890,6 +890,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               : `${direction} SPOT`}
           </span>
 
+          {isAutoScaledOut && (
+            <span className="bg-amber-950/90 text-amber-300 border border-amber-600 px-2 py-0.5 rounded text-[10px] font-mono font-bold animate-pulse">
+              ✂️ PARTIALLY CLOSED (TP1 HIT - SL @ BREAKEVEN)
+            </span>
+          )}
+
           {/* Mode Switcher Toggle */}
           {!isCrypto && (
             <button

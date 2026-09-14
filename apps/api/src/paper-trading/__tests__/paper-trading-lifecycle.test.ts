@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PaperTradingService } from '../paper-trading.service';
+import { PaperTradingService, ExecutionMode } from '../paper-trading.service';
 import { PaperPositionMonitorService } from '../paper-position-monitor.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CandlesService } from '../../candles/candles.service';
@@ -145,9 +145,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           return Promise.resolve(pos);
         }),
         updateMany: jest.fn().mockImplementation((args) => {
-          const matching = dbPositions.filter(
-            (p) => p.id === args.where.id && args.where.status.in.includes(p.status),
-          );
+          const matching = dbPositions.filter((p) => {
+            if (p.id !== args.where.id) return false;
+            if (args.where.status?.in) return args.where.status.in.includes(p.status);
+            if (args.where.status) return p.status === args.where.status;
+            return true;
+          });
           matching.forEach((p) => Object.assign(p, args.data));
           return Promise.resolve({ count: matching.length });
         }),
@@ -661,6 +664,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       target1: 200,
       target2: 300,
       allowPriceOverride: true,
+      executionMode: ExecutionMode.TEST,
       price: 150, // Option entry LTP = 150
     });
 
@@ -716,5 +720,98 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const trade = await paperService.closePosition(pos.id, 'Target 1');
     expect(trade.holdingDurationSeconds).toBeGreaterThanOrEqual(3590);
+  });
+
+  // TEST P: TP1 PARTIAL EXECUTED JOURNAL & ACCOUNTING
+  it('TEST P: TP1 PARTIAL EXECUTED JOURNAL — TP1 scale-out creates partial PaperTrade, credits account cash balance & updates realized PnL', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49500,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    const initialCash = Number((await paperService.getOrCreateAccount()).cashBalance);
+
+    // Live price crosses Target 1 (51000)
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+
+    await monitorService.evaluateActivePositions();
+
+    const dbPos = dbPositions.find((p) => p.id === pos.id);
+    expect(dbPos.status).toBe(PositionState.PARTIALLY_CLOSED);
+    expect(Number(dbPos.quantity)).toBe(5); // 50% remaining
+    expect(Number(dbPos.stopLoss)).toBe(50000); // SL moved to breakeven
+
+    // Verify partial PaperTrade record was created in database
+    const partialTrade = dbTrades.find(
+      (t) => t.positionId === pos.id && t.exitReason.includes('Target 1 Partial Exit'),
+    );
+    expect(partialTrade).toBeDefined();
+    expect(Number(partialTrade.quantity)).toBe(5);
+    expect(Number(partialTrade.exitPrice)).toBe(51000);
+    expect(Number(partialTrade.realizedPnL)).toBeGreaterThan(0);
+
+    // Verify Account cash balance was credited
+    const updatedAccount = await paperService.getOrCreateAccount();
+    expect(Number(updatedAccount.cashBalance)).toBeGreaterThan(initialCash);
+  });
+
+  // TEST Q: EXECUTION MODE PRICE OVERRIDE RESTRICTION
+  it('TEST Q: EXECUTION MODE RESTRICTION — allowPriceOverride is ignored in LIVE_MARKET mode for MARKET orders', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50500,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+
+    // Caller attempts to pass arbitrary price 48000 with allowPriceOverride in LIVE_MARKET mode
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      price: 48000,
+      allowPriceOverride: true,
+      executionMode: ExecutionMode.LIVE_MARKET,
+      stopLoss: 49500,
+      target1: 51000,
+    });
+
+    // Order must execute at live ticker price (50500), ignoring caller's price override in LIVE_MARKET mode
+    expect(pos.entryPrice).toBe(50500);
+  });
+
+  // TEST R: BINANCE GENUINE CLOSE TIME
+  it('TEST R: BINANCE GENUINE CLOSE TIME — marketEventTime originates from Binance closeTime', async () => {
+    const binanceCloseTime = 1726284000000;
+    const realStreamer = new RealMarketStreamerService({} as any);
+    const ticker = realStreamer.updateTicker('BTCUSDT', {
+      price: 80000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: binanceCloseTime,
+    });
+
+    expect(ticker.marketEventTime).toBe(binanceCloseTime);
   });
 });
