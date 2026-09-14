@@ -1268,4 +1268,188 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(Number(updatedPos.quantity)).toBe(5);
     expect(updatedPos.status).toBe(PositionState.PARTIALLY_CLOSED);
   });
+
+  // =========================================================================
+  // AI FIX 140 TESTS — PROVIDER INGESTION MATRIX, STALENESS & BREAKEVEN LIFECYCLE
+  // =========================================================================
+
+  it('TEST 140-1: PROVIDER INGESTION MATRIX — strict timestamp validation, zero value preservation & no hybrid defaults', () => {
+    const realStreamer = new RealMarketStreamerService(null as any);
+
+    // 1. Valid payload
+    const valid = realStreamer.ingestBinanceTickerData({
+      s: 'BTCUSDT',
+      c: '50000.00',
+      closeTime: 1700000000000,
+      P: '0',
+      v: '0',
+    });
+    expect(valid).not.toBeNull();
+    expect(valid!.marketEventTime).toBe(1700000000000);
+    expect(valid!.changePercent).toBe(0);
+    expect(valid!.volume).toBe(0);
+    expect(valid!.tickSize).toBe(0.01); // Standard nonsynthetic instrument tick size
+
+    // 2. Missing closeTime
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00' })).toBeNull();
+    // 3. Timestamp = 0
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 0 })).toBeNull();
+    // 4. Timestamp < 0
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: -100 })).toBeNull();
+    // 5. Timestamp = NaN
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 'NaN' })).toBeNull();
+    // 6. Timestamp = Infinity
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: Infinity })).toBeNull();
+
+    // 7. Price = 0
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '0', closeTime: Date.now() })).toBeNull();
+    // 8. Price < 0
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '-500', closeTime: Date.now() })).toBeNull();
+    // 9. Price = NaN
+    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: 'invalid', closeTime: Date.now() })).toBeNull();
+
+    // 10. No hybrid merging from cached ticker when fields missing
+    const noHybrid = realStreamer.ingestBinanceTickerData({
+      s: 'ETHUSDT',
+      c: '3000.00',
+      closeTime: 1700000005000,
+    });
+    expect(noHybrid).not.toBeNull();
+    expect(noHybrid!.open).toBe(3000.00); // Defaults to livePrice, NOT old cached value
+    expect(noHybrid!.volume).toBe(0); // Defaults to 0, NOT old cached value
+  });
+
+  it('TEST 140-2: STRICT STALENESS FAIL-CLOSED EXECUTION — stale marketEventTime rejected by streamer and monitor', async () => {
+    const realStreamer = new RealMarketStreamerService(null as any);
+    const now = Date.now();
+    realStreamer.updateTicker('NIFTY', {
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now - 1000,
+      lastUpdated: now,
+    });
+
+    // 1. Valid tick (1s old <= 5s maxAge)
+    const validTicker = realStreamer.getValidatedTicker('NIFTY', 5);
+    expect(validTicker.price).toBe(50000);
+
+    // 2. Stale tick (10s old > 5s maxAge)
+    realStreamer.updateTicker('NIFTY', {
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: now - 10000,
+      lastUpdated: now, // receivedAt/lastUpdated = now must NOT mask stale marketEventTime
+    });
+
+    expect(() => realStreamer.getValidatedTicker('NIFTY', 5)).toThrow(StaleMarketDataError);
+
+    // 3. Stale tick (60s old) prevents monitor auto-close
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => {
+      if (sym === 'NIFTY') {
+        return {
+          symbol: 'NIFTY',
+          price: 50000,
+          provenance: 'LIVE_PROVIDER',
+          marketEventTime: now - 1000,
+        };
+      }
+      return null;
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // Stale ticker causes monitor's getValidatedTicker call to throw StaleMarketDataError and fail closed
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => {
+      if (sym === 'NIFTY') {
+        throw new StaleMarketDataError('NIFTY', 60, 5, new Date(now - 60000));
+      }
+      return null;
+    });
+
+    await monitorService.evaluateActivePositions();
+
+    // Position remains OPEN because stale market data causes fail-closed monitoring
+    const unclosedPos = dbPositions.find((p) => p.id === pos.id);
+    expect(unclosedPos.status).toBe(PositionState.OPEN);
+  });
+
+  it('TEST 140-3: BREAKEVEN AFTER TP1 LIFECYCLE — ENTRY -> TP1 PARTIAL -> SL BREAKEVEN exit produces exact accounting and single PaperTrade', async () => {
+    let currentPrice = 50000;
+    let currentEventTime = Date.now();
+    const initCash = Number(dbAccounts[0].cashBalance);
+
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => {
+      return {
+        symbol: sym,
+        price: currentPrice,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: currentEventTime,
+      };
+    });
+
+    // 1. ENTRY 10 @ 50,000 (SL 49,500 => Risk = 5000 <= Max 10,000)
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49500,
+      target1: 51000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    const entryFill = dbFills[dbFills.length - 1];
+    const entryCharges = Number(entryFill.fee);
+
+    // 2. TP1 hit @ 51,000 -> scale out 5 units
+    currentPrice = 51000;
+    currentEventTime = Date.now() + 5000;
+    await monitorService.evaluateActivePositions();
+
+    const tp1Pos = dbPositions.find((p) => p.id === pos.id);
+    expect(tp1Pos.status).toBe(PositionState.PARTIALLY_CLOSED);
+    expect(Number(tp1Pos.quantity)).toBe(5);
+    expect(Number(tp1Pos.stopLoss)).toBe(50000); // Moved to breakeven
+
+    const tp1Fill = dbFills[dbFills.length - 1];
+    const tp1NetPnL = (51000 - 50000) * 92.0 * 5 - Number(tp1Fill.fee);
+
+    // 3. Price drops back to SL Breakeven @ 49,900 -> close remaining 5 units
+    currentPrice = 49900;
+    currentEventTime = Date.now() + 10000;
+    await monitorService.evaluateActivePositions();
+
+    const finalPos = dbPositions.find((p) => p.id === pos.id);
+    expect(finalPos.status).toBe(PositionState.CLOSED);
+
+    const finalFill = dbFills[dbFills.length - 1];
+    const finalLegNetPnL = (49900 - 50000) * 92.0 * 5 - Number(finalFill.fee);
+    const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
+
+    // 4. Assert Account Ledger Invariants
+    const finalAccount = dbAccounts[0];
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(tp1NetPnL + finalLegNetPnL, 2);
+    expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(totalLifecycleNetPnL, 2);
+    expect(Number(finalAccount.usedMargin)).toBe(0);
+
+    // 5. Assert Single PaperTrade Record
+    const trades = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(trades.length).toBe(1);
+    expect(Number(trades[0].realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
+
+    // 6. Assert Execution Legs (ENTRY, TP1_PARTIAL, FINAL_EXIT)
+    const legs = (finalPos.executionEventsJson as any).partialLegs || [];
+    expect(legs.length).toBe(1);
+    expect(legs[0].role).toBe('TP1_PARTIAL');
+    expect(legs[0].fillPrice).toBe(51000);
+    expect(legs[0].fillTimestamp).toBeDefined();
+  });
 });

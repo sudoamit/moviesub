@@ -306,86 +306,97 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       quotePrice: livePrice,
       quoteMarketEventTime: marketTimeStr,
       fillPrice: livePrice,
-      executionTime: execTimeStr,
+      fillTimestamp: execTimeStr,
       executionPriceSource: 'LIVE_TICK',
-      price: livePrice,
       quantity: partialQty,
       fee: exitCharges.totalCharges,
       grossPnL: partialGrossPnL,
       netPnL: partialNetPnL,
       realizedR: partialRealizedR,
+      price: livePrice,
+      executionTime: execTimeStr,
       timestamp: marketTimeStr,
     });
 
-    await this.prisma.$transaction(async (tx) => {
-      const existingTxOrder = await tx.paperOrder.findUnique({
-        where: { idempotencyKey },
-      });
-      if (existingTxOrder) return;
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const existingTxOrder = await tx.paperOrder.findUnique({
+          where: { idempotencyKey },
+        });
+        if (existingTxOrder) return;
 
-      const updated = await tx.paperPosition.updateMany({
-        where: {
-          id: pos.id,
-          status: { in: [PositionState.OPEN] },
-        },
-        data: {
-          status: PositionState.PARTIALLY_CLOSED,
-          quantity: new Decimal(remainingQty),
-          stopLoss: new Decimal(entryPrice), // Move SL to breakeven
-          usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
-          executionEventsJson: {
-            ...existingEvents,
-            partialLegs,
-          } as any,
-        },
-      });
+        const updated = await tx.paperPosition.updateMany({
+          where: {
+            id: pos.id,
+            status: { in: [PositionState.OPEN] },
+          },
+          data: {
+            status: PositionState.PARTIALLY_CLOSED,
+            quantity: new Decimal(remainingQty),
+            stopLoss: new Decimal(entryPrice), // Move SL to breakeven
+            usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
+            executionEventsJson: {
+              ...existingEvents,
+              partialLegs,
+            } as any,
+          },
+        });
 
-      if (updated.count === 0) return;
+        if (updated.count === 0) return;
 
-      const exitOrder = await tx.paperOrder.create({
-        data: {
-          accountId: pos.accountId,
-          symbol: pos.symbol,
-          contractSymbol: pos.contractSymbol,
-          instrumentType: pos.instrumentType,
-          direction: isBuy ? Direction.BEARISH : Direction.BULLISH,
-          orderType: 'MARKET',
-          requestedQuantity: new Decimal(partialQty),
-          filledQuantity: new Decimal(partialQty),
-          price: new Decimal(livePrice),
-          status: 'FILLED',
-          idempotencyKey,
-          correlationId: pos.correlationId,
-        },
-      });
+        const exitOrder = await tx.paperOrder.create({
+          data: {
+            accountId: pos.accountId,
+            symbol: pos.symbol,
+            contractSymbol: pos.contractSymbol,
+            instrumentType: pos.instrumentType,
+            direction: isBuy ? Direction.BEARISH : Direction.BULLISH,
+            orderType: 'MARKET',
+            requestedQuantity: new Decimal(partialQty),
+            filledQuantity: new Decimal(partialQty),
+            price: new Decimal(livePrice),
+            status: 'FILLED',
+            idempotencyKey,
+            correlationId: pos.correlationId,
+          },
+        });
 
-      await tx.paperFill.create({
-        data: {
-          orderId: exitOrder.id,
-          fillPrice: new Decimal(livePrice),
-          fillQuantity: new Decimal(partialQty),
-          fee: new Decimal(exitCharges.totalCharges),
-          feeBreakdownJson: exitCharges,
-          slippage: new Decimal(0),
-          executionPriceSource: 'LIVE_TICK',
-          liquidityType: 'TAKER',
-          sourceTimestamp: marketEventTime,
-          fillTimestamp: new Date(),
-          correlationId: pos.correlationId,
-        },
-      });
+        await tx.paperFill.create({
+          data: {
+            orderId: exitOrder.id,
+            fillPrice: new Decimal(livePrice),
+            fillQuantity: new Decimal(partialQty),
+            fee: new Decimal(exitCharges.totalCharges),
+            feeBreakdownJson: exitCharges,
+            slippage: new Decimal(0),
+            executionPriceSource: 'LIVE_TICK',
+            liquidityType: 'TAKER',
+            sourceTimestamp: marketEventTime,
+            fillTimestamp: new Date(),
+            correlationId: pos.correlationId,
+          },
+        });
 
-      // Update PaperAccount balance and used margin ONLY — PaperTrade record is created ONLY on final exit
-      await tx.paperAccount.update({
-        where: { id: pos.accountId },
-        data: {
-          cashBalance: { increment: new Decimal(partialNetPnL) },
-          usedMargin: { decrement: new Decimal(releasedMargin) },
-          realizedPnL: { increment: new Decimal(partialNetPnL) },
-          totalChargesPaid: { increment: new Decimal(exitCharges.totalCharges) },
-        },
+        // Update PaperAccount balance and used margin ONLY — PaperTrade record is created ONLY on final exit
+        await tx.paperAccount.update({
+          where: { id: pos.accountId },
+          data: {
+            cashBalance: { increment: new Decimal(partialNetPnL) },
+            usedMargin: { decrement: new Decimal(releasedMargin) },
+            realizedPnL: { increment: new Decimal(partialNetPnL) },
+            totalChargesPaid: { increment: new Decimal(exitCharges.totalCharges) },
+          },
+        });
       });
-    });
+    } catch (err: any) {
+      if (err?.code === 'P2002' || err?.message?.includes('P2002') || err?.message?.includes('idempotencyKey')) {
+        this.logger.log(
+          `[TP1 IDEMPOTENCY P2002] Concurrent race caught for position '${pos.id}'. Order idempotently created by another process.`,
+        );
+        return;
+      }
+      throw err;
+    }
 
     this.logger.log(
       `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}). Realized P&L: ₹${partialNetPnL}. Execution leg created.`,

@@ -379,14 +379,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (!data) return null;
 
     const rawCloseTime = data.closeTime ?? data.C;
-    if (rawCloseTime === undefined || rawCloseTime === null || !Number.isFinite(Number(rawCloseTime))) {
-      return null; // Reject tick: Provider timestamp missing or invalid
+    const marketEventTime = Number(rawCloseTime);
+    if (!Number.isFinite(marketEventTime) || marketEventTime <= 0) {
+      return null; // Reject tick: Provider timestamp missing, zero, negative, or invalid
     }
 
     const rawPrice = data.lastPrice ?? data.c;
     const livePrice = rawPrice !== undefined && rawPrice !== null ? parseFloat(rawPrice) : NaN;
     if (!Number.isFinite(livePrice) || livePrice <= 0) {
-      return null; // Reject tick: Invalid execution price
+      return null; // Reject tick: Invalid or non-positive execution price
     }
 
     const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
@@ -410,25 +411,25 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       const inst = getAuthoritativeInstrument(sym);
       if (inst && inst.tickSize) tickSize = inst.tickSize;
     } catch {
-      tickSize = sym.includes('BTC') ? 0.1 : 0.05;
+      // Use standard default if instrument registry lookup fails without guessing arbitrary symbol logic
     }
 
     const updated: ILiveRealTicker = {
       symbol: sym,
       price: livePrice,
-      open: Number.isFinite(open) ? open : (existing?.open ?? livePrice),
-      high: Number.isFinite(high) ? high : (existing?.high ?? livePrice),
-      low: Number.isFinite(low) ? low : (existing?.low ?? livePrice),
+      open: Number.isFinite(open) ? open : livePrice,
+      high: Number.isFinite(high) ? high : livePrice,
+      low: Number.isFinite(low) ? low : livePrice,
       close: livePrice,
-      volume: Number.isFinite(volume) && volume >= 0 ? Math.round(volume) : (existing?.volume ?? 0),
-      prevClose: Number.isFinite(open) ? open : (existing?.prevClose ?? livePrice),
-      changePercent: Number.isFinite(changePercent) ? changePercent : (existing?.changePercent ?? 0),
-      changeAmount: Number.isFinite(changeAmount) ? changeAmount : (existing?.changeAmount ?? 0),
+      volume: Number.isFinite(volume) && volume >= 0 ? Math.round(volume) : 0,
+      prevClose: Number.isFinite(open) ? open : livePrice,
+      changePercent: Number.isFinite(changePercent) ? changePercent : 0,
+      changeAmount: Number.isFinite(changeAmount) ? changeAmount : 0,
       tickSize,
       volatility: existing?.volatility ?? 1.0,
       lastUpdated: now,
       provenance: 'LIVE_PROVIDER',
-      marketEventTime: Number(rawCloseTime),
+      marketEventTime,
       observedAt: now,
       receivedAt: now,
     };
