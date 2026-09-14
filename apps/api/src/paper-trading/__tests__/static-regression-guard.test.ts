@@ -92,4 +92,58 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(ExecutionMode.TEST).toBe('TEST');
     expect(ExecutionMode.SIMULATED).toBe('SIMULATED');
   });
+
+  it('RULE 7: Single Accounting Authority Structural Invariant — PaperPositionMonitorService and PaperTradingService have zero local financial P&L math', () => {
+    const monitorFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-position-monitor.service.ts');
+    const monitorContent = fs.readFileSync(monitorFile, 'utf8');
+
+    // 1. Monitor must invoke TradeAccountingEngine.settleExecutionLeg
+    expect(monitorContent).toContain('TradeAccountingEngine.settleExecutionLeg');
+    // 2. Monitor must NOT have custom price diff calculations or calculateTradePnl calls
+    expect(monitorContent).not.toContain('calculateTradePnl');
+    expect(monitorContent).not.toMatch(/\b(livePrice\s*-\s*entryPrice)\s*\*/);
+    expect(monitorContent).not.toMatch(/\b(entryPrice\s*-\s*livePrice)\s*\*/);
+
+    const tradingFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-trading.service.ts');
+    const tradingContent = fs.readFileSync(tradingFile, 'utf8');
+
+    // 3. Trading service must invoke TradeAccountingEngine.settleExecutionLeg
+    expect(tradingContent).toContain('TradeAccountingEngine.settleExecutionLeg');
+    // 4. closePosition derives canonicalRealizedPnL strictly from leg.netPnL sum
+    expect(tradingContent).toContain('allLegsBreakdown.reduce((sum, leg) => sum + Number(leg.netPnL || 0), 0)');
+    // 5. Zero fallback or ad-hoc calculation
+    expect(tradingContent).not.toContain('fullLifecycleCalc');
+  });
+
+  it('RULE 8: Definitive Repository-Wide Mechanical Clean Scan across all production source files', () => {
+    const violations: { file: string; rule: string; matched: string }[] = [];
+
+    for (const file of productionFiles) {
+      const content = fs.readFileSync(file, 'utf8');
+
+      if (content.includes('USDT_INR_RATE')) {
+        violations.push({ file, rule: 'USDT_INR_RATE', matched: 'USDT_INR_RATE' });
+      }
+      if (content.includes('USD_INR_RATE')) {
+        violations.push({ file, rule: 'USD_INR_RATE', matched: 'USD_INR_RATE' });
+      }
+      const m92 = content.match(/(?<!\d)92\.0(?!\d)/);
+      if (m92) {
+        violations.push({ file, rule: '92.0', matched: m92[0] });
+      }
+      const m87 = content.match(/(?<!\d)87\.0(?!\d)/);
+      if (m87) {
+        violations.push({ file, rule: '87.0', matched: m87[0] });
+      }
+      if (!file.endsWith('trade-accounting-engine.ts')) {
+        const mDiff = content.match(/priceDiff\s*\*/);
+        if (mDiff) {
+          violations.push({ file, rule: 'priceDiff *', matched: mDiff[0] });
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+    expect(productionFiles.length).toBeGreaterThanOrEqual(100);
+  });
 });

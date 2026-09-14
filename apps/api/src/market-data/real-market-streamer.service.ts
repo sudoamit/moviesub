@@ -399,7 +399,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
     this.tickers.set(sym, updated);
     if (provenance === 'LIVE_PROVIDER') {
-      this.freshSymbolsAfterReconnect.add(sym);
+      this.freshSymbolsAfterReconnect.add(`SPOT:${sym}`);
     }
     return updated;
   }
@@ -527,7 +527,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
 
     this.tickers.set(sym, updated);
-    this.freshSymbolsAfterReconnect.add(sym);
+    this.freshSymbolsAfterReconnect.add(`SPOT:${sym}`);
     return updated;
   }
 
@@ -577,13 +577,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
     this.optionTickers.set(key, updated);
     if (provenance === 'LIVE_PROVIDER') {
-      this.freshSymbolsAfterReconnect.add(key);
+      this.freshSymbolsAfterReconnect.add(`OPTION:${key}`);
     }
     return updated;
   }
 
   public getOptionTicker(contractSymbol: string): ILiveRealTicker | null {
     const key = contractSymbol.toUpperCase();
+    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
+      return null;
+    }
     return this.optionTickers.get(key) || null;
   }
 
@@ -608,7 +611,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(sym)) {
+    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`SPOT:${sym}`)) {
       throw new MarketDataUnavailableError(
         sym,
         `Market quote for ${sym} is a cached tick from before provider reconnection. A fresh valid tick is required after reconnection.`,

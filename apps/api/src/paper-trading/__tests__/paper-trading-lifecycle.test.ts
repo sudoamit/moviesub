@@ -3184,7 +3184,48 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           expect(sumFillFees).toBeCloseTo(tradeTotalCharges, 1);
           expect(chargesDelta).toBeCloseTo(sumFillFees, 1);
 
-          // 6. Used margin restored to exactly 0
+          // 6. Execution Quantity Conservation Invariants:
+          const entryOrderId = (pos as any).orderId || dbOrders[0].id;
+          const entryFills = dbFills.filter((f) => f.orderId === entryOrderId);
+          const sumEntryQty = entryFills.reduce((sum, f) => sum + Number(f.fillQuantity), 0);
+          expect(sumEntryQty).toBe(10);
+
+          const exitFills = dbFills.filter((f) => f.orderId !== entryOrderId);
+          const sumExitQty = exitFills.reduce((sum, f) => sum + Number(f.fillQuantity), 0);
+          expect(sumExitQty).toBe(10);
+
+          const entryLegs = legs.filter((l) => l.role === 'ENTRY');
+          const partialLegs = legs.filter((l) => l.role === 'TP1_PARTIAL');
+          const finalExitLegs = legs.filter((l) => l.role === 'FINAL_EXIT');
+
+          expect(entryLegs.length).toBe(1);
+          expect(Number(entryLegs[0].quantity)).toBe(10);
+
+          expect(finalExitLegs.length).toBe(1);
+          const partialQtySum = partialLegs.reduce((sum, l) => sum + Number(l.quantity), 0);
+          const finalExitQty = Number(finalExitLegs[0].quantity);
+          expect(partialQtySum + finalExitQty).toBe(10);
+
+          if (isMultiLeg) {
+            expect(partialLegs.length).toBe(1);
+            expect(Number(partialLegs[0].quantity)).toBe(5);
+            expect(finalExitQty).toBe(5);
+          } else {
+            expect(partialLegs.length).toBe(0);
+            expect(finalExitQty).toBe(10);
+          }
+
+          for (const order of dbOrders) {
+            expect(Number(order.requestedQuantity)).toBe(Number(order.filledQuantity));
+          }
+          for (const fill of dbFills) {
+            const correspondingOrder = dbOrders.find((o) => o.id === fill.orderId);
+            expect(correspondingOrder).toBeDefined();
+            expect(Number(fill.fillQuantity)).toBe(Number(correspondingOrder.filledQuantity));
+          }
+          expect(Number(trade.quantity)).toBe(10);
+
+          // 7. Used margin restored to exactly 0
           expect(finalMargin).toBe(0.0);
         }
       }
@@ -3223,6 +3264,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const postEntryMargin = Number(dbAccounts[0].usedMargin);
       const postEntryRealized = Number(dbAccounts[0].realizedPnL);
       const postEntryCharges = Number(dbAccounts[0].totalChargesPaid);
+      const postEntryUnrealized = Number(pos.unrealizedPnL);
 
       const orderCountAfterEntry = dbOrders.length; // 1
       const fillCountAfterEntry = dbFills.length; // 1
@@ -3242,9 +3284,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(dbFills.length).toBe(fillCountAfterEntry);
       expect(dbTrades.length).toBe(tradeCountAfterEntry);
 
-      // Position must remain OPEN, NOT EXIT_PENDING, CLOSING, or CLOSED
+      // Position must remain strictly OPEN, quantity unchanged, closedAt undefined, margin and unrealized PnL unchanged
       const currentPos = dbPositions.find((p) => p.id === pos.id);
       expect(currentPos.status).toBe(PositionState.OPEN);
+      expect(Number(currentPos.quantity)).toBe(1);
+      expect(currentPos.closedAt).toBeUndefined();
+      expect(Number(currentPos.usedMargin)).toBe(postEntryMargin);
+      expect(Number(currentPos.unrealizedPnL)).toBe(postEntryUnrealized);
 
       // Account financial fields must be 100% unchanged
       expect(Number(dbAccounts[0].cashBalance)).toBe(postEntryCash);
@@ -3253,7 +3299,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(Number(dbAccounts[0].totalChargesPaid)).toBe(postEntryCharges);
     });
 
-    it('TEST 149-3 (Blocker 3): RealMarketStreamerService degradation & reconnection state machine', () => {
+    it('TEST 149-3 (Blocker 3): RealMarketStreamerService degradation & reconnection state machine with option namespace isolation', () => {
       const realStreamer = new RealMarketStreamerService({} as any);
 
       // 1. Newer valid tick -> LIVE_PROVIDER
@@ -3308,6 +3354,37 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const validated = realStreamer.getValidatedTicker('BTCUSDT');
       expect(validated.price).toBe(51000.0);
       expect(validated.provenance).toBe('LIVE_PROVIDER');
+
+      // 7. Namespaced isolation: spot update does NOT mark option ticker freshly reconnected
+      realStreamer.updateOptionTicker('NIFTY26SEP24000CE', {
+        price: 150.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: Date.now() - 10000, // old tick before disconnect
+      });
+      realStreamer.disconnectProvider();
+      realStreamer.setProviderConnected(true);
+
+      // Ingest fresh spot tick:
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: Date.now(),
+        lastPrice: '51500.0',
+        provenance: 'LIVE_PROVIDER',
+      });
+      // Spot ticker is valid
+      expect(realStreamer.getValidatedTicker('BTCUSDT').price).toBe(51500.0);
+      // Option ticker was NOT updated after reconnect -> returns null (isolated namespace)
+      expect(realStreamer.getOptionTicker('NIFTY26SEP24000CE')).toBeNull();
+
+      // Ingest fresh option tick:
+      realStreamer.updateOptionTicker('NIFTY26SEP24000CE', {
+        price: 155.0,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: Date.now(),
+      });
+      // Now option ticker is available
+      expect(realStreamer.getOptionTicker('NIFTY26SEP24000CE')).not.toBeNull();
+      expect(realStreamer.getOptionTicker('NIFTY26SEP24000CE')!.price).toBe(155.0);
     });
 
     it('TEST 149-4 (Blocker 4): Cross-currency order fails closed with MISSING_FX_RATE without universal epoch 0 fallback', async () => {
@@ -3378,6 +3455,70 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       expect(pos).toBeDefined();
       expect(pos.id).toBeDefined();
+    });
+
+    it('TEST 149-5 (Item 6): Complete Reconnection Lifecycle Transition Through Trade Execution', async () => {
+      // Re-instantiate PaperTradingService with a REAL RealMarketStreamerService
+      const realStreamer = new RealMarketStreamerService({} as any);
+      const testService = new PaperTradingService(mockPrisma as any, {} as any, realStreamer);
+
+      const converter = PointInTimeCurrencyConverter.getInstance();
+      converter.registerRate({ pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'TEST', version: '1.0' });
+
+      // 1. Initial valid ticker arrives and order is placed
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: Date.now(),
+        lastPrice: '50000.0',
+        provenance: 'LIVE_PROVIDER',
+      });
+
+      const pos = await testService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        quantity: 1,
+        orderType: 'MARKET',
+        stopLoss: 48000,
+        target1: 52000,
+        executionMode: ExecutionMode.TEST,
+      });
+      expect(pos.status).toBe(PositionState.OPEN);
+
+      // 2. Disconnect provider
+      realStreamer.disconnectProvider();
+      // Order/exit must fail closed
+      await expect(
+        testService.closePosition(pos.id, 'Manual Exit'),
+      ).rejects.toThrow(/disconnected/);
+
+      // 3. Reconnect provider — cached quote still exists from before reconnection
+      realStreamer.setProviderConnected(true);
+      await expect(
+        testService.closePosition(pos.id, 'Manual Exit'),
+      ).rejects.toThrow(/cached tick from before provider reconnection/);
+
+      // 4. Fresh valid tick arrives after reconnection
+      realStreamer.ingestBinanceTickerData({
+        symbol: 'BTCUSDT',
+        closeTime: Date.now(),
+        lastPrice: '51000.0',
+        provenance: 'LIVE_PROVIDER',
+      });
+
+      // 5. Validated ticker succeeds with LIVE_PROVIDER
+      const ticker = realStreamer.getValidatedTicker('BTCUSDT');
+      expect(ticker.price).toBe(51000.0);
+      expect(ticker.provenance).toBe('LIVE_PROVIDER');
+
+      // 6. Close execution succeeds and creates completed PaperTrade
+      const trade = await testService.closePosition(pos.id, 'Manual Exit');
+      expect(trade).toBeDefined();
+      expect(trade.positionId).toBe(pos.id);
+      expect(trade.exitPrice).toBeCloseTo(51000.0, 0);
+      expect(trade.realizedPnL).toBeDefined();
+
+      const closedPos = dbPositions.find((p) => p.id === pos.id);
+      expect(closedPos.status).toBe(PositionState.CLOSED);
     });
   });
 });
