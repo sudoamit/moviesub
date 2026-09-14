@@ -346,6 +346,12 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const sym = symbol.toUpperCase();
     const now = Date.now();
     const existing = this.tickers.get(sym);
+
+    // Out-of-order rejection: Do NOT regress to an older provider marketEventTime
+    if (existing && existing.marketEventTime && tick.marketEventTime && tick.marketEventTime < existing.marketEventTime) {
+      return existing;
+    }
+
     const updated: ILiveRealTicker = {
       symbol: sym,
       price: tick.price,
@@ -384,6 +390,12 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return null; // Reject tick: Provider timestamp missing, zero, negative, or invalid
     }
 
+    const now = Date.now();
+    const maxClockSkewMs = 5000;
+    if (marketEventTime > now + maxClockSkewMs) {
+      return null; // Reject tick: Provider timestamp is from future beyond clock skew limit (5s)
+    }
+
     const rawPrice = data.lastPrice ?? data.c;
     const livePrice = rawPrice !== undefined && rawPrice !== null ? parseFloat(rawPrice) : NaN;
     if (!Number.isFinite(livePrice) || livePrice <= 0) {
@@ -391,6 +403,17 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
+
+    const existing = this.tickers.get(sym);
+    if (existing && existing.marketEventTime) {
+      if (marketEventTime < existing.marketEventTime) {
+        return null; // Reject out-of-order tick: cached ticker has newer provider timestamp
+      }
+      if (marketEventTime === existing.marketEventTime && livePrice === existing.price) {
+        return existing; // Duplicate payload: return existing without mutating
+      }
+    }
+
     const rawOpen = data.openPrice ?? data.o;
     const open = rawOpen !== undefined && rawOpen !== null ? parseFloat(rawOpen) : NaN;
     const rawHigh = data.highPrice ?? data.h;
@@ -403,15 +426,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const changePercent = rawChangePct !== undefined && rawChangePct !== null ? parseFloat(rawChangePct) : NaN;
     const rawChangeAmt = data.priceChange ?? data.p;
     const changeAmount = rawChangeAmt !== undefined && rawChangeAmt !== null ? parseFloat(rawChangeAmt) : NaN;
-    const now = Date.now();
 
-    const existing = this.tickers.get(sym);
-    let tickSize = 0.01;
+    let tickSize: number | undefined = undefined;
     try {
       const inst = getAuthoritativeInstrument(sym);
       if (inst && inst.tickSize) tickSize = inst.tickSize;
     } catch {
-      // Use standard default if instrument registry lookup fails without guessing arbitrary symbol logic
+      // Do not fabricate tickSize if metadata lookup fails
     }
 
     const updated: ILiveRealTicker = {
@@ -425,7 +446,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       prevClose: Number.isFinite(open) ? open : livePrice,
       changePercent: Number.isFinite(changePercent) ? changePercent : 0,
       changeAmount: Number.isFinite(changeAmount) ? changeAmount : 0,
-      tickSize,
+      tickSize: tickSize ?? existing?.tickSize ?? 0.01,
       volatility: existing?.volatility ?? 1.0,
       lastUpdated: now,
       provenance: 'LIVE_PROVIDER',

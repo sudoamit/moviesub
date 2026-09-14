@@ -4,9 +4,11 @@ import { PaperTradingService } from '../paper-trading.service';
 import { RealMarketStreamerService } from '../../market-data/real-market-streamer.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
-describe('AI FIX 140 — True PostgreSQL Concurrency Integration Test', () => {
+describe('AI FIX 141 — True PostgreSQL Concurrency & Idempotency Integration Test', () => {
   let prismaA: PrismaClient;
   let prismaB: PrismaClient;
+  let paperTradingA: PaperTradingService;
+  let paperTradingB: PaperTradingService;
   let serviceA: PaperPositionMonitorService;
   let serviceB: PaperPositionMonitorService;
 
@@ -21,32 +23,32 @@ describe('AI FIX 140 — True PostgreSQL Concurrency Integration Test', () => {
     await prismaA.$connect();
     await prismaB.$connect();
 
-    const mockPaperTradingService = {
-      calculateCharges: (turnover: number, isCrypto: boolean) => ({
-        totalCharges: 10.0,
-        brokerage: 5.0,
-        stt: 2.0,
-        exchangeTxnFee: 1.0,
-        gst: 1.0,
-        sebiCharges: 0.5,
-        stampDuty: 0.5,
-      }),
-    };
-
     const mockStreamer = {
       getValidatedTicker: () => null,
       updateTicker: () => {},
     };
 
+    paperTradingA = new PaperTradingService(
+      prismaA as unknown as PrismaService,
+      null as any,
+      mockStreamer as unknown as RealMarketStreamerService,
+    );
+
+    paperTradingB = new PaperTradingService(
+      prismaB as unknown as PrismaService,
+      null as any,
+      mockStreamer as unknown as RealMarketStreamerService,
+    );
+
     serviceA = new PaperPositionMonitorService(
       prismaA as unknown as PrismaService,
-      mockPaperTradingService as unknown as PaperTradingService,
+      paperTradingA,
       mockStreamer as unknown as RealMarketStreamerService,
     );
 
     serviceB = new PaperPositionMonitorService(
       prismaB as unknown as PrismaService,
-      mockPaperTradingService as unknown as PaperTradingService,
+      paperTradingB,
       mockStreamer as unknown as RealMarketStreamerService,
     );
   });
@@ -56,7 +58,7 @@ describe('AI FIX 140 — True PostgreSQL Concurrency Integration Test', () => {
     await prismaB.$disconnect();
   });
 
-  it('Requirement 6: True PostgreSQL Concurrency — concurrent TP1 scale-out produces exactly 1 order, 1 fill, and 1 accounting settlement via real P2002 constraint', async () => {
+  it('Requirement 3 & 8: True PostgreSQL Concurrency — concurrent TP1 scale-out produces exactly 1 order, 1 fill, and 1 accounting settlement via real P2002 constraint', async () => {
     const testId = `pg_conc_${Date.now()}`;
     const account = await prismaA.paperAccount.create({
       data: {
@@ -127,16 +129,65 @@ describe('AI FIX 140 — True PostgreSQL Concurrency Integration Test', () => {
       where: { id: account.id },
     });
     expect(updatedAccount).not.toBeNull();
-    const expectedPartialNetPnL = (52100 - 50000) * 92.0 * 5.0 - 10.0;
+    // 5 qty * (52100 - 50000) * 92.0 - exitCharges
+    const exitTurnover = 52100.0 * 5.0;
+    const exitCharges = paperTradingA.calculateCharges(exitTurnover, true);
+    const expectedPartialNetPnL = Number(((52100 - 50000) * 92.0 * 5.0 - exitCharges.totalCharges).toFixed(2));
+
     expect(Number(updatedAccount!.realizedPnL)).toBeCloseTo(expectedPartialNetPnL, 2);
     expect(Number(updatedAccount!.cashBalance) - 500000.0).toBeCloseTo(expectedPartialNetPnL, 2);
     expect(Number(updatedAccount!.usedMargin)).toBe(25000.0);
-    expect(Number(updatedAccount!.totalChargesPaid)).toBe(10.0);
+    expect(Number(updatedAccount!.totalChargesPaid)).toBeCloseTo(exitCharges.totalCharges, 2);
 
     // Clean up test data
     await prismaA.paperFill.deleteMany({ where: { orderId: orders[0].id } });
     await prismaA.paperOrder.deleteMany({ where: { id: orders[0].id } });
     await prismaA.paperPosition.delete({ where: { id: position.id } });
+    await prismaA.paperAccount.delete({ where: { id: account.id } });
+  });
+
+  it('Requirement 4 & 10: PostgreSQL PaperOrder.idempotencyKey UNIQUE constraint — raw duplicate insert throws P2002 exception directly from database', async () => {
+    const testId = `pg_uniq_${Date.now()}`;
+    const account = await prismaA.paperAccount.create({
+      data: {
+        name: `Postgres Uniq Constraint Account ${testId}`,
+        cashBalance: 100000.0,
+      },
+    });
+
+    const idempotencyKey = `raw_dup_${testId}`;
+
+    // First insert succeeds
+    await prismaA.paperOrder.create({
+      data: {
+        accountId: account.id,
+        symbol: 'BTCUSDT',
+        contractSymbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        orderType: 'MARKET',
+        requestedQuantity: 1.0,
+        idempotencyKey,
+        correlationId: `corr_${testId}`,
+      },
+    });
+
+    // Duplicate insert with identical idempotencyKey MUST fail with PostgreSQL P2002 error
+    await expect(
+      prismaA.paperOrder.create({
+        data: {
+          accountId: account.id,
+          symbol: 'BTCUSDT',
+          contractSymbol: 'BTCUSDT',
+          direction: 'BULLISH',
+          orderType: 'MARKET',
+          requestedQuantity: 1.0,
+          idempotencyKey,
+          correlationId: `corr_${testId}`,
+        },
+      }),
+    ).rejects.toThrow(/P2002/);
+
+    await prismaA.paperOrder.deleteMany({ where: { idempotencyKey } });
     await prismaA.paperAccount.delete({ where: { id: account.id } });
   });
 });
