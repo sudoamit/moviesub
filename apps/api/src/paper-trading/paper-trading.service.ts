@@ -185,7 +185,8 @@ export class PaperTradingService implements IExecutionProvider {
       try {
         const ticker = this.realMarketStreamer.getValidatedTicker(sym, maxAgeSeconds);
         if (ticker && ticker.price > 0) {
-          return { price: ticker.price, timestamp: new Date(ticker.lastUpdated) };
+          const ts = ticker.marketEventTime || ticker.lastUpdated || Date.now();
+          return { price: ticker.price, timestamp: new Date(ts) };
         }
       } catch (err) {
         // Streamer check failed or threw stale error
@@ -1469,19 +1470,15 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin for final leg (Exact cash parity without double-counting)
-      const canonicalCashImpact = pnlCalc
-        ? Number((pnlCalc.grossPnlAccount - finalExitCharges).toFixed(2))
-        : Number((finalGrossPnL - finalExitCharges).toFixed(2));
-
-      const canonicalNetPnLIncrement = pnlCalc ? canonicalRealizedPnL : finalNetPnL;
+      // 8. Update PaperAccount Balance & Release Margin for final leg (Incremental final-leg parity without double-counting TP1)
+      const finalLegNetPnLIncrement = Number((canonicalRealizedPnL - partialNetPnLTotal).toFixed(2));
 
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
-          cashBalance: { increment: canonicalCashImpact },
+          cashBalance: { increment: finalNetPnL },
           usedMargin: { decrement: Number(pos.usedMargin) },
-          realizedPnL: { increment: canonicalNetPnLIncrement },
+          realizedPnL: { increment: finalLegNetPnLIncrement },
           totalChargesPaid: { increment: finalExitCharges },
         },
       });
@@ -1531,14 +1528,14 @@ export class PaperTradingService implements IExecutionProvider {
     const account = await this.getOrCreateAccount();
 
     await this.prisma.$transaction(async (tx) => {
-      // Close all open positions
+      // Invalidate all open/partially closed positions on account reset without creating fake CLOSED journal entries
       await tx.paperPosition.updateMany({
         where: {
           accountId: account.id,
           status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
         },
         data: {
-          status: PositionState.CLOSED,
+          status: PositionState.INVALIDATED,
           closedAt: new Date(),
         },
       });

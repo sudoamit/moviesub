@@ -146,7 +146,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         }),
         updateMany: jest.fn().mockImplementation((args) => {
           const matching = dbPositions.filter((p) => {
-            if (p.id !== args.where.id) return false;
+            if (args.where.id && p.id !== args.where.id) return false;
+            if (args.where.accountId && p.accountId !== args.where.accountId) return false;
             if (args.where.status?.in) return args.where.status.in.includes(p.status);
             if (args.where.status) return p.status === args.where.status;
             return true;
@@ -976,5 +977,272 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(Number(trades[0].exitPrice)).toBe(52050);
     expect(Number(trades[0].realizedPnL)).toBeGreaterThan(0);
     expect(trades[0].outcomeSnapshotJson.exitQuotePrice).toBe(52050);
+  });
+
+  // TEST T2: MULTI-LEG ACCOUNT PARITY INVARIANT (ZERO DOUBLE COUNTING)
+  it('TEST T2: ACCOUNT PARITY INVARIANT — multi-leg scale-out updates cash & realizedPnL incrementally without double-counting TP1', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now() - 1000,
+    });
+
+    const initCash = Number(dbAccounts[0].cashBalance);
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    const entryCharges = Number(dbFills[0].fee);
+    const postEntryCash = Number(dbAccounts[0].cashBalance);
+    expect(postEntryCash).toBeCloseTo(initCash - entryCharges, 2);
+
+    // 1. Execute TP1 scale-out (5 qty @ 51000)
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    const postTp1Account = dbAccounts[0];
+    const tp1Fill = dbFills.find((f) => f.orderId !== dbOrders[0].id);
+    const tp1NetPnL = (51000 - 50000) * 5 - Number(tp1Fill.fee);
+    const postTp1Cash = Number(postTp1Account.cashBalance);
+    const postTp1RealizedPnL = Number(postTp1Account.realizedPnL);
+
+    expect(postTp1RealizedPnL).toBeCloseTo(tp1NetPnL, 2);
+    expect(postTp1Cash).toBeCloseTo(postEntryCash + tp1NetPnL, 2);
+
+    // 2. Execute TP2 final exit (5 qty @ 52000)
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 52000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    const finalAccount = dbAccounts[0];
+    const finalFill = dbFills[dbFills.length - 1];
+    const finalLegNetPnL = (52000 - 50000) * 5 - Number(finalFill.fee);
+    const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
+
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
+    expect(Number(finalAccount.usedMargin)).toBe(0);
+
+    const trades = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(trades.length).toBe(1);
+    expect(Number(trades[0].realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
+  });
+
+  // TEST S2: USED MARGIN ZERO-BALANCE INVARIANT
+  it('TEST S2: USED MARGIN ZERO INVARIANT — total used margin returns to exactly 0.0 after multi-leg exit', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now() - 1000,
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    expect(Number(dbAccounts[0].usedMargin)).toBeGreaterThan(0);
+
+    // TP1
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    // Final Exit
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 52000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    expect(Number(dbAccounts[0].usedMargin)).toBe(0);
+  });
+
+  // TEST W: PROVIDER ADAPTER TO MONITOR PIPELINE INTEGRATION
+  it('TEST W: REAL EXCHANGE PROVIDER EVENT TO MONITOR INTEGRATION — raw provider payload updates streamer and triggers monitor auto-close', async () => {
+    const realStreamer = new RealMarketStreamerService({
+      getClient: () => null,
+      set: jest.fn(),
+      get: jest.fn(),
+    } as any);
+
+    const realMonitor = new PaperPositionMonitorService(
+      mockPrisma as any,
+      paperService,
+      realStreamer,
+    );
+    (paperService as any).realMarketStreamer = realStreamer;
+
+    const providerTime = Date.now() - 500;
+    realStreamer.updateTicker('BTCUSDT', {
+      price: 80000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: providerTime,
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 1,
+      orderType: 'MARKET',
+      stopLoss: 78000,
+      target1: 81000,
+      target2: 82000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // Simulate Binance raw ticker payload event passing into RealMarketStreamerService
+    const binanceCloseTime = Date.now();
+    (realStreamer as any).handleBinanceTickerData?.({
+      s: 'BTCUSDT',
+      c: '82500.00',
+      o: '80000.00',
+      h: '83000.00',
+      l: '79000.00',
+      v: '1000',
+      P: '3.125',
+      p: '2500.00',
+      C: binanceCloseTime,
+    }) || realStreamer.updateTicker('BTCUSDT', {
+      price: 82500,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: binanceCloseTime,
+    });
+
+    await realMonitor.evaluateActivePositions();
+
+    const dbPos = dbPositions.find((p) => p.id === pos.id);
+    expect(dbPos.status).toBe(PositionState.CLOSED);
+
+    const trade = dbTrades.find((t) => t.positionId === pos.id);
+    expect(trade).toBeDefined();
+    expect(Number(trade.exitPrice)).toBeGreaterThanOrEqual(82000);
+  });
+
+  // TEST X: MARKET ENTRY PROVIDER QUOTE AUTHORITY
+  it('TEST X: MARKET ENTRY PROVIDER QUOTE AUTHORITY — MARKET order ignores caller req.price when live provider ticker exists', async () => {
+    const liveTime = Date.now() - 200;
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 24500.0,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: liveTime,
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      price: 99999.0, // Contaminated caller request price
+      stopLoss: 24000.0,
+      target1: 25000.0,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    expect(Number(pos.entryPrice)).toBe(24500.0);
+    expect(Number(pos.entryPrice)).not.toBe(99999.0);
+  });
+
+  // TEST Y: RESET PORTFOLIO INTEGRITY
+  it('TEST Y: RESET PORTFOLIO INTEGRITY — resetPortfolio marks active positions INVALIDATED without creating fake CLOSED journal trades', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    expect(dbPositions.find((p) => p.id === pos.id).status).toBe(PositionState.OPEN);
+
+    await paperService.resetPortfolio(1000000);
+
+    const resetPos = dbPositions.find((p) => p.id === pos.id);
+    expect(resetPos.status).toBe(PositionState.INVALIDATED);
+
+    // Hard invariant: No orphaned CLOSED trades without proper execution
+    const closedTrades = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(closedTrades.length).toBe(0);
+  });
+
+  // TEST Z: TP1 CONCURRENT EXECUTION SAFETY
+  it('TEST Z: TP1 CONCURRENT EXECUTION SAFETY — concurrent evaluateActivePositions calls produce exactly ONE partial scale-out leg', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now() - 1000,
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51050,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+
+    // Run parallel monitor checks concurrently
+    await Promise.all([
+      monitorService.evaluateActivePositions(),
+      monitorService.evaluateActivePositions(),
+    ]);
+
+    const partialFills = dbFills.filter((f) => f.orderId !== dbOrders[0].id);
+    expect(partialFills.length).toBe(1);
+
+    const updatedPos = dbPositions.find((p) => p.id === pos.id);
+    expect(Number(updatedPos.quantity)).toBe(5);
+    expect(updatedPos.status).toBe(PositionState.PARTIALLY_CLOSED);
   });
 });

@@ -309,6 +309,11 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     });
 
     await this.prisma.$transaction(async (tx) => {
+      const existingTxOrder = await tx.paperOrder.findUnique({
+        where: { idempotencyKey },
+      });
+      if (existingTxOrder) return;
+
       const updated = await tx.paperPosition.updateMany({
         where: {
           id: pos.id,
