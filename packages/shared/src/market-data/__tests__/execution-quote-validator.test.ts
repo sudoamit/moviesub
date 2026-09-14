@@ -1,7 +1,6 @@
 import {
   validateExecutionQuoteTimestamp,
   validateAuthoritativeExecutionQuote,
-  createCanonicalOptionQuoteRecord,
   getCanonicalSigningSecret,
   parseAndValidateRedisOptionQuote,
   isProviderExecutionHealthy,
@@ -11,30 +10,53 @@ import {
   DEFAULT_MAX_AGE_MS,
   CANONICAL_OPTION_QUOTE_SCHEMA,
   CANONICAL_WRITER_ORIGIN,
-  ValidatedCanonicalOptionProviderTick,
 } from '../execution-quote-validator';
+import {
+  createCanonicalOptionQuoteRecord,
+  isProviderConnectionIdUuid,
+  mintProviderConnectionIdentity,
+  NSE_STREAM_OPTION_PROVIDER_ADAPTER,
+  ValidatedCanonicalOptionProviderTick,
+} from '../option-provider';
 
 describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () => {
   const now = 1700000000000;
   const providerInstanceId = 'api-test-instance-1';
-  const providerConnectionId = 'api-test-instance-1:epoch:5';
+  const providerConnectionId = '6d0881dc-7eaf-4b7c-9f71-86e0172954ce';
 
   beforeEach(() => {
     setCanonicalSigningSecret('test-canonical-option-quote-secret');
   });
 
-  function makeValidatedTick(overrides: Partial<Parameters<typeof ValidatedCanonicalOptionProviderTick.fromProviderEvent>[0]> = {}) {
-    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
-      contractSymbol: 'NIFTY24SEP25000CE',
-      price: 150.0,
-      marketEventTime: Date.now() - 500,
-      providerId: 'NSE_DIRECT',
-      connectionEpoch: 5,
-      providerInstanceId,
-      providerConnectionId,
-      providerTransport: 'WEBSOCKET_STREAM',
-      ...overrides,
-    });
+  function makeValidatedTick(overrides: {
+    contractSymbol?: string;
+    price?: number;
+    marketEventTime?: number;
+    providerId?: string;
+    connectionEpoch?: number;
+    providerInstanceId?: string;
+    providerConnectionId?: string;
+    providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
+  } = {}) {
+    const providerId = overrides.providerId ?? NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId;
+    const providerTransport = overrides.providerTransport ?? NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport;
+    const connectionEpoch = overrides.connectionEpoch ?? 5;
+    return NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+      {
+        providerId,
+        providerTransport,
+        providerSymbol: overrides.contractSymbol ?? 'NIFTY24SEP25000CE',
+        price: overrides.price ?? 150.0,
+        providerEventTime: overrides.marketEventTime ?? Date.now() - 500,
+        connectionEpoch,
+      },
+      mintProviderConnectionIdentity({
+        providerId,
+        providerInstanceId: overrides.providerInstanceId ?? providerInstanceId,
+        providerConnectionId: overrides.providerConnectionId ?? providerConnectionId,
+        connectionEpoch,
+      }),
+    );
   }
 
   describe('1. Future-Skew & Timestamp Validation Everywhere', () => {
@@ -286,7 +308,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         contractSymbol: contract,
         price: 150.0,
         provenance: 'LIVE_PROVIDER',
-        providerId: 'NSE_DIRECT',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
         connectionEpoch: epoch,
         providerInstanceId,
         providerConnectionId,
@@ -307,7 +329,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       expect(res.quote?.provenance).toBe('LIVE_PROVIDER');
       expect(res.quote?.price).toBe(150.0);
       expect(res.quote?.connectionEpoch).toBe(epoch);
-      expect(res.quote?.providerId).toBe('NSE_DIRECT');
+      expect(res.quote?.providerId).toBe(NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId);
       expect(res.quote?.providerInstanceId).toBe(providerInstanceId);
       expect(res.quote?.providerConnectionId).toBe(providerConnectionId);
       expect(res.quote?.providerTransport).toBe('WEBSOCKET_STREAM');
@@ -317,7 +339,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       const record = createCanonicalOptionQuoteRecord(makeValidatedTick({
         contractSymbol: contract,
         connectionEpoch: epoch - 1,
-        providerConnectionId: 'api-test-instance-1:epoch:4',
+        providerConnectionId: '13730d53-a482-43ce-8384-b97e7fbdb111',
       }));
 
       const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now());
@@ -370,7 +392,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       for (const patch of [
         { providerId: 'ATTACKER_PROVIDER' },
         { providerInstanceId: 'other-api-instance' },
-        { providerConnectionId: 'other-api-instance:epoch:5' },
+        { providerConnectionId: '32b38a0e-3773-4758-b16c-21af4e8bdc76' },
         { contractSymbol: 'NIFTY24SEP26000CE' },
         { price: 151.0 },
         { marketEventTime: Date.now() - 250 },
@@ -388,12 +410,52 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         contractSymbol: contract,
         price: 150.0,
         marketEventTime: now - 500,
-        providerId: 'NSE_DIRECT',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
         connectionEpoch: epoch,
         providerInstanceId,
         providerConnectionId,
         providerTransport: 'WEBSOCKET_STREAM',
       } as any)).toThrow(/validated provider-origin tick/);
+    });
+
+    it('cannot fabricate a branded provider tick with constructor tricks or structural objects', () => {
+      const validInput = makeValidatedTick().toRecordInput();
+
+      // @ts-expect-error constructor is private to the provider adapter module.
+      const compileTimeFabricationCheck = () => new ValidatedCanonicalOptionProviderTick(Symbol('fake'), validInput);
+      expect(compileTimeFabricationCheck).toBeDefined();
+      expect((ValidatedCanonicalOptionProviderTick as any).fromProviderEvent).toBeUndefined();
+      expect(() => new (ValidatedCanonicalOptionProviderTick as any)(Symbol('fake'), validInput))
+        .toThrow(/cannot be constructed outside/);
+
+      const structuralClone = {
+        contractSymbol: contract,
+        toRecordInput: () => validInput,
+      };
+      expect(() => createCanonicalOptionQuoteRecord(structuralClone as any))
+        .toThrow(/validated provider-origin tick/);
+
+      const authentic = makeValidatedTick({ contractSymbol: contract });
+      expect(Object.isFrozen(authentic)).toBe(true);
+      expect(Object.isFrozen(authentic.toRecordInput())).toBe(true);
+      expect(() => ((authentic.toRecordInput() as any).price = 999)).toThrow();
+    });
+
+    it('mints UUID provider connection ids instead of instance-plus-epoch strings', () => {
+      const first = mintProviderConnectionIdentity({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerInstanceId,
+        connectionEpoch: epoch,
+      });
+      const second = mintProviderConnectionIdentity({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerInstanceId,
+        connectionEpoch: epoch,
+      });
+
+      expect(isProviderConnectionIdUuid(first.providerConnectionId)).toBe(true);
+      expect(isProviderConnectionIdUuid(second.providerConnectionId)).toBe(true);
+      expect(first.providerConnectionId).not.toBe(second.providerConnectionId);
     });
 
     it('uses only CANONICAL_OPTION_QUOTE_SECRET and does not fall back to JWT/session secrets', () => {

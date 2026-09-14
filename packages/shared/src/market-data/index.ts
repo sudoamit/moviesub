@@ -10,3 +10,4 @@ export * from './chart-candle-adapter';
 export * from './venue-session-calendar';
 export * from './provider-sequence-capability';
 export * from './execution-quote-validator';
+export * from './option-provider';

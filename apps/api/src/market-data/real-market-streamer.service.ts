@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { RedisService } from '../common/redis/redis.service';
 import {
   WS_EVENTS,
@@ -8,6 +9,10 @@ import {
   validateExecutionQuoteTimestamp,
   createCanonicalOptionQuoteRecord,
   ICanonicalOptionQuoteRecord,
+  isValidatedCanonicalOptionProviderTick,
+  mintProviderConnectionIdentity,
+  NSE_REST_OPTION_PROVIDER_ADAPTER,
+  NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   ValidatedCanonicalOptionProviderTick,
 } from '@quant/shared';
 
@@ -462,14 +467,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private providerConnectionEpoch: number = 1;
   private readonly providerInstanceId: string =
     process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
-    `api-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
-  private providerConnectionId: string = this.createProviderConnectionId(1);
+    `api-${process.pid}-${crypto.randomUUID()}`;
+  private providerConnectionId: string = crypto.randomUUID();
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
-
-  private createProviderConnectionId(epoch: number): string {
-    return `${this.providerInstanceId}:epoch:${epoch}`;
-  }
 
   public getProviderState(): ProviderConnectionState {
     return this.providerState;
@@ -542,7 +543,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       this.reconnectedAt = Date.now();
       // Exactly ONE new connection epoch is minted for the new provider connection lifecycle
       this.providerConnectionEpoch++;
-      this.providerConnectionId = this.createProviderConnectionId(this.providerConnectionEpoch);
+      this.providerConnectionId = crypto.randomUUID();
       this.freshSymbolsAfterReconnect.clear();
       this.logger.log(`Market data provider reconnected. Exactly one new connection epoch assigned: ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
     }
@@ -846,14 +847,33 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): ValidatedCanonicalOptionProviderTick {
-    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
-      ...params,
-      providerId: 'NSE_STREAM_GATEWAY',
-      connectionEpoch: this.providerConnectionEpoch,
-      providerInstanceId: this.providerInstanceId,
-      providerConnectionId: this.providerConnectionId,
-      providerTransport: 'WEBSOCKET_STREAM',
-    });
+    return NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+      {
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+        providerSymbol: params.contractSymbol,
+        price: params.price,
+        providerEventTime: params.marketEventTime,
+        connectionEpoch: this.providerConnectionEpoch,
+        open: params.open,
+        high: params.high,
+        low: params.low,
+        close: params.close,
+        volume: params.volume,
+        prevClose: params.prevClose,
+        changePercent: params.changePercent,
+        changeAmount: params.changeAmount,
+        volatility: params.volatility,
+        tickSize: params.tickSize,
+        sequence: params.sequence,
+      },
+      mintProviderConnectionIdentity({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerInstanceId: this.providerInstanceId,
+        providerConnectionId: this.providerConnectionId,
+        connectionEpoch: this.providerConnectionEpoch,
+      }),
+    );
   }
 
   private createValidatedOptionProviderTickFromNseRest(params: {
@@ -872,14 +892,33 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): ValidatedCanonicalOptionProviderTick {
-    return ValidatedCanonicalOptionProviderTick.fromProviderEvent({
-      ...params,
-      providerId: 'NSE_YAHOO_REST',
-      connectionEpoch: this.providerConnectionEpoch,
-      providerInstanceId: this.providerInstanceId,
-      providerConnectionId: this.providerConnectionId,
-      providerTransport: 'REST_POLLING',
-    });
+    return NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+      {
+        providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: NSE_REST_OPTION_PROVIDER_ADAPTER.providerTransport,
+        providerSymbol: params.contractSymbol,
+        price: params.price,
+        providerEventTime: params.marketEventTime,
+        connectionEpoch: this.providerConnectionEpoch,
+        open: params.open,
+        high: params.high,
+        low: params.low,
+        close: params.close,
+        volume: params.volume,
+        prevClose: params.prevClose,
+        changePercent: params.changePercent,
+        changeAmount: params.changeAmount,
+        volatility: params.volatility,
+        tickSize: params.tickSize,
+        sequence: params.sequence,
+      },
+      mintProviderConnectionIdentity({
+        providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId,
+        providerInstanceId: this.providerInstanceId,
+        providerConnectionId: this.providerConnectionId,
+        connectionEpoch: this.providerConnectionEpoch,
+      }),
+    );
   }
 
   public async publishNseStreamCanonicalOptionQuote(params: {
@@ -923,7 +962,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private async publishCanonicalOptionQuote(
     providerTick: ValidatedCanonicalOptionProviderTick,
   ): Promise<ICanonicalOptionQuoteRecord | null> {
-    if (!(providerTick instanceof ValidatedCanonicalOptionProviderTick)) {
+    if (!isValidatedCanonicalOptionProviderTick(providerTick)) {
       throw new Error('Canonical option quote publication requires a validated provider-origin tick');
     }
 

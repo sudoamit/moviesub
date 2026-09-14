@@ -34,6 +34,12 @@ export function getCanonicalSigningSecret(): string {
   );
 }
 
+/**
+ * HMAC over exactly the execution-authoritative Redis payload fields:
+ * contractSymbol, price, marketEventTime, connectionEpoch, providerId,
+ * providerInstanceId, providerConnectionId, providerTransport.
+ * Tampering with ANY of these invalidates the signature.
+ */
 export function computeCanonicalSignature(
   contractSymbol: string,
   price: number,
@@ -60,86 +66,16 @@ export function computeCanonicalSignature(
 }
 
 function timingSafeSignatureEqual(actual: unknown, expected: string): boolean {
-  if (typeof actual !== 'string' || !/^[a-f0-9]{64}$/i.test(actual) || !/^[a-f0-9]{64}$/i.test(expected)) {
+  if (
+    typeof actual !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(actual) ||
+    !/^[a-f0-9]{64}$/i.test(expected)
+  ) {
     return false;
   }
   const actualBuf = Buffer.from(actual, 'hex');
   const expectedBuf = Buffer.from(expected, 'hex');
   return actualBuf.length === expectedBuf.length && crypto.timingSafeEqual(actualBuf, expectedBuf);
-}
-
-export interface ICanonicalOptionProviderTickInput {
-  contractSymbol: string;
-  price: number;
-  marketEventTime: number;
-  providerId: string;
-  connectionEpoch: number;
-  providerInstanceId: string;
-  providerConnectionId: string;
-  providerTransport: CanonicalProviderTransport;
-  observedAt?: number;
-  receivedAt?: number;
-  sequence?: number;
-  open?: number;
-  high?: number;
-  low?: number;
-  close?: number;
-  volume?: number;
-  prevClose?: number;
-  changePercent?: number;
-  changeAmount?: number;
-  volatility?: number;
-  tickSize?: number;
-}
-
-export class ValidatedCanonicalOptionProviderTick {
-  private readonly canonicalProviderTickBrand = true;
-  private constructor(private readonly input: ICanonicalOptionProviderTickInput) {}
-
-  public static fromProviderEvent(input: ICanonicalOptionProviderTickInput): ValidatedCanonicalOptionProviderTick {
-    validateCanonicalProviderTickInput(input);
-    return new ValidatedCanonicalOptionProviderTick({
-      ...input,
-      contractSymbol: input.contractSymbol.toUpperCase(),
-      providerId: input.providerId.trim(),
-      providerInstanceId: input.providerInstanceId.trim(),
-      providerConnectionId: input.providerConnectionId.trim(),
-    });
-  }
-
-  public toRecordInput(): ICanonicalOptionProviderTickInput {
-    return { ...this.input };
-  }
-}
-
-function validateCanonicalProviderTickInput(input: ICanonicalOptionProviderTickInput): void {
-  if (!input.contractSymbol || typeof input.contractSymbol !== 'string') {
-    throw new Error('Canonical option quote requires valid contractSymbol');
-  }
-  if (typeof input.price !== 'number' || !Number.isFinite(input.price) || input.price <= 0) {
-    throw new Error(`Canonical option quote requires positive finite price, got: ${input.price}`);
-  }
-  if (!input.providerId || typeof input.providerId !== 'string' || input.providerId.trim().length === 0) {
-    throw new Error('Canonical option quote requires non-empty authenticated providerId');
-  }
-  if (typeof input.connectionEpoch !== 'number' || !Number.isFinite(input.connectionEpoch) || input.connectionEpoch <= 0) {
-    throw new Error(`Canonical option quote requires positive connectionEpoch, got: ${input.connectionEpoch}`);
-  }
-  if (!input.providerInstanceId || typeof input.providerInstanceId !== 'string' || input.providerInstanceId.trim().length === 0) {
-    throw new Error('Canonical option quote requires non-empty providerInstanceId');
-  }
-  if (!input.providerConnectionId || typeof input.providerConnectionId !== 'string' || input.providerConnectionId.trim().length === 0) {
-    throw new Error('Canonical option quote requires non-empty providerConnectionId');
-  }
-  if (input.providerTransport !== 'WEBSOCKET_STREAM' && input.providerTransport !== 'REST_POLLING') {
-    throw new Error(`Canonical option quote requires explicit providerTransport, got: ${input.providerTransport}`);
-  }
-
-  const now = Date.now();
-  const tsValidation = validateExecutionQuoteTimestamp(input.marketEventTime, now);
-  if (!tsValidation.valid) {
-    throw new Error(`Canonical option quote timestamp rejected: ${tsValidation.reason}`);
-  }
 }
 
 export interface ICanonicalOptionQuoteRecord {
@@ -168,57 +104,6 @@ export interface ICanonicalOptionQuoteRecord {
   changeAmount?: number;
   volatility?: number;
   tickSize?: number;
-}
-
-export function createCanonicalOptionQuoteRecord(
-  providerTick: ValidatedCanonicalOptionProviderTick,
-): ICanonicalOptionQuoteRecord {
-  if (!(providerTick instanceof ValidatedCanonicalOptionProviderTick)) {
-    throw new Error('Canonical option quote requires a validated provider-origin tick');
-  }
-
-  const params = providerTick.toRecordInput();
-  validateCanonicalProviderTickInput(params);
-  const now = Date.now();
-
-  const signatureToken = computeCanonicalSignature(
-    params.contractSymbol.toUpperCase(),
-    params.price,
-    params.marketEventTime,
-    params.connectionEpoch,
-    params.providerId,
-    params.providerInstanceId,
-    params.providerConnectionId,
-    params.providerTransport,
-  );
-
-  return {
-    schemaVersion: CANONICAL_OPTION_QUOTE_SCHEMA,
-    writerOrigin: CANONICAL_WRITER_ORIGIN,
-    contractSymbol: params.contractSymbol.toUpperCase(),
-    price: params.price,
-    marketEventTime: params.marketEventTime,
-    observedAt: params.observedAt ?? now,
-    receivedAt: params.receivedAt ?? now,
-    providerId: params.providerId,
-    connectionEpoch: params.connectionEpoch,
-    providerInstanceId: params.providerInstanceId,
-    providerConnectionId: params.providerConnectionId,
-    providerTransport: params.providerTransport,
-    provenance: 'LIVE_PROVIDER',
-    sequence: params.sequence,
-    signatureToken,
-    open: params.open,
-    high: params.high,
-    low: params.low,
-    close: params.close,
-    volume: params.volume,
-    prevClose: params.prevClose,
-    changePercent: params.changePercent,
-    changeAmount: params.changeAmount,
-    volatility: params.volatility,
-    tickSize: params.tickSize,
-  };
 }
 
 export type ProviderConnectionState = 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'RECONNECTED';

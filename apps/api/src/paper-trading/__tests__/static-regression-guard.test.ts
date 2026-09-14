@@ -203,7 +203,9 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/public async publishCanonicalOptionQuote/);
     expect(streamerContent).not.toMatch(/providerId\s*:\s*params\.providerId/);
     expect(streamerContent).not.toMatch(/providerId\s*=\s*params\.providerId/);
-    expect(streamerContent).toContain("providerId: 'NSE_STREAM_GATEWAY'");
-    expect(streamerContent).toContain("providerId: 'NSE_YAHOO_REST'");
+    expect(streamerContent).toContain('NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+    expect(streamerContent).toContain('NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+    expect(streamerContent).toContain('providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId');
+    expect(streamerContent).toContain('providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId');
   });
 });

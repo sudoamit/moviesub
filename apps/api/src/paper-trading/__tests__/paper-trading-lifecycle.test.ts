@@ -12,8 +12,9 @@ import {
   StaleMarketDataError,
   PointInTimeCurrencyConverter,
   createCanonicalOptionQuoteRecord,
+  mintProviderConnectionIdentity,
+  NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   setCanonicalSigningSecret,
-  ValidatedCanonicalOptionProviderTick,
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
@@ -3658,17 +3659,25 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const providerInstanceId = realStreamer.getProviderInstanceId();
       const providerConnectionId = realStreamer.getProviderConnectionId();
 
-      const makeValidatedTick = (overrides: any = {}) => ValidatedCanonicalOptionProviderTick.fromProviderEvent({
-        contractSymbol: 'NIFTY26SEP24500CE',
-        price: 160.0,
-        marketEventTime: Date.now() - 200,
-        providerId: 'NSE_DIRECT',
-        connectionEpoch: activeEpoch,
-        providerInstanceId,
-        providerConnectionId,
-        providerTransport: 'WEBSOCKET_STREAM',
-        ...overrides,
-      });
+      const makeValidatedTick = (overrides: any = {}) => {
+        const connectionEpoch = overrides.connectionEpoch ?? activeEpoch;
+        return NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+          {
+            providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+            providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+            providerSymbol: overrides.contractSymbol ?? 'NIFTY26SEP24500CE',
+            price: overrides.price ?? 160.0,
+            providerEventTime: overrides.marketEventTime ?? Date.now() - 200,
+            connectionEpoch,
+          },
+          mintProviderConnectionIdentity({
+            providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+            providerInstanceId: overrides.providerInstanceId ?? providerInstanceId,
+            providerConnectionId: overrides.providerConnectionId ?? providerConnectionId,
+            connectionEpoch,
+          }),
+        );
+      };
 
       const mockRedisClient = {
         get: jest.fn(),
@@ -3715,7 +3724,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         JSON.stringify({
           price: 160.0,
           provenance: 'LIVE_PROVIDER',
-          providerId: 'NSE_DIRECT',
+          providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
           connectionEpoch: activeEpoch,
           marketEventTime: Date.now(),
         }),
@@ -3733,7 +3742,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(authQuote).toBeDefined();
       expect(authQuote.price).toBe(160.0);
       expect(authQuote.provenance).toBe('LIVE_PROVIDER');
-      expect(authQuote.providerId).toBe('NSE_DIRECT');
+      expect(authQuote.providerId).toBe(NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId);
       expect(authQuote.connectionEpoch).toBe(activeEpoch);
 
       // 4. Provider reconnects: exactly one new epoch is assigned
@@ -3871,6 +3880,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       const contract = 'NIFTY24OCT25000PE';
       const now = Date.now();
+      const firstConnectionId = realStreamer.getProviderConnectionId();
 
       // 1. Canonical provider ingestion publishes authentic option quote
       const published = await realStreamer.publishNseStreamCanonicalOptionQuote({
@@ -3900,6 +3910,54 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(retrievedQuote.providerConnectionId).toBe(realStreamer.getProviderConnectionId());
       expect(retrievedQuote.providerInstanceId).toBe(realStreamer.getProviderInstanceId());
 
+      const publicationCount = () => mockRedisClient.set.mock.calls.length;
+      const beforeDisconnected = publicationCount();
+      realStreamer.handleProviderDisconnect('Writer gate test');
+      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
+        contractSymbol: 'NIFTY24OCT25100PE',
+        price: 211.0,
+        marketEventTime: Date.now() - 100,
+      })).resolves.toBeNull();
+      expect(publicationCount()).toBe(beforeDisconnected);
+
+      realStreamer.handleProviderReconnecting();
+      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
+        contractSymbol: 'NIFTY24OCT25200PE',
+        price: 212.0,
+        marketEventTime: Date.now() - 100,
+      })).resolves.toBeNull();
+      expect(publicationCount()).toBe(beforeDisconnected);
+
+      realStreamer.handleProviderReconnect();
+      const freshEpoch = realStreamer.getConnectionEpoch();
+      const oldConnectionTick = NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+        {
+          providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+          providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+          providerSymbol: 'NIFTY24OCT25300PE',
+          price: 213.0,
+          providerEventTime: Date.now() - 100,
+          connectionEpoch: freshEpoch,
+        },
+        mintProviderConnectionIdentity({
+          providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+          providerInstanceId: realStreamer.getProviderInstanceId(),
+          providerConnectionId: firstConnectionId,
+          connectionEpoch: freshEpoch,
+        }),
+      );
+      await expect((realStreamer as any).publishCanonicalOptionQuote(oldConnectionTick))
+        .resolves.toBeNull();
+      expect(publicationCount()).toBe(beforeDisconnected);
+
+      const freshPublication = await realStreamer.publishNseStreamCanonicalOptionQuote({
+        contractSymbol: 'NIFTY24OCT25400PE',
+        price: 214.0,
+        marketEventTime: Date.now() - 100,
+      });
+      expect(freshPublication).toBeDefined();
+      expect(publicationCount()).toBe(beforeDisconnected + 1);
+
       // 3. Round-trip fails when payload signature is tampered/forged
       const storedJson = JSON.parse(redisStore[`option:ltp:${contract}`]);
       storedJson.price = 999.0; // Tamper price without regenerating cryptographic signature
@@ -3928,20 +3986,28 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         contractSymbol: contract,
         price: 999.0,
         marketEventTime: Date.now() - 100,
-        providerId: 'NSE_DIRECT',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
       })).rejects.toThrow(/validated provider-origin tick/);
 
       // 7. Production path rejects same numeric epoch from a different provider connection identity
-      const wrongConnectionRecord = createCanonicalOptionQuoteRecord(ValidatedCanonicalOptionProviderTick.fromProviderEvent({
-        contractSymbol: contract,
-        price: 214.0,
-        marketEventTime: Date.now() - 100,
-        providerId: 'NSE_STREAM_GATEWAY',
-        connectionEpoch: realStreamer.getConnectionEpoch(),
-        providerInstanceId: 'other-api-instance',
-        providerConnectionId: 'other-api-instance:epoch:1',
-        providerTransport: 'WEBSOCKET_STREAM',
-      }));
+      const wrongConnectionRecord = createCanonicalOptionQuoteRecord(
+        NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+          {
+            providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+            providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+            providerSymbol: contract,
+            price: 214.0,
+            providerEventTime: Date.now() - 100,
+            connectionEpoch: realStreamer.getConnectionEpoch(),
+          },
+          mintProviderConnectionIdentity({
+            providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+            providerInstanceId: 'other-api-instance',
+            providerConnectionId: 'c68efdf2-9886-4f57-9294-676028449a50',
+            connectionEpoch: realStreamer.getConnectionEpoch(),
+          }),
+        ),
+      );
       redisStore[`option:ltp:${contract}`] = JSON.stringify(wrongConnectionRecord);
       const wrongConnectionQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(wrongConnectionQuote.provenance).toBe('DEGRADED');
