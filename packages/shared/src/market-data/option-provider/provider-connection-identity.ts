@@ -4,10 +4,9 @@ import * as crypto from 'crypto';
  * AI FIX 156 — Provider connection identity authority.
  *
  * A ProviderConnectionIdentity is a branded, immutable descriptor of one concrete
- * provider connection lifecycle. It can only be minted through
- * `mintProviderConnectionIdentity`, which assigns a fresh RFC-4122 UUID
- * `providerConnectionId` per actual provider connection — never a derived
- * `instance:epoch` string.
+ * provider connection lifecycle. It can only be minted by the provider-adapter
+ * trust boundary, which assigns a fresh RFC-4122 UUID `providerConnectionId` per
+ * actual provider connection — never a derived `instance:epoch` string.
  */
 
 const BRANDED_PROVIDER_CONNECTION_IDENTITIES = new WeakSet<object>();
@@ -25,7 +24,6 @@ export interface IProviderConnectionIdentityInit {
   readonly providerId: string;
   readonly providerInstanceId: string;
   readonly connectionEpoch: number;
-  readonly providerConnectionId?: string;
 }
 
 interface ISealedProviderConnectionIdentityConstructor {
@@ -41,7 +39,7 @@ export class ProviderConnectionIdentity {
   private constructor(seal: symbol, init: IProviderConnectionIdentityInit) {
     if (seal !== CONNECTION_IDENTITY_CREATION_SEAL) {
       throw new Error(
-        '[UNBRANDED_CONNECTION_IDENTITY_REJECTED] ProviderConnectionIdentity cannot be constructed outside mintProviderConnectionIdentity()',
+        '[UNBRANDED_CONNECTION_IDENTITY_REJECTED] ProviderConnectionIdentity cannot be constructed outside the provider adapter trust boundary',
       );
     }
 
@@ -66,7 +64,7 @@ export class ProviderConnectionIdentity {
       );
     }
 
-    const providerConnectionId = init.providerConnectionId ?? crypto.randomUUID();
+    const providerConnectionId = crypto.randomUUID();
     if (!isProviderConnectionIdUuid(providerConnectionId)) {
       throw new Error(
         `ProviderConnectionIdentity requires a unique UUID providerConnectionId, got: ${providerConnectionId}`,
@@ -86,7 +84,7 @@ export class ProviderConnectionIdentity {
 const SealedProviderConnectionIdentity =
   ProviderConnectionIdentity as unknown as ISealedProviderConnectionIdentityConstructor;
 
-export function mintProviderConnectionIdentity(
+export function mintProviderConnectionIdentityForAdapter(
   init: IProviderConnectionIdentityInit,
 ): ProviderConnectionIdentity {
   return new SealedProviderConnectionIdentity(CONNECTION_IDENTITY_CREATION_SEAL, init);

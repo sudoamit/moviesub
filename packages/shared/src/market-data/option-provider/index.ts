@@ -10,7 +10,12 @@
  * The provider-specific adapters are the only public entry point for turning a real
  * provider event into a canonical execution tick.
  */
-export * from './provider-connection-identity';
+export {
+  isProviderConnectionIdUuid,
+  isProviderConnectionIdentity,
+  ProviderConnectionIdentity,
+  IProviderConnectionIdentityInit,
+} from './provider-connection-identity';
 export * from './raw-option-provider-event';
 export * from './option-provider-validators';
 export * from './canonical-option-provider-tick';

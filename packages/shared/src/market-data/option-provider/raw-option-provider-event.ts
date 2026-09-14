@@ -9,18 +9,18 @@ import { CanonicalProviderTransport } from '../execution-quote-validator';
  * `ValidatedOptionProviderEvent` by a provider-specific validator.
  */
 export interface RawOptionProviderEvent {
-  /** Provider identity that MUST match the validating adapter's declared providerId. */
-  readonly providerId: string;
-  /** Transport that MUST match the validating adapter's declared transport. */
-  readonly providerTransport: CanonicalProviderTransport;
+  /** Optional raw claim. If present and mismatched, provider validators reject it. */
+  readonly providerId?: string;
+  /** Optional raw claim. If present and mismatched, provider validators reject it. */
+  readonly providerTransport?: CanonicalProviderTransport;
   /** Raw contract/symbol string exactly as delivered by the provider. */
   readonly providerSymbol: string;
   /** Raw price exactly as delivered (providers may deliver numeric strings). */
   readonly price: number | string;
   /** Raw provider event time (epoch ms, numeric string, or Date). */
   readonly providerEventTime: number | string | Date;
-  /** Provider connection epoch claimed by the ingestion path. */
-  readonly connectionEpoch: number;
+  /** Raw epoch claims are ignored for authority and rejected when malformed. */
+  readonly connectionEpoch?: number;
   readonly open?: number | string;
   readonly high?: number | string;
   readonly low?: number | string;

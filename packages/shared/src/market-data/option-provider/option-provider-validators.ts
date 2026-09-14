@@ -24,7 +24,6 @@ export interface IValidatedOptionProviderEventFields {
   readonly contractSymbol: string;
   readonly price: number;
   readonly marketEventTime: number;
-  readonly connectionEpoch: number;
   readonly open?: number;
   readonly high?: number;
   readonly low?: number;
@@ -48,7 +47,6 @@ export class ValidatedOptionProviderEvent {
   public readonly contractSymbol: string;
   public readonly price: number;
   public readonly marketEventTime: number;
-  public readonly connectionEpoch: number;
   public readonly open?: number;
   public readonly high?: number;
   public readonly low?: number;
@@ -72,7 +70,6 @@ export class ValidatedOptionProviderEvent {
     this.contractSymbol = fields.contractSymbol;
     this.price = fields.price;
     this.marketEventTime = fields.marketEventTime;
-    this.connectionEpoch = fields.connectionEpoch;
     this.open = fields.open;
     this.high = fields.high;
     this.low = fields.low;
@@ -128,13 +125,14 @@ function toEventTimeMs(value: unknown): number | undefined {
   return toFiniteNumber(value);
 }
 
-function requireMatchingClaim(value: unknown, expected: string, label: string): void {
+function rejectMismatchedClaim(value: unknown, expected: string, label: string): void {
+  if (value === undefined || value === null) return;
   const actual = typeof value === 'string' ? value.trim() : '';
   if (actual !== expected) {
     throw new Error(
       `[PROVIDER_EVENT_REJECTED] Raw provider event ${label} '${String(
         value,
-      )}' does not match the validating adapter claim '${expected}'`,
+      )}' conflicts with the validating adapter identity '${expected}'`,
     );
   }
 }
@@ -159,8 +157,8 @@ export function createOptionProviderValidator(
         throw new Error('[PROVIDER_EVENT_REJECTED] Synthetic provider events cannot be branded');
       }
 
-      requireMatchingClaim(raw.providerId, providerId, 'providerId');
-      requireMatchingClaim(raw.providerTransport, providerTransport, 'providerTransport');
+      rejectMismatchedClaim(raw.providerId, providerId, 'providerId');
+      rejectMismatchedClaim(raw.providerTransport, providerTransport, 'providerTransport');
 
       const providerSymbol =
         typeof raw.providerSymbol === 'string' ? raw.providerSymbol.trim() : '';
@@ -190,13 +188,9 @@ export function createOptionProviderValidator(
         );
       }
 
-      if (
-        typeof raw.connectionEpoch !== 'number' ||
-        !Number.isFinite(raw.connectionEpoch) ||
-        raw.connectionEpoch <= 0
-      ) {
+      if (raw.connectionEpoch !== undefined && raw.connectionEpoch !== null) {
         throw new Error(
-          `[PROVIDER_EVENT_REJECTED] Provider event requires a positive finite connectionEpoch, got: ${raw.connectionEpoch}`,
+          '[PROVIDER_EVENT_REJECTED] Provider event cannot supply trusted connectionEpoch; the adapter derives it from the current provider connection',
         );
       }
 
@@ -206,7 +200,6 @@ export function createOptionProviderValidator(
         contractSymbol: providerSymbol.toUpperCase(),
         price,
         marketEventTime,
-        connectionEpoch: raw.connectionEpoch,
         open: toNonNegativeOrUndefined(raw.open),
         high: toNonNegativeOrUndefined(raw.high),
         low: toNonNegativeOrUndefined(raw.low),

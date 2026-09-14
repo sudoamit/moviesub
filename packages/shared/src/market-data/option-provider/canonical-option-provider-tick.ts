@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import {
   CanonicalProviderTransport,
   validateExecutionQuoteTimestamp,
@@ -13,6 +14,7 @@ import {
 } from './option-provider-validators';
 import {
   isProviderConnectionIdentity,
+  mintProviderConnectionIdentityForAdapter,
   ProviderConnectionIdentity,
 } from './provider-connection-identity';
 
@@ -177,12 +179,6 @@ function brandCanonicalOptionProviderTick(
       `[PROVIDER_CONNECTION_IDENTITY_MISMATCH] Validated provider event providerId ${event.providerId} does not match branded connection providerId ${connection.providerId}`,
     );
   }
-  if (event.connectionEpoch !== connection.connectionEpoch) {
-    throw new Error(
-      `[PROVIDER_CONNECTION_IDENTITY_MISMATCH] Validated provider event epoch ${event.connectionEpoch} does not match branded connection epoch ${connection.connectionEpoch}`,
-    );
-  }
-
   const now = Date.now();
   const canonicalInput: ICanonicalOptionProviderTickInput = {
     contractSymbol: event.contractSymbol,
@@ -216,10 +212,14 @@ function brandCanonicalOptionProviderTick(
 export interface IOptionProviderAdapter {
   readonly providerId: string;
   readonly providerTransport: CanonicalProviderTransport;
+  beginProviderConnection(options?: {
+    readonly providerInstanceId?: string;
+  }): ProviderConnectionIdentity;
+  getCurrentProviderConnection(): ProviderConnectionIdentity | null;
   validateProviderEvent(raw: RawOptionProviderEvent): ValidatedOptionProviderEvent;
   toCanonicalExecutionTick(
     raw: RawOptionProviderEvent,
-    connection: ProviderConnectionIdentity,
+    connectionGuard?: ProviderConnectionIdentity,
   ): ValidatedCanonicalOptionProviderTick;
 }
 
@@ -229,23 +229,58 @@ export function createOptionProviderAdapter(
   if (!validator || typeof validator.validate !== 'function') {
     throw new Error('Provider adapter requires a provider-specific validator');
   }
+  let connectionEpoch = 0;
+  let currentConnection: ProviderConnectionIdentity | null = null;
   return Object.freeze({
     providerId: validator.providerId,
     providerTransport: validator.providerTransport,
+    beginProviderConnection(options?: { readonly providerInstanceId?: string }): ProviderConnectionIdentity {
+      const providerInstanceId =
+        typeof options?.providerInstanceId === 'string' && options.providerInstanceId.trim().length > 0
+          ? options.providerInstanceId.trim()
+          : crypto.randomUUID();
+      connectionEpoch += 1;
+      currentConnection = mintProviderConnectionIdentityForAdapter({
+        providerId: validator.providerId,
+        providerInstanceId,
+        connectionEpoch,
+      });
+      return currentConnection;
+    },
+    getCurrentProviderConnection(): ProviderConnectionIdentity | null {
+      return currentConnection;
+    },
     validateProviderEvent(raw: RawOptionProviderEvent): ValidatedOptionProviderEvent {
       return validator.validate(raw);
     },
     toCanonicalExecutionTick(
       raw: RawOptionProviderEvent,
-      connection: ProviderConnectionIdentity,
+      connectionGuard?: ProviderConnectionIdentity,
     ): ValidatedCanonicalOptionProviderTick {
+      if (!currentConnection) {
+        throw new Error(
+          '[PROVIDER_CONNECTION_REQUIRED] Provider adapter must have a current provider connection before minting canonical ticks',
+        );
+      }
+      if (connectionGuard !== undefined) {
+        if (!isProviderConnectionIdentity(connectionGuard)) {
+          throw new Error(
+            '[UNBRANDED_CONNECTION_IDENTITY_REJECTED] Provider adapter rejected a fabricated provider connection identity',
+          );
+        }
+        if (connectionGuard !== currentConnection) {
+          throw new Error(
+            '[STALE_PROVIDER_CONNECTION_REJECTED] Provider adapter rejected a non-current provider connection identity',
+          );
+        }
+      }
       const validated = validator.validate(raw);
       if (!isValidatedOptionProviderEvent(validated)) {
         throw new Error(
           '[PROVIDER_ADAPTER_INTEGRITY] Provider validator did not yield a branded validated event',
         );
       }
-      return brandCanonicalOptionProviderTick(validated, connection);
+      return brandCanonicalOptionProviderTick(validated, currentConnection);
     },
   });
 }
