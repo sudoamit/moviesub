@@ -1,7 +1,8 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { PaperTradingService } from './paper-trading.service';
-import { RealMarketStreamerService, QuoteProvenance } from '../market-data/real-market-streamer.service';
+import { ExecutionMode } from './execution-provider.interface';
+import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
 import { Direction, PositionState, WS_EVENTS } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
@@ -79,12 +80,14 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     try {
       if (isOption) {
         // Options: fetch option contract quote for exact instrument contractSymbol
-        livePrice = await this.getOptionContractLtp(pos);
-        if (livePrice <= 0) {
+        const optionQuote = await this.getOptionContractQuote(pos);
+        if (!optionQuote || optionQuote.provenance !== 'LIVE_PROVIDER' || optionQuote.price <= 0) {
           // If exact option LTP is unavailable, do NOT fall back to spot price. Fail closed.
           return;
         }
-        provenance = 'LIVE_PROVIDER';
+        livePrice = optionQuote.price;
+        marketEventTime = new Date(optionQuote.marketEventTime || optionQuote.lastUpdated);
+        provenance = optionQuote.provenance;
       } else {
         // Spot or Crypto: fetch validated ticker
         const ticker = this.realMarketStreamer.getValidatedTicker(symbol, 5);
@@ -133,6 +136,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             triggerMarketEventTime: marketEventTime,
             exitPriceOverride: livePrice,
             allowPriceOverride: true,
+            executionMode: ExecutionMode.PAPER_MARKET,
             correlationId: pos.correlationId,
           },
         );
@@ -170,6 +174,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             triggerMarketEventTime: marketEventTime,
             exitPriceOverride: livePrice,
             allowPriceOverride: true,
+            executionMode: ExecutionMode.PAPER_MARKET,
             correlationId: pos.correlationId,
           },
         );
@@ -205,13 +210,13 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
   }
 
   /**
-   * Fetches real option contract LTP. Spot price is strictly NEVER used as an option LTP.
+   * Fetches real option contract quote object with genuine marketEventTime.
    */
-  private async getOptionContractLtp(pos: any): Promise<number> {
+  private async getOptionContractQuote(pos: any): Promise<ILiveRealTicker | null> {
     if (this.realMarketStreamer) {
       const optionTicker = this.realMarketStreamer.getOptionTicker(pos.contractSymbol);
       if (optionTicker && optionTicker.provenance === 'LIVE_PROVIDER' && optionTicker.price > 0) {
-        return optionTicker.price;
+        return optionTicker;
       }
     }
     if (this.redis) {
@@ -220,16 +225,32 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         if (cached) {
           const parsed = JSON.parse(cached);
           if (parsed.price > 0 && Date.now() - parsed.timestamp <= 5000) {
-            return parsed.price;
+            return {
+              symbol: pos.contractSymbol,
+              price: parsed.price,
+              open: parsed.price,
+              high: parsed.price,
+              low: parsed.price,
+              close: parsed.price,
+              volume: 1000,
+              prevClose: parsed.price,
+              changePercent: 0,
+              changeAmount: 0,
+              tickSize: 0.05,
+              volatility: 1.0,
+              lastUpdated: parsed.timestamp,
+              provenance: 'LIVE_PROVIDER',
+              marketEventTime: parsed.marketEventTime || parsed.timestamp,
+            };
           }
         }
       } catch {}
     }
-    return 0;
+    return null;
   }
 
   /**
-   * Backend Real Partial Scale-Out at TP1 with Full Accounting & Journal Record
+   * Backend Real Partial Scale-Out at TP1 (Creates Execution Leg ONLY — NO duplicate PaperTrade row)
    */
   private async executePartialScaleOut(
     pos: any,
@@ -270,6 +291,19 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const partialRealizedR = riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0;
     const releasedMargin = Number((Number(pos.usedMargin) * partialRatio).toFixed(2));
 
+    const existingEvents = (pos.executionEventsJson as any) || {};
+    const partialLegs = existingEvents.partialLegs || [];
+    partialLegs.push({
+      role: 'TP1_PARTIAL',
+      price: livePrice,
+      quantity: partialQty,
+      fee: exitCharges.totalCharges,
+      grossPnL: partialGrossPnL,
+      netPnL: partialNetPnL,
+      realizedR: partialRealizedR,
+      timestamp: marketEventTime.toISOString(),
+    });
+
     await this.prisma.$transaction(async (tx) => {
       const updated = await tx.paperPosition.updateMany({
         where: {
@@ -281,6 +315,10 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           quantity: new Decimal(remainingQty),
           stopLoss: new Decimal(entryPrice), // Move SL to breakeven
           usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
+          executionEventsJson: {
+            ...existingEvents,
+            partialLegs,
+          } as any,
         },
       });
 
@@ -319,46 +357,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         },
       });
 
-      // Create Partial PaperTrade Journal Record
-      const partialTrade = await tx.paperTrade.create({
-        data: {
-          accountId: pos.accountId,
-          positionId: pos.id,
-          symbol: pos.symbol,
-          contractSymbol: pos.contractSymbol,
-          instrumentType: pos.instrumentType,
-          strike: pos.strike,
-          optionType: pos.optionType,
-          direction: pos.direction,
-          quantity: new Decimal(partialQty),
-          entryPrice: new Decimal(entryPrice),
-          exitPrice: new Decimal(livePrice),
-          realizedPnL: new Decimal(partialNetPnL),
-          realizedR: new Decimal(partialRealizedR),
-          entryTime: pos.entryTime,
-          exitTime: new Date(),
-          exitReason: 'Target 1 Partial Exit (50%)',
-          chargesJson: {
-            exitCharges,
-            totalCharges: exitCharges.totalCharges,
-          },
-          outcomeClassification: 'WIN_TP1',
-          outcomeSnapshotJson: {
-            isPartial: true,
-            leg: 'TP1_PARTIAL',
-            triggerPrice: target1,
-            triggerMarketEventTime: marketEventTime.toISOString(),
-            exitPrice: livePrice,
-            partialQty,
-            remainingQty,
-            netPnL: partialNetPnL,
-            realizedR: partialRealizedR,
-          },
-          correlationId: pos.correlationId,
-        },
-      });
-
-      // Update PaperAccount balance, realized P&L, and total charges paid
+      // Update PaperAccount balance and used margin ONLY — PaperTrade record is created ONLY on final exit
       await tx.paperAccount.update({
         where: { id: pos.accountId },
         data: {
@@ -371,7 +370,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     });
 
     this.logger.log(
-      `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}). Realized P&L: ₹${partialNetPnL}.`,
+      `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}). Realized P&L: ₹${partialNetPnL}. Execution leg created.`,
     );
   }
 

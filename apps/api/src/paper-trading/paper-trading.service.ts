@@ -1221,7 +1221,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 4. Retrieve Entry Fills for Execution Aggregation (Strict: No Fabricated Fills)
+      // 4. Retrieve Fills & Multi-Leg Execution Details
       let entryFills: IFillRecord[] = [];
       if (pos.orderId && tx.paperFill && typeof tx.paperFill.findMany === 'function') {
         const rawFills = await tx.paperFill.findMany({ where: { orderId: pos.orderId } });
@@ -1268,8 +1268,6 @@ export class PaperTradingService implements IExecutionProvider {
       if (hasAuthoritativeEntryFills) {
         aggregated = ExecutionAggregator.aggregateTradeLifecycle(entryFills, [exitFillRecord]);
       } else {
-        // STRICT: Zero fabricated fill records. Missing entry execution represented strictly as null.
-        // Duration and authoritative entry price are unknown.
         isLegacyExecutionData = true;
         executionDataComplete = false;
         const exitLeg = ExecutionAggregator.aggregateLeg([exitFillRecord], 'EXIT');
@@ -1281,7 +1279,7 @@ export class PaperTradingService implements IExecutionProvider {
         };
       }
 
-      // 5. Immutable Opening Accounting Snapshot & Canonical P&L
+      // 5. Multi-Leg Accounting & Lifecycle Realized P&L / Weighted R Aggregation
       const inst = getAuthoritativeInstrument(symbol);
       const quoteCurrency = inst.currency;
       const openingSnapshot =
@@ -1298,10 +1296,44 @@ export class PaperTradingService implements IExecutionProvider {
         calculatedAt: exitTime.getTime(),
       });
 
-      const effectiveExitPrice = aggregated.exit.weightedPrice;
+      const partialLegs: any[] = (pos.executionEventsJson as any)?.partialLegs || [];
+      let partialNetPnLTotal = 0;
+      let partialWeightedRSum = 0;
+      let partialQtyTotal = 0;
+      let partialFeesTotal = 0;
+
+      for (const leg of partialLegs) {
+        partialNetPnLTotal += Number(leg.netPnL || 0);
+        partialWeightedRSum += Number(leg.realizedR || 0) * Number(leg.quantity || 0);
+        partialQtyTotal += Number(leg.quantity || 0);
+        partialFeesTotal += Number(leg.fee || 0);
+      }
+
+      const finalQty = Number(pos.quantity);
+      const finalTurnover = finalExitPrice * finalQty;
+      const finalExitCharges = exitCharges.totalCharges;
+      const USDT_INR_RATE = isCrypto ? 92.0 : 1.0;
+      const entryPrice = Number(pos.entryPrice);
+      const finalPriceDiff = isBuy ? finalExitPrice - entryPrice : entryPrice - finalExitPrice;
+      const finalGrossPnL = finalPriceDiff * USDT_INR_RATE * finalQty;
+      const finalNetPnL = Number((finalGrossPnL - finalExitCharges).toFixed(2));
+
+      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : entryPrice);
+      const riskDistance = initialSL ? Math.abs(entryPrice - initialSL) : 0;
+      const finalRealizedR = riskDistance > 0 ? Number((finalPriceDiff / riskDistance).toFixed(2)) : 0;
+
+      const totalPositionQuantity = partialQtyTotal + finalQty;
+      const totalLifecyclePnL = Number((partialNetPnLTotal + finalNetPnL).toFixed(2));
+      const totalWeightedRSum = partialWeightedRSum + (finalRealizedR * finalQty);
+      const weightedLifecycleR = totalPositionQuantity > 0 ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2)) : 0;
+      const totalLifecycleCharges = Number((entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2));
+
+      const effectiveExitPrice = totalPositionQuantity > 0
+        ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
+        : finalExitPrice;
       let effectiveEntryPrice = Number(pos.entryPrice);
-      let canonicalRealizedPnL = 0.0;
-      let canonicalRealizedR = 0.0;
+      let canonicalRealizedPnL = totalLifecyclePnL;
+      let canonicalRealizedR = weightedLifecycleR;
       let pnlCalc: any = null;
 
       if (hasAuthoritativeEntryFills && aggregated.entry) {
@@ -1309,26 +1341,31 @@ export class PaperTradingService implements IExecutionProvider {
         pnlCalc = TradeAccountingEngine.calculateTradePnl({
           entryPrice: effectiveEntryPrice,
           exitPrice: effectiveExitPrice,
-          quantity: Number(pos.quantity),
+          quantity: totalPositionQuantity,
           direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
           accountingSnapshot: snapshot,
-          fees: totalCharges,
+          fees: totalLifecycleCharges,
         });
-
-        const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
-        const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
-        const riskAnchor = initialStopLoss ?? stopLoss;
-        const riskDistance = riskAnchor ? Math.abs(effectiveEntryPrice - riskAnchor) : 0;
-
         canonicalRealizedPnL = pnlCalc.netPnlAccount;
-        canonicalRealizedR =
-          riskDistance > 0
-            ? Number(((isBuy ? effectiveExitPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveExitPrice) / riskDistance).toFixed(2))
-            : 0;
       }
 
       canonicalRealizedPnLLog = canonicalRealizedPnL;
       canonicalRealizedRLog = canonicalRealizedR;
+
+      const allLegsBreakdown = [
+        ...(hasAuthoritativeEntryFills && aggregated.entry ? [{ role: 'ENTRY', price: effectiveEntryPrice, quantity: totalPositionQuantity, timestamp: pos.entryTime }] : []),
+        ...partialLegs,
+        {
+          role: 'FINAL_EXIT',
+          price: finalExitPrice,
+          quantity: finalQty,
+          fee: finalExitCharges,
+          grossPnL: finalGrossPnL,
+          netPnL: finalNetPnL,
+          realizedR: finalRealizedR,
+          timestamp: exitTime.toISOString(),
+        },
+      ];
 
       // 6. Mark Position CLOSED
       await tx.paperPosition.update({
@@ -1342,7 +1379,7 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 7. Create PaperTrade Record with Canonical Execution Facts
+      // 7. Create EXACTLY ONE Canonical PaperTrade Record for the entire position lifecycle
       const tradeRecord = await tx.paperTrade.create({
         data: {
           accountId: pos.accountId,
@@ -1353,24 +1390,31 @@ export class PaperTradingService implements IExecutionProvider {
           strike: pos.strike,
           optionType: pos.optionType,
           direction: pos.direction,
-          quantity: pos.quantity,
-          entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? new Decimal(effectiveEntryPrice) : null,
+          quantity: new Decimal(totalPositionQuantity),
+          entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? new Decimal(effectiveEntryPrice) : new Decimal(entryPrice),
           exitPrice: new Decimal(effectiveExitPrice),
-          realizedPnL: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedPnL) : null,
-          realizedR: hasAuthoritativeEntryFills ? new Decimal(canonicalRealizedR) : null,
+          realizedPnL: new Decimal(canonicalRealizedPnL),
+          realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
           holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
-          entryTime: hasAuthoritativeEntryFills && aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : null,
+          entryTime: hasAuthoritativeEntryFills && aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : pos.entryTime,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
             entryCharges,
-            exitCharges,
-            totalCharges: Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2)),
+            partialExitCharges: partialFeesTotal,
+            finalExitCharges,
+            totalCharges: totalLifecycleCharges,
           },
           featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
           outcomeSnapshotJson: {
+            legs: allLegsBreakdown,
+            totalPositionQuantity,
+            weightedExitPrice: effectiveExitPrice,
+            weightedEntryPrice: effectiveEntryPrice,
+            totalLifecyclePnL: canonicalRealizedPnL,
+            weightedLifecycleR: canonicalRealizedR,
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             triggerPrice: triggerPriceOpt ?? null,
@@ -1380,7 +1424,7 @@ export class PaperTradingService implements IExecutionProvider {
             exitFillPrice: finalExitPrice,
             livePrice: exitPrice,
             exitPrice: effectiveExitPrice,
-            entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? effectiveEntryPrice : Number(pos.entryPrice),
+            entryPrice: effectiveEntryPrice,
             requestedEntryPrice: Number(pos.entryPrice),
             actualEntryPrice: aggregated.entry ? aggregated.entry.weightedPrice : null,
             actualEntryPriceCurrency: aggregated.entry ? snapshot.quoteCurrency : null,
@@ -1391,14 +1435,14 @@ export class PaperTradingService implements IExecutionProvider {
             slippageBps: exitSlippage.slippageBps,
             slippageAmount: exitSlippage.slippageAmount,
             exitReason,
-            realizedPnL: hasAuthoritativeEntryFills ? canonicalRealizedPnL : null,
+            realizedPnL: canonicalRealizedPnL,
             quotePnl: pnlCalc ? pnlCalc.quotePnl : null,
             quoteCurrency: snapshot.quoteCurrency,
-            netPnlAccount: hasAuthoritativeEntryFills ? pnlCalc.netPnlAccount : null,
+            netPnlAccount: pnlCalc ? pnlCalc.netPnlAccount : canonicalRealizedPnL,
             accountCurrency: snapshot.accountCurrency,
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
-            realizedR: hasAuthoritativeEntryFills ? canonicalRealizedR : null,
+            realizedR: canonicalRealizedR,
             holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
@@ -1415,28 +1459,22 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 8. Update PaperAccount Balance & Release Margin with Exact Cash Parity
-      if (hasAuthoritativeEntryFills && pnlCalc) {
-        const canonicalCashImpact = Number((pnlCalc.grossPnlAccount - exitCharges.totalCharges).toFixed(2));
-        await tx.paperAccount.update({
-          where: { id: pos.accountId },
-          data: {
-            cashBalance: { increment: canonicalCashImpact },
-            usedMargin: { decrement: Number(pos.usedMargin) },
-            realizedPnL: { increment: canonicalRealizedPnL },
-            totalChargesPaid: { increment: exitCharges.totalCharges },
-          },
-        });
-      } else {
-        await tx.paperAccount.update({
-          where: { id: pos.accountId },
-          data: {
-            cashBalance: { decrement: exitCharges.totalCharges },
-            usedMargin: { decrement: Number(pos.usedMargin) },
-            totalChargesPaid: { increment: exitCharges.totalCharges },
-          },
-        });
-      }
+      // 8. Update PaperAccount Balance & Release Margin for final leg (Exact cash parity without double-counting)
+      const canonicalCashImpact = pnlCalc
+        ? Number((pnlCalc.grossPnlAccount - finalExitCharges).toFixed(2))
+        : Number((finalGrossPnL - finalExitCharges).toFixed(2));
+
+      const canonicalNetPnLIncrement = pnlCalc ? canonicalRealizedPnL : finalNetPnL;
+
+      await tx.paperAccount.update({
+        where: { id: pos.accountId },
+        data: {
+          cashBalance: { increment: canonicalCashImpact },
+          usedMargin: { decrement: Number(pos.usedMargin) },
+          realizedPnL: { increment: canonicalNetPnLIncrement },
+          totalChargesPaid: { increment: finalExitCharges },
+        },
+      });
 
       // 9. Audit Log
       await tx.auditEvent.create({

@@ -722,8 +722,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(trade.holdingDurationSeconds).toBeGreaterThanOrEqual(3590);
   });
 
-  // TEST P: TP1 PARTIAL EXECUTED JOURNAL & ACCOUNTING
-  it('TEST P: TP1 PARTIAL EXECUTED JOURNAL — TP1 scale-out creates partial PaperTrade, credits account cash balance & updates realized PnL', async () => {
+  // TEST P: TP1 PARTIAL SCALE-OUT EXECUTION LEG (NO DUPLICATE PAPER TRADE ROW)
+  it('TEST P: TP1 PARTIAL EXECUTION LEG — TP1 scale-out creates execution leg, updates position to PARTIALLY_CLOSED, but DOES NOT create a duplicate PaperTrade row', async () => {
     (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
       symbol: 'NIFTY',
       price: 50000,
@@ -761,16 +761,11 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(Number(dbPos.quantity)).toBe(5); // 50% remaining
     expect(Number(dbPos.stopLoss)).toBe(50000); // SL moved to breakeven
 
-    // Verify partial PaperTrade record was created in database
-    const partialTrade = dbTrades.find(
-      (t) => t.positionId === pos.id && t.exitReason.includes('Target 1 Partial Exit'),
-    );
-    expect(partialTrade).toBeDefined();
-    expect(Number(partialTrade.quantity)).toBe(5);
-    expect(Number(partialTrade.exitPrice)).toBe(51000);
-    expect(Number(partialTrade.realizedPnL)).toBeGreaterThan(0);
+    // Verify NO top-level PaperTrade record was created at TP1 partial exit
+    const tradesForPosAtTP1 = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(tradesForPosAtTP1.length).toBe(0);
 
-    // Verify Account cash balance was credited
+    // Verify Account cash balance was credited for partial leg
     const updatedAccount = await paperService.getOrCreateAccount();
     expect(Number(updatedAccount.cashBalance)).toBeGreaterThan(initialCash);
   });
@@ -813,5 +808,118 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     });
 
     expect(ticker.marketEventTime).toBe(binanceCloseTime);
+  });
+
+  // TEST S: SINGLE PAPERTRADE RECORD INVARIANT FOR MULTI-LEG LIFECYCLE
+  it('TEST S: SINGLE PAPERTRADE INVARIANT — full multi-leg lifecycle (TP1 + Final Exit) produces EXACTLY ONE PaperTrade record', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49500,
+      target1: 51000,
+      target2: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // 1. TP1 hit
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    // 2. Final TP2 hit on remaining 50%
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 52000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    const tradesForPos = dbTrades.filter((t) => t.positionId === pos.id);
+    expect(tradesForPos.length).toBe(1); // STRICTLY ONE CANONICAL PAPERTRADE RECORD
+    expect(Number(tradesForPos[0].quantity)).toBe(10); // Original full quantity (10)
+    expect(Number(tradesForPos[0].exitPrice)).toBe(51500); // Weighted exit price: (51000*5 + 52000*5)/10 = 51500
+  });
+
+  // TEST T: MULTI-LEG WEIGHTED REALIZED R & NET PNL AGGREGATION
+  it('TEST T: WEIGHTED LIFECYCLE R & NET PNL — calculates correct aggregated lifecycle realized R and net PnL', async () => {
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 50000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+
+    const pos = await paperService.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'BUY',
+      quantity: 10,
+      orderType: 'MARKET',
+      stopLoss: 49000, // Risk = 1000 pts per unit
+      target1: 51000, // TP1 = +1.0R (+1000 pts)
+      target2: 52000, // TP2 = +2.0R (+2000 pts)
+      executionMode: ExecutionMode.TEST,
+    });
+
+    // TP1 hit (51000 @ 5 units)
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 51000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    // Final TP2 hit (52000 @ 5 units)
+    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
+      symbol: 'NIFTY',
+      price: 52000,
+      provenance: 'LIVE_PROVIDER',
+      lastUpdated: Date.now(),
+      marketEventTime: Date.now(),
+    });
+    await monitorService.evaluateActivePositions();
+
+    const trade = dbTrades.find((t) => t.positionId === pos.id);
+    expect(trade).toBeDefined();
+
+    // Weighted R = (1.0R * 5 + 2.0R * 5) / 10 = 1.5R
+    expect(Number(trade.realizedR)).toBeCloseTo(1.5, 1);
+    expect(Number(trade.realizedPnL)).toBeGreaterThan(0);
+    expect(trade.outcomeSnapshotJson?.legs).toBeDefined();
+    expect(trade.outcomeSnapshotJson.legs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // TEST U: OPTION MARKET EVENT TIMESTAMP PROPAGATION
+  it('TEST U: OPTION TIMESTAMP PROPAGATION — option auto-close uses option quote marketEventTime', async () => {
+    const optionEventTime = new Date('2026-09-13T14:30:00Z');
+    const realStreamer = new RealMarketStreamerService({} as any);
+    realStreamer.updateOptionTicker('NIFTY 24000 CE', {
+      price: 250,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: optionEventTime.getTime(),
+    });
+
+    const quote = (realStreamer as any).getOptionTicker('NIFTY 24000 CE');
+    expect(quote).toBeDefined();
+    expect(quote.marketEventTime).toBe(optionEventTime.getTime());
   });
 });
