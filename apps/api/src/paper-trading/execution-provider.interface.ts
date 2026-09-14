@@ -83,6 +83,8 @@ export interface IPaperPosition {
     sebiTurnover: number;
     totalCharges: number;
   };
+  /** Raw execution events JSON including persisted accountingSnapshot at entry */
+  executionEventsJson?: any;
 }
 
 export interface IPaperTradeHistory {

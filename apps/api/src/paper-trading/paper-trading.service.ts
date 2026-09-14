@@ -1731,6 +1731,7 @@ export class PaperTradingService implements IExecutionProvider {
       openedAt: pos.openedAt instanceof Date ? pos.openedAt.toISOString() : String(pos.openedAt),
       status: pos.status as PositionState,
       featureSnapshotJson: pos.featureSnapshotJson || undefined,
+      executionEventsJson: pos.executionEventsJson || undefined,
       charges,
     };
   }

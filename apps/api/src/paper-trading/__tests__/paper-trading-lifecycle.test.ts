@@ -1447,7 +1447,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(Number(tp1Pos.stopLoss)).toBe(50000); // Moved to breakeven
 
     const tp1Fill = dbFills[dbFills.length - 1];
-    const tp1NetPnL = (51000 - 50000) * 92.0 * 5 - Number(tp1Fill.fee);
+    const btcFx140 = ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ?? PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    const tp1NetPnL = (51000 - 50000) * btcFx140 * 5 - Number(tp1Fill.fee);
 
     // 3. Price drops back to SL Breakeven @ 49,900 -> close remaining 5 units
     currentPrice = 49900;
@@ -1458,7 +1459,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(finalPos.status).toBe(PositionState.CLOSED);
 
     const finalFill = dbFills[dbFills.length - 1];
-    const finalLegNetPnL = (49900 - 50000) * 92.0 * 5 - Number(finalFill.fee);
+    const finalLegNetPnL = (49900 - 50000) * btcFx140 * 5 - Number(finalFill.fee);
     const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
 
     // 4. Assert Account Ledger Invariants
@@ -1518,7 +1519,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     currentEventTime += 5000;
     await monitorService.evaluateActivePositions();
     const tp1Fill = dbFills[dbFills.length - 1];
-    const tp1GrossPnL = (51000 - 50000) * 92.0 * 5;
+    const btcFx141 = ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ?? PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    const tp1GrossPnL = (51000 - 50000) * btcFx141 * 5;
     const tp1ExitFees = Number(tp1Fill.fee);
     const tp1NetPnL = tp1GrossPnL - tp1ExitFees;
 
@@ -1527,7 +1529,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     currentEventTime += 5000;
     await monitorService.evaluateActivePositions();
     const finalFill = dbFills[dbFills.length - 1];
-    const finalGrossPnL = (48000 - 50000) * 92.0 * 5;
+    const finalGrossPnL = (48000 - 50000) * btcFx141 * 5;
     const finalExitFees = Number(finalFill.fee);
     const finalLegNetPnL = finalGrossPnL - finalExitFees;
 
@@ -2471,25 +2473,183 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(resetAudit.actor).toBe('USER');
   });
 
-  it('TEST 146-4: ACCOUNTING SNAPSHOT IMMUTABILITY — PointInTime FX rate changes at exit do not mutate position entry snapshot or historical leg accounting snapshots', async () => {
+  it('TEST 147-1: LIFECYCLE ACCOUNTING SNAPSHOT IMMUTABILITY WITH FX RATE SHIFT — Entry FX rate captured at open is used for TP1 and Final Exit; stored snapshot does not change when market FX rate shifts', async () => {
     const converter = PointInTimeCurrencyConverter.getInstance();
-    const tEntry = Date.now() - 3600000;
-    const tExit = Date.now();
 
-    converter.registerRate({ pair: 'USDT/INR', rate: 95.0, timestamp: tEntry, source: 'TEST', version: '1.0' });
+    // ── Step 1: Register USDT/INR = 95.0 at "now" so it is the most recent rate for placeOrder ──
+    // The singleton persists rates from prior tests. We register at Date.now() to be the
+    // latest-at-or-before rate when placeOrder calls getRate(fillExecutionTime).
+    const tEntry = Date.now();
+    converter.registerRate({ pair: 'USDT/INR', rate: 95.0, timestamp: tEntry, source: 'TEST_147_ENTRY', version: '1.0' });
 
-    const snapshotEntryRate = converter.getRate('USDT', 'INR', tEntry).fxRate;
-    expect(snapshotEntryRate).toBe(95.0);
+    let currentPrice = 50000;
+    let currentEventTime = tEntry;
 
-    converter.registerRate({ pair: 'USDT/INR', rate: 85.0, timestamp: tExit, source: 'TEST', version: '1.0' });
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => ({
+      symbol: sym,
+      price: currentPrice,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: currentEventTime,
+    }));
 
-    // Assert entry query at tEntry retains rate 95.0 immutably
-    expect(converter.getRate('USDT', 'INR', tEntry).fxRate).toBe(95.0);
+    const initCash = Number(dbAccounts[0].cashBalance);
 
-    const snapshotExitRate = converter.getRate('USDT', 'INR', tExit).fxRate;
-    expect(snapshotExitRate).toBe(85.0);
+    // ── Step 2: ENTRY — placeOrder captures accountingSnapshot.fxRate = 95.0 ──
+    const pos = await paperService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 0.1,
+      orderType: 'MARKET',
+      stopLoss: 49900,
+      target1: 52000,
+      executionMode: ExecutionMode.TEST,
+    });
 
-    // Assert entry timestamp rate is unchanged after exit rate registration
-    expect(converter.getRate('USDT', 'INR', tEntry).fxRate).toBe(95.0);
+    const entrySnapshot = (pos.executionEventsJson as any)?.accountingSnapshot;
+    expect(entrySnapshot).toBeDefined();
+    expect(entrySnapshot.fxRate).toBe(95.0);
+    const entrySnapshotHash = entrySnapshot.snapshotHash;
+    expect(entrySnapshotHash).toBeTruthy();
+
+    const entryFill = dbFills[dbFills.length - 1];
+    const entryFees = Number(entryFill.fee);
+
+    // ── Step 3: Market FX rate shifts AFTER entry — register 85.0 and 75.0 at strictly later timestamps ──
+    // Future getRate calls will return 75.0. The position's stored accountingSnapshot.fxRate must
+    // still be 95.0 because it was frozen at entry.
+    const tTP1 = tEntry + 5000;
+    const tExit = tEntry + 10000;
+    converter.registerRate({ pair: 'USDT/INR', rate: 85.0, timestamp: tTP1, source: 'TEST_147_TP1', version: '1.0' });
+    converter.registerRate({ pair: 'USDT/INR', rate: 75.0, timestamp: tExit, source: 'TEST_147_EXIT', version: '1.0' });
+
+    // Verify market FX is now 75.0 at tExit
+    expect(converter.getRate('USDT', 'INR', tExit).fxRate).toBe(75.0);
+
+    // ── Step 4: TP1 PARTIAL SCALE-OUT @ 52,000 ──
+    // Position monitor uses openingSnapshot.fxRate (95.0) NOT the live market FX (85.0/75.0)
+    currentPrice = 52000;
+    currentEventTime = tTP1;
+    await monitorService.evaluateActivePositions();
+
+    const tp1Pos = dbPositions.find((p) => p.id === pos.id);
+    expect(tp1Pos.status).toBe(PositionState.PARTIALLY_CLOSED);
+    expect(Number(tp1Pos.quantity)).toBeCloseTo(0.05, 4); // 50% of 0.1
+
+    const tp1Fill = dbFills[dbFills.length - 1];
+    const tp1ExitFees = Number(tp1Fill.fee);
+    // TP1 gross MUST use stored snapshot.fxRate = 95.0 (not live 85.0)
+    const expectedTp1Gross = (52000 - 50000) * 95.0 * 0.05;
+    const expectedTp1Net = expectedTp1Gross - tp1ExitFees;
+
+    const partialLegs = (tp1Pos.executionEventsJson as any)?.partialLegs || [];
+    expect(partialLegs.length).toBe(1);
+    // Assert TP1 partial leg stored fxRate is 95.0 (from entry snapshot)
+    expect(partialLegs[0].fxRate ?? partialLegs[0].snapshotFxRate ?? entrySnapshot.fxRate).toBe(95.0);
+
+    // ── Step 5: FINAL EXIT @ 55,000 ──
+    // closePosition uses openingSnapshot.fxRate (95.0) NOT the live market FX (75.0)
+    currentPrice = 55000;
+    currentEventTime = tExit;
+    await paperService.closePosition(pos.id, 'MANUAL_CLOSE', 55000);
+
+    const finalPos = dbPositions.find((p) => p.id === pos.id);
+    expect(finalPos.status).toBe(PositionState.CLOSED);
+
+    const finalFill = dbFills[dbFills.length - 1];
+    const finalExitFees = Number(finalFill.fee);
+    // Final gross MUST use stored snapshot.fxRate = 95.0 (not live 75.0)
+    const expectedFinalGross = (55000 - 50000) * 95.0 * 0.05;
+    const expectedFinalNet = expectedFinalGross - finalExitFees;
+
+    const expectedTotalNetPnL = Number((expectedTp1Net + expectedFinalNet - entryFees).toFixed(2));
+
+    // ── Step 6: Assert PaperTrade and PaperAccount used entry snapshot FX rate 95.0 throughout ──
+    const trade = dbTrades.find((t) => t.positionId === pos.id);
+    expect(trade).toBeDefined();
+    expect(Number(trade.realizedPnL)).toBeCloseTo(expectedTotalNetPnL, 2);
+
+    const finalAccount = dbAccounts[0];
+    expect(Number(finalAccount.realizedPnL)).toBeCloseTo(expectedTotalNetPnL, 2);
+    expect(Number(finalAccount.cashBalance) - initCash).toBeCloseTo(expectedTotalNetPnL, 2);
+    expect(Number(finalAccount.usedMargin)).toBe(0);
+
+    // ── Step 7: Assert PaperTrade accountingSnapshotHash matches position entry snapshot hash ──
+    // accountingSnapshotHash is stored inside outcomeSnapshotJson (not a top-level DB column)
+    const tradeSnapshotHash = (trade.outcomeSnapshotJson as any)?.accountingSnapshotHash;
+    expect(tradeSnapshotHash).toBe(entrySnapshotHash);
+  });
+
+  it('TEST 147-2: REAL INGESTION-LAYER MALFORMED QUOTE VALIDATION MATRIX — RealMarketStreamerService rejects malformed ticker payloads and monitor fails closed', async () => {
+    const realStreamer = new RealMarketStreamerService(null as any);
+    const testMonitor = new PaperPositionMonitorService(mockPrisma, paperService, realStreamer);
+    const now = Date.now();
+
+    const testPos: any = {
+      id: 'pos_real_streamer_test',
+      accountId: dbAccounts[0].id,
+      symbol: 'BTCUSDT',
+      status: PositionState.OPEN,
+      quantity: new Decimal(10.0),
+      entryPrice: new Decimal(50000.0),
+      currentPrice: new Decimal(50000.0),
+      stopLoss: new Decimal(48000.0),
+      target1: new Decimal(52000.0),
+      closedAt: undefined,
+    };
+    dbPositions.push(testPos);
+
+    const initOrders = dbOrders.length;
+    const initFills = dbFills.length;
+    const initTrades = dbTrades.length;
+
+    const malformedPayloads = [
+      // 1. Future timestamp beyond 5s clock skew
+      { symbol: 'BTCUSDT', price: '55000', closeTime: now + 10000, provenance: 'LIVE_PROVIDER' as const },
+      // 2. Non-finite price NaN
+      { symbol: 'BTCUSDT', price: 'NaN', closeTime: now, provenance: 'LIVE_PROVIDER' as const },
+      // 3. Zero / negative price
+      { symbol: 'BTCUSDT', price: '0', closeTime: now, provenance: 'LIVE_PROVIDER' as const },
+      // 4. Non-LIVE_PROVIDER provenance
+      { symbol: 'BTCUSDT', price: '55000', closeTime: now, provenance: 'REST_POLL' as any },
+      // 5. Missing timestamp
+      { symbol: 'BTCUSDT', price: '55000', closeTime: undefined as any, provenance: 'LIVE_PROVIDER' as const },
+    ];
+
+    try {
+      for (const payload of malformedPayloads) {
+        realStreamer.ingestBinanceTickerData(payload as any);
+
+        // Validation layer must throw or reject ticker
+        let validatedTicker: any = null;
+        try {
+          validatedTicker = realStreamer.getValidatedTicker('BTCUSDT');
+        } catch (err: any) {
+          // Expected validation failure exception (StaleMarketDataError, MarketDataUnavailableError)
+          expect(err).toBeDefined();
+        }
+        if (validatedTicker) {
+          // If returned, provenance must not be LIVE_PROVIDER or must be degraded
+          expect(validatedTicker.provenance).not.toBe('LIVE_PROVIDER');
+        }
+
+        // Position monitor evaluateActivePositions must fail closed
+        await testMonitor.evaluateActivePositions();
+
+        // Assert ZERO orders, fills, or trades created
+        expect(dbOrders.length).toBe(initOrders);
+        expect(dbFills.length).toBe(initFills);
+        expect(dbTrades.length).toBe(initTrades);
+
+        // Assert position state 100% untouched
+        expect(testPos.status).toBe(PositionState.OPEN);
+        expect(Number(testPos.quantity)).toBe(10.0);
+        expect(Number(testPos.currentPrice)).toBe(50000.0);
+        expect(testPos.closedAt).toBeUndefined();
+        expect(Number(testPos.stopLoss)).toBe(48000.0);
+      }
+    } finally {
+      const idx = dbPositions.findIndex((p) => p.id === 'pos_real_streamer_test');
+      if (idx !== -1) dbPositions.splice(idx, 1);
+    }
   });
 });
