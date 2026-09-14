@@ -227,9 +227,30 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         const cached = await this.redis.getClient().get(`option:ltp:${pos.contractSymbol}`);
         if (cached) {
           const parsed = JSON.parse(cached);
-          // Strict quality contract: Require genuine provider marketEventTime within 5s freshness
-          const eventTime = parsed.marketEventTime;
-          if (parsed.price > 0 && eventTime && Date.now() - Number(eventTime) <= 5000) {
+          const rawEventTime = parsed.marketEventTime;
+          const eventTime = rawEventTime ? Number(rawEventTime) : undefined;
+          const currentEpoch = this.realMarketStreamer?.getConnectionEpoch();
+
+          // Strict provenance authority:
+          // A Redis cached quote is ONLY permitted to declare LIVE_PROVIDER if:
+          // 1. The Redis entry itself explicitly carries authenticated provider-origin metadata
+          // 2. The entry has a genuine, positive marketEventTime within 5s freshness
+          // 3. The entry preserves connectionEpoch matching the current active streamer connection epoch
+          // 4. The streamer provider is currently connected and healthy
+          const isStreamerConnected = this.realMarketStreamer?.getProviderState() !== 'DISCONNECTED';
+          const isFresh = eventTime !== undefined && Number.isFinite(eventTime) && Date.now() - eventTime <= 5000;
+          const hasProviderOrigin = Boolean(parsed.providerId || parsed.providerOrigin);
+          const isEpochMatching = parsed.connectionEpoch !== undefined && parsed.connectionEpoch === currentEpoch;
+          const isAuthenticProvider =
+            isStreamerConnected &&
+            parsed.provenance === 'LIVE_PROVIDER' &&
+            hasProviderOrigin &&
+            isFresh &&
+            isEpochMatching;
+
+          const provenance: QuoteProvenance = isAuthenticProvider ? 'LIVE_PROVIDER' : 'DEGRADED';
+
+          if (parsed.price > 0 && eventTime) {
             return {
               symbol: pos.contractSymbol,
               price: parsed.price,
@@ -244,8 +265,10 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               tickSize: (getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined),
               volatility: parsed.volatility,
               lastUpdated: parsed.timestamp || Date.now(),
-              provenance: 'LIVE_PROVIDER',
-              marketEventTime: Number(eventTime),
+              provenance,
+              marketEventTime: eventTime,
+              connectionEpoch: parsed.connectionEpoch,
+              providerId: parsed.providerId || parsed.providerOrigin,
             };
           }
         }

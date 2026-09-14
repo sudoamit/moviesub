@@ -1369,6 +1369,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // 1. Valid tick (1s old <= 5s maxAge)
     const niftyTicker = (realStreamer as any).tickers.get('NIFTY');
     niftyTicker.provenance = 'LIVE_PROVIDER';
+    niftyTicker.connectionEpoch = realStreamer.getConnectionEpoch();
     niftyTicker.marketEventTime = now - 1000;
     const validTicker = realStreamer.getValidatedTicker('NIFTY', 5);
     expect(validTicker.price).toBe(24175.65);
@@ -3601,10 +3602,21 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         ...pos,
         id: 'pos_malformed',
         status: PositionState.OPEN,
+        quantity: 5.0,
         executionEventsJson: {},
         featureSnapshotJson: {},
       };
       dbPositions.push(malformedPos);
+
+      const orderCountBefore = dbOrders.length;
+      const fillCountBefore = dbFills.length;
+      const tradeCountBefore = dbTrades.length;
+      const cashBefore = Number(dbAccounts[0].cashBalance);
+      const marginBefore = Number(dbAccounts[0].usedMargin);
+      const realizedBefore = Number(dbAccounts[0].realizedPnL);
+      const chargesBefore = Number(dbAccounts[0].totalChargesPaid);
+      const qtyBefore = Number(malformedPos.quantity);
+      const statusBefore = malformedPos.status;
 
       // Attempting closePosition must reject immediately with [MALFORMED_LIFECYCLE]
       await expect(
@@ -3613,8 +3625,102 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // Attempting monitor TP1 scale-out must reject immediately with [MALFORMED_LIFECYCLE]
       await expect(
-        (monitorService as any).executePartialScaleOut(malformedPos, 52000.0, new Date(2000)),
+        (monitorService as any).executePartialScaleOut(malformedPos, 52000.0, 52000.0, new Date(2000)),
       ).rejects.toThrow(/\[MALFORMED_LIFECYCLE\]/);
+
+      // Full Database Mutation Guarantee: Zero side effects across orders, fills, trades, accounts, and positions
+      expect(dbOrders.length).toBe(orderCountBefore);
+      expect(dbFills.length).toBe(fillCountBefore);
+      expect(dbTrades.length).toBe(tradeCountBefore);
+      expect(Number(dbAccounts[0].cashBalance)).toBe(cashBefore);
+      expect(Number(dbAccounts[0].usedMargin)).toBe(marginBefore);
+      expect(Number(dbAccounts[0].realizedPnL)).toBe(realizedBefore);
+      expect(Number(dbAccounts[0].totalChargesPaid)).toBe(chargesBefore);
+      expect(Number(malformedPos.quantity)).toBe(qtyBefore);
+      expect(malformedPos.status).toBe(statusBefore);
+      expect((malformedPos as any).closedAt).toBeUndefined();
+    });
+
+    it('TEST 149-7 (Option Provenance Authority & Connection Epoch Coupling): Redis option quote without authentic provider origin and matching epoch is degraded', async () => {
+      const realStreamer = new RealMarketStreamerService({} as any);
+      const activeEpoch = realStreamer.getConnectionEpoch();
+
+      const mockRedisClient = {
+        get: jest.fn(),
+      };
+      const mockRedis = {
+        getClient: () => mockRedisClient,
+      };
+
+      const testMonitor = new PaperPositionMonitorService(
+        {} as any,
+        paperService,
+        realStreamer,
+        mockRedis as any,
+      );
+
+      const pos = {
+        id: 'opt_pos_1',
+        symbol: 'NIFTY',
+        contractSymbol: 'NIFTY26SEP24500CE',
+        instrumentType: 'OPTION',
+        direction: Direction.BULLISH,
+        quantity: 50,
+        entryPrice: 150.0,
+        stopLoss: 120.0,
+        target1: 180.0,
+      };
+
+      // 1. Unauthenticated Redis quote: contains only price and timestamp (no providerId, no epoch)
+      mockRedisClient.get.mockResolvedValueOnce(
+        JSON.stringify({
+          price: 155.0,
+          marketEventTime: Date.now(),
+        }),
+      );
+
+      const unauthQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(unauthQuote).toBeDefined();
+      expect(unauthQuote.price).toBe(155.0);
+      // Provenance MUST NOT be declared LIVE_PROVIDER without authenticated provider origin
+      expect(unauthQuote.provenance).toBe('DEGRADED');
+
+      // 2. Authenticated Redis quote with matching active connection epoch
+      mockRedisClient.get.mockResolvedValueOnce(
+        JSON.stringify({
+          price: 160.0,
+          provenance: 'LIVE_PROVIDER',
+          providerId: 'NSE_DIRECT',
+          connectionEpoch: activeEpoch,
+          marketEventTime: Date.now(),
+        }),
+      );
+
+      const authQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(authQuote).toBeDefined();
+      expect(authQuote.price).toBe(160.0);
+      expect(authQuote.provenance).toBe('LIVE_PROVIDER');
+      expect(authQuote.providerId).toBe('NSE_DIRECT');
+      expect(authQuote.connectionEpoch).toBe(activeEpoch);
+
+      // 3. Provider disconnects -> bumps epoch
+      realStreamer.disconnectProvider();
+      const newEpoch = realStreamer.getConnectionEpoch();
+      expect(newEpoch).toBeGreaterThan(activeEpoch);
+
+      // Re-querying previously cached quote now fails epoch check -> degraded
+      mockRedisClient.get.mockResolvedValueOnce(
+        JSON.stringify({
+          price: 160.0,
+          provenance: 'LIVE_PROVIDER',
+          providerId: 'NSE_DIRECT',
+          connectionEpoch: activeEpoch, // obsolete epoch!
+          marketEventTime: Date.now(),
+        }),
+      );
+
+      const obsoleteEpochQuote = await (testMonitor as any).getOptionContractQuote(pos);
+      expect(obsoleteEpochQuote.provenance).toBe('DEGRADED');
     });
   });
 });

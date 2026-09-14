@@ -1145,6 +1145,17 @@ export class PaperTradingService implements IExecutionProvider {
     const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
     const config = await this.getSystemConfig();
 
+    // Authoritative Lifecycle Invariant: A position lacking an immutable opening snapshot cannot be closed
+    const openingSnapshot =
+      (pos.executionEventsJson as any)?.accountingSnapshot ??
+      (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
+
+    if (!openingSnapshot) {
+      throw new BadRequestException(
+        `[MALFORMED_LIFECYCLE] Cannot close position '${pos.id}': Missing authoritative immutable opening accounting snapshot. Silently constructing an ad-hoc snapshot during close execution is strictly prohibited.`,
+      );
+    }
+
     // Resolve live exit price with strict fail-closed validation & LIVE_TICK provenance
     let exitPrice: number;
     let sourceTimestamp = new Date();

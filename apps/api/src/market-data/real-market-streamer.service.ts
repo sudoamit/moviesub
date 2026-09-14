@@ -25,6 +25,8 @@ export interface ILiveRealTicker {
   observedAt?: number;
   receivedAt?: number;
   isDerivedFields?: boolean;
+  connectionEpoch?: number;
+  providerId?: string;
 }
 
 @Injectable()
@@ -201,13 +203,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     try {
       const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
       if (!res.ok) {
-        this.handleProviderDisconnect(`Binance HTTP status ${res.status}`);
         return;
       }
       const data = await res.json();
 
       if (data && (data.lastPrice || data.c)) {
-        this.handleProviderReconnect();
         const ticker = this.ingestBinanceTickerData(data);
         if (ticker) await this.broadcastTick(ticker);
       }
@@ -217,6 +217,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       if (paxgRes.ok) {
         const paxgData = await paxgRes.json();
         if (paxgData && paxgData.lastPrice) {
+          const rawCloseTime = paxgData.closeTime;
+          const eventTime = rawCloseTime ? Number(rawCloseTime) : null;
+          if (!eventTime || eventTime <= 0 || !Number.isFinite(eventTime)) {
+            // Missing provider event time -> reject quote without fabricating Date.now()
+            return;
+          }
+
           const livePrice = parseFloat(paxgData.lastPrice);
           const open = parseFloat(paxgData.openPrice);
           const high = parseFloat(paxgData.highPrice);
@@ -251,7 +258,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           ticker.changeAmount = changeAmount;
           ticker.lastUpdated = now;
           ticker.provenance = 'LIVE_PROVIDER';
-          ticker.marketEventTime = paxgData.closeTime ? Number(paxgData.closeTime) : now;
+          ticker.marketEventTime = eventTime;
+          ticker.connectionEpoch = this.providerConnectionEpoch;
           ticker.observedAt = now;
           ticker.receivedAt = now;
 
@@ -260,7 +268,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         }
       }
     } catch (err) {
-      this.handleProviderDisconnect(`Binance connection error: ${(err as Error).message}`);
       this.logger.debug(`Binance real tick notice: ${(err as Error).message}`);
     }
   }
@@ -408,6 +415,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
     this.tickers.set(sym, updated);
     if (provenance === 'LIVE_PROVIDER') {
+      updated.connectionEpoch = this.providerConnectionEpoch;
       this.freshSymbolsAfterReconnect.add(`SPOT:${sym}`);
     }
     return updated;
@@ -421,11 +429,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   private providerState: ProviderConnectionState = 'CONNECTED';
   private providerConnected = true;
+  private providerConnectionEpoch: number = 1;
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
 
   public getProviderState(): ProviderConnectionState {
     return this.providerState;
+  }
+
+  public getConnectionEpoch(): number {
+    return this.providerConnectionEpoch;
   }
 
   public handleProviderDisconnect(reason?: string): void {
@@ -434,14 +447,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
     this.providerState = 'DISCONNECTED';
     this.providerConnected = false;
-    // Atomically invalidate execution freshness on disconnect
+    // Atomically bump connection epoch so any pre-existing ticks become obsolete
+    this.providerConnectionEpoch++;
     this.freshSymbolsAfterReconnect.clear();
   }
 
   public handleProviderReconnecting(): void {
     this.providerState = 'RECONNECTING';
     this.providerConnected = false;
-    // Atomically invalidate execution freshness on reconnecting
+    this.providerConnectionEpoch++;
     this.freshSymbolsAfterReconnect.clear();
   }
 
@@ -451,9 +465,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       this.providerState = 'RECONNECTED';
       this.providerConnected = true;
       this.reconnectedAt = Date.now();
-      // Atomically invalidate execution freshness on reconnect
+      // Fresh connection epoch begins upon reconnection
+      this.providerConnectionEpoch++;
       this.freshSymbolsAfterReconnect.clear();
-      this.logger.log('Market data provider reconnected. Execution freshness invalidated until fresh ticks arrive.');
+      this.logger.log(`Market data provider reconnected. Connection epoch bumped to ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
     }
   }
 
@@ -564,6 +579,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       lastUpdated: now,
       provenance: 'LIVE_PROVIDER',
       marketEventTime,
+      connectionEpoch: this.providerConnectionEpoch,
       observedAt: now,
       receivedAt: now,
     };
@@ -613,6 +629,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       lastUpdated: tick.lastUpdated ?? now,
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
+      connectionEpoch: provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
@@ -629,10 +646,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return null;
     }
     const key = contractSymbol.toUpperCase();
+    const ticker = this.optionTickers.get(key) || null;
+    if (!ticker) return null;
+    if (ticker.connectionEpoch !== this.providerConnectionEpoch) {
+      return null;
+    }
     if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
       return null;
     }
-    return this.optionTickers.get(key) || null;
+    return ticker;
   }
 
   /**
@@ -641,7 +663,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
    * 2. Provenance must be LIVE_PROVIDER (BOOTSTRAP / UNKNOWN / STALE rejected)
    * 3. Must contain genuine, positive marketEventTime
    * 4. Freshness check: age <= maxAgeSeconds (default 5s)
-   * 5. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
+   * 5. Connection epoch check: quote must match active provider connection epoch
+   * 6. Throws MarketDataUnavailableError or StaleMarketDataError on failure.
    */
   getValidatedTicker(
     symbol: string,
@@ -649,17 +672,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
 
-    if (!this.providerConnected) {
+    if (!this.providerConnected || this.providerState === 'DISCONNECTED') {
       throw new MarketDataUnavailableError(
         sym,
         'Market data provider is disconnected. Trade execution blocked.',
-      );
-    }
-
-    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`SPOT:${sym}`)) {
-      throw new MarketDataUnavailableError(
-        sym,
-        `Market quote for ${sym} is a cached tick from before provider reconnection. A fresh valid tick is required after reconnection.`,
       );
     }
 
@@ -669,6 +685,20 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       throw new MarketDataUnavailableError(
         sym,
         'No active market data stream available for symbol',
+      );
+    }
+
+    if (ticker.connectionEpoch !== this.providerConnectionEpoch) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is a cached tick from before provider reconnection (connection epoch ${ticker.connectionEpoch ?? 'none'} vs active ${this.providerConnectionEpoch}). A fresh valid tick is required after reconnection.`,
+      );
+    }
+
+    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`SPOT:${sym}`)) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is a cached tick from before provider reconnection. A fresh valid tick is required after reconnection.`,
       );
     }
 
