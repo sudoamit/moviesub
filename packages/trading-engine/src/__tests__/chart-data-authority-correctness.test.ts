@@ -110,6 +110,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
       sourceIdentity: 'NSE_TRUE_DATA',
       livePrice: 108,
       asOfTimestamp: '2026-09-13T09:45:00.000Z',
+      marketAsOf: '2026-09-13T09:45:00.000Z',
+      observedAt: '2026-09-13T09:45:00.000Z',
     };
 
     const result = ChartSnapshotValidator.validateSnapshot(snapshot, 'NIFTY', '15m');
@@ -891,6 +893,8 @@ describe('Chart Data Authority & Coordinate Correctness Audit Test Suite', () =>
         livePrice: 108,
         asOfTimestamp: '2026-09-13T09:45:00.000Z',
         closedThrough: '2026-09-13T09:30:00.000Z',
+        marketAsOf: '2026-09-13T09:45:00.000Z',
+        observedAt: '2026-09-13T09:45:00.000Z',
       };
 
       const result = ChartSnapshotValidator.validateSnapshot(snapshot, 'NIFTY', '15m');

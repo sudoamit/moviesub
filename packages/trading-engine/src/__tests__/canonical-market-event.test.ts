@@ -3,6 +3,7 @@ import {
   ChartMarketSnapshot,
   VenueSessionCalendar,
   ProviderSequenceCapabilityRegistry,
+  ProviderIdentityNormalizer,
 } from '@quant/shared';
 import { ChartSnapshotValidator } from '../chart-snapshot-validator';
 
@@ -11,6 +12,9 @@ describe('AI FIX 127 — Canonical Market Event & Session Watermark Correction S
 
   beforeEach(() => {
     aggregator = new CanonicalCandleAggregator();
+    ['p1', 'p2', 'provider_1', 'ws_conn_101', 'conn_1', 'conn_2', 'TEST_FEED', 'BINANCE_WS'].forEach((alias) => {
+      ProviderIdentityNormalizer.registerAlias(alias, 'NSE_TRUE_DATA');
+    });
   });
 
   // 1. Market Event Timestamps & Removal of Date.now()

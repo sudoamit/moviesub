@@ -42,7 +42,6 @@ describe('AI FIX 128 — Canonical Provider Observation & Capability Enforcement
     asOfTimestamp: 1700001000000,
     marketAsOf: 1700001000000,
     observedAt: 1700001005000,
-    latestMarketEventTimestamp: 1700001000000,
     dataProvenance: 'LIVE',
     sourceIdentity: 'NSE_TRUE_DATA',
     sessionKey: 'NSE:2026-09-13',
@@ -128,7 +127,7 @@ describe('AI FIX 128 — Canonical Provider Observation & Capability Enforcement
 
     const nextSnap = aggregator.processTick(baseSnapshot, tick);
     expect(nextSnap.livePrice).toBe(2512);
-    expect(nextSnap.latestMarketEventTimestamp).toBe(1700001001000);
+    expect(nextSnap.marketAsOf).toBe(1700001001000);
   });
 
   test('6. Reject SESSION_CUMULATIVE tick when provider does not support session volume', () => {
@@ -292,7 +291,7 @@ describe('AI FIX 128 — Canonical Provider Observation & Capability Enforcement
     expect(snap.formingCandle?.high).toBe(2525);
     expect(snap.formingCandle?.close).toBe(2525);
     expect(snap.formingCandle?.volume).toBe(550); // 500 + 50
-    expect(snap.latestMarketEventTimestamp).toBe(1700001005000);
+    expect(snap.marketAsOf).toBe(1700001005000);
     expect(snap.streamState?.marketAsOf).toBe(1700001005000);
     expect(snap.streamState?.lastSequenceNumber).toBe(101);
   });

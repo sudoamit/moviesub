@@ -32,7 +32,7 @@ export interface ProviderCapabilities {
   readonly session: ProviderSessionCapabilities;
 }
 
-// Backwards-compatibility alias
+/** @deprecated Use ProviderCapabilities instead */
 export type ProviderSequencePolicy = ProviderCapabilities;
 
 export class ProviderIdentityNormalizer {
@@ -40,11 +40,16 @@ export class ProviderIdentityNormalizer {
     BINANCE: 'BINANCE_REALTIME',
     BINANCE_REALTIME: 'BINANCE_REALTIME',
     BINANCE_WS: 'BINANCE_REALTIME',
+    BINANCE_REST: 'BINANCE_REALTIME',
+    BINANCE_LIVE: 'BINANCE_REALTIME',
     'BINANCE-1': 'BINANCE_REALTIME',
+    'BINANCE-LIVE': 'BINANCE_REALTIME',
+    'BINANCE-WS': 'BINANCE_REALTIME',
     NSE: 'NSE_TRUE_DATA',
     NSE_TRUE_DATA: 'NSE_TRUE_DATA',
     NSE_REALTIME: 'NSE_TRUE_DATA',
     NSE_LIVE: 'NSE_TRUE_DATA',
+    NSE_WS: 'NSE_TRUE_DATA',
     COMEX: 'COMEX_GOLD',
     COMEX_GOLD: 'COMEX_GOLD',
     GOLD: 'COMEX_GOLD',
@@ -69,15 +74,14 @@ export class ProviderIdentityNormalizer {
     if (this.canonicalAliases[key]) {
       return this.canonicalAliases[key];
     }
-    if (key.startsWith('BINANCE')) return 'BINANCE_REALTIME';
-    if (key.startsWith('NSE')) return 'NSE_TRUE_DATA';
-    if (key.startsWith('COMEX') || key.startsWith('GOLD')) return 'COMEX_GOLD';
-    if (key.startsWith('YAHOO')) return 'YAHOO_FINANCE';
+    // Fail closed: Strict explicit alias mapping only. Unknown provider IDs return UNKNOWN_PROVIDER.
     return 'UNKNOWN_PROVIDER';
   }
 }
 
 export class ProviderSequenceCapabilityRegistry {
+  private static isLocked = false;
+
   private static capabilities: Record<string, ProviderCapabilities> = {
     BINANCE_REALTIME: {
       providerId: 'BINANCE_REALTIME',
@@ -184,9 +188,19 @@ export class ProviderSequenceCapabilityRegistry {
   };
 
   /**
+   * Locks the capability registry to prevent dynamic mutations after startup initialization.
+   */
+  public static lockRegistry(): void {
+    this.isLocked = true;
+  }
+
+  /**
    * Registers custom provider capabilities from adapter definitions.
    */
   public static registerCapabilities(capabilities: ProviderCapabilities): void {
+    if (this.isLocked) {
+      throw new Error('ProviderSequenceCapabilityRegistry is locked and cannot register new capabilities.');
+    }
     if (capabilities && capabilities.providerId) {
       const key = capabilities.providerId.toUpperCase().trim();
       this.capabilities[key] = capabilities;

@@ -43,7 +43,6 @@ describe('AI FIX 129 — Final Provider Watermark & Stream Bootstrap Suite', () 
     asOfTimestamp: 1700001000000,
     marketAsOf: 1700001000000,
     observedAt: 1700001005000,
-    latestMarketEventTimestamp: 1700001000000,
     dataProvenance: 'LIVE',
     sourceIdentity: 'NSE_TRUE_DATA',
     sessionKey: 'NSE:2023-11-15',

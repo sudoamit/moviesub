@@ -179,6 +179,13 @@ export class ChartSnapshotValidator {
     const asOfMs = snapshot.asOfTimestamp ? new Date(snapshot.asOfTimestamp).getTime() : NaN;
     const observedAtMs = snapshot.observedAt ? new Date(snapshot.observedAt).getTime() : asOfMs;
 
+    // P0 Invariant Check: Missing/Unset marketAsOf MUST have isDegraded === true
+    if (snapshot.marketAsOf === undefined || snapshot.marketAsOf === null) {
+      if (snapshot.isDegraded !== true) {
+        errors.push('Snapshot missing marketAsOf must explicitly have isDegraded = true (market event timestamp unknown).');
+      }
+    }
+
     if (!isNaN(marketAsOfMs) && !isNaN(closedThroughMs) && marketAsOfMs < closedThroughMs) {
       errors.push(`marketAsOf (${snapshot.marketAsOf}) cannot be before closedThrough (${snapshot.closedThrough}).`);
     }

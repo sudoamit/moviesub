@@ -114,7 +114,6 @@ export interface ChartMarketSnapshot {
   readonly closedThrough?: Date | string | number;
   readonly asOfTimestamp: Date | string | number;
   readonly marketAsOf?: Date | string | number;
-  readonly latestMarketEventTimestamp?: Date | string | number;
   readonly observedAt?: Date | string | number;
   readonly sessionKey?: string;
   readonly sessionVolumeWatermark?: number | null;

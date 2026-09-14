@@ -32,13 +32,19 @@ export class CanonicalCandleAggregator {
   private lastAcceptedEventTimeMs = -1;
   private lastSequenceNumber: number | null = null;
   private sessionVolumeWatermark: number | null = null;
-  private connectionEpoch: string | null = null;
   private providerConnectionEpoch: string | null = null;
   private localConnectionInstanceId: string | null = null;
   private providerId = 'UNKNOWN_PROVIDER';
   private lastSessionKey = '';
   private currentSymbol = '';
   private currentTimeframe = '';
+
+  /**
+   * Derived connection epoch property based on active provider/local connection identities.
+   */
+  get connectionEpoch(): string | null {
+    return this.providerConnectionEpoch || this.localConnectionInstanceId || null;
+  }
 
   /**
    * Resets internal aggregator state (for symbol switches, disconnection, or fresh streams).
@@ -49,7 +55,6 @@ export class CanonicalCandleAggregator {
     this.lastAcceptedEventTimeMs = -1;
     this.lastSequenceNumber = null;
     this.sessionVolumeWatermark = null;
-    this.connectionEpoch = null;
     this.providerConnectionEpoch = null;
     this.localConnectionInstanceId = null;
     this.providerId = 'UNKNOWN_PROVIDER';
@@ -59,14 +64,28 @@ export class CanonicalCandleAggregator {
   }
 
   /**
+   * Stream lifecycle event: Called when MarketStreamProvider connects/reconnects with authoritative context.
+   */
+  onStreamConnected(context: { providerConnectionEpoch?: string | null; localConnectionInstanceId?: string | null; resetSequence?: boolean }): void {
+    this.providerConnectionEpoch = context.providerConnectionEpoch && context.providerConnectionEpoch !== 'REST_BOOTSTRAP' ? context.providerConnectionEpoch : null;
+    this.localConnectionInstanceId = context.localConnectionInstanceId ?? null;
+    if (context.resetSequence !== false) {
+      this.lastSequenceNumber = null;
+    }
+  }
+
+  onStreamReconnected(context: { providerConnectionEpoch?: string | null; localConnectionInstanceId?: string | null }): void {
+    this.onStreamConnected({ ...context, resetSequence: true });
+  }
+
+  /**
    * Explicitly sets current stream connection epoch.
    * Supports stream lifecycle authority: setConnectionEpoch(providerEpoch, localInstanceId).
    */
   setConnectionEpoch(epoch: string | null, localInstanceId?: string | null): void {
     this.providerConnectionEpoch = epoch && epoch !== 'REST_BOOTSTRAP' ? epoch : null;
     this.localConnectionInstanceId = localInstanceId ?? null;
-    this.connectionEpoch = this.providerConnectionEpoch || this.localConnectionInstanceId || (epoch === 'REST_BOOTSTRAP' ? 'REST_BOOTSTRAP' : null);
-    if (!this.connectionEpoch || this.connectionEpoch === 'REST_BOOTSTRAP') {
+    if (!this.connectionEpoch) {
       this.lastSequenceNumber = null;
     }
   }
@@ -76,7 +95,7 @@ export class CanonicalCandleAggregator {
    */
   resetSequenceWatermark(epoch?: string, seq?: number): void {
     if (epoch) {
-      this.connectionEpoch = epoch;
+      this.providerConnectionEpoch = epoch !== 'REST_BOOTSTRAP' ? epoch : null;
       this.lastSequenceNumber = seq ?? null;
     } else {
       this.lastSequenceNumber = null;
@@ -111,7 +130,6 @@ export class CanonicalCandleAggregator {
 
     this.providerConnectionEpoch = state?.providerConnectionEpoch ?? (state?.connectionEpoch && state.connectionEpoch !== 'REST_BOOTSTRAP' ? state.connectionEpoch : null);
     this.localConnectionInstanceId = state?.localConnectionInstanceId ?? null;
-    this.connectionEpoch = state?.connectionEpoch ?? (this.providerConnectionEpoch || this.localConnectionInstanceId || (snapshot.streamState ? 'REST_BOOTSTRAP' : null));
 
     // 2. Restore Latest Event Watermark (marketAsOf) strictly from genuine market event watermarks
     if (state?.marketAsOf) {
@@ -419,7 +437,7 @@ export class CanonicalCandleAggregator {
 
     // 11. Construct Candidate Snapshot & Stream State (No Date.now() for marketAsOf)
     const latestEventMs = Math.max(this.lastAcceptedEventTimeMs, tickTimeMs);
-    const marketAsOfValue = typeof snapshot.marketAsOf === 'string' || typeof snapshot.latestMarketEventTimestamp === 'string'
+    const marketAsOfValue = typeof snapshot.marketAsOf === 'string'
       ? new Date(latestEventMs).toISOString()
       : latestEventMs;
     const observationIso = new Date().toISOString();
@@ -449,7 +467,6 @@ export class CanonicalCandleAggregator {
       livePrice: nextForming.close,
       closedThrough,
       marketAsOf: marketAsOfValue,
-      latestMarketEventTimestamp: marketAsOfValue,
       observedAt: observationIso,
       sessionKey,
       sessionVolumeWatermark: candidateSessionVolumeWatermark,
@@ -461,7 +478,6 @@ export class CanonicalCandleAggregator {
 
     // 12. TRANSACTIONAL COMMIT: Only update internal state AFTER tick processing succeeds
     this.providerId = tickProviderId;
-    this.connectionEpoch = candidateEpoch;
     this.providerConnectionEpoch = candidateProviderEpoch;
     this.localConnectionInstanceId = candidateLocalInstanceId;
     this.lastSequenceNumber = candidateSequenceNum;
