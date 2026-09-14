@@ -142,7 +142,7 @@ function rejectMismatchedClaim(value: unknown, expected: string, label: string):
  * providerId + transport it accepts, validates the *original* provider event before
  * branding, and is the sole producer of a branded ValidatedOptionProviderEvent.
  */
-export function createOptionProviderValidator(
+function createOptionProviderValidator(
   providerId: string,
   providerTransport: CanonicalProviderTransport,
 ): IOptionProviderValidator {

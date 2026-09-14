@@ -22,10 +22,8 @@ import {
 } from '../execution-quote-validator';
 import {
   createCanonicalOptionQuoteRecord,
-  createOptionProviderAdapter,
   isProviderConnectionIdUuid,
   isProviderConnectionIdentity,
-  NSE_STREAM_OPTION_PROVIDER_VALIDATOR,
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   ValidatedCanonicalOptionProviderTick,
 } from '../option-provider';
@@ -48,18 +46,12 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
     providerInstanceId?: string;
     providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
   } = {}) {
-    const adapter =
-      overrides.providerId || overrides.providerTransport
-        ? NSE_STREAM_OPTION_PROVIDER_ADAPTER
-        : createOptionProviderAdapter(NSE_STREAM_OPTION_PROVIDER_VALIDATOR);
+    const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
     const providerId = overrides.providerId ?? adapter.providerId;
     const providerTransport = overrides.providerTransport ?? adapter.providerTransport;
-    let connection = adapter.beginProviderConnection({
+    const connection = adapter.beginProviderConnection({
       providerInstanceId: overrides.providerInstanceId ?? providerInstanceId,
     });
-    while (connection.connectionEpoch < (overrides.connectionEpoch ?? 1)) {
-      connection = adapter.beginProviderConnection({ providerInstanceId: overrides.providerInstanceId ?? providerInstanceId });
-    }
     const currentConnection = adapter.getCurrentProviderConnection();
     if (!currentConnection) throw new Error('test adapter did not create a connection');
     return adapter.toCanonicalExecutionTick(
@@ -339,11 +331,11 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
     it('4. authentic canonical writer payload => validated as LIVE_PROVIDER', () => {
       const record = createCanonicalOptionQuoteRecord(makeValidatedTick({ contractSymbol: contract, connectionEpoch: epoch }));
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now(), record.providerConnectionId, providerInstanceId);
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, record.connectionEpoch, true, Date.now(), record.providerConnectionId, providerInstanceId);
       expect(res.valid).toBe(true);
       expect(res.quote?.provenance).toBe('LIVE_PROVIDER');
       expect(res.quote?.price).toBe(150.0);
-      expect(res.quote?.connectionEpoch).toBe(epoch);
+      expect(res.quote?.connectionEpoch).toBe(record.connectionEpoch);
       expect(res.quote?.providerId).toBe(NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId);
       expect(res.quote?.providerInstanceId).toBe(providerInstanceId);
       expect(res.quote?.providerConnectionId).toBe(record.providerConnectionId);
@@ -356,7 +348,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         connectionEpoch: epoch - 1,
       }));
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now());
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, record.connectionEpoch + 1, true, Date.now());
       expect(res.valid).toBe(false);
       expect(res.reason).toContain('obsolete connection epoch');
     });
@@ -367,7 +359,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       const res = parseAndValidateRedisOptionQuote(
         JSON.stringify(record),
         contract,
-        epoch,
+        record.connectionEpoch,
         false, // streamer not healthy!
         Date.now(),
       );
@@ -381,7 +373,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       const res = parseAndValidateRedisOptionQuote(
         JSON.stringify(record),
         contract,
-        epoch,
+        record.connectionEpoch,
         false,
         Date.now(),
       );
@@ -396,7 +388,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         connectionEpoch: epoch,
       }));
 
-      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, epoch, true, Date.now());
+      const res = parseAndValidateRedisOptionQuote(JSON.stringify(record), contract, record.connectionEpoch, true, Date.now());
       expect(res.valid).toBe(false);
       expect(res.reason).toContain('Contract mismatch');
     });
@@ -407,7 +399,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         { providerId: 'ATTACKER_PROVIDER' },
         { providerInstanceId: 'other-api-instance' },
         { providerConnectionId: '32b38a0e-3773-4758-b16c-21af4e8bdc76' },
-        { connectionEpoch: epoch + 1 },
+        { connectionEpoch: record.connectionEpoch + 1 },
         { contractSymbol: 'NIFTY24SEP26000CE' },
         { price: 151.0 },
         { marketEventTime: Date.now() - 250 },
@@ -415,7 +407,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         { providerTransport: 'REST_POLLING' },
       ]) {
         const tampered = { ...record, ...patch };
-        const res = parseAndValidateRedisOptionQuote(JSON.stringify(tampered), contract, epoch, true, Date.now(), record.providerConnectionId, providerInstanceId);
+        const res = parseAndValidateRedisOptionQuote(JSON.stringify(tampered), contract, record.connectionEpoch, true, Date.now(), record.providerConnectionId, providerInstanceId);
         expect(res.valid).toBe(false);
       }
     });
@@ -456,19 +448,57 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
     });
 
     it('mints UUID provider connection ids inside the adapter instead of accepting caller ids', () => {
-      const adapter = createOptionProviderAdapter(NSE_STREAM_OPTION_PROVIDER_VALIDATOR);
+      const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
       const first = adapter.beginProviderConnection({ providerInstanceId });
       const second = adapter.beginProviderConnection({ providerInstanceId });
 
       expect(isProviderConnectionIdUuid(first.providerConnectionId)).toBe(true);
       expect(isProviderConnectionIdUuid(second.providerConnectionId)).toBe(true);
       expect(first.providerConnectionId).not.toBe(second.providerConnectionId);
-      expect(first.connectionEpoch).toBe(1);
-      expect(second.connectionEpoch).toBe(2);
+      expect(second.connectionEpoch).toBe(first.connectionEpoch + 1);
+    });
+
+    it('does not expose generic adapter or validator factories as production authority', () => {
+      const publicApi = require('../option-provider');
+
+      expect(publicApi.createOptionProviderAdapter).toBeUndefined();
+      expect(publicApi.createOptionProviderValidator).toBeUndefined();
+      expect(publicApi.NSE_STREAM_OPTION_PROVIDER_VALIDATOR).toBeUndefined();
+      expect(publicApi.NSE_REST_OPTION_PROVIDER_VALIDATOR).toBeUndefined();
+    });
+
+    it('fabricated validator and adapter objects cannot produce production-authoritative ticks', () => {
+      const fakeValidatedEvent = Object.freeze({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+        contractSymbol: contract,
+        price: 150.0,
+        marketEventTime: Date.now() - 500,
+      });
+      const fakeValidator = Object.freeze({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+        validate: () => fakeValidatedEvent,
+      });
+      const fakeAdapter = Object.freeze({
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
+        beginProviderConnection: () => ({
+          providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+          providerInstanceId,
+          providerConnectionId,
+          connectionEpoch: epoch,
+        }),
+        toCanonicalExecutionTick: () => fakeValidatedEvent,
+      });
+
+      expect(() => (fakeValidator as any).validate({})).not.toThrow();
+      expect(() => createCanonicalOptionQuoteRecord((fakeAdapter as any).toCanonicalExecutionTick()))
+        .toThrow(/validated provider-origin tick/);
     });
 
     it('rejects fabricated and stale provider connection identity objects', () => {
-      const adapter = createOptionProviderAdapter(NSE_STREAM_OPTION_PROVIDER_VALIDATOR);
+      const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
       const first = adapter.beginProviderConnection({ providerInstanceId });
       const second = adapter.beginProviderConnection({ providerInstanceId });
       const raw = {
@@ -493,8 +523,45 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       expect(() => adapter.toCanonicalExecutionTick(raw, second)).not.toThrow();
     });
 
+    it('raw provider identity and epoch claims cannot override adapter-derived authority', () => {
+      const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
+      const connection = adapter.beginProviderConnection({ providerInstanceId });
+
+      const tick = adapter.toCanonicalExecutionTick({
+        providerId: adapter.providerId,
+        providerTransport: adapter.providerTransport,
+        providerSymbol: contract,
+        price: 150.0,
+        providerEventTime: Date.now() - 500,
+      }, connection);
+      const recordInput = tick.toRecordInput();
+      expect(recordInput.providerId).toBe(adapter.providerId);
+      expect(recordInput.providerTransport).toBe(adapter.providerTransport);
+      expect(recordInput.connectionEpoch).toBe(connection.connectionEpoch);
+      expect(recordInput.providerConnectionId).toBe(connection.providerConnectionId);
+
+      expect(() => adapter.toCanonicalExecutionTick({
+        providerId: 'ATTACKER',
+        providerSymbol: contract,
+        price: 150.0,
+        providerEventTime: Date.now() - 500,
+      }, connection)).toThrow(/providerId/);
+      expect(() => adapter.toCanonicalExecutionTick({
+        providerTransport: 'REST_POLLING',
+        providerSymbol: contract,
+        price: 150.0,
+        providerEventTime: Date.now() - 500,
+      }, connection)).toThrow(/providerTransport/);
+      expect(() => adapter.toCanonicalExecutionTick({
+        providerSymbol: contract,
+        price: 150.0,
+        providerEventTime: Date.now() - 500,
+        connectionEpoch: connection.connectionEpoch,
+      }, connection)).toThrow(/cannot supply trusted connectionEpoch/);
+    });
+
     it('rejects malformed provider payloads before minting canonical ticks', () => {
-      const adapter = createOptionProviderAdapter(NSE_STREAM_OPTION_PROVIDER_VALIDATOR);
+      const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
       adapter.beginProviderConnection({ providerInstanceId });
 
       for (const raw of [
@@ -518,7 +585,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
     });
 
     it('proves production-equivalent provider event to Redis to execution validator path', () => {
-      const adapter = createOptionProviderAdapter(NSE_STREAM_OPTION_PROVIDER_VALIDATOR);
+      const adapter = NSE_STREAM_OPTION_PROVIDER_ADAPTER;
       const connection = adapter.beginProviderConnection({ providerInstanceId });
       const providerWireEvent = {
         providerSymbol: contract,

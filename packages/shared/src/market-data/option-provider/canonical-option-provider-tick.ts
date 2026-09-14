@@ -223,7 +223,7 @@ export interface IOptionProviderAdapter {
   ): ValidatedCanonicalOptionProviderTick;
 }
 
-export function createOptionProviderAdapter(
+function createOptionProviderAdapter(
   validator: IOptionProviderValidator,
 ): IOptionProviderAdapter {
   if (!validator || typeof validator.validate !== 'function') {

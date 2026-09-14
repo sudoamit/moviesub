@@ -17,7 +17,20 @@ export {
   IProviderConnectionIdentityInit,
 } from './provider-connection-identity';
 export * from './raw-option-provider-event';
-export * from './option-provider-validators';
-export * from './canonical-option-provider-tick';
+export {
+  IOptionProviderValidator,
+  isValidatedOptionProviderEvent,
+  ValidatedOptionProviderEvent,
+} from './option-provider-validators';
+export {
+  BINANCE_OPTION_PROVIDER_ADAPTER,
+  ICanonicalOptionProviderTickInput,
+  IOptionProviderAdapter,
+  isValidatedCanonicalOptionProviderTick,
+  NSE_REST_OPTION_PROVIDER_ADAPTER,
+  NSE_STREAM_OPTION_PROVIDER_ADAPTER,
+  validateCanonicalProviderTickInput,
+  ValidatedCanonicalOptionProviderTick,
+} from './canonical-option-provider-tick';
 export * from './canonical-option-quote-record';
 export * from './option-provider-adapters';

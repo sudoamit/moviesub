@@ -10,9 +10,9 @@ import {
   createCanonicalOptionQuoteRecord,
   ICanonicalOptionQuoteRecord,
   isValidatedCanonicalOptionProviderTick,
-  mintProviderConnectionIdentity,
   NSE_REST_OPTION_PROVIDER_ADAPTER,
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
+  ProviderConnectionIdentity,
   ValidatedCanonicalOptionProviderTick,
 } from '@quant/shared';
 
@@ -464,11 +464,19 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private streamConnectionState: ProviderConnectionState = 'CONNECTED';
   private restHealthState: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' = 'HEALTHY';
   private providerConnected = true;
-  private providerConnectionEpoch: number = 1;
   private readonly providerInstanceId: string =
     process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
     `api-${process.pid}-${crypto.randomUUID()}`;
-  private providerConnectionId: string = crypto.randomUUID();
+  private streamProviderConnection: ProviderConnectionIdentity =
+    NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+  private restProviderConnection: ProviderConnectionIdentity =
+    NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+  private providerConnectionEpoch: number = this.streamProviderConnection.connectionEpoch;
+  private providerConnectionId: string = this.streamProviderConnection.providerConnectionId;
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
 
@@ -541,12 +549,28 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       this.streamConnectionState = 'RECONNECTED';
       this.providerConnected = true;
       this.reconnectedAt = Date.now();
-      // Exactly ONE new connection epoch is minted for the new provider connection lifecycle
-      this.providerConnectionEpoch++;
-      this.providerConnectionId = crypto.randomUUID();
+      this.beginProviderConnections();
       this.freshSymbolsAfterReconnect.clear();
       this.logger.log(`Market data provider reconnected. Exactly one new connection epoch assigned: ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
     }
+  }
+
+  private beginProviderConnections(): void {
+    this.streamProviderConnection = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    this.restProviderConnection = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    this.providerConnectionEpoch = this.streamProviderConnection.connectionEpoch;
+    this.providerConnectionId = this.streamProviderConnection.providerConnectionId;
+  }
+
+  private getCurrentOptionProviderConnection(providerId: string): ProviderConnectionIdentity {
+    if (providerId === NSE_REST_OPTION_PROVIDER_ADAPTER.providerId) {
+      return this.restProviderConnection;
+    }
+    return this.streamProviderConnection;
   }
 
   public setProviderConnected(connected: boolean): void {
@@ -849,12 +873,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }): ValidatedCanonicalOptionProviderTick {
     return NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
       {
-        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
-        providerTransport: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerTransport,
         providerSymbol: params.contractSymbol,
         price: params.price,
         providerEventTime: params.marketEventTime,
-        connectionEpoch: this.providerConnectionEpoch,
         open: params.open,
         high: params.high,
         low: params.low,
@@ -867,12 +888,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: params.tickSize,
         sequence: params.sequence,
       },
-      mintProviderConnectionIdentity({
-        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
-        providerInstanceId: this.providerInstanceId,
-        providerConnectionId: this.providerConnectionId,
-        connectionEpoch: this.providerConnectionEpoch,
-      }),
+      this.streamProviderConnection,
     );
   }
 
@@ -894,12 +910,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }): ValidatedCanonicalOptionProviderTick {
     return NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick(
       {
-        providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId,
-        providerTransport: NSE_REST_OPTION_PROVIDER_ADAPTER.providerTransport,
         providerSymbol: params.contractSymbol,
         price: params.price,
         providerEventTime: params.marketEventTime,
-        connectionEpoch: this.providerConnectionEpoch,
         open: params.open,
         high: params.high,
         low: params.low,
@@ -912,12 +925,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         tickSize: params.tickSize,
         sequence: params.sequence,
       },
-      mintProviderConnectionIdentity({
-        providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId,
-        providerInstanceId: this.providerInstanceId,
-        providerConnectionId: this.providerConnectionId,
-        connectionEpoch: this.providerConnectionEpoch,
-      }),
+      this.restProviderConnection,
     );
   }
 
@@ -976,10 +984,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (!redisClient || redisClient.status !== 'ready') return null;
 
     const params = providerTick.toRecordInput();
+    const activeConnection = this.getCurrentOptionProviderConnection(params.providerId);
     if (
-      params.connectionEpoch !== this.providerConnectionEpoch ||
-      params.providerInstanceId !== this.providerInstanceId ||
-      params.providerConnectionId !== this.providerConnectionId
+      params.connectionEpoch !== activeConnection.connectionEpoch ||
+      params.providerInstanceId !== activeConnection.providerInstanceId ||
+      params.providerConnectionId !== activeConnection.providerConnectionId
     ) {
       this.logger.warn(`Cannot publish canonical option quote for ${params.contractSymbol}: provider connection identity is not current`);
       return null;
