@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import {
   CanonicalProviderTransport,
   validateExecutionQuoteTimestamp,
+  normalizeCanonicalProviderId,
 } from '../execution-quote-validator';
 import { RawSpotProviderEvent } from './raw-spot-provider-event';
 import {
@@ -228,6 +229,14 @@ function createSpotProviderAdapter(
       readonly existingConnection?: ProviderConnectionIdentity;
     }): ProviderConnectionIdentity {
       if (options?.existingConnection && isProviderConnectionIdentity(options.existingConnection)) {
+        if (
+          normalizeCanonicalProviderId(options.existingConnection.providerId) !== normalizeCanonicalProviderId(validator.providerId) ||
+          options.existingConnection.providerTransport !== validator.providerTransport
+        ) {
+          throw new Error(
+            `[INVALID_SHARED_CONNECTION_IDENTITY] Existing connection providerId '${options.existingConnection.providerId}' or transport '${options.existingConnection.providerTransport}' does not match adapter provider '${validator.providerId}' (${validator.providerTransport})`,
+          );
+        }
         currentConnection = options.existingConnection;
         connectionEpoch = currentConnection.connectionEpoch;
         return currentConnection;

@@ -214,21 +214,21 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
     const baseTime = 0;
     this.registerRate({
       pair: 'USDT/INR',
-      rate: 92.0,
+      rate: 92.5,
       timestamp: baseTime,
       source: 'RBI_MARKET_BASELINE',
       version: '1.0',
     });
     this.registerRate({
       pair: 'USD/INR',
-      rate: 87.0,
+      rate: 87.5,
       timestamp: baseTime,
       source: 'RBI_MARKET_BASELINE',
       version: '1.0',
     });
     this.registerRate({
       pair: 'EUR/INR',
-      rate: 95.0,
+      rate: 95.5,
       timestamp: baseTime,
       source: 'RBI_MARKET_BASELINE',
       version: '1.0',

@@ -181,7 +181,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(monitorContent).not.toMatch(/provenance:\s*parsed\.provenance/);
 
     // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
-    expect(streamerContent).toContain("streamConnectionState === 'CONNECTED' || this.streamConnectionState === 'RECONNECTED'");
+    expect(streamerContent).toMatch(/connectionState === 'CONNECTED' \|\| (this\.|state\.)?connectionState === 'RECONNECTED'/);
   });
 
   it('RULE 10: AI FIX 155 Structural Guards — canonical option authority is provider-derived and explicitly signed', () => {
@@ -280,6 +280,31 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 5. validateCurrentProviderExecutionQuote helper must exist
     expect(validatorContent).toContain('export function validateCurrentProviderExecutionQuote');
+  });
+
+  it('RULE 14: AI FIX 162 Structural Guards — Final Provider-Runtime-State Hardening', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. Zero global streamConnectionState field in RealMarketStreamerService
+    expect(streamerContent).not.toMatch(/private\s+streamConnectionState\s*:\s*ProviderConnectionState/);
+
+    // 2. Zero global streamProviderConnected field in RealMarketStreamerService
+    expect(streamerContent).not.toMatch(/private\s+streamProviderConnected\s*=/);
+
+    // 3. streamRuntimeStateMap exists and manages provider-scoped state
+    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string,');
+
+    // 4. getCurrentProviderConnection enforces providerTransport check
+    expect(streamerContent).toContain('[PROVIDER_TRANSPORT_MISMATCH]');
+
+    // 5. Freshness invalidation on reconnect is provider-scoped (no global clear in handleStreamProviderReconnect)
+    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?\}\n  \}/)?.[0] || '';
+    expect(handleReconnectFn).not.toContain('this.freshSymbolsAfterReconnect.clear()');
+    expect(handleReconnectFn).toContain('WEBSOCKET_STREAM:');
+
+    // 6. beginStreamProviderConnection and beginRestProviderConnection validate shared existingConnection identity
+    expect(streamerContent).toContain('[INVALID_SHARED_CONNECTION_IDENTITY]');
   });
 });
 

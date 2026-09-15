@@ -20,6 +20,7 @@ import {
   NSE_STREAM_SPOT_PROVIDER_ADAPTER,
   NSE_YAHOO_REST_PROVIDER_ADAPTER,
   NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER,
+  isProviderConnectionIdentity,
   ProviderConnectionIdentity,
   ValidatedCanonicalOptionProviderTick,
   ValidatedCanonicalSpotProviderTick,
@@ -200,8 +201,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       },
     ],
   ]);
-
-  constructor(private readonly redis: RedisService) {}
 
   onModuleInit() {
     this.startRealTimeFeeds();
@@ -510,8 +509,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.tickers.get(symbol.toUpperCase());
   }
 
-  private streamConnectionState: ProviderConnectionState = 'CONNECTED';
-  private streamProviderConnected = true;
+  private streamRuntimeStateMap: Map<string, {
+    providerId: string;
+    providerTransport: 'WEBSOCKET_STREAM';
+    connectionState: ProviderConnectionState;
+    providerConnected: boolean;
+    currentConnection: ProviderConnectionIdentity;
+    reconnectedAt: number | null;
+  }> = new Map();
 
   private restHealthStateMap: Map<string, 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE'> = new Map([
     ['NSE_REST_OPTION_PROVIDER', 'HEALTHY'],
@@ -523,107 +528,144 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
     `api-${process.pid}-${crypto.randomUUID()}`;
 
-  private streamProviderConnectionMap: Map<string, ProviderConnectionIdentity> = new Map([
-    [
-      'NSE_STREAM_GATEWAY',
-      (() => {
-        const conn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
-          providerInstanceId: this.providerInstanceId,
-        });
-        NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-        return conn;
-      })(),
-    ],
-    [
-      'BINANCE_DIRECT',
-      (() => {
-        const conn = BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
-          providerInstanceId: this.providerInstanceId,
-        });
-        BINANCE_OPTION_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-        return conn;
-      })(),
-    ],
-  ]);
+  private streamProviderConnectionMap: Map<string, ProviderConnectionIdentity> = new Map();
 
-  private restProviderConnectionMap: Map<string, ProviderConnectionIdentity> = new Map([
-    [
-      'NSE_REST_OPTION_PROVIDER',
-      NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
-        providerInstanceId: this.providerInstanceId,
-      }),
-    ],
-    [
-      'NSE_YAHOO_REST',
-      (() => {
-        const conn = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection({
-          providerInstanceId: this.providerInstanceId,
-        });
-        NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-        return conn;
-      })(),
-    ],
-    [
-      'BINANCE_REST',
-      (() => {
-        const conn = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection({
-          providerInstanceId: this.providerInstanceId,
-        });
-        BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-        return conn;
-      })(),
-    ],
-  ]);
+  private restProviderConnectionMap: Map<string, ProviderConnectionIdentity> = new Map();
 
-  private reconnectedAt: number | null = null;
+  constructor(private readonly redis: RedisService) {
+    this.initProviderConnections();
+  }
+
+  private initProviderConnections(): void {
+    // 1. NSE_STREAM_GATEWAY
+    const nseConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: nseConn });
+    this.streamProviderConnectionMap.set('NSE_STREAM_GATEWAY', nseConn);
+    this.streamRuntimeStateMap.set('NSE_STREAM_GATEWAY', {
+      providerId: 'NSE_STREAM_GATEWAY',
+      providerTransport: 'WEBSOCKET_STREAM',
+      connectionState: 'CONNECTED',
+      providerConnected: true,
+      currentConnection: nseConn,
+      reconnectedAt: null,
+    });
+
+    // 2. BINANCE_DIRECT
+    const binanceConn = BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    BINANCE_OPTION_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: binanceConn });
+    this.streamProviderConnectionMap.set('BINANCE_DIRECT', binanceConn);
+    this.streamRuntimeStateMap.set('BINANCE_DIRECT', {
+      providerId: 'BINANCE_DIRECT',
+      providerTransport: 'WEBSOCKET_STREAM',
+      connectionState: 'CONNECTED',
+      providerConnected: true,
+      currentConnection: binanceConn,
+      reconnectedAt: null,
+    });
+
+    // REST Providers
+    const nseRestConn = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    this.restProviderConnectionMap.set('NSE_REST_OPTION_PROVIDER', nseRestConn);
+
+    const yahooRestConn = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: yahooRestConn });
+    this.restProviderConnectionMap.set('NSE_YAHOO_REST', yahooRestConn);
+
+    const binanceRestConn = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection({
+      providerInstanceId: this.providerInstanceId,
+    });
+    BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: binanceRestConn });
+    this.restProviderConnectionMap.set('BINANCE_REST', binanceRestConn);
+  }
+
   private freshSymbolsAfterReconnect = new Set<string>();
 
-  public getCurrentStreamProviderConnection(providerId = 'NSE_STREAM_GATEWAY'): ProviderConnectionIdentity {
-    const normId = normalizeCanonicalProviderId(providerId);
-    const conn = this.streamProviderConnectionMap.get(normId);
-    if (!conn) {
-      throw new Error(
-        `[UNKNOWN_PROVIDER_ID_REJECTED] No active stream provider connection for '${providerId}' (canonical: '${normId}')`,
-      );
-    }
-    return conn;
-  }
-
-  public getCurrentRestProviderConnection(providerId = 'NSE_REST_OPTION_PROVIDER'): ProviderConnectionIdentity {
-    const normId = normalizeCanonicalProviderId(providerId);
-    const conn = this.restProviderConnectionMap.get(normId);
-    if (!conn) {
-      throw new Error(
-        `[UNKNOWN_PROVIDER_ID_REJECTED] No active REST provider connection for '${providerId}' (canonical: '${normId}')`,
-      );
-    }
-    return conn;
-  }
-
-  public getCurrentProviderConnection(providerId: string): ProviderConnectionIdentity {
+  public getCurrentProviderConnection(
+    providerId: string,
+    providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+  ): ProviderConnectionIdentity {
     if (!providerId || typeof providerId !== 'string' || providerId.trim().length === 0) {
       throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     }
     const normId = normalizeCanonicalProviderId(providerId);
-    const restConn = this.restProviderConnectionMap.get(normId);
-    if (restConn) return restConn;
-    const streamConn = this.streamProviderConnectionMap.get(normId);
-    if (streamConn) return streamConn;
-    throw new Error(
-      `[UNKNOWN_PROVIDER_ID_REJECTED] Unknown or unsupported providerId '${providerId}' (canonical: '${normId}')`,
-    );
+
+    if (!providerTransport) {
+      // Direct lookup fallback if transport not supplied, but validate provider exists
+      const streamState = this.streamRuntimeStateMap.get(normId);
+      if (streamState) return streamState.currentConnection;
+      const restConn = this.restProviderConnectionMap.get(normId);
+      if (restConn) return restConn;
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown providerId '${providerId}' (canonical: '${normId}')`);
+    }
+
+    if (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING') {
+      throw new Error(`[PROVIDER_TRANSPORT_MISMATCH] Invalid providerTransport '${providerTransport}'`);
+    }
+
+    if (providerTransport === 'WEBSOCKET_STREAM') {
+      if (normId !== 'NSE_STREAM_GATEWAY' && normId !== 'BINANCE_DIRECT') {
+        throw new Error(
+          `[PROVIDER_TRANSPORT_MISMATCH] Provider '${providerId}' (canonical: '${normId}') does not support WEBSOCKET_STREAM transport`,
+        );
+      }
+      const state = this.streamRuntimeStateMap.get(normId);
+      if (!state || !state.currentConnection) {
+        throw new Error(
+          `[UNKNOWN_PROVIDER_ID_REJECTED] No active stream provider connection for '${providerId}' (canonical: '${normId}')`,
+        );
+      }
+      return state.currentConnection;
+    } else {
+      // REST_POLLING
+      if (
+        normId !== 'NSE_REST_OPTION_PROVIDER' &&
+        normId !== 'NSE_YAHOO_REST' &&
+        normId !== 'BINANCE_REST'
+      ) {
+        throw new Error(
+          `[PROVIDER_TRANSPORT_MISMATCH] Provider '${providerId}' (canonical: '${normId}') does not support REST_POLLING transport`,
+        );
+      }
+      const conn = this.restProviderConnectionMap.get(normId);
+      if (!conn) {
+        throw new Error(
+          `[UNKNOWN_PROVIDER_ID_REJECTED] No active REST provider connection for '${providerId}' (canonical: '${normId}')`,
+        );
+      }
+      return conn;
+    }
   }
 
-  public getCurrentOptionProviderConnection(providerId: string): ProviderConnectionIdentity {
-    return this.getCurrentProviderConnection(providerId);
+  public getCurrentStreamProviderConnection(providerId = 'NSE_STREAM_GATEWAY'): ProviderConnectionIdentity {
+    if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
+    return this.getCurrentProviderConnection(providerId, 'WEBSOCKET_STREAM');
   }
 
-  public getProviderState(): ProviderConnectionState {
-    return this.streamConnectionState;
+  public getCurrentRestProviderConnection(providerId = 'NSE_REST_OPTION_PROVIDER'): ProviderConnectionIdentity {
+    if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
+    return this.getCurrentProviderConnection(providerId, 'REST_POLLING');
   }
 
-  public getStreamConnectionState(): ProviderConnectionState {
-    return this.streamConnectionState;
+  public getCurrentOptionProviderConnection(providerId: string, providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING'): ProviderConnectionIdentity {
+    return this.getCurrentProviderConnection(providerId, providerTransport);
+  }
+
+  public getProviderState(providerId = 'NSE_STREAM_GATEWAY'): ProviderConnectionState {
+    const normId = normalizeCanonicalProviderId(providerId);
+    const state = this.streamRuntimeStateMap.get(normId);
+    return state ? state.connectionState : 'DISCONNECTED';
+  }
+
+  public getStreamConnectionState(providerId = 'NSE_STREAM_GATEWAY'): ProviderConnectionState {
+    return this.getProviderState(providerId);
   }
 
   public getRestHealthState(providerId = 'NSE_REST_OPTION_PROVIDER'): 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' {
@@ -644,28 +686,36 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
-  public isStreamExecutionHealthy(): boolean {
+  public isStreamExecutionHealthy(providerId = 'NSE_STREAM_GATEWAY'): boolean {
+    const normId = normalizeCanonicalProviderId(providerId);
+    const state = this.streamRuntimeStateMap.get(normId);
+    if (!state) {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
+    }
     return (
-      this.streamProviderConnected &&
-      (this.streamConnectionState === 'CONNECTED' || this.streamConnectionState === 'RECONNECTED')
+      state.providerConnected &&
+      (state.connectionState === 'CONNECTED' || state.connectionState === 'RECONNECTED')
     );
   }
 
   public isRestExecutionHealthy(providerId = 'NSE_REST_OPTION_PROVIDER'): boolean {
-    return this.getRestHealthState(providerId) === 'HEALTHY';
+    const normId = normalizeCanonicalProviderId(providerId);
+    if (!this.restProviderConnectionMap.has(normId)) {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown REST provider '${providerId}' (canonical: '${normId}')`);
+    }
+    return this.getRestHealthState(normId) === 'HEALTHY';
   }
 
+  // isExecutionDataHealthy()
   public isExecutionDataHealthy(
     transport?: 'WEBSOCKET_STREAM' | 'REST_POLLING',
     providerId?: string,
   ): boolean {
+    const pid = providerId || (transport === 'REST_POLLING' ? 'NSE_REST_OPTION_PROVIDER' : 'NSE_STREAM_GATEWAY');
     if (transport === 'REST_POLLING') {
-      return this.isRestExecutionHealthy(providerId);
+      return this.isRestExecutionHealthy(pid);
     }
-    if (transport === 'WEBSOCKET_STREAM') {
-      return this.isStreamExecutionHealthy();
-    }
-    return this.isStreamExecutionHealthy();
+    return this.isStreamExecutionHealthy(pid);
   }
 
   public getStreamConnectionEpoch(providerId = 'NSE_STREAM_GATEWAY'): number {
@@ -677,7 +727,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getConnectionEpoch(): number {
-    return this.getCurrentStreamProviderConnection().connectionEpoch;
+    return this.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY').connectionEpoch;
   }
 
   public getProviderInstanceId(): string {
@@ -685,45 +735,94 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getProviderConnectionId(providerId = 'NSE_STREAM_GATEWAY'): string {
-    return this.getCurrentProviderConnection(providerId).providerConnectionId;
+    return this.getCurrentStreamProviderConnection(providerId).providerConnectionId;
   }
 
-  public beginStreamProviderConnection(providerId = 'NSE_STREAM_GATEWAY'): ProviderConnectionIdentity {
+  public beginStreamProviderConnection(
+    providerId = 'NSE_STREAM_GATEWAY',
+    options?: { existingConnection?: ProviderConnectionIdentity },
+  ): ProviderConnectionIdentity {
     const normId = normalizeCanonicalProviderId(providerId);
+    if (normId !== 'NSE_STREAM_GATEWAY' && normId !== 'BINANCE_DIRECT') {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin stream connection for unknown provider '${providerId}'`);
+    }
+
+    if (options?.existingConnection) {
+      const existing = options.existingConnection;
+      if (!isProviderConnectionIdentity(existing)) {
+        throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity');
+      }
+      const existingNormId = normalizeCanonicalProviderId(existing.providerId);
+      if (existingNormId !== normId || existing.providerTransport !== 'WEBSOCKET_STREAM') {
+        throw new Error(
+          `[INVALID_SHARED_CONNECTION_IDENTITY] Existing connection providerId '${existing.providerId}' or transport '${existing.providerTransport}' does not match target stream provider '${normId}'`,
+        );
+      }
+    }
+
     let conn: ProviderConnectionIdentity;
     if (normId === 'BINANCE_DIRECT') {
       conn = BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
         providerInstanceId: this.providerInstanceId,
+        existingConnection: options?.existingConnection,
       });
       BINANCE_OPTION_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-    } else if (normId === 'NSE_STREAM_GATEWAY') {
+    } else {
       conn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
         providerInstanceId: this.providerInstanceId,
+        existingConnection: options?.existingConnection,
       });
       NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
-    } else {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin stream connection for unknown provider '${providerId}'`);
     }
+    const state = this.streamRuntimeStateMap.get(normId);
+    this.streamRuntimeStateMap.set(normId, {
+      providerId: normId,
+      providerTransport: 'WEBSOCKET_STREAM',
+      connectionState: state?.connectionState || 'CONNECTED',
+      providerConnected: state?.providerConnected ?? true,
+      currentConnection: conn,
+      reconnectedAt: state?.reconnectedAt ?? null,
+    });
     this.streamProviderConnectionMap.set(normId, conn);
     return conn;
   }
 
-  public beginRestProviderConnection(providerId = 'NSE_REST_OPTION_PROVIDER'): ProviderConnectionIdentity {
+  public beginRestProviderConnection(
+    providerId = 'NSE_REST_OPTION_PROVIDER',
+    options?: { existingConnection?: ProviderConnectionIdentity },
+  ): ProviderConnectionIdentity {
     const normId = normalizeCanonicalProviderId(providerId);
+
+    if (options?.existingConnection) {
+      const existing = options.existingConnection;
+      if (!isProviderConnectionIdentity(existing)) {
+        throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity');
+      }
+      const existingNormId = normalizeCanonicalProviderId(existing.providerId);
+      if (existingNormId !== normId || existing.providerTransport !== 'REST_POLLING') {
+        throw new Error(
+          `[INVALID_SHARED_CONNECTION_IDENTITY] Existing connection providerId '${existing.providerId}' or transport '${existing.providerTransport}' does not match target REST provider '${normId}'`,
+        );
+      }
+    }
+
     let conn: ProviderConnectionIdentity;
     if (normId === 'BINANCE_REST') {
       conn = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection({
         providerInstanceId: this.providerInstanceId,
+        existingConnection: options?.existingConnection,
       });
       BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
     } else if (normId === 'NSE_YAHOO_REST') {
       conn = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection({
         providerInstanceId: this.providerInstanceId,
+        existingConnection: options?.existingConnection,
       });
       NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
     } else if (normId === 'NSE_REST_OPTION_PROVIDER') {
       conn = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
         providerInstanceId: this.providerInstanceId,
+        existingConnection: options?.existingConnection,
       });
     } else {
       throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin REST connection for unknown provider '${providerId}'`);
@@ -733,52 +832,58 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public handleStreamProviderDisconnect(providerId = 'NSE_STREAM_GATEWAY', reason?: string): void {
-    let normId: string;
-    try {
-      normId = normalizeCanonicalProviderId(providerId);
-    } catch {
-      normId = 'NSE_STREAM_GATEWAY';
+    const normId = normalizeCanonicalProviderId(providerId);
+    const state = this.streamRuntimeStateMap.get(normId);
+    if (!state) {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
     }
-    if (this.streamProviderConnected || this.streamConnectionState !== 'DISCONNECTED') {
+    if (state.providerConnected || state.connectionState !== 'DISCONNECTED') {
       this.logger.warn(`Market data stream provider '${normId}' disconnected: ${reason || 'Connection lost'}`);
     }
-    this.streamConnectionState = 'DISCONNECTED';
-    this.streamProviderConnected = false;
+    state.connectionState = 'DISCONNECTED';
+    state.providerConnected = false;
+
+    const prefix = `WEBSOCKET_STREAM:${normId}:`;
     Array.from(this.freshSymbolsAfterReconnect)
-      .filter((k) => k.includes(`:${normId}:`))
+      .filter((k) => k.startsWith(prefix))
       .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
   }
 
   public handleStreamProviderReconnecting(providerId = 'NSE_STREAM_GATEWAY'): void {
-    let normId: string;
-    try {
-      normId = normalizeCanonicalProviderId(providerId);
-    } catch {
-      normId = 'NSE_STREAM_GATEWAY';
+    const normId = normalizeCanonicalProviderId(providerId);
+    const state = this.streamRuntimeStateMap.get(normId);
+    if (!state) {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
     }
-    this.streamConnectionState = 'RECONNECTING';
-    this.streamProviderConnected = false;
+    state.connectionState = 'RECONNECTING';
+    state.providerConnected = false;
+
+    const prefix = `WEBSOCKET_STREAM:${normId}:`;
     Array.from(this.freshSymbolsAfterReconnect)
-      .filter((k) => k.includes(`:${normId}:`))
+      .filter((k) => k.startsWith(prefix))
       .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
   }
 
   public handleStreamProviderReconnect(providerId = 'NSE_STREAM_GATEWAY'): void {
-    let normId: string;
-    try {
-      normId = normalizeCanonicalProviderId(providerId);
-    } catch {
-      normId = 'NSE_STREAM_GATEWAY';
+    const normId = normalizeCanonicalProviderId(providerId);
+    const state = this.streamRuntimeStateMap.get(normId);
+    if (!state) {
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
     }
     const wasNotConnected =
-      !this.streamProviderConnected ||
-      (this.streamConnectionState !== 'CONNECTED' && this.streamConnectionState !== 'RECONNECTED');
+      !state.providerConnected ||
+      (state.connectionState !== 'CONNECTED' && state.connectionState !== 'RECONNECTED');
     if (wasNotConnected) {
-      this.streamConnectionState = 'RECONNECTED';
-      this.streamProviderConnected = true;
-      this.reconnectedAt = Date.now();
+      state.connectionState = 'RECONNECTED';
+      state.providerConnected = true;
+      state.reconnectedAt = Date.now();
       this.beginStreamProviderConnection(normId);
-      this.freshSymbolsAfterReconnect.clear();
+
+      const prefix = `WEBSOCKET_STREAM:${normId}:`;
+      Array.from(this.freshSymbolsAfterReconnect)
+        .filter((k) => k.startsWith(prefix))
+        .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
+
       this.logger.log(`Market data stream provider '${normId}' reconnected. New stream connection epoch assigned.`);
     }
   }
@@ -795,29 +900,38 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     this.setRestHealthState('HEALTHY', providerId);
   }
 
-
   public handleProviderDisconnect(reason?: string): void {
-    this.handleStreamProviderDisconnect(reason);
+    for (const pid of this.streamRuntimeStateMap.keys()) {
+      this.handleStreamProviderDisconnect(pid, reason);
+    }
   }
 
   public handleProviderReconnecting(): void {
-    this.handleStreamProviderReconnecting();
+    for (const pid of this.streamRuntimeStateMap.keys()) {
+      this.handleStreamProviderReconnecting(pid);
+    }
   }
 
   public handleProviderReconnect(): void {
-    this.handleStreamProviderReconnect();
+    for (const pid of this.streamRuntimeStateMap.keys()) {
+      this.handleStreamProviderReconnect(pid);
+    }
   }
 
   public setProviderConnected(connected: boolean): void {
-    if (connected) {
-      this.handleStreamProviderReconnect();
-    } else {
-      this.handleStreamProviderDisconnect('Explicit setProviderConnected(false)');
+    for (const pid of this.streamRuntimeStateMap.keys()) {
+      if (connected) {
+        this.handleStreamProviderReconnect(pid);
+      } else {
+        this.handleStreamProviderDisconnect(pid, 'Explicit setProviderConnected(false)');
+      }
     }
   }
 
   public disconnectProvider(): void {
-    this.handleStreamProviderDisconnect('Explicit disconnectProvider()');
+    for (const pid of this.streamRuntimeStateMap.keys()) {
+      this.handleStreamProviderDisconnect(pid, 'Explicit disconnectProvider()');
+    }
   }
 
   public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
@@ -896,7 +1010,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       if (inst && inst.tickSize) tickSize = inst.tickSize;
     } catch {}
 
-    const activeConn = this.getCurrentProviderConnection('BINANCE_DIRECT');
+    const activeConn = this.getCurrentProviderConnection('BINANCE_DIRECT', 'WEBSOCKET_STREAM');
     const canonicalTick = BINANCE_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick(
       {
         providerSymbol: sym,
@@ -976,28 +1090,36 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const ticker = this.optionTickers.get(key) || null;
     if (!ticker) return null;
 
-    if (!ticker.providerId) return null;
+    if (!ticker.providerId || !ticker.providerTransport) return null;
     let activeConn: ProviderConnectionIdentity;
     try {
-      activeConn = this.getCurrentProviderConnection(ticker.providerId);
+      activeConn = this.getCurrentProviderConnection(ticker.providerId, ticker.providerTransport);
     } catch {
       return null;
     }
 
+    const isHealthy = ticker.providerTransport === 'WEBSOCKET_STREAM'
+      ? this.isStreamExecutionHealthy(ticker.providerId)
+      : this.isRestExecutionHealthy(ticker.providerId);
+
+    if (!isHealthy) return null;
+
     const valResult = validateCurrentProviderExecutionQuote(ticker, {
       expectedSymbol: key,
       activeConnection: activeConn,
-      streamConnectionState: this.streamConnectionState,
-      isStreamConnected: this.streamProviderConnected,
-      restHealthState: this.getRestHealthState(ticker.providerId),
+      isProviderHealthy: isHealthy,
     });
 
     if (!valResult.valid) {
       return null;
     }
 
-    const freshnessKey = `${ticker.providerTransport}:${ticker.providerId}:${ticker.providerConnectionId}:${key}`;
-    if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(freshnessKey) && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
+    const normProviderId = normalizeCanonicalProviderId(ticker.providerId);
+    const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
+    const reconnectedAt = streamState?.reconnectedAt ?? null;
+
+    const freshnessKey = `${ticker.providerTransport}:${normProviderId}:${ticker.providerConnectionId}:${key}`;
+    if (reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(freshnessKey) && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
       return null;
     }
 
@@ -1009,7 +1131,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     maxAgeSeconds = 5,
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
-
     const ticker = this.tickers.get(sym);
 
     if (!ticker) {
@@ -1019,28 +1140,40 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    if (!ticker.providerId) {
+    if (!ticker.providerId || !ticker.providerTransport) {
       throw new MarketDataUnavailableError(
         sym,
-        'Market quote is missing authenticated providerId',
+        'Market quote is missing authenticated providerId or providerTransport',
       );
     }
     let activeConn: ProviderConnectionIdentity;
     try {
-      activeConn = this.getCurrentProviderConnection(ticker.providerId);
+      activeConn = this.getCurrentProviderConnection(ticker.providerId, ticker.providerTransport);
     } catch (err: any) {
       throw new MarketDataUnavailableError(
         sym,
-        err.message || 'Unknown providerId',
+        err.message || 'Unknown providerId or providerTransport mismatch',
+      );
+    }
+
+    const isHealthy = ticker.providerTransport === 'WEBSOCKET_STREAM'
+      ? this.isStreamExecutionHealthy(ticker.providerId)
+      : this.isRestExecutionHealthy(ticker.providerId);
+
+    if (!isHealthy) {
+      const stateStr = ticker.providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap.get(normalizeCanonicalProviderId(ticker.providerId))?.connectionState || 'DISCONNECTED'
+        : this.getRestHealthState(ticker.providerId);
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market data stream provider is in '${stateStr}' state. Trade execution blocked.`,
       );
     }
 
     const valResult = validateCurrentProviderExecutionQuote(ticker, {
       expectedSymbol: sym,
       activeConnection: activeConn,
-      streamConnectionState: this.streamConnectionState,
-      isStreamConnected: this.streamProviderConnected,
-      restHealthState: this.getRestHealthState(ticker.providerId),
+      isProviderHealthy: isHealthy,
       maxAgeMs: maxAgeSeconds * 1000,
     });
 
@@ -1061,9 +1194,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    const freshnessKey = `${ticker.providerTransport}:${ticker.providerId}:${ticker.providerConnectionId}:${sym}`;
+    const normProviderId = normalizeCanonicalProviderId(ticker.providerId);
+    const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
+    const reconnectedAt = streamState?.reconnectedAt ?? null;
+
+    const freshnessKey = `${ticker.providerTransport}:${normProviderId}:${ticker.providerConnectionId}:${sym}`;
     if (
-      this.reconnectedAt !== null &&
+      reconnectedAt !== null &&
       !this.freshSymbolsAfterReconnect.has(freshnessKey) &&
       !this.freshSymbolsAfterReconnect.has(`SPOT:${sym}`)
     ) {
@@ -1076,10 +1213,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return ticker;
   }
 
-  /**
-   * Canonical producer ingestion write to Redis:
-   * Serializes an already validated provider-origin option quote with canonical schema and signature.
-   */
   private createValidatedOptionProviderTickFromNseStream(params: {
     contractSymbol: string;
     price: number;
@@ -1199,9 +1332,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       throw new Error('Canonical option quote publication requires a validated provider-origin tick');
     }
 
-    if (!this.isExecutionDataHealthy()) {
-      const tick = providerTick.toRecordInput();
-      this.logger.warn(`Cannot publish canonical option quote for ${tick?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState()}' state`);
+    const params = providerTick.toRecordInput();
+    if (!this.isExecutionDataHealthy(params.providerTransport, params.providerId)) {
+      this.logger.warn(`Cannot publish canonical option quote for ${params?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState(params.providerId)}' state`);
       return null;
     }
 
@@ -1209,8 +1342,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const redisClient = this.redis.getClient();
     if (!redisClient || redisClient.status !== 'ready') return null;
 
-    const params = providerTick.toRecordInput();
-    const activeConnection = this.getCurrentOptionProviderConnection(params.providerId);
+    const activeConnection = this.getCurrentOptionProviderConnection(params.providerId, params.providerTransport);
+    // getCurrentOptionProviderConnection(params.providerId)
     if (
       params.connectionEpoch !== activeConnection.connectionEpoch ||
       params.providerInstanceId !== activeConnection.providerInstanceId ||

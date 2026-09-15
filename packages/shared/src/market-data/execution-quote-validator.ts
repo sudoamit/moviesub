@@ -172,6 +172,7 @@ export interface IExecutionQuoteValidationContext {
   activeProviderInstanceId?: string;
   providerState?: ProviderConnectionState | string;
   isProviderConnected?: boolean;
+  isProviderHealthy?: boolean;
   maxAgeMs?: number;
   maxFutureSkewMs?: number;
   currentTimeMs?: number;
@@ -327,6 +328,14 @@ export function validateAuthoritativeExecutionQuote(
       valid: false,
       reason: `Quote providerTransport '${quote.providerTransport}' is invalid or missing`,
       errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+    };
+  }
+
+  if (ctx.isProviderHealthy === false) {
+    return {
+      valid: false,
+      reason: 'Market data provider is in an unhealthy execution state. Trade execution blocked.',
+      errorType: 'PROVIDER_DISCONNECTED',
     };
   }
 

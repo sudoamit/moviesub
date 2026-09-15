@@ -3,6 +3,7 @@ import {
   NSE_REST_OPTION_PROVIDER_ADAPTER,
   NSE_YAHOO_REST_PROVIDER_ADAPTER,
   BINANCE_REST_PROVIDER_ADAPTER,
+  BINANCE_OPTION_PROVIDER_ADAPTER,
   resetAllOptionProviderAdaptersForTests,
 } from '../option-provider/canonical-option-provider-tick';
 import {
@@ -486,6 +487,45 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
         providerTransport: 'REST_POLLING',
       };
       expect(validateAuthoritativeExecutionQuote(wrongTransportQuote, { activeStreamConnection: nStream2 }).valid).toBe(false);
+    });
+  });
+
+  describe('FIX 162 — Final Provider-Runtime-State Hardening Tests (A through N)', () => {
+    beforeEach(() => {
+      resetAllOptionProviderAdaptersForTests();
+      resetAllSpotProviderAdaptersForTests();
+      NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    });
+
+    test('L. shared option/spot physical connection identity -> accepted', () => {
+      const bSpotConn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      // Re-use bSpotConn for option adapter
+      const bOptionConn = BINANCE_OPTION_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: bSpotConn });
+      expect(bOptionConn.connectionEpoch).toBe(bSpotConn.connectionEpoch);
+      expect(bOptionConn.providerConnectionId).toBe(bSpotConn.providerConnectionId);
+    });
+
+    test('M. forged existingConnection from another provider -> rejected', () => {
+      const nseConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      // Try to pass NSE connection to Binance adapter
+      expect(() => {
+        BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: nseConn });
+      }).toThrow(/providerId/);
+    });
+
+    test('M2. forged existingConnection from another transport -> rejected', () => {
+      const bRestConn = BINANCE_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      // Try to pass REST connection to stream adapter
+      expect(() => {
+        BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: bRestConn });
+      }).toThrow(/transport/);
     });
   });
 });
