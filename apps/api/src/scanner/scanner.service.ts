@@ -8,6 +8,7 @@ import { Timeframe, WS_EVENTS } from '@quant/shared';
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ScannerService.name);
   private autoScanTimer: NodeJS.Timeout | null = null;
+  private isScanning = false;
 
   constructor(
     private readonly redis: RedisService,
@@ -36,43 +37,63 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async triggerScan(timeframe: Timeframe = Timeframe.M15) {
-    const startTime = Date.now();
-    const signals = await this.signalsService.getAllSignals(timeframe);
+    if (this.isScanning) {
+      this.logger.debug(
+        `[SCANNER_LOCKED] Previous market scan is still executing. Skipping overlapping scan trigger.`,
+      );
+      return {
+        timestamp: new Date().toISOString(),
+        timeframe,
+        scannedCount: 0,
+        signalsFound: 0,
+        durationMs: 0,
+        signals: [],
+        status: 'SKIPPED_OVERLAPPING',
+      };
+    }
 
-    const validSignals = signals.filter((s) => s.direction !== 'NEUTRAL' && s.score >= 60);
+    this.isScanning = true;
+    try {
+      const startTime = Date.now();
+      const signals = await this.signalsService.getAllSignals(timeframe);
 
-    // Evaluate active algo bots against valid high-conviction signals
-    for (const sig of validSignals) {
-      try {
-        await this.algoBotsService.evaluateSignalForBots(sig);
-      } catch (err) {
-        this.logger.debug(`Algo bot evaluation note: ${(err as Error).message}`);
+      const validSignals = signals.filter((s) => s.direction !== 'NEUTRAL' && s.score >= 60);
+
+      // Evaluate active algo bots against valid high-conviction signals
+      for (const sig of validSignals) {
+        try {
+          await this.algoBotsService.evaluateSignalForBots(sig);
+        } catch (err) {
+          this.logger.debug(`Algo bot evaluation note: ${(err as Error).message}`);
+        }
       }
+
+      const duration = Date.now() - startTime;
+      const summary = {
+        timestamp: new Date().toISOString(),
+        timeframe,
+        scannedCount: signals.length,
+        signalsFound: validSignals.length,
+        durationMs: duration,
+        signals: validSignals,
+      };
+
+      // Cache latest scan status in Redis
+      await this.redis.set('scanner:status:latest', JSON.stringify(summary), 86400);
+
+      // Broadcast event
+      const redisClient = this.redis.getClient();
+      if (redisClient && redisClient.status === 'ready') {
+        await redisClient.publish(WS_EVENTS.SCANNER_UPDATED, JSON.stringify(summary));
+      }
+
+      this.logger.log(
+        `Multi-asset scan completed in ${duration}ms. Signals found: ${validSignals.length}`,
+      );
+      return summary;
+    } finally {
+      this.isScanning = false;
     }
-
-    const duration = Date.now() - startTime;
-    const summary = {
-      timestamp: new Date().toISOString(),
-      timeframe,
-      scannedCount: signals.length,
-      signalsFound: validSignals.length,
-      durationMs: duration,
-      signals: validSignals,
-    };
-
-    // Cache latest scan status in Redis
-    await this.redis.set('scanner:status:latest', JSON.stringify(summary), 86400);
-
-    // Broadcast event
-    const redisClient = this.redis.getClient();
-    if (redisClient && redisClient.status === 'ready') {
-      await redisClient.publish(WS_EVENTS.SCANNER_UPDATED, JSON.stringify(summary));
-    }
-
-    this.logger.log(
-      `Multi-asset scan completed in ${duration}ms. Signals found: ${validSignals.length}`,
-    );
-    return summary;
   }
 
   async getScannerStatus() {
