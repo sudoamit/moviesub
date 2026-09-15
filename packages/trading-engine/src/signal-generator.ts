@@ -584,10 +584,12 @@ export class SignalGenerator {
       },
       liquiditySweep: {
         matched: hasSweep,
+        timestamp: hasSweep && recentSweeps.length > 0 ? recentSweeps[recentSweeps.length - 1].sweptTimestamp || decisionTimestamp : undefined,
         details: hasSweep ? 'Liquidity pool swept' : undefined,
       },
       structureBreak: {
         matched: hasStructureBreak,
+        timestamp: hasStructureBreak ? decisionTimestamp : undefined,
         details: hasStructureBreak ? 'Structure break / CHoCH' : undefined,
       },
     };

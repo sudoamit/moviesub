@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { PaperTradingService } from '../paper-trading/paper-trading.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -15,6 +15,7 @@ import {
   StaleMarketDataError,
   Timeframe,
 } from '@quant/shared';
+import * as crypto from 'crypto';
 
 export interface IAlgoBot {
   id: string;
@@ -30,6 +31,7 @@ export interface IAlgoBot {
   isActive: boolean;
   createdAt: string;
   triggerCount: number;
+  configVersion?: string;
   lastTriggeredAt?: string;
   lastTriggerDetails?: string;
 }
@@ -44,11 +46,11 @@ export interface IStrategyMatchResult {
 export class AlgoBotsService implements OnModuleInit {
   private readonly logger = new Logger(AlgoBotsService.name);
 
-  // Process-local lock cache optimization
+  // Process-local lock cache optimization only (non-authoritative)
   private readonly inMemoryLocks = new Set<string>();
 
-  // Fallback in-memory store if DB is empty on first boot
-  private presetBots: IAlgoBot[] = [
+  // Preset default bots used only on initial DB seeding
+  private readonly presetBots: IAlgoBot[] = [
     {
       id: 'bot_nifty_smc_pro',
       name: 'NIFTY 15m Institutional Order Flow Scalper',
@@ -137,7 +139,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P1 #15: Persistent Database Bot Configuration Read
+   * P1 #15 & P1 #11: Persistent Database Bot Configuration Read with Strict DB Error Handling
    */
   async listBots(): Promise<IAlgoBot[]> {
     if (this.prisma) {
@@ -145,27 +147,28 @@ export class AlgoBotsService implements OnModuleInit {
         const dbBots = await this.prisma.algoBot.findMany({
           orderBy: { createdAt: 'desc' },
         });
-        if (dbBots && dbBots.length > 0) {
-          return dbBots.map((b) => ({
-            id: b.id,
-            name: b.name,
-            symbol: b.symbol,
-            direction: b.direction as any,
-            timeframe: b.timeframe,
-            minScore: b.minScore,
-            smcCondition: b.smcCondition as any,
-            lots: b.lots,
-            autoExecutePaper: b.autoExecutePaper,
-            notifyWebhook: b.notifyWebhook,
-            isActive: b.isActive,
-            createdAt: b.createdAt.toISOString(),
-            triggerCount: b.triggerCount,
-            lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
-            lastTriggerDetails: b.lastTriggerDetails || undefined,
-          }));
-        }
-      } catch {
-        // Fallback to in-memory if DB fails
+        return dbBots.map((b) => ({
+          id: b.id,
+          name: b.name,
+          symbol: b.symbol,
+          direction: b.direction as any,
+          timeframe: b.timeframe,
+          minScore: b.minScore,
+          smcCondition: b.smcCondition as any,
+          lots: b.lots,
+          autoExecutePaper: b.autoExecutePaper,
+          notifyWebhook: b.notifyWebhook,
+          isActive: b.isActive,
+          createdAt: b.createdAt.toISOString(),
+          triggerCount: b.triggerCount,
+          lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
+          lastTriggerDetails: b.lastTriggerDetails || undefined,
+        }));
+      } catch (err: any) {
+        this.logger.error(`Database query failed in listBots(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration retrieval: ${err.message}`,
+        );
       }
     }
     return this.presetBots;
@@ -214,95 +217,126 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P1 #15: Create Bot with DTO Validation & Database Persistence
+   * P1 #14 & P1 #15: Create Bot with DTO Validation & Database Persistence (No Silent In-Memory Fallback)
    */
   async createBot(dto: Partial<IAlgoBot>): Promise<IAlgoBot> {
     const symbol = (dto.symbol || 'NIFTY').toUpperCase().trim();
     this.validateBotConfig({ ...dto, symbol });
 
-    const newBot: IAlgoBot = {
-      id: `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      name: dto.name || `${symbol} Custom SMC Bot`,
-      symbol,
-      direction: dto.direction || 'ANY',
-      timeframe: this.normalizeTimeframe(dto.timeframe),
-      minScore: Number(dto.minScore || 80),
-      smcCondition: dto.smcCondition || 'ANY_CONFLUENCE',
-      lots: Number(dto.lots || 1),
-      autoExecutePaper: dto.autoExecutePaper === true,
-      notifyWebhook: dto.notifyWebhook !== false,
-      isActive: dto.isActive === true,
-      createdAt: new Date().toISOString(),
-      triggerCount: 0,
-    };
+    const newBotId = `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const name = dto.name || `${symbol} Custom SMC Bot`;
+    const direction = dto.direction || 'ANY';
+    const timeframe = this.normalizeTimeframe(dto.timeframe);
+    const minScore = Number(dto.minScore || 80);
+    const smcCondition = dto.smcCondition || 'ANY_CONFLUENCE';
+    const lots = Number(dto.lots || 1);
+    const autoExecutePaper = dto.autoExecutePaper === true;
+    const notifyWebhook = dto.notifyWebhook !== false;
+    const isActive = dto.isActive === true;
 
     if (this.prisma) {
       try {
-        await this.prisma.algoBot.create({
+        const created = await this.prisma.algoBot.create({
           data: {
-            id: newBot.id,
-            name: newBot.name,
-            symbol: newBot.symbol,
-            direction: newBot.direction as any,
-            timeframe: newBot.timeframe,
-            minScore: newBot.minScore,
-            smcCondition: newBot.smcCondition as any,
-            lots: newBot.lots,
-            autoExecutePaper: newBot.autoExecutePaper,
-            notifyWebhook: newBot.notifyWebhook,
-            isActive: newBot.isActive,
+            id: newBotId,
+            name,
+            symbol,
+            direction: direction as any,
+            timeframe,
+            minScore,
+            smcCondition: smcCondition as any,
+            lots,
+            autoExecutePaper,
+            notifyWebhook,
+            isActive,
             triggerCount: 0,
           },
         });
+
+        this.logger.log(`✓ [ALGO BOT CREATED] '${created.name}' (${created.symbol} ${created.direction})`);
+        return {
+          id: created.id,
+          name: created.name,
+          symbol: created.symbol,
+          direction: created.direction as any,
+          timeframe: created.timeframe,
+          minScore: created.minScore,
+          smcCondition: created.smcCondition as any,
+          lots: created.lots,
+          autoExecutePaper: created.autoExecutePaper,
+          notifyWebhook: created.notifyWebhook,
+          isActive: created.isActive,
+          createdAt: created.createdAt.toISOString(),
+          triggerCount: created.triggerCount,
+        };
       } catch (err: any) {
-        this.logger.error(`Failed to persist new bot in DB: ${err.message}`);
+        this.logger.error(`Database write failed in createBot(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration persistence: ${err.message}`,
+        );
       }
     }
 
-    this.presetBots.unshift(newBot);
-    this.logger.log(`✓ [ALGO BOT CREATED] '${newBot.name}' (${newBot.symbol} ${newBot.direction})`);
-    return newBot;
+    const fallbackBot: IAlgoBot = {
+      id: newBotId,
+      name,
+      symbol,
+      direction,
+      timeframe,
+      minScore,
+      smcCondition,
+      lots,
+      autoExecutePaper,
+      notifyWebhook,
+      isActive,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    };
+    this.presetBots.unshift(fallbackBot);
+    return fallbackBot;
   }
 
   async toggleBot(id: string): Promise<IAlgoBot> {
-    let bot: IAlgoBot | undefined;
     if (this.prisma) {
       try {
         const existing = await this.prisma.algoBot.findUnique({ where: { id } });
-        if (existing) {
-          const updated = await this.prisma.algoBot.update({
-            where: { id },
-            data: { isActive: !existing.isActive },
-          });
-          bot = {
-            id: updated.id,
-            name: updated.name,
-            symbol: updated.symbol,
-            direction: updated.direction as any,
-            timeframe: updated.timeframe,
-            minScore: updated.minScore,
-            smcCondition: updated.smcCondition as any,
-            lots: updated.lots,
-            autoExecutePaper: updated.autoExecutePaper,
-            notifyWebhook: updated.notifyWebhook,
-            isActive: updated.isActive,
-            createdAt: updated.createdAt.toISOString(),
-            triggerCount: updated.triggerCount,
-          };
+        if (!existing) {
+          throw new NotFoundException(`Bot '${id}' not found`);
         }
-      } catch {
-        // Fallback to preset
+        const updated = await this.prisma.algoBot.update({
+          where: { id },
+          data: { isActive: !existing.isActive },
+        });
+        this.logger.log(`✓ Bot '${updated.name}' is now ${updated.isActive ? 'ACTIVE' : 'PAUSED'}`);
+        return {
+          id: updated.id,
+          name: updated.name,
+          symbol: updated.symbol,
+          direction: updated.direction as any,
+          timeframe: updated.timeframe,
+          minScore: updated.minScore,
+          smcCondition: updated.smcCondition as any,
+          lots: updated.lots,
+          autoExecutePaper: updated.autoExecutePaper,
+          notifyWebhook: updated.notifyWebhook,
+          isActive: updated.isActive,
+          createdAt: updated.createdAt.toISOString(),
+          triggerCount: updated.triggerCount,
+        };
+      } catch (err: any) {
+        if (err instanceof NotFoundException) throw err;
+        this.logger.error(`Database update failed in toggleBot(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration toggle: ${err.message}`,
+        );
       }
     }
 
+    const bot = this.presetBots.find((b) => b.id === id);
     if (!bot) {
-      bot = this.presetBots.find((b) => b.id === id);
-      if (!bot) {
-        throw new NotFoundException(`Bot '${id}' not found`);
-      }
-      bot.isActive = !bot.isActive;
+      throw new NotFoundException(`Bot '${id}' not found`);
     }
-
+    bot.isActive = !bot.isActive;
     this.logger.log(`✓ Bot '${bot.name}' is now ${bot.isActive ? 'ACTIVE' : 'PAUSED'}`);
     return bot;
   }
@@ -311,8 +345,12 @@ export class AlgoBotsService implements OnModuleInit {
     if (this.prisma) {
       try {
         await this.prisma.algoBot.delete({ where: { id } });
-      } catch {
-        // Fallback
+        return { success: true };
+      } catch (err: any) {
+        this.logger.error(`Database delete failed in deleteBot(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration deletion: ${err.message}`,
+        );
       }
     }
     const index = this.presetBots.findIndex((b) => b.id === id);
@@ -364,7 +402,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #7: Signal Freshness Validation
+   * P0 #7: Signal Freshness & Decision Boundary Window Validation
    */
   public validateSignalFreshness(
     signal: ISignalSetup,
@@ -398,7 +436,7 @@ export class AlgoBotsService implements OnModuleInit {
       return {
         matches: false,
         reasonCode: 'SIGNAL_STALE',
-        details: `Signal age (${Math.round(ageMs / 1000)}s) exceeds max allowed age (${Math.round(maxAgeMs / 1000)}s) for ${signal.timeframe}`,
+        details: `Signal age (${Math.round(ageMs / 1000)}s) exceeds max allowed decision window (${Math.round(maxAgeMs / 1000)}s) for ${signal.timeframe}`,
       };
     }
 
@@ -406,7 +444,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #4: Authoritative Order Quantity Resolution (No hardcoded multipliers)
+   * P0 #4 & P1 #12: Authoritative Order Quantity Resolution (Venue & Asset Type Aware)
    */
   public resolveBotOrderQuantity(bot: IAlgoBot, instrument: IInstrument): number {
     if (!bot || typeof bot.lots !== 'number' || !Number.isFinite(bot.lots) || bot.lots <= 0) {
@@ -436,7 +474,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #5: Canonical SMC Condition Evidence Matching
+   * P0 #5: Canonical SMC Evidence & Point-in-Time Provenance Matching (No Prose Heuristics or Score Fallbacks)
    */
   public matchesSmcCondition(
     condition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
@@ -444,33 +482,45 @@ export class AlgoBotsService implements OnModuleInit {
   ): boolean {
     const evidence = signal.triggerEvidence;
 
+    // Hard rejection if canonical triggerEvidence object is missing entirely
+    if (!evidence) {
+      return false;
+    }
+
+    const signalTime = new Date(signal.timestamp || signal.createdAt || Date.now()).getTime();
+    const maxAgeMs = this.getMaxSignalAgeMs(signal.timeframe);
+
+    const isEvidenceItemValid = (item: any): boolean => {
+      if (!item || item.matched !== true) return false;
+      if (item.timestamp) {
+        const itemTime = new Date(item.timestamp).getTime();
+        if (Number.isNaN(itemTime)) return false;
+        // Evidence timestamp must not be from the future (lookahead) or older than maxSignalAgeMs
+        if (itemTime > signalTime + 5000 || signalTime - itemTime > maxAgeMs) {
+          return false;
+        }
+      }
+      return true;
+    };
+
     if (condition === 'ORDER_BLOCK') {
-      return evidence?.orderBlock?.matched === true;
+      return isEvidenceItemValid(evidence.orderBlock);
     }
 
     if (condition === 'FVG') {
-      return evidence?.fvg?.matched === true;
+      return isEvidenceItemValid(evidence.fvg);
     }
 
     if (condition === 'LIQUIDITY_SWEEP') {
-      return evidence?.liquiditySweep?.matched === true;
+      return isEvidenceItemValid(evidence.liquiditySweep);
     }
 
     if (condition === 'ANY_CONFLUENCE') {
-      if (!evidence) {
-        // Fallback for signals constructed without triggerEvidence: check if any trigger is present
-        const breakdown = signal.scoreBreakdown || {};
-        return (
-          Number(breakdown.orderBlock || 0) > 0 ||
-          Number(breakdown.fvg || 0) > 0 ||
-          Number(breakdown.liquiditySweep || 0) > 0
-        );
-      }
       return (
-        evidence.orderBlock?.matched === true ||
-        evidence.fvg?.matched === true ||
-        evidence.liquiditySweep?.matched === true ||
-        evidence.structureBreak?.matched === true
+        isEvidenceItemValid(evidence.orderBlock) ||
+        isEvidenceItemValid(evidence.fvg) ||
+        isEvidenceItemValid(evidence.liquiditySweep) ||
+        isEvidenceItemValid(evidence.structureBreak)
       );
     }
 
@@ -548,7 +598,7 @@ export class AlgoBotsService implements OnModuleInit {
       return {
         matches: false,
         reasonCode: 'SIGNAL_NOT_ACTIVE',
-        details: `Signal state '${signal.state}' is not ACTIVE`,
+        details: `Signal state '${signal.state}' is not ACTIVE (must be SignalState.ACTIVE)`,
       };
     }
 
@@ -618,7 +668,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #8: Canonical Decision Fingerprint Generator
+   * P0 #8 & P1 #8: Canonical Decision Fingerprint Generator with Bot Configuration Versioning
    */
   public getSignalFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
     const timestampRaw = signal.timestamp || signal.createdAt || new Date();
@@ -630,19 +680,26 @@ export class AlgoBotsService implements OnModuleInit {
     const tfMs = this.getMaxSignalAgeMs(normTf);
     const canonicalCandleBoundaryMs = Math.floor(signalTimeMs / tfMs) * tfMs;
 
-    return `bot_exec:${bot.id}:${normSymbol}:${normTf}:${normDir}:${canonicalCandleBoundaryMs}`;
+    // Strategy configuration hash to uniquely represent bot parameters
+    const configHash = crypto
+      .createHash('sha256')
+      .update(`${bot.symbol}:${bot.timeframe}:${bot.direction}:${bot.minScore}:${bot.smcCondition}:${bot.lots}`)
+      .digest('hex')
+      .substring(0, 8);
+
+    return `bot_exec:${bot.id}:v${configHash}:${normSymbol}:${normTf}:${normDir}:${canonicalCandleBoundaryMs}`;
   }
 
   /**
-   * P0 #1: True Atomic Execution Reservation via PostgreSQL `@unique(fingerprint)`
+   * P0 #1 & P0 #2: True Atomic Execution Reservation via PostgreSQL `@unique(fingerprint)`
    */
   public async reserveExecutionLock(
     bot: IAlgoBot,
     signal: ISignalSetup,
     fingerprint: string,
-  ): Promise<{ success: boolean; executionId?: string }> {
+  ): Promise<{ success: boolean; executionId?: string; reason?: string }> {
     if (this.inMemoryLocks.has(fingerprint)) {
-      return { success: false };
+      return { success: false, reason: 'LOCAL_LOCK_ACTIVE' };
     }
 
     const signalTimestamp = signal.timestamp || signal.createdAt || new Date();
@@ -666,6 +723,7 @@ export class AlgoBotsService implements OnModuleInit {
         this.inMemoryLocks.add(fingerprint);
         return { success: true, executionId: execution.id };
       } catch (err: any) {
+        // Unique constraint violation (Prisma P2002) means this fingerprint has already been reserved
         if (err?.code === 'P2002') {
           const existing = await this.prisma.algoBotExecution.findUnique({
             where: { fingerprint },
@@ -686,59 +744,29 @@ export class AlgoBotsService implements OnModuleInit {
           }
 
           this.inMemoryLocks.add(fingerprint);
-          return { success: false };
+          return { success: false, reason: 'DUPLICATE_RESERVATION' };
         }
 
-        // Fail closed if DB fails and Redis is unavailable
-        if (this.redis) {
-          const client = this.redis.getClient();
-          if (client && client.status === 'ready') {
-            try {
-              const res = await client.set(`lock:${fingerprint}`, 'RESERVED', 'EX', 86400, 'NX');
-              if (res === 'OK') {
-                this.inMemoryLocks.add(fingerprint);
-                return { success: true };
-              }
-            } catch {
-              // Fail closed
-            }
-          }
-        }
-
-        return { success: false };
+        // P0 #1: DB reservation is authoritative. FAIL CLOSED if DB fails.
+        this.logger.error(`Database atomic reservation failed for ${fingerprint}: ${err.message}`);
+        return { success: false, reason: 'DATABASE_UNAVAILABLE' };
       }
     }
 
-    // Redis optimization fallback
-    if (this.redis) {
-      const client = this.redis.getClient();
-      if (client && client.status === 'ready') {
-        try {
-          const res = await client.set(`lock:${fingerprint}`, 'RESERVED', 'EX', 86400, 'NX');
-          if (res === 'OK') {
-            this.inMemoryLocks.add(fingerprint);
-            return { success: true };
-          }
-        } catch {
-          return { success: false };
-        }
-      }
-    }
-
-    // Fallback for isolated unit tests when neither DB nor Redis service is injected
+    // Isolated unit test fallback ONLY when neither DB nor Redis is injected
     if (!this.prisma && !this.redis) {
       this.inMemoryLocks.add(fingerprint);
       return { success: true, executionId: `test_exec_${fingerprint}` };
     }
 
-    return { success: false };
+    return { success: false, reason: 'DATABASE_UNAVAILABLE' };
   }
 
   /**
-   * P0 #2: State Machine Lifecycle Method — Mark Started
+   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Executing (Must throw on DB error)
    */
   public async markExecutionStarted(executionId: string): Promise<void> {
-    if (this.prisma && executionId) {
+    if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
       try {
         await this.prisma.algoBotExecution.update({
           where: { id: executionId },
@@ -747,17 +775,20 @@ export class AlgoBotsService implements OnModuleInit {
             startedAt: new Date(),
           },
         });
-      } catch {
-        // ignore
+      } catch (err: any) {
+        this.logger.error(`Failed to update execution state to EXECUTING (${executionId}): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Execution state transition to EXECUTING failed: ${err.message}`,
+        );
       }
     }
   }
 
   /**
-   * P0 #2: State Machine Lifecycle Method — Mark Executed
+   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Executed (Must throw on DB error)
    */
   public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
-    if (this.prisma && executionId) {
+    if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
       try {
         await this.prisma.algoBotExecution.update({
           where: { id: executionId },
@@ -767,17 +798,20 @@ export class AlgoBotsService implements OnModuleInit {
             completedAt: new Date(),
           },
         });
-      } catch {
-        // ignore
+      } catch (err: any) {
+        this.logger.error(`Failed to update execution state to EXECUTED (${executionId}): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Execution state transition to EXECUTED failed: ${err.message}`,
+        );
       }
     }
   }
 
   /**
-   * P0 #2: State Machine Lifecycle Method — Mark Failed (Retryable vs Final)
+   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Failed (Retryable vs Final)
    */
   public async markExecutionFailed(executionId: string, err: any): Promise<void> {
-    if (!this.prisma || !executionId) return;
+    if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
 
     let isRetryable = false;
     if (
@@ -798,7 +832,7 @@ export class AlgoBotsService implements OnModuleInit {
     const failureReason = err?.message || String(err);
 
     try {
-      await this.prisma.algoBotExecution.update({
+      const updated = await this.prisma.algoBotExecution.update({
         where: { id: executionId },
         data: {
           state,
@@ -808,13 +842,10 @@ export class AlgoBotsService implements OnModuleInit {
       });
 
       if (isRetryable) {
-        const ex = await this.prisma.algoBotExecution.findUnique({ where: { id: executionId } });
-        if (ex) {
-          this.inMemoryLocks.delete(ex.fingerprint);
-        }
+        this.inMemoryLocks.delete(updated.fingerprint);
       }
-    } catch {
-      // ignore
+    } catch (dbErr: any) {
+      this.logger.error(`Failed to record execution failure state (${executionId}): ${dbErr.message}`);
     }
   }
 
@@ -831,7 +862,7 @@ export class AlgoBotsService implements OnModuleInit {
           },
         });
       } catch {
-        // ignore
+        // ignore trigger count increment error
       }
     }
   }
@@ -872,7 +903,27 @@ export class AlgoBotsService implements OnModuleInit {
         continue;
       }
 
-      // 3. P0 #4: Resolve Order Quantity via Authoritative Instrument Registry
+      // 🔴 #9: Check Bot Position Scope Guard BEFORE DB Reservation to prevent consuming reservation rows
+      const portfolio = await this.paperTradingService.getPortfolio();
+      const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
+      if (alreadyOpen) {
+        this.logger.warn(
+          `[REJECTED: POSITION_ALREADY_OPEN] Open position already exists for symbol '${bot.symbol}'`,
+        );
+        continue;
+      }
+
+      // 3. 🟠 #13: Early Live Market Data Availability Check (Eligibility Gate)
+      try {
+        await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+      } catch (err: any) {
+        this.logger.error(
+          `[REJECTED: MARKET_DATA_UNAVAILABLE] Live market data unavailable for symbol '${bot.symbol}': ${err.message}`,
+        );
+        continue;
+      }
+
+      // 4. P0 #4 & P1 #12: Resolve Order Quantity via Authoritative Instrument Registry
       let quantity: number;
       try {
         const instrument = getAuthoritativeInstrument(bot.symbol);
@@ -884,13 +935,13 @@ export class AlgoBotsService implements OnModuleInit {
         continue;
       }
 
-      // 4. P0 #1: Compute Fingerprint & Reserve Execution Lock via Database `@unique` constraint
+      // 5. P0 #1: Compute Versioned Fingerprint & Reserve Execution Lock via Database `@unique` constraint
       const fingerprint = this.getSignalFingerprint(bot, signal);
       const reservation = await this.reserveExecutionLock(bot, signal, fingerprint);
 
       if (!reservation.success || !reservation.executionId) {
         this.logger.warn(
-          `[REJECTED: EXECUTION_LOCKED] Duplicate signal or execution lock already held for fingerprint: ${fingerprint}`,
+          `[REJECTED: EXECUTION_LOCKED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: ${reservation.reason})`,
         );
         continue;
       }
@@ -898,33 +949,11 @@ export class AlgoBotsService implements OnModuleInit {
       const executionId = reservation.executionId;
       await this.recordBotTrigger(bot.id, signal);
 
-      // 5. P0 #2: Execution State Machine Lifecycle Management
+      // 6. P0 #2: Execution State Machine Lifecycle Management
       try {
         await this.markExecutionStarted(executionId);
 
-        // P1 #10: Revalidate Live Market Data Freshness
-        try {
-          await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
-        } catch (err: any) {
-          this.logger.error(
-            `[REJECTED: MARKET_DATA_UNAVAILABLE] Live market data unavailable for symbol '${bot.symbol}': ${err.message}`,
-          );
-          await this.markExecutionFailed(executionId, err);
-          continue;
-        }
-
-        // P1 #11: Secondary Position Check
-        const portfolio = await this.paperTradingService.getPortfolio();
-        const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
-        if (alreadyOpen) {
-          this.logger.warn(
-            `[REJECTED: POSITION_ALREADY_OPEN] Open position already exists for symbol '${bot.symbol}'`,
-          );
-          const posErr = new Error('POSITION_ALREADY_OPEN');
-          await this.markExecutionFailed(executionId, posErr);
-          continue;
-        }
-
+        // Place Order via Authoritative PaperTradingService (Obtains Authoritative Execution Quote)
         const orderResult = await this.paperTradingService.placeOrder({
           symbol: bot.symbol,
           direction: signal.direction === 'BULLISH' ? 'BUY' : 'SELL',

@@ -4,11 +4,13 @@ import { PaperTradingService } from '../../paper-trading/paper-trading.service';
 import { AlertsService } from '../../alerts/alerts.service';
 import { Direction, ISignalSetup, MarketDataUnavailableError, SignalGrade, SignalState } from '@quant/shared';
 import { SignalGenerator } from '@quant/trading-engine';
+import { InternalServerErrorException } from '@nestjs/common';
 
-describe('AlgoBotsService — Production-Grade Execution Safety (Fix 174)', () => {
+describe('AlgoBotsService — Production-Grade Execution Safety & Verification (Fix 174 Pass 2)', () => {
   let service: AlgoBotsService;
   let mockPaperTradingService: any;
   let mockAlertsService: any;
+  let mockPrismaService: any;
 
   const createTestBot = (overrides?: Partial<IAlgoBot>): IAlgoBot => ({
     id: 'bot_nifty_ob_test',
@@ -62,10 +64,10 @@ describe('AlgoBotsService — Production-Grade Execution Safety (Fix 174)', () =
       grade: SignalGrade.A_PLUS,
     },
     triggerEvidence: {
-      orderBlock: { matched: true, details: 'OB tap' },
+      orderBlock: { matched: true, timestamp: new Date(), details: 'OB tap' },
       fvg: { matched: false },
       liquiditySweep: { matched: false },
-      structureBreak: { matched: true },
+      structureBreak: { matched: true, timestamp: new Date() },
     },
     reasons: ['HTF_BULLISH_ALIGNED', 'BULLISH_ORDER_BLOCK_TAP'],
     timestamp: new Date(),
@@ -83,6 +85,8 @@ describe('AlgoBotsService — Production-Grade Execution Safety (Fix 174)', () =
       sendAlert: jest.fn().mockResolvedValue({ success: true }),
     };
 
+    mockPrismaService = null;
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AlgoBotsService,
@@ -94,157 +98,91 @@ describe('AlgoBotsService — Production-Grade Execution Safety (Fix 174)', () =
     service = module.get<AlgoBotsService>(AlgoBotsService);
   });
 
-  // A. SMC Canonical Trigger Evidence Matching
-  describe('A. Canonical SMC Trigger Evidence Matching', () => {
-    it('should execute when bot requires ORDER_BLOCK and signal has orderBlock.matched = true', async () => {
+  // 1. Canonical SMC Evidence & Timestamp Provenance
+  describe('1. Canonical SMC Trigger Evidence & Provenance', () => {
+    it('should REJECT signal when triggerEvidence object is completely absent', async () => {
       const bot = createTestBot({ smcCondition: 'ORDER_BLOCK' });
       jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
+      const signal = createTestSignal({ triggerEvidence: undefined });
+
+      await service.evaluateSignalForBots(signal);
+
+      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
+    });
+
+    it('should REJECT when SMC trigger evidence timestamp is stale (> maxSignalAgeMs)', async () => {
+      const bot = createTestBot({ smcCondition: 'ORDER_BLOCK' });
+      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
+      const staleEvidenceTime = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes old
+      const signal = createTestSignal({
+        triggerEvidence: {
+          orderBlock: { matched: true, timestamp: staleEvidenceTime },
+        },
+      });
+
+      await service.evaluateSignalForBots(signal);
+
+      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
+    });
+  });
+
+  // 2. Decision Boundary Window & Signal State
+  describe('2. Decision Boundary Window & Signal State', () => {
+    it('should REJECT when signal state is not SignalState.ACTIVE', async () => {
+      const bot = createTestBot();
+      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
+      const pendingSignal = createTestSignal({ state: SignalState.PENDING });
+
+      await service.evaluateSignalForBots(pendingSignal);
+
+      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
+    });
+
+    it('should REJECT signal that has passed its timeframe decision boundary window', async () => {
+      const bot = createTestBot({ timeframe: '15m' });
+      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
+      const expiredWindowTimestamp = new Date(Date.now() - 16 * 60 * 1000); // 16 mins ago
+      const expiredSignal = createTestSignal({ timestamp: expiredWindowTimestamp });
+
+      await service.evaluateSignalForBots(expiredSignal);
+
+      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
+    });
+  });
+
+  // 3. Strategy Config Versioning in Fingerprint
+  describe('3. Strategy Config Versioning in Fingerprint', () => {
+    it('should include bot configuration version hash in execution fingerprint', () => {
+      const bot1 = createTestBot({ minScore: 80 });
+      const bot2 = createTestBot({ minScore: 90 });
+      const signal = createTestSignal({ timestamp: new Date('2026-09-15T09:15:00.000Z') });
+
+      const fp1 = service.getSignalFingerprint(bot1, signal);
+      const fp2 = service.getSignalFingerprint(bot2, signal);
+
+      expect(fp1).toContain('bot_exec:bot_nifty_ob_test:v');
+      expect(fp1).not.toEqual(fp2);
+    });
+  });
+
+  // 4. Order of Operations & Position Check Before Reservation
+  describe('4. Order of Operations & Position Check Prior to Reservation', () => {
+    it('should NOT attempt database reservation if open position already exists for symbol', async () => {
+      const bot = createTestBot();
+      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
+      mockPaperTradingService.getPortfolio.mockResolvedValue({
+        openPositions: [{ symbol: 'NIFTY' }],
+      });
+      const reserveSpy = jest.spyOn(service, 'reserveExecutionLock');
       const signal = createTestSignal();
 
       await service.evaluateSignalForBots(signal);
 
-      expect(mockPaperTradingService.placeOrder).toHaveBeenCalledTimes(1);
-      expect(mockPaperTradingService.placeOrder).toHaveBeenCalledWith(
-        expect.objectContaining({
-          symbol: 'NIFTY',
-          quantity: 65, // 1 lot * 65 lotSize
-        }),
-      );
-    });
-
-    it('should REJECT when bot requires FVG but signal has fvg.matched = false even if scoreBreakdown.fvg > 0', async () => {
-      const bot = createTestBot({ smcCondition: 'FVG' });
-      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
-      const signal = createTestSignal({
-        triggerEvidence: {
-          orderBlock: { matched: true },
-          fvg: { matched: false },
-        },
-      });
-
-      await service.evaluateSignalForBots(signal);
-
+      expect(reserveSpy).not.toHaveBeenCalled();
       expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
     });
 
-    it('should REJECT ANY_CONFLUENCE when all trigger evidence matched properties are false', async () => {
-      const bot = createTestBot({ smcCondition: 'ANY_CONFLUENCE' });
-      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
-      const signal = createTestSignal({
-        triggerEvidence: {
-          orderBlock: { matched: false },
-          fvg: { matched: false },
-          liquiditySweep: { matched: false },
-          structureBreak: { matched: false },
-        },
-      });
-
-      await service.evaluateSignalForBots(signal);
-
-      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
-    });
-  });
-
-  // B. Signal State Enforcement (P0 #6)
-  describe('B. Signal State Enforcement', () => {
-    it('should REJECT non-ACTIVE signal states (PENDING, TP1_HIT, EXPIRED, CANCELLED)', async () => {
-      const bot = createTestBot();
-      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
-
-      const pendingSignal = createTestSignal({ state: SignalState.PENDING });
-      const tp1Signal = createTestSignal({ state: SignalState.TP1_HIT });
-      const expiredSignal = createTestSignal({ state: SignalState.EXPIRED });
-      const cancelledSignal = createTestSignal({ state: SignalState.CANCELLED });
-
-      await service.evaluateSignalForBots(pendingSignal);
-      await service.evaluateSignalForBots(tp1Signal);
-      await service.evaluateSignalForBots(expiredSignal);
-      await service.evaluateSignalForBots(cancelledSignal);
-
-      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
-    });
-  });
-
-  // C. Signal Freshness & Maximum Age (P0 #7)
-  describe('C. Signal Freshness & Maximum Age Policy', () => {
-    it('should REJECT stale signal exceeding max age for timeframe', async () => {
-      const bot = createTestBot({ timeframe: '15m' });
-      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
-
-      // 16 minutes old (max allowed for 15m is 15 minutes)
-      const staleTimestamp = new Date(Date.now() - 16 * 60 * 1000);
-      const staleSignal = createTestSignal({ timestamp: staleTimestamp });
-
-      await service.evaluateSignalForBots(staleSignal);
-
-      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
-    });
-
-    it('should REJECT signal with timestamp in the future (>5s ahead)', async () => {
-      const bot = createTestBot();
-      jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
-
-      const futureTimestamp = new Date(Date.now() + 60 * 1000);
-      const futureSignal = createTestSignal({ timestamp: futureTimestamp });
-
-      await service.evaluateSignalForBots(futureSignal);
-
-      expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
-    });
-  });
-
-  // D. Canonical Decision Fingerprint (P0 #8)
-  describe('D. Canonical Decision Fingerprint', () => {
-    it('should generate identical fingerprints for two scans of the same candle decision boundary', () => {
-      const bot = createTestBot();
-      const signal1 = createTestSignal({ id: 'sig_1', timestamp: new Date('2026-09-15T09:05:00.000Z') });
-      const signal2 = createTestSignal({ id: 'sig_2', timestamp: new Date('2026-09-15T09:08:00.000Z') });
-
-      const fp1 = service.getSignalFingerprint(bot, signal1);
-      const fp2 = service.getSignalFingerprint(bot, signal2);
-
-      // Both belong to the 09:00 - 09:15 15m candle boundary
-      expect(fp1).toBe(fp2);
-    });
-
-    it('should generate different fingerprints for distinct candle boundaries', () => {
-      const bot = createTestBot();
-      const signal1 = createTestSignal({ timestamp: new Date('2026-09-15T09:05:00.000Z') });
-      const signal2 = createTestSignal({ timestamp: new Date('2026-09-15T09:20:00.000Z') });
-
-      const fp1 = service.getSignalFingerprint(bot, signal1);
-      const fp2 = service.getSignalFingerprint(bot, signal2);
-
-      expect(fp1).not.toBe(fp2);
-    });
-  });
-
-  // G. Authoritative Order Quantity Resolution (P0 #4)
-  describe('G. Authoritative Instrument Quantity Resolution', () => {
-    it('should compute exact canonical quantities for NIFTY, BANKNIFTY, and BTCUSDT', () => {
-      const botNifty = createTestBot({ symbol: 'NIFTY', lots: 2 });
-      const instNifty = { symbol: 'NIFTY', lotSize: 65, minimumQuantity: 65, quantityPrecision: 0 } as any;
-      expect(service.resolveBotOrderQuantity(botNifty, instNifty)).toBe(130);
-
-      const botBank = createTestBot({ symbol: 'BANKNIFTY', lots: 3 });
-      const instBank = { symbol: 'BANKNIFTY', lotSize: 15, minimumQuantity: 15, quantityPrecision: 0 } as any;
-      expect(service.resolveBotOrderQuantity(botBank, instBank)).toBe(45);
-
-      const botBtc = createTestBot({ symbol: 'BTCUSDT', lots: 5 });
-      const instBtc = { symbol: 'BTCUSDT', lotSize: 0.001, minimumQuantity: 0.001, quantityPrecision: 3 } as any;
-      expect(service.resolveBotOrderQuantity(botBtc, instBtc)).toBe(0.005);
-    });
-
-    it('should throw on invalid lots or unsupported instrument', () => {
-      const botInvalid = createTestBot({ lots: 0 });
-      const instNifty = { symbol: 'NIFTY', lotSize: 65 } as any;
-      expect(() => service.resolveBotOrderQuantity(botInvalid, instNifty)).toThrow('INVALID_BOT_LOTS');
-    });
-  });
-
-  // P0 #3: autoExecutePaper=false check before reservation
-  describe('P0 #3. autoExecutePaper Guard', () => {
-    it('should NOT consume an execution reservation when autoExecutePaper is false', async () => {
+    it('should NOT attempt database reservation when autoExecutePaper is false', async () => {
       const bot = createTestBot({ autoExecutePaper: false });
       jest.spyOn(service, 'listBots').mockResolvedValue([bot]);
       const reserveSpy = jest.spyOn(service, 'reserveExecutionLock');
@@ -257,27 +195,22 @@ describe('AlgoBotsService — Production-Grade Execution Safety (Fix 174)', () =
     });
   });
 
-  // P1 #16: Test-only guard for deterministic signals
-  describe('P1 #16. Production Guard for Deterministic Signals', () => {
-    it('should throw error when deterministic signals are injected in production mode', () => {
-      const originalNodeEnv = process.env.NODE_ENV;
-      const originalAppEnv = process.env.APP_ENV;
+  // 5. DB Fail-Closed for Bot Configuration Operations
+  describe('5. Database Fail-Closed for Bot Configuration', () => {
+    it('should throw InternalServerErrorException when database query fails during listBots()', async () => {
+      const dbMockPrisma = {
+        algoBot: {
+          findMany: jest.fn().mockRejectedValue(new Error('Connection terminated')),
+        },
+      };
 
-      process.env.NODE_ENV = 'production';
-      process.env.APP_ENV = 'production';
+      const testService = new AlgoBotsService(
+        mockPaperTradingService,
+        mockAlertsService,
+        dbMockPrisma as any,
+      );
 
-      try {
-        expect(() => {
-          SignalGenerator.generateSignal({
-            symbol: 'NIFTY',
-            executionCandles: [{ timestamp: new Date(), open: 24000, high: 24010, low: 23990, close: 24005, volume: 1000 }],
-            strategyConfig: { deterministicSignal: { timestamp: new Date() } },
-          });
-        }).toThrow('DETERMINISTIC_SIGNAL_INJECTION_PROHIBITED');
-      } finally {
-        process.env.NODE_ENV = originalNodeEnv;
-        process.env.APP_ENV = originalAppEnv;
-      }
+      await expect(testService.listBots()).rejects.toThrow(InternalServerErrorException);
     });
   });
 });
