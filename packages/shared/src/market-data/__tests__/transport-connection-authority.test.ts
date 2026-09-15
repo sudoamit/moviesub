@@ -19,6 +19,7 @@ import {
   normalizeCanonicalProviderId,
   setCanonicalSigningSecret,
   resetCanonicalSigningSecretForTests,
+  ProviderRuntimeState,
 } from '../execution-quote-validator';
 
 describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
@@ -526,6 +527,194 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(() => {
         BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: bRestConn });
       }).toThrow(/transport/);
+    });
+  });
+
+  describe('FIX 163 — Final Provider-Runtime Authority Hardening Tests (A through N)', () => {
+    beforeEach(() => {
+      resetAllOptionProviderAdaptersForTests();
+      resetAllSpotProviderAdaptersForTests();
+      NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    });
+
+    test('A. runtimeState stream validation against matching quote -> valid', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: conn.connectionEpoch,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(true);
+    });
+
+    test('B. runtimeState providerTransport mismatch -> rejected with PROVIDER_TRANSPORT_MISMATCH', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'REST_POLLING',
+        connectionEpoch: conn.connectionEpoch,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('PROVIDER_TRANSPORT_MISMATCH');
+    });
+
+    test('C. runtimeState providerId mismatch -> rejected with UNKNOWN_PROVIDER_ID_REJECTED', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: conn.connectionEpoch,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('UNKNOWN_PROVIDER_ID_REJECTED');
+    });
+
+    test('D. runtimeState RECONNECTING -> rejected with PROVIDER_RECONNECTING', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: conn.connectionEpoch,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'RECONNECTING',
+        providerConnected: false,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('PROVIDER_RECONNECTING');
+    });
+
+    test('E. runtimeState DISCONNECTED -> rejected with PROVIDER_DISCONNECTED', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: conn.connectionEpoch,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'DISCONNECTED',
+        providerConnected: false,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('PROVIDER_DISCONNECTED');
+    });
+
+    test('F. runtimeState connectionEpoch mismatch -> rejected with EPOCH_MISMATCH', () => {
+      const conn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+      const quote = {
+        symbol: 'BTCUSDT',
+        price: 75000,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: conn.connectionEpoch - 1,
+        providerInstanceId: conn.providerInstanceId,
+        providerConnectionId: conn.providerConnectionId,
+      };
+
+      const runtimeState: ProviderRuntimeState = {
+        providerId: 'BINANCE_DIRECT',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: conn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('EPOCH_MISMATCH');
     });
   });
 });

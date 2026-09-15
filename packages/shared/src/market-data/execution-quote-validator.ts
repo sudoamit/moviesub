@@ -165,6 +165,17 @@ export function validateExecutionQuoteTimestamp(
   return { valid: true, ageMs };
 }
 
+import { ProviderConnectionIdentity } from './option-provider/provider-connection-identity';
+
+export interface ProviderRuntimeState {
+  providerId: string;
+  providerTransport: CanonicalProviderTransport;
+  connectionState: ProviderConnectionState;
+  providerConnected: boolean;
+  currentConnection: ProviderConnectionIdentity;
+  reconnectedAt: number | null;
+}
+
 export interface IExecutionQuoteValidationContext {
   expectedSymbol?: string;
   activeConnectionEpoch?: number;
@@ -173,6 +184,7 @@ export interface IExecutionQuoteValidationContext {
   providerState?: ProviderConnectionState | string;
   isProviderConnected?: boolean;
   isProviderHealthy?: boolean;
+  runtimeState?: ProviderRuntimeState;
   maxAgeMs?: number;
   maxFutureSkewMs?: number;
   currentTimeMs?: number;
@@ -329,6 +341,63 @@ export function validateAuthoritativeExecutionQuote(
       reason: `Quote providerTransport '${quote.providerTransport}' is invalid or missing`,
       errorType: 'PROVIDER_TRANSPORT_MISMATCH',
     };
+  }
+
+  if (ctx.runtimeState) {
+    const rs = ctx.runtimeState;
+    if (quote.providerTransport !== rs.providerTransport) {
+      return {
+        valid: false,
+        reason: `Quote transport '${quote.providerTransport}' does not match runtime transport '${rs.providerTransport}'`,
+        errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+      };
+    }
+    const rsNormId = normalizeCanonicalProviderId(rs.providerId);
+    if (normProviderId !== rsNormId) {
+      return {
+        valid: false,
+        reason: `Quote providerId '${quote.providerId}' (canonical: '${normProviderId}') does not match runtime providerId '${rs.providerId}' (canonical: '${rsNormId}')`,
+        errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+      };
+    }
+    if (rs.connectionState === 'RECONNECTING') {
+      return {
+        valid: false,
+        reason: 'Market data provider is in RECONNECTING state. Trade execution blocked.',
+        errorType: 'PROVIDER_RECONNECTING',
+      };
+    }
+    if (!rs.providerConnected || rs.connectionState === 'DISCONNECTED') {
+      return {
+        valid: false,
+        reason: `Market data provider is in '${rs.connectionState || 'DISCONNECTED'}' state. Trade execution blocked.`,
+        errorType: 'PROVIDER_DISCONNECTED',
+      };
+    }
+    const conn = rs.currentConnection;
+    if (conn) {
+      if (quote.connectionEpoch !== conn.connectionEpoch) {
+        return {
+          valid: false,
+          reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${conn.connectionEpoch}). A fresh tick from the active connection is required.`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+      if (quote.providerConnectionId !== conn.providerConnectionId) {
+        return {
+          valid: false,
+          reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${conn.providerConnectionId}).`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+      if (quote.providerInstanceId !== conn.providerInstanceId) {
+        return {
+          valid: false,
+          reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${conn.providerInstanceId}).`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+    }
   }
 
   if (ctx.isProviderHealthy === false) {

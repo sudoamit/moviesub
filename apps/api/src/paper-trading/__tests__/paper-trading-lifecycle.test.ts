@@ -3685,7 +3685,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     it('TEST 149-7 (Option Provenance Authority & Connection Epoch Coupling): Redis option quote without authentic provider origin and matching epoch is degraded', async () => {
       const realStreamer = new RealMarketStreamerService({} as any);
-      const activeEpoch = realStreamer.getConnectionEpoch();
+      const activeEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
       const providerInstanceId = realStreamer.getProviderInstanceId();
 
       const makeValidatedTick = (overrides: any = {}) => {
@@ -3764,8 +3764,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // 4. Provider reconnects: exactly one new epoch is assigned
       realStreamer.handleProviderDisconnect('Simulated connection drop');
-      expect(realStreamer.getProviderState()).toBe('DISCONNECTED');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('DISCONNECTED');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
 
       // Re-querying during DISCONNECTED fails closed -> DEGRADED
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
@@ -3774,8 +3774,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // Provider transitions to RECONNECTING: still fails closed -> DEGRADED
       realStreamer.handleProviderReconnecting();
-      expect(realStreamer.getProviderState()).toBe('RECONNECTING');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTING');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
 
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
       const reconnectingQuote = await (testMonitor as any).getOptionContractQuote(pos);
@@ -3783,11 +3783,11 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // Provider finishes reconnection -> exactly one epoch increment
       realStreamer.handleProviderReconnect();
-      const newEpoch = realStreamer.getConnectionEpoch();
-      const newProviderConnectionId = realStreamer.getProviderConnectionId();
+      const newEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const newProviderConnectionId = realStreamer.getProviderConnectionId('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
       expect(newEpoch).toBe(activeEpoch + 1);
-      expect(realStreamer.getProviderState()).toBe('RECONNECTED');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(true);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTED');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(true);
 
       // Cached quote from old epoch is rejected even after reconnection
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
@@ -3810,29 +3810,29 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     it('TEST 153-1 (Deterministic Connection Epoch Lifecycle): Disconnect and Reconnecting do NOT mint premature epochs; Reconnect mints exactly one new epoch', () => {
       const realStreamer = new RealMarketStreamerService({} as any);
-      const initialEpoch = realStreamer.getConnectionEpoch();
+      const initialEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
 
       // Disconnect
       realStreamer.handleProviderDisconnect('Network blip');
-      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch);
-      expect(realStreamer.getProviderState()).toBe('DISCONNECTED');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('DISCONNECTED');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
 
       // Reconnecting
       realStreamer.handleProviderReconnecting();
-      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch);
-      expect(realStreamer.getProviderState()).toBe('RECONNECTING');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(false);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTING');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
 
       // Reconnect completes -> exactly one new epoch
       realStreamer.handleProviderReconnect();
-      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch + 1);
-      expect(realStreamer.getProviderState()).toBe('RECONNECTED');
-      expect(realStreamer.isExecutionDataHealthy()).toBe(true);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch + 1);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTED');
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(true);
 
       // Subsequent duplicate call does not bump epoch again
       realStreamer.handleProviderReconnect();
-      expect(realStreamer.getConnectionEpoch()).toBe(initialEpoch + 1);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch + 1);
     });
 
     it('TEST 153-2 (Spot Execution Fail-Closed on RECONNECTING and DISCONNECTED): getValidatedTicker strictly blocks execution', () => {
@@ -3931,7 +3931,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(retrievedQuote.provenance).toBe('LIVE_PROVIDER');
       expect(retrievedQuote.price).toBe(210.5);
       expect(retrievedQuote.providerId).toBe('NSE_STREAM_GATEWAY');
-      expect(retrievedQuote.providerConnectionId).toBe(realStreamer.getProviderConnectionId());
+      expect(retrievedQuote.providerConnectionId).toBe(realStreamer.getProviderConnectionId('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM'));
       expect(retrievedQuote.providerInstanceId).toBe(realStreamer.getProviderInstanceId());
 
       const publicationCount = () => mockRedisClient.set.mock.calls.length;
@@ -3953,7 +3953,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(publicationCount()).toBe(beforeDisconnected);
 
       realStreamer.handleProviderReconnect();
-      const freshEpoch = realStreamer.getConnectionEpoch();
+      const freshEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
       await expect((realStreamer as any).publishCanonicalOptionQuote(staleTickBeforeReconnect))
         .resolves.toBeNull();
       expect(publicationCount()).toBe(beforeDisconnected);

@@ -81,6 +81,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   it('RULE 5: PointInTimeCurrencyConverter starts with ZERO hardcoded rates (Strict Fail-Closed)', () => {
     PointInTimeCurrencyConverter.resetInstance();
     const freshConverter = PointInTimeCurrencyConverter.getInstance();
+    freshConverter.clearAllRates();
     expect(() => freshConverter.getRate('USDT', 'INR', Date.now())).toThrow(/MISSING_FX_RATE/);
     expect(() => freshConverter.getRate('USD', 'INR', Date.now())).toThrow(/MISSING_FX_RATE/);
     expect(() => freshConverter.getRate('EUR', 'INR', Date.now())).toThrow(/MISSING_FX_RATE/);
@@ -181,7 +182,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(monitorContent).not.toMatch(/provenance:\s*parsed\.provenance/);
 
     // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
-    expect(streamerContent).toMatch(/connectionState === 'CONNECTED' \|\| (this\.|state\.)?connectionState === 'RECONNECTED'/);
+    expect(streamerContent).toMatch(/connectionState === 'CONNECTED' \|\| (this\.|state\.|runtime\.)?connectionState === 'RECONNECTED'/);
   });
 
   it('RULE 10: AI FIX 155 Structural Guards — canonical option authority is provider-derived and explicitly signed', () => {
@@ -205,7 +206,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(publishFn).not.toMatch(/providerId\s*:\s*params\.providerId/);
     expect(streamerContent).toContain('NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
     expect(streamerContent).toContain('NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
-    expect(streamerContent).toContain('getCurrentOptionProviderConnection(params.providerId)');
+    expect(streamerContent).toContain('getCurrentOptionProviderConnection(params.providerId, params.providerTransport)');
   });
 
   it('RULE 11: AI FIX 159 Structural Guards — Final Transport-Specific Connection Authority', () => {
@@ -267,12 +268,12 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 2. getCurrentStreamProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
     const getStreamConnFn = streamerContent.match(/getCurrentStreamProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
     expect(getStreamConnFn).not.toContain('this.beginStreamProviderConnection');
-    expect(getStreamConnFn).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+    expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
 
     // 3. getCurrentRestProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
     const getRestConnFn = streamerContent.match(/getCurrentRestProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
     expect(getRestConnFn).not.toContain('this.beginRestProviderConnection');
-    expect(getRestConnFn).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+    expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
 
     // 4. normalizeCanonicalProviderId must throw [UNKNOWN_PROVIDER_ID_REJECTED] on unknown provider IDs
     expect(validatorContent).toContain('normalizeCanonicalProviderId');
@@ -305,6 +306,27 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 6. beginStreamProviderConnection and beginRestProviderConnection validate shared existingConnection identity
     expect(streamerContent).toContain('[INVALID_SHARED_CONNECTION_IDENTITY]');
+  });
+
+  it('RULE 15: AI FIX 163 Structural Guards — Final Provider-Runtime Authority Hardening', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. getCurrentProviderConnection requires providerTransport in signature (not optional)
+    expect(streamerContent).toMatch(/getCurrentProviderConnection\(\s*providerId\s*:\s*string\s*,\s*providerTransport\s*:\s*'WEBSOCKET_STREAM'\s*\|\s*'REST_POLLING'/);
+
+    // 2. resolveCurrentProviderRuntime exists as pure resolver
+    expect(streamerContent).toContain('public resolveCurrentProviderRuntime');
+
+    // 3. Symmetric streamRuntimeStateMap and restRuntimeStateMap exist
+    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, ProviderRuntimeState>');
+    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, ProviderRuntimeState>');
+
+    // 4. Zero fallback catch blocks converting unknown provider IDs to valid providers
+    expect(streamerContent).not.toMatch(/catch\s*\{[\s\S]*?normId\s*=\s*['"]NSE_STREAM_GATEWAY['"]/);
+
+    // 5. Zero freshSymbolsAfterReconnect.clear() calls in whole streamer file
+    expect(streamerContent).not.toContain('freshSymbolsAfterReconnect.clear()');
   });
 });
 
