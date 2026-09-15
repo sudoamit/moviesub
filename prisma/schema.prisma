@@ -1118,4 +1118,76 @@ model AIRetrainJob {
   @@map("ai_retrain_jobs")
 }
 
+enum AlgoBotExecutionState {
+  RESERVED
+  EXECUTING
+  EXECUTED
+  FAILED_RETRYABLE
+  FAILED_FINAL
+  CANCELLED
+}
+
+enum AlgoBotSmcCondition {
+  ORDER_BLOCK
+  FVG
+  LIQUIDITY_SWEEP
+  ANY_CONFLUENCE
+}
+
+enum AlgoBotDirection {
+  BULLISH
+  BEARISH
+  ANY
+}
+
+model AlgoBot {
+  id                 String              @id @default(uuid())
+  name               String
+  symbol             String
+  direction          AlgoBotDirection    @default(ANY)
+  timeframe          String              @default("15m")
+  minScore           Int                 @default(80)
+  smcCondition       AlgoBotSmcCondition @default(ANY_CONFLUENCE)
+  lots               Int                 @default(1)
+  autoExecutePaper   Boolean             @default(false)
+  notifyWebhook      Boolean             @default(true)
+  isActive           Boolean             @default(true)
+  triggerCount       Int                 @default(0)
+  lastTriggeredAt    DateTime?
+  lastTriggerDetails String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  executions         AlgoBotExecution[]
+
+  @@map("algo_bots")
+}
+
+model AlgoBotExecution {
+  id              String                @id @default(uuid())
+  fingerprint     String                @unique
+  botId           String
+  bot             AlgoBot               @relation(fields: [botId], references: [id], onDelete: Cascade)
+  symbol          String
+  timeframe       String
+  direction       Direction
+  signalId        String?
+  signalTimestamp DateTime
+  state           AlgoBotExecutionState @default(RESERVED)
+  correlationId   String
+  reservedAt      DateTime              @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+  failedAt        DateTime?
+  failureReason   String?
+  orderPositionId String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([botId, symbol, timeframe, signalTimestamp])
+  @@index([state])
+  @@map("algo_bot_executions")
+}
+
+
 

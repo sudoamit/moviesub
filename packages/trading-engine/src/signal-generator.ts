@@ -155,6 +155,11 @@ export class SignalGenerator {
         : undefined;
 
     if (detList && detList.length > 0) {
+      if (process.env.NODE_ENV === 'production' && process.env.APP_ENV === 'production') {
+        throw new Error(
+          'DETERMINISTIC_SIGNAL_INJECTION_PROHIBITED: Deterministic test signal injection is strictly prohibited in production mode',
+        );
+      }
       const currTime = decisionTimestamp.getTime();
       const candleOpenTime =
         rawExecCandles.length > 0
@@ -237,6 +242,12 @@ export class SignalGenerator {
           },
           reasoning: {} as any,
           scoreBreakdown: {} as any,
+          triggerEvidence: det.triggerEvidence || {
+            orderBlock: { matched: true },
+            fvg: { matched: true },
+            liquiditySweep: { matched: true },
+            structureBreak: { matched: true },
+          },
           timeframe: String(executionTf),
           reasons: det.reasons ?? ['Candidate deterministic setup'],
           marketContext: det.marketContext,
@@ -556,6 +567,31 @@ export class SignalGenerator {
       asOfTimestamp: decisionTimestamp,
     });
 
+    const triggerEvidence = {
+      orderBlock: {
+        matched: activeOB !== null,
+        id: activeOB?.id,
+        direction: activeOB?.direction,
+        timestamp: activeOB?.timestamp,
+        details: activeOB ? `Order Block tap [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]` : undefined,
+      },
+      fvg: {
+        matched: activeFVG !== null,
+        id: activeFVG?.id,
+        direction: activeFVG?.direction,
+        timestamp: activeFVG?.timestamp,
+        details: activeFVG ? `FVG mitigation [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]` : undefined,
+      },
+      liquiditySweep: {
+        matched: hasSweep,
+        details: hasSweep ? 'Liquidity pool swept' : undefined,
+      },
+      structureBreak: {
+        matched: hasStructureBreak,
+        details: hasStructureBreak ? 'Structure break / CHoCH' : undefined,
+      },
+    };
+
     return {
       id: `smc_${symbol}_${executionTf}_${finalDirection}_${triggerTag}_${decisionTimestamp.getTime()}`,
       symbol,
@@ -563,6 +599,7 @@ export class SignalGenerator {
       score: totalScore,
       grade,
       scoreBreakdown: breakdown,
+      triggerEvidence,
       timeframe: executionTf as Timeframe,
       htfBias: mtf.htfBias,
       entryZone: levels.entryZone,
@@ -571,7 +608,7 @@ export class SignalGenerator {
       riskRewardRatios: levels.riskRewardRatios,
       reasoning,
       reasons: explicitReasons,
-      state: SignalState.PENDING,
+      state: SignalState.ACTIVE,
       timestamp: decisionTimestamp,
       quantSnapshot: snapshot,
       quantScore: snapshot.score,

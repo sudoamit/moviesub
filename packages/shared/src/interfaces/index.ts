@@ -246,6 +246,21 @@ export interface ISignalReasoning {
   summary: string;
 }
 
+export interface ITriggerEvidenceItem {
+  matched: boolean;
+  id?: string;
+  direction?: Direction | string;
+  timestamp?: Date | string;
+  details?: string;
+}
+
+export interface ISignalTriggerEvidence {
+  orderBlock?: ITriggerEvidenceItem;
+  fvg?: ITriggerEvidenceItem;
+  liquiditySweep?: ITriggerEvidenceItem;
+  structureBreak?: ITriggerEvidenceItem;
+}
+
 export interface ISignalSetup {
   id?: string;
   instrumentId?: string;
@@ -276,6 +291,7 @@ export interface ISignalSetup {
   reasons?: string[];
   risks?: string[];
   scoreBreakdown: IScoreBreakdown;
+  triggerEvidence?: ISignalTriggerEvidence;
   activatedAt?: Date;
   closedAt?: Date;
   exitPrice?: number;

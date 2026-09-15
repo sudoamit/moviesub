@@ -1,9 +1,20 @@
-import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { PaperTradingService } from '../paper-trading/paper-trading.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
-import { ISignalSetup, Timeframe } from '@quant/shared';
+import {
+  Direction,
+  getAuthoritativeInstrument,
+  hasInstrument,
+  IInstrument,
+  ISignalSetup,
+  MarketDataUnavailableError,
+  SignalGrade,
+  SignalState,
+  StaleMarketDataError,
+  Timeframe,
+} from '@quant/shared';
 
 export interface IAlgoBot {
   id: string;
@@ -30,14 +41,14 @@ export interface IStrategyMatchResult {
 }
 
 @Injectable()
-export class AlgoBotsService {
+export class AlgoBotsService implements OnModuleInit {
   private readonly logger = new Logger(AlgoBotsService.name);
 
-  // Process-local lock cache for fast idempotency check
+  // Process-local lock cache optimization
   private readonly inMemoryLocks = new Set<string>();
 
-  // In-memory store of active algorithmic bots initialized with preset institutional bots
-  private bots: IAlgoBot[] = [
+  // Fallback in-memory store if DB is empty on first boot
+  private presetBots: IAlgoBot[] = [
     {
       id: 'bot_nifty_smc_pro',
       name: 'NIFTY 15m Institutional Order Flow Scalper',
@@ -91,22 +102,130 @@ export class AlgoBotsService {
     @Optional() private readonly prisma?: PrismaService,
     @Optional() private readonly redis?: RedisService,
   ) {
-    this.logger.log(
-      `Algo Strategy Studio initialized with ${this.bots.length} active automated bots.`,
-    );
+    this.logger.log('Algo Strategy Studio Service Initialized.');
   }
 
+  async onModuleInit() {
+    if (this.prisma) {
+      try {
+        const count = await this.prisma.algoBot.count();
+        if (count === 0) {
+          this.logger.log('Seeding initial preset AlgoBots into database...');
+          for (const bot of this.presetBots) {
+            await this.prisma.algoBot.create({
+              data: {
+                id: bot.id,
+                name: bot.name,
+                symbol: bot.symbol,
+                direction: bot.direction as any,
+                timeframe: bot.timeframe,
+                minScore: bot.minScore,
+                smcCondition: bot.smcCondition as any,
+                lots: bot.lots,
+                autoExecutePaper: bot.autoExecutePaper,
+                notifyWebhook: bot.notifyWebhook,
+                isActive: bot.isActive,
+                triggerCount: bot.triggerCount,
+              },
+            });
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to seed/sync preset AlgoBots in database: ${err?.message}`);
+      }
+    }
+  }
+
+  /**
+   * P1 #15: Persistent Database Bot Configuration Read
+   */
   async listBots(): Promise<IAlgoBot[]> {
-    return this.bots;
+    if (this.prisma) {
+      try {
+        const dbBots = await this.prisma.algoBot.findMany({
+          orderBy: { createdAt: 'desc' },
+        });
+        if (dbBots && dbBots.length > 0) {
+          return dbBots.map((b) => ({
+            id: b.id,
+            name: b.name,
+            symbol: b.symbol,
+            direction: b.direction as any,
+            timeframe: b.timeframe,
+            minScore: b.minScore,
+            smcCondition: b.smcCondition as any,
+            lots: b.lots,
+            autoExecutePaper: b.autoExecutePaper,
+            notifyWebhook: b.notifyWebhook,
+            isActive: b.isActive,
+            createdAt: b.createdAt.toISOString(),
+            triggerCount: b.triggerCount,
+            lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
+            lastTriggerDetails: b.lastTriggerDetails || undefined,
+          }));
+        }
+      } catch {
+        // Fallback to in-memory if DB fails
+      }
+    }
+    return this.presetBots;
   }
 
+  /**
+   * P1 #14: DTO Validation for AlgoBot Configuration
+   */
+  public validateBotConfig(dto: Partial<IAlgoBot>): void {
+    if (!dto.name || typeof dto.name !== 'string' || dto.name.trim().length === 0) {
+      throw new BadRequestException('Bot name is required and must be a non-empty string');
+    }
+
+    const symbol = (dto.symbol || '').toUpperCase().trim();
+    if (!hasInstrument(symbol)) {
+      throw new BadRequestException(`Unsupported instrument symbol '${dto.symbol}'`);
+    }
+
+    const normTf = this.normalizeTimeframe(dto.timeframe);
+    const validTimeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+    if (!validTimeframes.includes(normTf)) {
+      throw new BadRequestException(`Unsupported timeframe '${dto.timeframe}'`);
+    }
+
+    if (dto.direction && !['BULLISH', 'BEARISH', 'ANY'].includes(dto.direction)) {
+      throw new BadRequestException(`Unsupported bot direction '${dto.direction}'`);
+    }
+
+    if (
+      dto.smcCondition &&
+      !['ORDER_BLOCK', 'FVG', 'LIQUIDITY_SWEEP', 'ANY_CONFLUENCE'].includes(dto.smcCondition)
+    ) {
+      throw new BadRequestException(`Unsupported bot smcCondition '${dto.smcCondition}'`);
+    }
+
+    if (
+      typeof dto.minScore === 'number' &&
+      (dto.minScore < 0 || dto.minScore > 100 || !Number.isFinite(dto.minScore))
+    ) {
+      throw new BadRequestException('minScore must be a number between 0 and 100');
+    }
+
+    if (typeof dto.lots === 'number' && (dto.lots <= 0 || !Number.isFinite(dto.lots))) {
+      throw new BadRequestException('lots must be a positive finite number');
+    }
+  }
+
+  /**
+   * P1 #15: Create Bot with DTO Validation & Database Persistence
+   */
   async createBot(dto: Partial<IAlgoBot>): Promise<IAlgoBot> {
+    const symbol = (dto.symbol || 'NIFTY').toUpperCase().trim();
+    this.validateBotConfig({ ...dto, symbol });
+
     const newBot: IAlgoBot = {
-      id: `bot_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-      name: dto.name || `${dto.symbol || 'NIFTY'} Custom SMC Bot`,
-      symbol: (dto.symbol || 'NIFTY').toUpperCase(),
+      id: `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      name: dto.name || `${symbol} Custom SMC Bot`,
+      symbol,
       direction: dto.direction || 'ANY',
-      timeframe: dto.timeframe || '15m',
+      timeframe: this.normalizeTimeframe(dto.timeframe),
       minScore: Number(dto.minScore || 80),
       smcCondition: dto.smcCondition || 'ANY_CONFLUENCE',
       lots: Number(dto.lots || 1),
@@ -117,32 +236,94 @@ export class AlgoBotsService {
       triggerCount: 0,
     };
 
-    this.bots.unshift(newBot);
+    if (this.prisma) {
+      try {
+        await this.prisma.algoBot.create({
+          data: {
+            id: newBot.id,
+            name: newBot.name,
+            symbol: newBot.symbol,
+            direction: newBot.direction as any,
+            timeframe: newBot.timeframe,
+            minScore: newBot.minScore,
+            smcCondition: newBot.smcCondition as any,
+            lots: newBot.lots,
+            autoExecutePaper: newBot.autoExecutePaper,
+            notifyWebhook: newBot.notifyWebhook,
+            isActive: newBot.isActive,
+            triggerCount: 0,
+          },
+        });
+      } catch (err: any) {
+        this.logger.error(`Failed to persist new bot in DB: ${err.message}`);
+      }
+    }
+
+    this.presetBots.unshift(newBot);
     this.logger.log(`✓ [ALGO BOT CREATED] '${newBot.name}' (${newBot.symbol} ${newBot.direction})`);
     return newBot;
   }
 
   async toggleBot(id: string): Promise<IAlgoBot> {
-    const bot = this.bots.find((b) => b.id === id);
-    if (!bot) {
-      throw new NotFoundException(`Bot '${id}' not found`);
+    let bot: IAlgoBot | undefined;
+    if (this.prisma) {
+      try {
+        const existing = await this.prisma.algoBot.findUnique({ where: { id } });
+        if (existing) {
+          const updated = await this.prisma.algoBot.update({
+            where: { id },
+            data: { isActive: !existing.isActive },
+          });
+          bot = {
+            id: updated.id,
+            name: updated.name,
+            symbol: updated.symbol,
+            direction: updated.direction as any,
+            timeframe: updated.timeframe,
+            minScore: updated.minScore,
+            smcCondition: updated.smcCondition as any,
+            lots: updated.lots,
+            autoExecutePaper: updated.autoExecutePaper,
+            notifyWebhook: updated.notifyWebhook,
+            isActive: updated.isActive,
+            createdAt: updated.createdAt.toISOString(),
+            triggerCount: updated.triggerCount,
+          };
+        }
+      } catch {
+        // Fallback to preset
+      }
     }
-    bot.isActive = !bot.isActive;
+
+    if (!bot) {
+      bot = this.presetBots.find((b) => b.id === id);
+      if (!bot) {
+        throw new NotFoundException(`Bot '${id}' not found`);
+      }
+      bot.isActive = !bot.isActive;
+    }
+
     this.logger.log(`✓ Bot '${bot.name}' is now ${bot.isActive ? 'ACTIVE' : 'PAUSED'}`);
     return bot;
   }
 
   async deleteBot(id: string): Promise<{ success: boolean }> {
-    const index = this.bots.findIndex((b) => b.id === id);
-    if (index === -1) {
-      throw new NotFoundException(`Bot '${id}' not found`);
+    if (this.prisma) {
+      try {
+        await this.prisma.algoBot.delete({ where: { id } });
+      } catch {
+        // Fallback
+      }
     }
-    this.bots.splice(index, 1);
+    const index = this.presetBots.findIndex((b) => b.id === id);
+    if (index !== -1) {
+      this.presetBots.splice(index, 1);
+    }
     return { success: true };
   }
 
   /**
-   * Normalizes timeframes (e.g. 'M15' -> '15m', 'H1' -> '1h') to ensure exact string comparison parity.
+   * Normalizes timeframes (e.g. 'M15' -> '15m', 'H1' -> '1h') for exact string comparison parity
    */
   public normalizeTimeframe(tf: string | Timeframe | undefined): string {
     if (!tf) return '15m';
@@ -158,8 +339,146 @@ export class AlgoBotsService {
   }
 
   /**
-   * Authoritative Strategy Matching Function:
-   * Enforces symbol, timeframe, direction, minScore, and smcCondition.
+   * P0 #7: Maximum Signal Age Policy
+   */
+  public getMaxSignalAgeMs(timeframe: string | Timeframe): number {
+    const normTf = this.normalizeTimeframe(timeframe);
+    switch (normTf) {
+      case '1m':
+        return 60 * 1000;
+      case '5m':
+        return 5 * 60 * 1000;
+      case '15m':
+        return 15 * 60 * 1000;
+      case '30m':
+        return 30 * 60 * 1000;
+      case '1h':
+        return 60 * 60 * 1000;
+      case '4h':
+        return 4 * 60 * 60 * 1000;
+      case '1d':
+        return 24 * 60 * 60 * 1000;
+      default:
+        return 15 * 60 * 1000;
+    }
+  }
+
+  /**
+   * P0 #7: Signal Freshness Validation
+   */
+  public validateSignalFreshness(
+    signal: ISignalSetup,
+    asOfTimestamp: Date = new Date(),
+  ): IStrategyMatchResult {
+    const timestampRaw = signal.timestamp || signal.createdAt;
+    if (!timestampRaw) {
+      return { matches: false, reasonCode: 'SIGNAL_MISSING_TIMESTAMP', details: 'Signal lacks valid timestamp' };
+    }
+
+    const signalTime = new Date(timestampRaw).getTime();
+    if (Number.isNaN(signalTime)) {
+      return { matches: false, reasonCode: 'SIGNAL_INVALID_TIMESTAMP', details: 'Signal timestamp is invalid/NaN' };
+    }
+
+    const asOfMs = asOfTimestamp.getTime();
+
+    // Reject future timestamps (> 5000ms ahead of asOfTimestamp)
+    if (signalTime > asOfMs + 5000) {
+      return {
+        matches: false,
+        reasonCode: 'SIGNAL_FUTURE',
+        details: `Signal timestamp (${new Date(signalTime).toISOString()}) is in the future`,
+      };
+    }
+
+    const maxAgeMs = this.getMaxSignalAgeMs(signal.timeframe);
+    const ageMs = asOfMs - signalTime;
+
+    if (ageMs > maxAgeMs) {
+      return {
+        matches: false,
+        reasonCode: 'SIGNAL_STALE',
+        details: `Signal age (${Math.round(ageMs / 1000)}s) exceeds max allowed age (${Math.round(maxAgeMs / 1000)}s) for ${signal.timeframe}`,
+      };
+    }
+
+    return { matches: true };
+  }
+
+  /**
+   * P0 #4: Authoritative Order Quantity Resolution (No hardcoded multipliers)
+   */
+  public resolveBotOrderQuantity(bot: IAlgoBot, instrument: IInstrument): number {
+    if (!bot || typeof bot.lots !== 'number' || !Number.isFinite(bot.lots) || bot.lots <= 0) {
+      throw new Error(`INVALID_BOT_LOTS: Bot '${bot?.id}' has invalid lots: ${bot?.lots}`);
+    }
+    if (!instrument) {
+      throw new Error('INVALID_INSTRUMENT: Cannot resolve order quantity for undefined instrument');
+    }
+
+    const lotSize = Number(instrument.lotSize || 1);
+    const minQty = Number(instrument.minimumQuantity || lotSize || 1);
+    const precision = typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 0;
+
+    const rawQuantity = bot.lots * lotSize;
+    const clampedQty = Math.max(minQty, rawQuantity);
+
+    const factor = Math.pow(10, precision);
+    const canonicalQty = Math.round(clampedQty * factor) / factor;
+
+    if (!Number.isFinite(canonicalQty) || canonicalQty <= 0) {
+      throw new Error(
+        `INVALID_RESOLVED_QUANTITY: Computed quantity ${canonicalQty} for ${instrument.symbol} is invalid`,
+      );
+    }
+
+    return canonicalQty;
+  }
+
+  /**
+   * P0 #5: Canonical SMC Condition Evidence Matching
+   */
+  public matchesSmcCondition(
+    condition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
+    signal: ISignalSetup,
+  ): boolean {
+    const evidence = signal.triggerEvidence;
+
+    if (condition === 'ORDER_BLOCK') {
+      return evidence?.orderBlock?.matched === true;
+    }
+
+    if (condition === 'FVG') {
+      return evidence?.fvg?.matched === true;
+    }
+
+    if (condition === 'LIQUIDITY_SWEEP') {
+      return evidence?.liquiditySweep?.matched === true;
+    }
+
+    if (condition === 'ANY_CONFLUENCE') {
+      if (!evidence) {
+        // Fallback for signals constructed without triggerEvidence: check if any trigger is present
+        const breakdown = signal.scoreBreakdown || {};
+        return (
+          Number(breakdown.orderBlock || 0) > 0 ||
+          Number(breakdown.fvg || 0) > 0 ||
+          Number(breakdown.liquiditySweep || 0) > 0
+        );
+      }
+      return (
+        evidence.orderBlock?.matched === true ||
+        evidence.fvg?.matched === true ||
+        evidence.liquiditySweep?.matched === true ||
+        evidence.structureBreak?.matched === true
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * P0 #1 & P0 #5: Authoritative Strategy Condition Matching
    */
   public matchesBotStrategy(bot: IAlgoBot, signal: ISignalSetup): IStrategyMatchResult {
     if (!bot || !signal) {
@@ -171,18 +490,18 @@ export class AlgoBotsService {
       return {
         matches: false,
         reasonCode: 'SYMBOL_MISMATCH',
-        details: `Bot symbol '${bot.symbol}' does not match signal symbol '${signal.symbol}'`,
+        details: `Bot symbol '${bot.symbol}' !== signal symbol '${signal.symbol}'`,
       };
     }
 
     // 2. Exact Timeframe Match
-    const normalizedBotTf = this.normalizeTimeframe(bot.timeframe);
-    const normalizedSignalTf = this.normalizeTimeframe(signal.timeframe);
-    if (normalizedBotTf !== normalizedSignalTf) {
+    const botTf = this.normalizeTimeframe(bot.timeframe);
+    const signalTf = this.normalizeTimeframe(signal.timeframe);
+    if (botTf !== signalTf) {
       return {
         matches: false,
         reasonCode: 'TIMEFRAME_MISMATCH',
-        details: `Bot timeframe '${bot.timeframe}' (${normalizedBotTf}) does not match signal timeframe '${signal.timeframe}' (${normalizedSignalTf})`,
+        details: `Bot timeframe '${bot.timeframe}' (${botTf}) !== signal timeframe '${signal.timeframe}' (${signalTf})`,
       };
     }
 
@@ -191,7 +510,7 @@ export class AlgoBotsService {
       return {
         matches: false,
         reasonCode: 'DIRECTION_MISMATCH',
-        details: `Bot direction '${bot.direction}' does not match signal direction '${signal.direction}'`,
+        details: `Bot direction '${bot.direction}' !== signal direction '${signal.direction}'`,
       };
     }
 
@@ -200,16 +519,16 @@ export class AlgoBotsService {
       return {
         matches: false,
         reasonCode: 'SCORE_BELOW_THRESHOLD',
-        details: `Signal score (${signal.score}) is below bot minScore threshold (${bot.minScore})`,
+        details: `Signal score (${signal.score}) < bot minScore (${bot.minScore})`,
       };
     }
 
-    // 5. SMC Condition Match (Strictly inspects canonical signal output fields, NOT bot name)
+    // 5. Canonical SMC Condition Evidence Match
     if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
       return {
         matches: false,
         reasonCode: 'SMC_CONDITION_MISMATCH',
-        details: `Signal does not satisfy bot SMC condition '${bot.smcCondition}'`,
+        details: `Signal does not satisfy canonical SMC trigger evidence for '${bot.smcCondition}'`,
       };
     }
 
@@ -217,62 +536,27 @@ export class AlgoBotsService {
   }
 
   /**
-   * Inspects canonical ISignalSetup fields (scoreBreakdown, reasoning, reasons) to evaluate SMC condition
-   */
-  public matchesSmcCondition(
-    condition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
-    signal: ISignalSetup,
-  ): boolean {
-    if (condition === 'ANY_CONFLUENCE') {
-      return true;
-    }
-
-    const breakdown = signal.scoreBreakdown || {};
-    const reasoning = signal.reasoning || {};
-    const reasons = signal.reasons || [];
-
-    const explicitStr = (reasons || []).join(' ').toUpperCase();
-    const triggerStr = (reasoning.triggerReason || '').toUpperCase();
-    const summaryStr = (reasoning.summary || '').toUpperCase();
-    const liquidityStr = (reasoning.liquidityReason || '').toUpperCase();
-
-    if (condition === 'ORDER_BLOCK') {
-      const obScore = Number(breakdown.orderBlock || 0);
-      const inReasons = /ORDER_BLOCK|ORDER_BLOCK_TAP|OB_TAP|OB/i.test(explicitStr);
-      const inTrigger = /ORDER_BLOCK|ORDER BLOCK|OB_TAP|ORDER_BLOCK_TAP/i.test(triggerStr);
-      const inSummary = /ORDER_BLOCK|ORDER BLOCK/i.test(summaryStr);
-      return obScore > 0 || inReasons || inTrigger || inSummary;
-    }
-
-    if (condition === 'FVG') {
-      const fvgScore = Number(breakdown.fvg || 0);
-      const inReasons = /FVG|FAIR_VALUE_GAP|FVG_MITIGATION/i.test(explicitStr);
-      const inTrigger = /FVG|FAIR VALUE GAP|FVG_MITIGATION/i.test(triggerStr);
-      const inSummary = /FVG|FAIR VALUE GAP/i.test(summaryStr);
-      return fvgScore > 0 || inReasons || inTrigger || inSummary;
-    }
-
-    if (condition === 'LIQUIDITY_SWEEP') {
-      const sweepScore = Number(breakdown.liquiditySweep || 0);
-      const inReasons = /LIQUIDITY_SWEEP|LIQUIDITY_TAKEN|LIQUIDITY|SWEPT/i.test(explicitStr);
-      const inTrigger = /LIQUIDITY_SWEEP|LIQUIDITY|SWEPT/i.test(triggerStr);
-      const inLiquidity = /LIQUIDITY_SWEEP|LIQUIDITY|SWEPT/i.test(liquidityStr);
-      const inSummary = /LIQUIDITY_SWEEP|LIQUIDITY|SWEPT/i.test(summaryStr);
-      return sweepScore > 0 || inReasons || inTrigger || inLiquidity || inSummary;
-    }
-
-    return false;
-  }
-
-  /**
-   * Validates general signal eligibility before bot execution (NEUTRAL, NO_TRADE, invalid levels, timestamps)
+   * P0 #6 & P1 #9: Complete Trade-Level & Signal Eligibility Validation
    */
   public validateExecutionEligibility(bot: IAlgoBot, signal: ISignalSetup): IStrategyMatchResult {
     if (!bot.isActive) {
       return { matches: false, reasonCode: 'BOT_INACTIVE', details: `Bot '${bot.id}' is inactive/paused` };
     }
 
-    if (!signal.direction || signal.direction === ('NEUTRAL' as any) || signal.direction === ('NO_TRADE' as any)) {
+    // P0 #6: Require signal.state === SignalState.ACTIVE
+    if (!signal.state || signal.state !== SignalState.ACTIVE) {
+      return {
+        matches: false,
+        reasonCode: 'SIGNAL_NOT_ACTIVE',
+        details: `Signal state '${signal.state}' is not ACTIVE`,
+      };
+    }
+
+    if (
+      !signal.direction ||
+      signal.direction === ('NEUTRAL' as any) ||
+      signal.direction === ('NO_TRADE' as any)
+    ) {
       return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Signal direction '${signal.direction}' is NEUTRAL or NO_TRADE` };
     }
 
@@ -280,26 +564,53 @@ export class AlgoBotsService {
       return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Signal grade is NO_TRADE` };
     }
 
-    const timestamp = signal.timestamp || signal.createdAt;
-    if (!timestamp || Number.isNaN(new Date(timestamp).getTime())) {
-      return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Signal lacks valid market timestamp` };
+    // P0 #7: Signal Freshness Validation
+    const freshness = this.validateSignalFreshness(signal);
+    if (!freshness.matches) {
+      return freshness;
     }
 
+    // P1 #9: Validate all required trade levels
     const optimalEntry = signal.entryZone?.optimal;
     const stopLoss = signal.stopLoss;
     const tp1 = signal.takeProfits?.tp1;
+    const tp2 = signal.takeProfits?.tp2;
+    const tp3 = signal.takeProfits?.tp3;
 
-    if (!optimalEntry || optimalEntry <= 0 || !stopLoss || stopLoss <= 0 || !tp1 || tp1 <= 0) {
-      return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Incomplete entry/SL/TP trade levels` };
+    if (typeof signal.score !== 'number' || !Number.isFinite(signal.score) || signal.score <= 0) {
+      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Signal score must be a positive finite number' };
+    }
+
+    if (
+      typeof optimalEntry !== 'number' || !Number.isFinite(optimalEntry) || optimalEntry <= 0 ||
+      typeof stopLoss !== 'number' || !Number.isFinite(stopLoss) || stopLoss <= 0 ||
+      typeof tp1 !== 'number' || !Number.isFinite(tp1) || tp1 <= 0 ||
+      typeof tp2 !== 'number' || !Number.isFinite(tp2) || tp2 <= 0 ||
+      typeof tp3 !== 'number' || !Number.isFinite(tp3) || tp3 <= 0
+    ) {
+      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Incomplete or non-finite entry/SL/TP levels' };
+    }
+
+    const riskDistance = Math.abs(optimalEntry - stopLoss);
+    if (!Number.isFinite(riskDistance) || riskDistance <= 0) {
+      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Invalid risk distance between entry and SL' };
     }
 
     if (signal.direction === 'BULLISH') {
-      if (stopLoss >= optimalEntry || tp1 <= optimalEntry) {
-        return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Invalid BULLISH SL/TP orientation relative to entry` };
+      if (!(stopLoss < optimalEntry && optimalEntry < tp1 && tp1 <= tp2 && tp2 <= tp3)) {
+        return {
+          matches: false,
+          reasonCode: 'INVALID_LEVELS',
+          details: `Invalid BULLISH target orientation. SL (${stopLoss}) < entry (${optimalEntry}) < TP1 (${tp1}) <= TP2 (${tp2}) <= TP3 (${tp3})`,
+        };
       }
     } else if (signal.direction === 'BEARISH') {
-      if (stopLoss <= optimalEntry || tp1 >= optimalEntry) {
-        return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Invalid BEARISH SL/TP orientation relative to entry` };
+      if (!(stopLoss > optimalEntry && optimalEntry > tp1 && tp1 >= tp2 && tp2 >= tp3)) {
+        return {
+          matches: false,
+          reasonCode: 'INVALID_LEVELS',
+          details: `Invalid BEARISH target orientation. SL (${stopLoss}) > entry (${optimalEntry}) > TP1 (${tp1}) >= TP2 (${tp2}) >= TP3 (${tp3})`,
+        };
       }
     }
 
@@ -307,99 +618,245 @@ export class AlgoBotsService {
   }
 
   /**
-   * Generates a deterministic execution fingerprint for bot execution deduplication
+   * P0 #8: Canonical Decision Fingerprint Generator
    */
   public getSignalFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
-    const timestamp = signal.timestamp || signal.createdAt || new Date();
-    const signalTimeMs = new Date(timestamp).getTime();
+    const timestampRaw = signal.timestamp || signal.createdAt || new Date();
+    const signalTimeMs = new Date(timestampRaw).getTime();
     const normTf = this.normalizeTimeframe(signal.timeframe);
-    const sigId = signal.id ? `:${signal.id}` : '';
-    return `bot_exec:${bot.id}:${signal.symbol.toUpperCase()}:${normTf}:${signal.direction}${sigId}:${signalTimeMs}`;
+    const normSymbol = bot.symbol.toUpperCase();
+    const normDir = signal.direction;
+
+    const tfMs = this.getMaxSignalAgeMs(normTf);
+    const canonicalCandleBoundaryMs = Math.floor(signalTimeMs / tfMs) * tfMs;
+
+    return `bot_exec:${bot.id}:${normSymbol}:${normTf}:${normDir}:${canonicalCandleBoundaryMs}`;
   }
 
   /**
-   * Database + Redis persistent atomic lock reservation preventing race conditions and duplicate executions
+   * P0 #1: True Atomic Execution Reservation via PostgreSQL `@unique(fingerprint)`
    */
-  public async reserveExecutionLock(fingerprint: string): Promise<boolean> {
+  public async reserveExecutionLock(
+    bot: IAlgoBot,
+    signal: ISignalSetup,
+    fingerprint: string,
+  ): Promise<{ success: boolean; executionId?: string }> {
     if (this.inMemoryLocks.has(fingerprint)) {
-      return false;
+      return { success: false };
     }
 
-    // 1. Persistent Database Lock via AuditEvent check
+    const signalTimestamp = signal.timestamp || signal.createdAt || new Date();
+
     if (this.prisma) {
       try {
-        const existing = await this.prisma.auditEvent.findFirst({
-          where: {
-            entityId: fingerprint,
-            eventType: { in: ['ALGO_BOT_EXECUTION_RESERVED', 'ALGO_BOT_ORDER_PLACED'] },
+        const execution = await this.prisma.algoBotExecution.create({
+          data: {
+            fingerprint,
+            botId: bot.id,
+            symbol: bot.symbol.toUpperCase(),
+            timeframe: this.normalizeTimeframe(bot.timeframe),
+            direction: signal.direction as any,
+            signalId: signal.id || null,
+            signalTimestamp: new Date(signalTimestamp),
+            state: 'RESERVED',
+            correlationId: fingerprint,
           },
         });
-        if (existing) {
+
+        this.inMemoryLocks.add(fingerprint);
+        return { success: true, executionId: execution.id };
+      } catch (err: any) {
+        if (err?.code === 'P2002') {
+          const existing = await this.prisma.algoBotExecution.findUnique({
+            where: { fingerprint },
+          });
+
+          if (existing && existing.state === 'FAILED_RETRYABLE') {
+            const updated = await this.prisma.algoBotExecution.update({
+              where: { id: existing.id },
+              data: {
+                state: 'RESERVED',
+                failureReason: null,
+                failedAt: null,
+                updatedAt: new Date(),
+              },
+            });
+            this.inMemoryLocks.add(fingerprint);
+            return { success: true, executionId: updated.id };
+          }
+
           this.inMemoryLocks.add(fingerprint);
-          return false;
+          return { success: false };
         }
-      } catch {
-        // Continue fallback
+
+        // Fail closed if DB fails and Redis is unavailable
+        if (this.redis) {
+          const client = this.redis.getClient();
+          if (client && client.status === 'ready') {
+            try {
+              const res = await client.set(`lock:${fingerprint}`, 'RESERVED', 'EX', 86400, 'NX');
+              if (res === 'OK') {
+                this.inMemoryLocks.add(fingerprint);
+                return { success: true };
+              }
+            } catch {
+              // Fail closed
+            }
+          }
+        }
+
+        return { success: false };
       }
     }
 
-    // 2. Redis Atomic Lock Check
+    // Redis optimization fallback
     if (this.redis) {
       const client = this.redis.getClient();
       if (client && client.status === 'ready') {
         try {
           const res = await client.set(`lock:${fingerprint}`, 'RESERVED', 'EX', 86400, 'NX');
-          if (res !== 'OK') {
+          if (res === 'OK') {
             this.inMemoryLocks.add(fingerprint);
-            return false;
+            return { success: true };
           }
         } catch {
-          // Continue fallback
+          return { success: false };
         }
       }
     }
 
-    this.inMemoryLocks.add(fingerprint);
+    // Fallback for isolated unit tests when neither DB nor Redis service is injected
+    if (!this.prisma && !this.redis) {
+      this.inMemoryLocks.add(fingerprint);
+      return { success: true, executionId: `test_exec_${fingerprint}` };
+    }
 
-    // 3. Write DB Reservation Audit Record
-    if (this.prisma) {
+    return { success: false };
+  }
+
+  /**
+   * P0 #2: State Machine Lifecycle Method — Mark Started
+   */
+  public async markExecutionStarted(executionId: string): Promise<void> {
+    if (this.prisma && executionId) {
       try {
-        await this.prisma.auditEvent.create({
+        await this.prisma.algoBotExecution.update({
+          where: { id: executionId },
           data: {
-            actor: 'SYSTEM',
-            service: 'API',
-            eventType: 'ALGO_BOT_EXECUTION_RESERVED',
-            entityType: 'ALGO_BOT_EXECUTION',
-            entityId: fingerprint,
-            correlationId: fingerprint,
-            payloadJson: { reservedAt: new Date().toISOString() },
+            state: 'EXECUTING',
+            startedAt: new Date(),
           },
         });
       } catch {
-        // Ignore DB insert conflict
+        // ignore
       }
     }
+  }
 
-    return true;
+  /**
+   * P0 #2: State Machine Lifecycle Method — Mark Executed
+   */
+  public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
+    if (this.prisma && executionId) {
+      try {
+        await this.prisma.algoBotExecution.update({
+          where: { id: executionId },
+          data: {
+            state: 'EXECUTED',
+            orderPositionId: orderPositionId || null,
+            completedAt: new Date(),
+          },
+        });
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * P0 #2: State Machine Lifecycle Method — Mark Failed (Retryable vs Final)
+   */
+  public async markExecutionFailed(executionId: string, err: any): Promise<void> {
+    if (!this.prisma || !executionId) return;
+
+    let isRetryable = false;
+    if (
+      err instanceof MarketDataUnavailableError ||
+      err instanceof StaleMarketDataError ||
+      err?.name === 'MarketDataUnavailableError' ||
+      err?.name === 'StaleMarketDataError' ||
+      err?.message?.includes('MarketDataUnavailableError') ||
+      err?.message?.includes('StaleMarketDataError') ||
+      err?.message?.includes('streamer') ||
+      err?.message?.includes('timeout') ||
+      err?.message?.includes('network')
+    ) {
+      isRetryable = true;
+    }
+
+    const state = isRetryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
+    const failureReason = err?.message || String(err);
+
+    try {
+      await this.prisma.algoBotExecution.update({
+        where: { id: executionId },
+        data: {
+          state,
+          failedAt: new Date(),
+          failureReason,
+        },
+      });
+
+      if (isRetryable) {
+        const ex = await this.prisma.algoBotExecution.findUnique({ where: { id: executionId } });
+        if (ex) {
+          this.inMemoryLocks.delete(ex.fingerprint);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private async recordBotTrigger(botId: string, signal: ISignalSetup): Promise<void> {
+    const details = `${signal.direction} Trigger @ ₹${signal.entryZone.optimal.toFixed(2)} (Score: ${signal.score}/100)`;
+    if (this.prisma) {
+      try {
+        await this.prisma.algoBot.update({
+          where: { id: botId },
+          data: {
+            triggerCount: { increment: 1 },
+            lastTriggeredAt: new Date(),
+            lastTriggerDetails: details,
+          },
+        });
+      } catch {
+        // ignore
+      }
+    }
   }
 
   /**
    * Evaluates incoming signal against all active bot strategies
    */
   async evaluateSignalForBots(signal: ISignalSetup) {
-    for (const bot of this.bots) {
-      // 1. Validate Bot Active & General Eligibility
+    const bots = await this.listBots();
+
+    for (const bot of bots) {
+      // 1. Validate Bot Active & Signal Eligibility (ACTIVE state, trade levels, freshness)
       const eligibility = this.validateExecutionEligibility(bot, signal);
       if (!eligibility.matches) {
         if (!bot.isActive) {
           this.logger.debug(`[REJECTED: BOT_INACTIVE] Bot '${bot.id}' is inactive/paused`);
-        } else if (eligibility.reasonCode === 'INVALID_SIGNAL') {
-          this.logger.warn(`[REJECTED: INVALID_SIGNAL] Signal for ${signal.symbol} rejected: ${eligibility.details}`);
+        } else {
+          this.logger.warn(
+            `[REJECTED: ${eligibility.reasonCode}] Bot '${bot.id}' rejected signal ${signal.symbol}: ${eligibility.details}`,
+          );
         }
         continue;
       }
 
-      // 2. Authoritative Strategy Matching
+      // 2. Authoritative Strategy Matching (Symbol, Timeframe, Direction, MinScore, Canonical SMC Evidence)
       const match = this.matchesBotStrategy(bot, signal);
       if (!match.matches) {
         this.logger.debug(
@@ -408,65 +865,70 @@ export class AlgoBotsService {
         continue;
       }
 
-      // 3. Signal Execution Idempotency Fingerprint & Atomic Lock Reservation
+      // P0 #3: NEVER RESERVE BEFORE autoExecutePaper CHECK
+      if (!bot.autoExecutePaper) {
+        this.logger.debug(`[AUTO_EXECUTE_DISABLED] Bot '${bot.id}' has autoExecutePaper=false`);
+        await this.recordBotTrigger(bot.id, signal);
+        continue;
+      }
+
+      // 3. P0 #4: Resolve Order Quantity via Authoritative Instrument Registry
+      let quantity: number;
+      try {
+        const instrument = getAuthoritativeInstrument(bot.symbol);
+        quantity = this.resolveBotOrderQuantity(bot, instrument);
+      } catch (err: any) {
+        this.logger.error(
+          `[REJECTED: INVALID_QUANTITY] Failed to resolve order quantity for bot '${bot.id}': ${err.message}`,
+        );
+        continue;
+      }
+
+      // 4. P0 #1: Compute Fingerprint & Reserve Execution Lock via Database `@unique` constraint
       const fingerprint = this.getSignalFingerprint(bot, signal);
-      const reserved = await this.reserveExecutionLock(fingerprint);
-      if (!reserved) {
+      const reservation = await this.reserveExecutionLock(bot, signal, fingerprint);
+
+      if (!reservation.success || !reservation.executionId) {
         this.logger.warn(
           `[REJECTED: EXECUTION_LOCKED] Duplicate signal or execution lock already held for fingerprint: ${fingerprint}`,
         );
         continue;
       }
 
-      // Update bot trigger metadata
-      bot.triggerCount += 1;
-      bot.lastTriggeredAt = new Date().toISOString();
-      bot.lastTriggerDetails = `${signal.direction} Trigger @ ₹${signal.entryZone.optimal.toFixed(2)} (Score: ${signal.score}/100)`;
+      const executionId = reservation.executionId;
+      await this.recordBotTrigger(bot.id, signal);
 
-      this.logger.log(
-        `🤖 [BOT TRIGGERED] '${bot.name}' (${bot.id}) -> ${signal.symbol} ${signal.direction} @ ₹${signal.entryZone.optimal} | Fingerprint: ${fingerprint}`,
-      );
-
-      // 4. Automated Paper Execution
-      if (!bot.autoExecutePaper) {
-        this.logger.debug(`[AUTO_EXECUTE_DISABLED] Bot '${bot.id}' has autoExecutePaper=false`);
-        continue;
-      }
-
+      // 5. P0 #2: Execution State Machine Lifecycle Management
       try {
-        // Fail closed if live exchange market data is stale or unavailable
+        await this.markExecutionStarted(executionId);
+
+        // P1 #10: Revalidate Live Market Data Freshness
         try {
           await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
         } catch (err: any) {
           this.logger.error(
             `[REJECTED: MARKET_DATA_UNAVAILABLE] Live market data unavailable for symbol '${bot.symbol}': ${err.message}`,
           );
+          await this.markExecutionFailed(executionId, err);
           continue;
         }
 
-        // Check bot position scope (prevent duplicate open positions per symbol)
+        // P1 #11: Secondary Position Check
         const portfolio = await this.paperTradingService.getPortfolio();
         const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
         if (alreadyOpen) {
           this.logger.warn(
             `[REJECTED: POSITION_ALREADY_OPEN] Open position already exists for symbol '${bot.symbol}'`,
           );
+          const posErr = new Error('POSITION_ALREADY_OPEN');
+          await this.markExecutionFailed(executionId, posErr);
           continue;
         }
-
-        const lotMultiplier =
-          bot.symbol === 'NIFTY'
-            ? 65
-            : bot.symbol === 'BANKNIFTY'
-              ? 15
-              : bot.symbol === 'BTCUSDT'
-                ? 0.2
-                : 100;
 
         const orderResult = await this.paperTradingService.placeOrder({
           symbol: bot.symbol,
           direction: signal.direction === 'BULLISH' ? 'BUY' : 'SELL',
-          quantity: bot.lots * lotMultiplier,
+          quantity,
           orderType: 'MARKET',
           signalPrice: signal.entryZone.optimal,
           signalTime: signal.timestamp ? new Date(signal.timestamp).toISOString() : undefined,
@@ -478,11 +940,14 @@ export class AlgoBotsService {
           correlationId: fingerprint,
         });
 
+        await this.markExecutionExecuted(executionId, orderResult.id);
+
         this.logger.log(
-          `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
+          `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Qty: ${quantity} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
         );
       } catch (e: any) {
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`);
+        await this.markExecutionFailed(executionId, e);
       }
     }
   }
