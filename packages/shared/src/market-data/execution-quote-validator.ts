@@ -202,12 +202,47 @@ export interface IExecutionQuoteValidationResult {
     | 'UNKNOWN_PROVIDER_ID_REJECTED';
 }
 
+export function normalizeCanonicalProviderId(providerId: unknown): string {
+  if (typeof providerId !== 'string') return '';
+  const trimmed = providerId.trim();
+  switch (trimmed) {
+    case 'NSE_OPTION_STREAM':
+    case 'NSE_OPTION_PROVIDER':
+    case 'NSE_STREAM_GATEWAY':
+      return 'NSE_STREAM_GATEWAY';
+    case 'NSE_OPTION_REST':
+    case 'NSE_REST_OPTION_PROVIDER':
+      return 'NSE_REST_OPTION_PROVIDER';
+    case 'BINANCE_OPTION_STREAM':
+    case 'BINANCE_DIRECT':
+      return 'BINANCE_DIRECT';
+    case 'BINANCE_REST':
+      return 'BINANCE_REST';
+    case 'NSE_YAHOO_REST':
+      return 'NSE_YAHOO_REST';
+    case 'REAL_MARKET_STREAMER':
+      return 'REAL_MARKET_STREAMER';
+    default:
+      return trimmed;
+  }
+}
+
+export const CANONICAL_PROVIDER_IDS = new Set([
+  'NSE_STREAM_GATEWAY',
+  'NSE_REST_OPTION_PROVIDER',
+  'NSE_YAHOO_REST',
+  'BINANCE_DIRECT',
+  'BINANCE_REST',
+  'REAL_MARKET_STREAMER',
+]);
+
 const SUPPORTED_PROVIDER_IDS = new Set([
   'NSE_STREAM_GATEWAY',
   'NSE_OPTION_STREAM',
   'NSE_OPTION_REST',
   'BINANCE_OPTION_STREAM',
   'BINANCE_DIRECT',
+  'BINANCE_REST',
   'NSE_YAHOO_REST',
   'REAL_MARKET_STREAMER',
   'NSE_OPTION_PROVIDER',
@@ -256,10 +291,11 @@ export function validateAuthoritativeExecutionQuote(
     };
   }
 
-  if (!SUPPORTED_PROVIDER_IDS.has(quote.providerId)) {
+  const normProviderId = normalizeCanonicalProviderId(quote.providerId);
+  if (!normProviderId || !CANONICAL_PROVIDER_IDS.has(normProviderId)) {
     return {
       valid: false,
-      reason: `Quote providerId '${quote.providerId}' is unknown or unsupported`,
+      reason: `Quote providerId '${quote.providerId}' is unknown or non-canonical`,
       errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
     };
   }
@@ -331,17 +367,18 @@ export function validateAuthoritativeExecutionQuote(
     : (ctx.activeRestConnection || ctx.activeConnection);
 
   if (targetConnection) {
-    if (quote.providerTransport !== targetConnection.providerTransport) {
+    const targetNormProviderId = normalizeCanonicalProviderId(targetConnection.providerId);
+    if (targetConnection.providerTransport && quote.providerTransport !== targetConnection.providerTransport) {
       return {
         valid: false,
         reason: `Quote transport '${quote.providerTransport}' does not match active target connection transport '${targetConnection.providerTransport}'`,
         errorType: 'PROVIDER_TRANSPORT_MISMATCH',
       };
     }
-    if (quote.providerId !== targetConnection.providerId) {
+    if (normProviderId !== targetNormProviderId) {
       return {
         valid: false,
-        reason: `Quote providerId '${quote.providerId}' does not match target connection providerId '${targetConnection.providerId}'`,
+        reason: `Quote providerId '${quote.providerId}' (canonical: '${normProviderId}') does not match target connection providerId '${targetConnection.providerId}' (canonical: '${targetNormProviderId}')`,
         errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
       };
     }

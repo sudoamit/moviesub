@@ -6,10 +6,13 @@ import {
 import { RawOptionProviderEvent } from './raw-option-provider-event';
 import {
   BINANCE_OPTION_PROVIDER_VALIDATOR,
+  BINANCE_REST_PROVIDER_VALIDATOR,
+  BINANCE_SPOT_PROVIDER_VALIDATOR,
   IOptionProviderValidator,
   isValidatedOptionProviderEvent,
   NSE_REST_OPTION_PROVIDER_VALIDATOR,
   NSE_STREAM_OPTION_PROVIDER_VALIDATOR,
+  NSE_YAHOO_REST_PROVIDER_VALIDATOR,
   ValidatedOptionProviderEvent,
 } from './option-provider-validators';
 import {
@@ -303,8 +306,23 @@ export const BINANCE_OPTION_PROVIDER_ADAPTER = createOptionProviderAdapter(
   BINANCE_OPTION_PROVIDER_VALIDATOR,
 );
 
+export const NSE_YAHOO_REST_PROVIDER_ADAPTER = createOptionProviderAdapter(
+  NSE_YAHOO_REST_PROVIDER_VALIDATOR,
+);
+
+export const BINANCE_REST_PROVIDER_ADAPTER = createOptionProviderAdapter(
+  BINANCE_REST_PROVIDER_VALIDATOR,
+);
+
+export const BINANCE_SPOT_PROVIDER_ADAPTER = createOptionProviderAdapter(
+  BINANCE_SPOT_PROVIDER_VALIDATOR,
+);
+
 export function resetAllOptionProviderAdaptersForTests(): void {
   NSE_STREAM_OPTION_PROVIDER_ADAPTER.resetForTests();
   NSE_REST_OPTION_PROVIDER_ADAPTER.resetForTests();
   BINANCE_OPTION_PROVIDER_ADAPTER.resetForTests();
+  NSE_YAHOO_REST_PROVIDER_ADAPTER.resetForTests();
+  BINANCE_REST_PROVIDER_ADAPTER.resetForTests();
+  BINANCE_SPOT_PROVIDER_ADAPTER.resetForTests();
 }

@@ -234,19 +234,18 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       try {
         const cached = await this.redis.getClient().get(`option:ltp:${pos.contractSymbol}`);
         if (cached) {
-          const currentEpoch = this.realMarketStreamer?.getConnectionEpoch() ?? 0;
-          const isStreamerHealthy = this.realMarketStreamer?.isExecutionDataHealthy() ?? false;
-          const activeProviderConnectionId = this.realMarketStreamer?.getProviderConnectionId();
-          const activeProviderInstanceId = this.realMarketStreamer?.getProviderInstanceId();
+          const parsedObj = JSON.parse(cached);
+          const providerId = parsedObj.providerId || 'NSE_STREAM_GATEWAY';
+          const activeConn = this.realMarketStreamer?.getCurrentProviderConnection(providerId);
+          const isStreamerHealthy =
+            this.realMarketStreamer?.isExecutionDataHealthy(parsedObj.providerTransport, providerId) ?? false;
 
           const validation = parseAndValidateRedisOptionQuote(
             cached,
             pos.contractSymbol,
-            currentEpoch,
+            activeConn || 0,
             isStreamerHealthy,
             Date.now(),
-            activeProviderConnectionId,
-            activeProviderInstanceId,
           );
 
           if (validation.valid && validation.quote) {

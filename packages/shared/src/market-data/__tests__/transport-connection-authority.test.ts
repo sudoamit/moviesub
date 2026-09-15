@@ -212,4 +212,136 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
     resetAllOptionProviderAdaptersForTests();
     expect(NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()).toBeNull();
   });
+
+  describe('FIX 160 — Production-Hardening Release Gate Tests', () => {
+    test('6. Timestamp Discipline (missing, zero, negative, NaN, future, stale, valid)', () => {
+      const now = Date.now();
+      const streamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const baseQuote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        provenance: 'LIVE_PROVIDER',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn.connectionEpoch,
+        providerInstanceId: streamConn.providerInstanceId,
+        providerConnectionId: streamConn.providerConnectionId,
+      };
+
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: undefined }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: 0 }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: -1000 }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: NaN }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: now + 10000 }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: now - 10000 }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(false);
+      expect(validateAuthoritativeExecutionQuote({ ...baseQuote, marketEventTime: now - 500 }, { activeConnection: streamConn, currentTimeMs: now }).valid).toBe(true);
+    });
+
+    test('7. Connection Lifecycle (Stream & REST)', () => {
+      const streamConn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const epochBeforeDisc = streamConn1.connectionEpoch;
+      expect(NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!.connectionEpoch).toBe(epochBeforeDisc);
+
+      const streamConn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(streamConn2.connectionEpoch).toBe(epochBeforeDisc + 1);
+      expect(streamConn2.providerConnectionId).not.toBe(streamConn1.providerConnectionId);
+
+      const oldQuote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: Date.now(),
+        provenance: 'LIVE_PROVIDER',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn1.connectionEpoch,
+        providerInstanceId: streamConn1.providerInstanceId,
+        providerConnectionId: streamConn1.providerConnectionId,
+      };
+
+      const resOld = validateAuthoritativeExecutionQuote(oldQuote, { activeConnection: streamConn2 });
+      expect(resOld.valid).toBe(false);
+      expect(resOld.errorType).toBe('EPOCH_MISMATCH');
+    });
+
+    test('8. Execution Path Regression Tests (A through M)', () => {
+      const now = Date.now();
+      const streamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const restConn = NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      const validStreamQuote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now - 200,
+        provenance: 'LIVE_PROVIDER',
+        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn.connectionEpoch,
+        providerInstanceId: streamConn.providerInstanceId,
+        providerConnectionId: streamConn.providerConnectionId,
+      };
+
+      const validRestQuote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now - 200,
+        provenance: 'LIVE_PROVIDER',
+        providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId,
+        providerTransport: 'REST_POLLING',
+        connectionEpoch: restConn.connectionEpoch,
+        providerInstanceId: restConn.providerInstanceId,
+        providerConnectionId: restConn.providerConnectionId,
+      };
+
+      // A. valid stream quote -> accepted
+      expect(validateAuthoritativeExecutionQuote(validStreamQuote, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(true);
+
+      // B. stale stream connection -> rejected
+      expect(validateAuthoritativeExecutionQuote(validStreamQuote, { activeStreamConnection: streamConn, streamConnectionState: 'DISCONNECTED', isStreamConnected: false, currentTimeMs: now }).valid).toBe(false);
+
+      // C. valid REST quote -> accepted
+      expect(validateAuthoritativeExecutionQuote(validRestQuote, { activeRestConnection: restConn, restHealthState: 'HEALTHY', currentTimeMs: now }).valid).toBe(true);
+
+      // D. stale REST connection / UNAVAILABLE -> rejected
+      expect(validateAuthoritativeExecutionQuote(validRestQuote, { activeRestConnection: restConn, restHealthState: 'UNAVAILABLE', currentTimeMs: now }).valid).toBe(false);
+
+      // E. missing event timestamp -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, marketEventTime: undefined }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // F. future event timestamp -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, marketEventTime: now + 10000 }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // G. arbitrary caller-crafted LIVE_PROVIDER quote -> rejected
+      expect(validateAuthoritativeExecutionQuote({ contractSymbol: 'NIFTY26SEP25000CE', price: 150.5, provenance: 'BOOTSTRAP' }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // H. forged providerId -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, providerId: 'FORGED_PROVIDER' }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // I. forged providerConnectionId -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, providerConnectionId: 'forged-conn-id' }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // J. forged connectionEpoch -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, connectionEpoch: 9999 }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // K. wrong providerTransport -> rejected
+      expect(validateAuthoritativeExecutionQuote({ ...validStreamQuote, providerTransport: 'INVALID_TRANSPORT' }, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+
+      // L. Binance REST mislabeled as websocket -> rejected
+      const paxgMislabeled = {
+        contractSymbol: 'PAXGUSDT',
+        price: 2885.5,
+        marketEventTime: now - 200,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'BINANCE_REST',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: restConn.connectionEpoch,
+        providerInstanceId: restConn.providerInstanceId,
+        providerConnectionId: restConn.providerConnectionId,
+      };
+      expect(validateAuthoritativeExecutionQuote(paxgMislabeled, { activeRestConnection: restConn, restHealthState: 'HEALTHY', currentTimeMs: now }).valid).toBe(false);
+
+      // M. quote from previous connection epoch -> rejected
+      const prevEpochQuote = { ...validStreamQuote, connectionEpoch: streamConn.connectionEpoch - 1 };
+      expect(validateAuthoritativeExecutionQuote(prevEpochQuote, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
+    });
+  });
 });

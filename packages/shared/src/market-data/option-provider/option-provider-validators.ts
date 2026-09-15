@@ -222,11 +222,26 @@ export const NSE_STREAM_OPTION_PROVIDER_VALIDATOR = createOptionProviderValidato
 );
 
 export const NSE_REST_OPTION_PROVIDER_VALIDATOR = createOptionProviderValidator(
-  'NSE_YAHOO_REST',
+  'NSE_REST_OPTION_PROVIDER',
   'REST_POLLING',
 );
 
 export const BINANCE_OPTION_PROVIDER_VALIDATOR = createOptionProviderValidator(
+  'BINANCE_DIRECT',
+  'WEBSOCKET_STREAM',
+);
+
+export const NSE_YAHOO_REST_PROVIDER_VALIDATOR = createOptionProviderValidator(
+  'NSE_YAHOO_REST',
+  'REST_POLLING',
+);
+
+export const BINANCE_REST_PROVIDER_VALIDATOR = createOptionProviderValidator(
+  'BINANCE_REST',
+  'REST_POLLING',
+);
+
+export const BINANCE_SPOT_PROVIDER_VALIDATOR = createOptionProviderValidator(
   'BINANCE_DIRECT',
   'WEBSOCKET_STREAM',
 );

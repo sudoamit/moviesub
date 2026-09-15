@@ -24,11 +24,15 @@ export {
 } from './option-provider-validators';
 export {
   BINANCE_OPTION_PROVIDER_ADAPTER,
+  BINANCE_REST_PROVIDER_ADAPTER,
+  BINANCE_SPOT_PROVIDER_ADAPTER,
   ICanonicalOptionProviderTickInput,
   IOptionProviderAdapter,
   isValidatedCanonicalOptionProviderTick,
   NSE_REST_OPTION_PROVIDER_ADAPTER,
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
+  NSE_YAHOO_REST_PROVIDER_ADAPTER,
+  resetAllOptionProviderAdaptersForTests,
   validateCanonicalProviderTickInput,
   ValidatedCanonicalOptionProviderTick,
 } from './canonical-option-provider-tick';

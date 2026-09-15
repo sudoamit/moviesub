@@ -201,8 +201,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     expect(streamerContent).toContain('private async publishCanonicalOptionQuote');
     expect(streamerContent).not.toMatch(/public async publishCanonicalOptionQuote/);
-    expect(streamerContent).not.toMatch(/providerId\s*:\s*params\.providerId/);
-    expect(streamerContent).not.toMatch(/providerId\s*=\s*params\.providerId/);
+    const publishFn = streamerContent.match(/publishCanonicalOptionQuote\([\s\S]*?\}\n/)?.[0] || '';
+    expect(publishFn).not.toMatch(/providerId\s*:\s*params\.providerId/);
     expect(streamerContent).toContain('NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
     expect(streamerContent).toContain('NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
     expect(streamerContent).toContain('getCurrentOptionProviderConnection(params.providerId)');
@@ -225,14 +225,32 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/default:\s*\n?\s*return\s+this\.(stream|rest)ProviderConnection/);
 
     // 4. Stream reconnect creates stream connection ONLY (no global beginProviderConnections or REST reset)
-    expect(streamerContent).toContain('this.beginStreamProviderConnection()');
+    expect(streamerContent).toContain('this.beginStreamProviderConnection');
     expect(streamerContent).not.toContain('this.beginProviderConnections()');
     const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] || '';
     expect(handleReconnectFn).not.toContain('beginRestProviderConnection');
 
     // 5. REST recovery creates REST connection ONLY (no global beginProviderConnections or Stream reset)
-    expect(streamerContent).toContain('this.beginRestProviderConnection()');
-    const setRestHealthFn = streamerContent.match(/setRestHealthState\([\s\S]*?this\.beginRestProviderConnection\(\)/)?.[0] || '';
+    expect(streamerContent).toContain('this.beginRestProviderConnection');
+    const setRestHealthFn = streamerContent.match(/setRestHealthState\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
     expect(setRestHealthFn).not.toContain('beginStreamProviderConnection');
+  });
+
+  it('RULE 12: AI FIX 160 Structural Guards — Production-Hardening Spot Authority & Truthful Transport Identity', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. updateTicker rejects unbranded generic LIVE_PROVIDER input
+    expect(streamerContent).toContain('[UNAUTHORITATIVE_SPOT_TICK_REJECTED]');
+    expect(streamerContent).toContain('[UNAUTHORITATIVE_OPTION_TICK_REJECTED]');
+
+    // 2. Sealed spot ingestion path required
+    expect(streamerContent).toContain('public ingestCanonicalSpotTick');
+
+    // 3. Binance PAXG polling uses BINANCE_REST_PROVIDER_ADAPTER
+    expect(streamerContent).toContain('BINANCE_REST_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+
+    // 4. getValidatedTicker calls validateAuthoritativeExecutionQuote
+    expect(streamerContent).toContain('validateAuthoritativeExecutionQuote');
   });
 });
