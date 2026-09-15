@@ -168,12 +168,12 @@ export function validateExecutionQuoteTimestamp(
 import { ProviderConnectionIdentity, isProviderConnectionIdentity } from './option-provider/provider-connection-identity';
 
 export interface ProviderRuntimeState {
-  providerId: string;
-  providerTransport: CanonicalProviderTransport;
-  connectionState: ProviderConnectionState;
-  providerConnected: boolean;
-  currentConnection: ProviderConnectionIdentity;
-  reconnectedAt: number | null;
+  readonly providerId: string;
+  readonly providerTransport: CanonicalProviderTransport;
+  readonly connectionState: ProviderConnectionState;
+  readonly providerConnected: boolean;
+  readonly currentConnection: ProviderConnectionIdentity;
+  readonly reconnectedAt: number | null;
 }
 
 export interface IExecutionQuoteValidationContext {

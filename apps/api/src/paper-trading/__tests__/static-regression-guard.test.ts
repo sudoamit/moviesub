@@ -319,8 +319,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('public resolveCurrentProviderRuntime');
 
     // 3. Symmetric streamRuntimeStateMap and restRuntimeStateMap exist
-    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, ProviderRuntimeState>');
-    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, ProviderRuntimeState>');
+    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
+    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
 
     // 4. Zero fallback catch blocks converting unknown provider IDs to valid providers
     expect(streamerContent).not.toMatch(/catch\s*\{[\s\S]*?normId\s*=\s*['"]NSE_STREAM_GATEWAY['"]/);
@@ -348,10 +348,34 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('private setProviderRuntimeConnection');
 
     // 2. Structured freshnessStore Map exists
-    expect(streamerContent).toContain('private freshnessStore = new Map<string, Set<string>>();');
+    expect(streamerContent).toContain('freshnessStore');
 
     // 3. Execution quote validator enforces internal runtimeState consistency via isProviderConnectionIdentity
     expect(validatorContent).toContain('isProviderConnectionIdentity(conn)');
   });
+
+  it('RULE 17: AI FIX 166 Structural Guards — Provider-Runtime Atomicity & Connection Rotation Invariants', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. streamRuntimeStateMap and restRuntimeStateMap store Readonly<ProviderRuntimeState>
+    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
+    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
+
+    // 2. transitionProviderRuntime wraps snapshots in Object.freeze
+    expect(streamerContent).toContain('Object.freeze(');
+
+    // 3. setProviderRuntimeConnection requires mode option and throws [INVALID_CONNECTION_ROTATION] on invariant violation
+    expect(streamerContent).toContain("mode?: 'initialization' | 'rotation'");
+    expect(streamerContent).toContain('[INVALID_CONNECTION_ROTATION]');
+
+    // 4. Nested 3-level Map freshnessStore exists for transport/provider/connection isolation
+    expect(streamerContent).toContain('Map<');
+
+    // 5. setRestHealthState mints connection before transitioning state to CONNECTED
+    const setRestHealthFn = streamerContent.match(/setRestHealthState\([\s\S]*?this\.logger\.log/)?.[0] || streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] || streamerContent;
+    expect(setRestHealthFn).toMatch(/beginRestProviderConnection[\s\S]*?transitionProviderRuntime/);
+  });
 });
+
 

@@ -870,5 +870,71 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(res.valid).toBe(true);
     });
   });
+
+  describe('FIX 166 — Final Provider-Runtime Atomicity & Connection Rotation Invariant Tests', () => {
+    test('166-A. Stream reconnect service-level exactly-once rotation', () => {
+      const initialConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      expect(initialConn.connectionEpoch).toBe(1);
+
+      const rotatedConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        providerInstanceId: initialConn.providerInstanceId,
+      });
+      expect(rotatedConn.connectionEpoch).toBe(initialConn.connectionEpoch + 1);
+      expect(rotatedConn.providerConnectionId).not.toBe(initialConn.providerConnectionId);
+      expect(rotatedConn.providerInstanceId).toBe(initialConn.providerInstanceId);
+    });
+
+    test('166-B. Duplicate stream reconnect with existing connection is idempotent and preserves epoch', () => {
+      const conn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const conn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: conn1,
+      });
+
+      expect(conn2.connectionEpoch).toBe(conn1.connectionEpoch);
+      expect(conn2.providerConnectionId).toBe(conn1.providerConnectionId);
+      expect(conn2.providerInstanceId).toBe(conn1.providerInstanceId);
+    });
+
+    test('166-C. REST health recovery UNAVAILABLE -> HEALTHY exactly-once rotation', () => {
+      const initialRestConn = NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      expect(initialRestConn.connectionEpoch).toBe(1);
+
+      const recoveredRestConn = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(recoveredRestConn.connectionEpoch).toBe(initialRestConn.connectionEpoch + 1);
+      expect(recoveredRestConn.providerConnectionId).not.toBe(initialRestConn.providerConnectionId);
+    });
+
+    test('166-D. Connection rotation invariants: rotation requires newEpoch > oldEpoch, distinct connectionId, matching instanceId', () => {
+      const conn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const conn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        providerInstanceId: conn1.providerInstanceId,
+      });
+
+      // Rotation invariants verification
+      expect(conn2.connectionEpoch).toBeGreaterThan(conn1.connectionEpoch);
+      expect(conn2.providerConnectionId).not.toBe(conn1.providerConnectionId);
+      expect(conn2.providerInstanceId).toBe(conn1.providerInstanceId);
+      expect(conn2.providerId).toBe(conn1.providerId);
+      expect(conn2.providerTransport).toBe(conn1.providerTransport);
+    });
+
+    test('166-E. ProviderRuntimeState snapshot immutability via Object.freeze', () => {
+      const conn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const runtimeState: ProviderRuntimeState = Object.freeze({
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: conn,
+        reconnectedAt: null,
+      });
+
+      expect(Object.isFrozen(runtimeState)).toBe(true);
+      expect(() => {
+        (runtimeState as any).providerConnected = false;
+      }).toThrow();
+    });
+  });
 });
+
 
