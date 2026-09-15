@@ -10,6 +10,7 @@ import {
   createCanonicalOptionQuoteRecord,
   ICanonicalOptionQuoteRecord,
   isValidatedCanonicalOptionProviderTick,
+  BINANCE_OPTION_PROVIDER_ADAPTER,
   NSE_REST_OPTION_PROVIDER_ADAPTER,
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   ProviderConnectionIdentity,
@@ -266,10 +267,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             lastUpdated: now,
             provenance: 'LIVE_PROVIDER',
             marketEventTime: eventTime,
-            connectionEpoch: this.providerConnectionEpoch,
+            connectionEpoch: this.streamProviderConnection.connectionEpoch,
             providerId: 'BINANCE_DIRECT',
-            providerInstanceId: this.providerInstanceId,
-            providerConnectionId: this.providerConnectionId,
+            providerInstanceId: this.streamProviderConnection.providerInstanceId,
+            providerConnectionId: this.streamProviderConnection.providerConnectionId,
             providerTransport: 'WEBSOCKET_STREAM',
             observedAt: now,
             receivedAt: now,
@@ -338,10 +339,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             ticker.lastUpdated = now;
             ticker.provenance = 'LIVE_PROVIDER';
             ticker.marketEventTime = marketEventTime;
-            ticker.connectionEpoch = this.providerConnectionEpoch;
+            ticker.connectionEpoch = this.restProviderConnection.connectionEpoch;
             ticker.providerId = 'NSE_YAHOO_REST';
-            ticker.providerInstanceId = this.providerInstanceId;
-            ticker.providerConnectionId = this.providerConnectionId;
+            ticker.providerInstanceId = this.restProviderConnection.providerInstanceId;
+            ticker.providerConnectionId = this.restProviderConnection.providerConnectionId;
             ticker.providerTransport = 'REST_POLLING';
             ticker.observedAt = now;
             ticker.receivedAt = now;
@@ -419,8 +420,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       }
     }
 
-    const connectionEpoch = provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined;
-    const providerId = provenance === 'LIVE_PROVIDER' ? 'REAL_MARKET_STREAMER' : undefined;
+    const transport = tick.providerTransport ?? 'WEBSOCKET_STREAM';
+    const conn = transport === 'REST_POLLING' ? this.restProviderConnection : this.streamProviderConnection;
+    const connectionEpoch = provenance === 'LIVE_PROVIDER' ? conn.connectionEpoch : undefined;
+    const providerId = provenance === 'LIVE_PROVIDER' ? (tick.providerId ?? conn.providerId) : undefined;
 
     const updated: ILiveRealTicker = {
       symbol: sym,
@@ -440,9 +443,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       marketEventTime: tick.marketEventTime ?? undefined,
       connectionEpoch,
       providerId,
-      providerInstanceId: provenance === 'LIVE_PROVIDER' ? this.providerInstanceId : undefined,
-      providerConnectionId: provenance === 'LIVE_PROVIDER' ? this.providerConnectionId : undefined,
-      providerTransport: provenance === 'LIVE_PROVIDER' ? 'WEBSOCKET_STREAM' : undefined,
+      providerInstanceId: provenance === 'LIVE_PROVIDER' ? conn.providerInstanceId : undefined,
+      providerConnectionId: provenance === 'LIVE_PROVIDER' ? conn.providerConnectionId : undefined,
+      providerTransport: provenance === 'LIVE_PROVIDER' ? transport : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
       receivedAt: tick.receivedAt ?? now,
@@ -460,28 +463,58 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.tickers.get(symbol.toUpperCase());
   }
 
-  private providerState: ProviderConnectionState = 'CONNECTED';
   private streamConnectionState: ProviderConnectionState = 'CONNECTED';
+  private streamProviderConnected = true;
   private restHealthState: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' = 'HEALTHY';
-  private providerConnected = true;
+
   private readonly providerInstanceId: string =
     process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
     `api-${process.pid}-${crypto.randomUUID()}`;
+
   private streamProviderConnection: ProviderConnectionIdentity =
     NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
+
   private restProviderConnection: ProviderConnectionIdentity =
     NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
-  private providerConnectionEpoch: number = this.streamProviderConnection.connectionEpoch;
-  private providerConnectionId: string = this.streamProviderConnection.providerConnectionId;
+
   private reconnectedAt: number | null = null;
   private freshSymbolsAfterReconnect = new Set<string>();
 
+  public getCurrentStreamProviderConnection(): ProviderConnectionIdentity {
+    return this.streamProviderConnection;
+  }
+
+  public getCurrentRestProviderConnection(): ProviderConnectionIdentity {
+    return this.restProviderConnection;
+  }
+
+  public getCurrentOptionProviderConnection(providerId: string): ProviderConnectionIdentity {
+    if (!providerId || typeof providerId !== 'string') {
+      throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
+    }
+    switch (providerId) {
+      case NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId:
+      case 'NSE_OPTION_STREAM':
+      case 'NSE_OPTION_PROVIDER':
+        return this.streamProviderConnection;
+      case NSE_REST_OPTION_PROVIDER_ADAPTER.providerId:
+      case 'NSE_OPTION_REST':
+        return this.restProviderConnection;
+      case BINANCE_OPTION_PROVIDER_ADAPTER.providerId:
+        return this.streamProviderConnection;
+      default:
+        throw new Error(
+          `[UNKNOWN_PROVIDER_ID_REJECTED] Unknown or unsupported providerId '${providerId}'`,
+        );
+    }
+  }
+
   public getProviderState(): ProviderConnectionState {
-    return this.providerState;
+    return this.streamConnectionState;
   }
 
   public getStreamConnectionState(): ProviderConnectionState {
@@ -493,23 +526,44 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public setRestHealthState(state: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE'): void {
+    const wasUnhealthy = this.restHealthState !== 'HEALTHY';
     this.restHealthState = state;
+    if (state === 'HEALTHY' && wasUnhealthy) {
+      this.beginRestProviderConnection();
+    }
   }
 
-  /**
-   * Explicit fail-closed predicate for execution-authoritative data:
-   * Execution data is strictly accepted ONLY when providerState is CONNECTED or RECONNECTED.
-   * DISCONNECTED and RECONNECTING fail closed immediately.
-   */
-  public isExecutionDataHealthy(): boolean {
+  public isStreamExecutionHealthy(): boolean {
     return (
-      this.providerConnected &&
-      (this.providerState === 'CONNECTED' || this.providerState === 'RECONNECTED')
+      this.streamProviderConnected &&
+      (this.streamConnectionState === 'CONNECTED' || this.streamConnectionState === 'RECONNECTED')
     );
   }
 
+  public isRestExecutionHealthy(): boolean {
+    return this.restHealthState === 'HEALTHY';
+  }
+
+  public isExecutionDataHealthy(transport?: 'WEBSOCKET_STREAM' | 'REST_POLLING'): boolean {
+    if (transport === 'REST_POLLING') {
+      return this.isRestExecutionHealthy();
+    }
+    if (transport === 'WEBSOCKET_STREAM') {
+      return this.isStreamExecutionHealthy();
+    }
+    return this.isStreamExecutionHealthy();
+  }
+
+  public getStreamConnectionEpoch(): number {
+    return this.streamProviderConnection.connectionEpoch;
+  }
+
+  public getRestConnectionEpoch(): number {
+    return this.restProviderConnection.connectionEpoch;
+  }
+
   public getConnectionEpoch(): number {
-    return this.providerConnectionEpoch;
+    return this.streamProviderConnection.connectionEpoch;
   }
 
   public getProviderInstanceId(): string {
@@ -517,72 +571,76 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getProviderConnectionId(): string {
-    return this.providerConnectionId;
+    return this.streamProviderConnection.providerConnectionId;
   }
 
-  public handleProviderDisconnect(reason?: string): void {
-    if (this.providerConnected || this.providerState !== 'DISCONNECTED') {
-      this.logger.warn(`Market data provider disconnected: ${reason || 'Connection lost'}`);
-    }
-    this.providerState = 'DISCONNECTED';
-    this.streamConnectionState = 'DISCONNECTED';
-    this.providerConnected = false;
-    // Note: Do NOT bump epoch here. Old quotes are immediately rejected because
-    // isExecutionDataHealthy() is false during DISCONNECTED and RECONNECTING.
-    // The single new epoch is assigned upon successful RECONNECTED.
-    this.freshSymbolsAfterReconnect.clear();
-  }
-
-  public handleProviderReconnecting(): void {
-    this.providerState = 'RECONNECTING';
-    this.streamConnectionState = 'RECONNECTING';
-    this.providerConnected = false;
-    // Note: Do NOT bump epoch here. Provider is attempting reconnection.
-    // Execution fails closed immediately via isExecutionDataHealthy().
-    this.freshSymbolsAfterReconnect.clear();
-  }
-
-  public handleProviderReconnect(): void {
-    const wasNotConnected = !this.providerConnected || (this.providerState !== 'CONNECTED' && this.providerState !== 'RECONNECTED');
-    if (wasNotConnected) {
-      this.providerState = 'RECONNECTED';
-      this.streamConnectionState = 'RECONNECTED';
-      this.providerConnected = true;
-      this.reconnectedAt = Date.now();
-      this.beginProviderConnections();
-      this.freshSymbolsAfterReconnect.clear();
-      this.logger.log(`Market data provider reconnected. Exactly one new connection epoch assigned: ${this.providerConnectionEpoch}. Execution freshness invalidated until fresh ticks arrive.`);
-    }
-  }
-
-  private beginProviderConnections(): void {
+  public beginStreamProviderConnection(): ProviderConnectionIdentity {
     this.streamProviderConnection = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
+    return this.streamProviderConnection;
+  }
+
+  public beginRestProviderConnection(): ProviderConnectionIdentity {
     this.restProviderConnection = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
-    this.providerConnectionEpoch = this.streamProviderConnection.connectionEpoch;
-    this.providerConnectionId = this.streamProviderConnection.providerConnectionId;
+    return this.restProviderConnection;
   }
 
-  private getCurrentOptionProviderConnection(providerId: string): ProviderConnectionIdentity {
-    if (providerId === NSE_REST_OPTION_PROVIDER_ADAPTER.providerId) {
-      return this.restProviderConnection;
+  public handleStreamProviderDisconnect(reason?: string): void {
+    if (this.streamProviderConnected || this.streamConnectionState !== 'DISCONNECTED') {
+      this.logger.warn(`Market data stream provider disconnected: ${reason || 'Connection lost'}`);
     }
-    return this.streamProviderConnection;
+    this.streamConnectionState = 'DISCONNECTED';
+    this.streamProviderConnected = false;
+    this.freshSymbolsAfterReconnect.clear();
+  }
+
+  public handleStreamProviderReconnecting(): void {
+    this.streamConnectionState = 'RECONNECTING';
+    this.streamProviderConnected = false;
+    this.freshSymbolsAfterReconnect.clear();
+  }
+
+  public handleStreamProviderReconnect(): void {
+    const wasNotConnected =
+      !this.streamProviderConnected ||
+      (this.streamConnectionState !== 'CONNECTED' && this.streamConnectionState !== 'RECONNECTED');
+    if (wasNotConnected) {
+      this.streamConnectionState = 'RECONNECTED';
+      this.streamProviderConnected = true;
+      this.reconnectedAt = Date.now();
+      this.beginStreamProviderConnection();
+      this.freshSymbolsAfterReconnect.clear();
+      this.logger.log(
+        `Market data stream provider reconnected. New stream connection epoch assigned: ${this.streamProviderConnection.connectionEpoch}.`,
+      );
+    }
+  }
+
+  public handleProviderDisconnect(reason?: string): void {
+    this.handleStreamProviderDisconnect(reason);
+  }
+
+  public handleProviderReconnecting(): void {
+    this.handleStreamProviderReconnecting();
+  }
+
+  public handleProviderReconnect(): void {
+    this.handleStreamProviderReconnect();
   }
 
   public setProviderConnected(connected: boolean): void {
     if (connected) {
-      this.handleProviderReconnect();
+      this.handleStreamProviderReconnect();
     } else {
-      this.handleProviderDisconnect('Explicit setProviderConnected(false)');
+      this.handleStreamProviderDisconnect('Explicit setProviderConnected(false)');
     }
   }
 
   public disconnectProvider(): void {
-    this.handleProviderDisconnect('Explicit disconnectProvider()');
+    this.handleStreamProviderDisconnect('Explicit disconnectProvider()');
   }
 
   public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
@@ -680,10 +738,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       lastUpdated: now,
       provenance: 'LIVE_PROVIDER',
       marketEventTime,
-      connectionEpoch: this.providerConnectionEpoch,
+      connectionEpoch: this.streamProviderConnection.connectionEpoch,
       providerId: 'BINANCE_DIRECT',
-      providerInstanceId: this.providerInstanceId,
-      providerConnectionId: this.providerConnectionId,
+      providerInstanceId: this.streamProviderConnection.providerInstanceId,
+      providerConnectionId: this.streamProviderConnection.providerConnectionId,
       providerTransport: 'WEBSOCKET_STREAM',
       observedAt: now,
       receivedAt: now,
@@ -734,10 +792,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       lastUpdated: tick.lastUpdated ?? now,
       provenance,
       marketEventTime: tick.marketEventTime ?? undefined,
-      connectionEpoch: provenance === 'LIVE_PROVIDER' ? this.providerConnectionEpoch : undefined,
+      connectionEpoch: provenance === 'LIVE_PROVIDER' ? this.streamProviderConnection.connectionEpoch : undefined,
       providerId: provenance === 'LIVE_PROVIDER' ? 'NSE_OPTION_PROVIDER' : undefined,
-      providerInstanceId: provenance === 'LIVE_PROVIDER' ? this.providerInstanceId : undefined,
-      providerConnectionId: provenance === 'LIVE_PROVIDER' ? this.providerConnectionId : undefined,
+      providerInstanceId: provenance === 'LIVE_PROVIDER' ? this.streamProviderConnection.providerInstanceId : undefined,
+      providerConnectionId: provenance === 'LIVE_PROVIDER' ? this.streamProviderConnection.providerConnectionId : undefined,
       providerTransport: provenance === 'LIVE_PROVIDER' ? 'WEBSOCKET_STREAM' : undefined,
       sequence: tick.sequence ?? existing?.sequence ?? undefined,
       observedAt: tick.observedAt ?? now,
@@ -751,13 +809,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getOptionTicker(contractSymbol: string): ILiveRealTicker | null {
-    if (!this.isExecutionDataHealthy()) {
+    if (!this.isStreamExecutionHealthy()) {
       return null;
     }
     const key = contractSymbol.toUpperCase();
     const ticker = this.optionTickers.get(key) || null;
     if (!ticker) return null;
-    if (ticker.connectionEpoch !== this.providerConnectionEpoch) {
+    if (ticker.connectionEpoch !== this.streamProviderConnection.connectionEpoch) {
       return null;
     }
     if (this.reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
@@ -782,13 +840,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   ): ILiveRealTicker {
     const sym = symbol.toUpperCase();
 
-    if (!this.isExecutionDataHealthy()) {
-      throw new MarketDataUnavailableError(
-        sym,
-        `Market data provider is ${this.providerState === 'DISCONNECTED' ? 'disconnected (DISCONNECTED)' : `in '${this.providerState}' state`}. Trade execution blocked.`,
-      );
-    }
-
     const ticker = this.tickers.get(sym);
 
     if (!ticker) {
@@ -798,10 +849,21 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    if (ticker.connectionEpoch !== this.providerConnectionEpoch) {
+    const transport = ticker.providerTransport || 'WEBSOCKET_STREAM';
+    const conn = transport === 'REST_POLLING' ? this.restProviderConnection : this.streamProviderConnection;
+
+    if (!this.isExecutionDataHealthy(transport)) {
+      const stateStr = transport === 'REST_POLLING' ? this.restHealthState : this.streamConnectionState;
       throw new MarketDataUnavailableError(
         sym,
-        `Market quote for ${sym} is a cached tick from before provider reconnection (connection epoch ${ticker.connectionEpoch ?? 'none'} vs active ${this.providerConnectionEpoch}). A fresh valid tick is required after reconnection.`,
+        `Market data provider transport ${transport} is in '${stateStr}' state (${stateStr === 'DISCONNECTED' ? 'disconnected' : stateStr}). Trade execution blocked.`,
+      );
+    }
+
+    if (ticker.connectionEpoch !== conn.connectionEpoch) {
+      throw new MarketDataUnavailableError(
+        sym,
+        `Market quote for ${sym} is a cached tick from before provider reconnection (connection epoch ${ticker.connectionEpoch ?? 'none'} vs active ${conn.connectionEpoch}). A fresh valid tick is required after reconnection.`,
       );
     }
 
@@ -976,7 +1038,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     if (!this.isExecutionDataHealthy()) {
       const tick = providerTick.toRecordInput();
-      this.logger.warn(`Cannot publish canonical option quote for ${tick?.contractSymbol || 'unknown'}: provider is in '${this.providerState}' state`);
+      this.logger.warn(`Cannot publish canonical option quote for ${tick?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState()}' state`);
       return null;
     }
 

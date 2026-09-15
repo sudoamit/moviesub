@@ -128,10 +128,20 @@ export class CandlesService {
       if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
         const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
         const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym;
-        const res = await fetch(
-          `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
-        );
-        if (res.ok) {
+        let res: Response | null = null;
+        for (let attempt = 0; attempt <= 2; attempt++) {
+          try {
+            res = await fetch(
+              `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
+            );
+            if (res.ok) break;
+            this.logger.warn(`Binance fetch failed with status ${res.status} for ${binanceSym} (attempt ${attempt + 1}/3)`);
+          } catch (err) {
+            this.logger.warn(`Binance fetch exception for ${binanceSym} (attempt ${attempt + 1}/3): ${(err as Error).message}`);
+          }
+        }
+
+        if (res && res.ok) {
           const raw = await res.json();
           if (Array.isArray(raw) && raw.length > 0) {
             const candles: ICandle[] = raw.map((k: any) => {
@@ -303,6 +313,11 @@ export class CandlesService {
       isClosed: c.isClosed,
       provenance: resolution.dataProvenance,
     }));
+
+    if (candles.length === 0) {
+      this.logger.warn(`No market data found for ${symbol} on timeframe ${timeframe}`);
+      throw new NotFoundException(`Market data unavailable for ${symbol} (${timeframe})`);
+    }
 
     const forming = candles.find((c) => c.isClosed === false) || null;
 

@@ -24,6 +24,7 @@ export interface IProviderConnectionIdentityInit {
   readonly providerId: string;
   readonly providerInstanceId: string;
   readonly connectionEpoch: number;
+  readonly providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
 }
 
 interface ISealedProviderConnectionIdentityConstructor {
@@ -35,6 +36,7 @@ export class ProviderConnectionIdentity {
   public readonly providerInstanceId: string;
   public readonly providerConnectionId: string;
   public readonly connectionEpoch: number;
+  public readonly providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
 
   private constructor(seal: symbol, init: IProviderConnectionIdentityInit) {
     if (seal !== CONNECTION_IDENTITY_CREATION_SEAL) {
@@ -75,6 +77,7 @@ export class ProviderConnectionIdentity {
     this.providerInstanceId = providerInstanceId;
     this.providerConnectionId = providerConnectionId;
     this.connectionEpoch = init.connectionEpoch;
+    this.providerTransport = init.providerTransport;
 
     BRANDED_PROVIDER_CONNECTION_IDENTITIES.add(this);
     Object.freeze(this);

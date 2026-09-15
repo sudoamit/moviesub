@@ -175,6 +175,12 @@ export interface IExecutionQuoteValidationContext {
   maxAgeMs?: number;
   maxFutureSkewMs?: number;
   currentTimeMs?: number;
+  activeStreamConnection?: any;
+  activeRestConnection?: any;
+  activeConnection?: any;
+  streamConnectionState?: ProviderConnectionState | string;
+  isStreamConnected?: boolean;
+  restHealthState?: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | string;
 }
 
 export interface IExecutionQuoteValidationResult {
@@ -191,8 +197,21 @@ export interface IExecutionQuoteValidationResult {
     | 'EPOCH_MISMATCH'
     | 'PROVIDER_DISCONNECTED'
     | 'PROVIDER_RECONNECTING'
-    | 'SYNTHETIC_REJECTED';
+    | 'SYNTHETIC_REJECTED'
+    | 'PROVIDER_TRANSPORT_MISMATCH'
+    | 'UNKNOWN_PROVIDER_ID_REJECTED';
 }
+
+const SUPPORTED_PROVIDER_IDS = new Set([
+  'NSE_STREAM_GATEWAY',
+  'NSE_OPTION_STREAM',
+  'NSE_OPTION_REST',
+  'BINANCE_OPTION_STREAM',
+  'BINANCE_DIRECT',
+  'NSE_YAHOO_REST',
+  'REAL_MARKET_STREAMER',
+  'NSE_OPTION_PROVIDER',
+]);
 
 export function validateAuthoritativeExecutionQuote(
   quote: any,
@@ -221,26 +240,6 @@ export function validateAuthoritativeExecutionQuote(
     }
   }
 
-  if (ctx.providerState === 'RECONNECTING') {
-    return {
-      valid: false,
-      reason: 'Market data provider is in RECONNECTING state. Trade execution blocked.',
-      errorType: 'PROVIDER_RECONNECTING',
-    };
-  }
-
-  if (
-    ctx.providerState === 'DISCONNECTED' ||
-    ctx.isProviderConnected === false ||
-    (ctx.providerState && !isProviderExecutionHealthy(ctx.providerState, ctx.isProviderConnected))
-  ) {
-    return {
-      valid: false,
-      reason: `Market data provider is in '${ctx.providerState || 'DISCONNECTED'}' state. Trade execution blocked.`,
-      errorType: 'PROVIDER_DISCONNECTED',
-    };
-  }
-
   if (quote.provenance !== 'LIVE_PROVIDER') {
     return {
       valid: false,
@@ -249,7 +248,7 @@ export function validateAuthoritativeExecutionQuote(
     };
   }
 
-  if (!quote.providerId) {
+  if (!quote.providerId || typeof quote.providerId !== 'string' || quote.providerId.trim().length === 0) {
     return {
       valid: false,
       reason: 'Quote is missing authenticated providerId',
@@ -257,28 +256,155 @@ export function validateAuthoritativeExecutionQuote(
     };
   }
 
-  if (ctx.activeConnectionEpoch !== undefined) {
-    if (quote.connectionEpoch !== ctx.activeConnectionEpoch) {
+  if (!SUPPORTED_PROVIDER_IDS.has(quote.providerId)) {
+    return {
+      valid: false,
+      reason: `Quote providerId '${quote.providerId}' is unknown or unsupported`,
+      errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+    };
+  }
+
+  if (quote.providerTransport !== 'WEBSOCKET_STREAM' && quote.providerTransport !== 'REST_POLLING') {
+    return {
+      valid: false,
+      reason: `Quote providerTransport '${quote.providerTransport}' is invalid or missing`,
+      errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+    };
+  }
+
+  // Check transport-specific health state
+  const isStream = quote.providerTransport === 'WEBSOCKET_STREAM';
+  const streamState = ctx.streamConnectionState ?? ctx.providerState;
+  const isStreamConn = ctx.isStreamConnected ?? ctx.isProviderConnected;
+
+  if (isStream) {
+    if (streamState === 'RECONNECTING') {
       return {
         valid: false,
-        reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${ctx.activeConnectionEpoch}). A fresh tick from the active connection is required.`,
-        errorType: 'EPOCH_MISMATCH',
+        reason: 'Market data stream provider is in RECONNECTING state. Trade execution blocked.',
+        errorType: 'PROVIDER_RECONNECTING',
+      };
+    }
+    if (
+      streamState === 'DISCONNECTED' ||
+      isStreamConn === false ||
+      (streamState && !isProviderExecutionHealthy(streamState, isStreamConn))
+    ) {
+      return {
+        valid: false,
+        reason: `Market data stream provider is in '${streamState || 'DISCONNECTED'}' state. Trade execution blocked.`,
+        errorType: 'PROVIDER_DISCONNECTED',
+      };
+    }
+  } else {
+    // REST transport
+    const restState = ctx.restHealthState;
+    if (restState === 'UNAVAILABLE' || restState === 'DEGRADED') {
+      return {
+        valid: false,
+        reason: `Market data REST provider is in '${restState}' health state. Trade execution blocked.`,
+        errorType: 'PROVIDER_DISCONNECTED',
+      };
+    }
+    if (ctx.providerState === 'RECONNECTING') {
+      return {
+        valid: false,
+        reason: 'Market data provider is in RECONNECTING state. Trade execution blocked.',
+        errorType: 'PROVIDER_RECONNECTING',
+      };
+    }
+    if (
+      ctx.providerState === 'DISCONNECTED' ||
+      ctx.isProviderConnected === false
+    ) {
+      return {
+        valid: false,
+        reason: `Market data provider is in '${ctx.providerState || 'DISCONNECTED'}' state. Trade execution blocked.`,
+        errorType: 'PROVIDER_DISCONNECTED',
       };
     }
   }
-  if (ctx.activeProviderConnectionId !== undefined && quote.providerConnectionId !== ctx.activeProviderConnectionId) {
+
+  // Transport-specific Connection Identity Validation
+  const targetConnection = isStream
+    ? (ctx.activeStreamConnection || ctx.activeConnection)
+    : (ctx.activeRestConnection || ctx.activeConnection);
+
+  if (targetConnection) {
+    if (quote.providerTransport !== targetConnection.providerTransport) {
+      return {
+        valid: false,
+        reason: `Quote transport '${quote.providerTransport}' does not match active target connection transport '${targetConnection.providerTransport}'`,
+        errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+      };
+    }
+    if (quote.providerId !== targetConnection.providerId) {
+      return {
+        valid: false,
+        reason: `Quote providerId '${quote.providerId}' does not match target connection providerId '${targetConnection.providerId}'`,
+        errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+      };
+    }
+    if (quote.connectionEpoch !== targetConnection.connectionEpoch) {
+      return {
+        valid: false,
+        reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${targetConnection.connectionEpoch}). A fresh tick from the active connection is required.`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (quote.providerConnectionId !== targetConnection.providerConnectionId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${targetConnection.providerConnectionId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (quote.providerInstanceId !== targetConnection.providerInstanceId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${targetConnection.providerInstanceId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+  } else if (!isStream && ctx.activeStreamConnection && !ctx.activeRestConnection && !ctx.activeConnection) {
+    // REST quote tested against ONLY stream connection
     return {
       valid: false,
-      reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${ctx.activeProviderConnectionId}).`,
-      errorType: 'EPOCH_MISMATCH',
+      reason: 'REST quote cannot be validated against a stream connection authority',
+      errorType: 'PROVIDER_TRANSPORT_MISMATCH',
     };
-  }
-  if (ctx.activeProviderInstanceId !== undefined && quote.providerInstanceId !== ctx.activeProviderInstanceId) {
+  } else if (isStream && ctx.activeRestConnection && !ctx.activeStreamConnection && !ctx.activeConnection) {
+    // Stream quote tested against ONLY REST connection
     return {
       valid: false,
-      reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${ctx.activeProviderInstanceId}).`,
-      errorType: 'EPOCH_MISMATCH',
+      reason: 'Stream quote cannot be validated against a REST connection authority',
+      errorType: 'PROVIDER_TRANSPORT_MISMATCH',
     };
+  } else {
+    // Direct epoch/ID field validation fallback
+    if (ctx.activeConnectionEpoch !== undefined) {
+      if (quote.connectionEpoch !== ctx.activeConnectionEpoch) {
+        return {
+          valid: false,
+          reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${ctx.activeConnectionEpoch}). A fresh tick from the active connection is required.`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+    }
+    if (ctx.activeProviderConnectionId !== undefined && quote.providerConnectionId !== ctx.activeProviderConnectionId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${ctx.activeProviderConnectionId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (ctx.activeProviderInstanceId !== undefined && quote.providerInstanceId !== ctx.activeProviderInstanceId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${ctx.activeProviderInstanceId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
   }
 
   const tsResult = validateExecutionQuoteTimestamp(
@@ -301,12 +427,12 @@ export function validateAuthoritativeExecutionQuote(
 export function parseAndValidateRedisOptionQuote(
   rawJson: string | null | undefined,
   expectedContractSymbol: string,
-  activeEpoch: number,
+  activeConnectionOrEpoch: any,
   isStreamerHealthy: boolean,
   currentTimeMs = Date.now(),
   activeProviderConnectionId?: string,
   activeProviderInstanceId?: string,
-): { valid: boolean; quote?: any; reason?: string } {
+): { valid: boolean; quote?: any; reason?: string; errorType?: string } {
   if (!rawJson) {
     return { valid: false, reason: 'Redis key is empty or null' };
   }
@@ -346,32 +472,81 @@ export function parseAndValidateRedisOptionQuote(
     return { valid: false, reason: `Invalid price in Redis payload: ${parsed.price}` };
   }
 
-  // Streamer health check: execution quotes from Redis are valid only while the streamer connection is healthy
+  if (parsed.providerTransport !== 'WEBSOCKET_STREAM' && parsed.providerTransport !== 'REST_POLLING') {
+    return { valid: false, reason: `Redis option quote has invalid providerTransport: ${parsed.providerTransport}`, errorType: 'PROVIDER_TRANSPORT_MISMATCH' };
+  }
+
+  if (!parsed.providerId || !SUPPORTED_PROVIDER_IDS.has(parsed.providerId)) {
+    return { valid: false, reason: `Redis option quote providerId '${parsed.providerId}' is unknown or unsupported`, errorType: 'UNKNOWN_PROVIDER_ID_REJECTED' };
+  }
+
+  // Streamer health check
   if (!isStreamerHealthy) {
     return { valid: false, reason: 'Underlying market streamer is not in an execution-healthy state' };
   }
 
-  // Connection Epoch check
-  if (parsed.connectionEpoch !== activeEpoch) {
-    return {
-      valid: false,
-      reason: `Redis option quote is from obsolete connection epoch ${parsed.connectionEpoch} (active epoch: ${activeEpoch})`,
-    };
-  }
-  if (activeProviderConnectionId !== undefined && parsed.providerConnectionId !== activeProviderConnectionId) {
-    return {
-      valid: false,
-      reason: `Redis option quote is from obsolete provider connection ${parsed.providerConnectionId ?? 'none'} (active provider connection: ${activeProviderConnectionId})`,
-    };
-  }
-  if (activeProviderInstanceId !== undefined && parsed.providerInstanceId !== activeProviderInstanceId) {
-    return {
-      valid: false,
-      reason: `Redis option quote is from provider instance ${parsed.providerInstanceId ?? 'none'} (active provider instance: ${activeProviderInstanceId})`,
-    };
-  }
-  if (parsed.providerTransport !== 'WEBSOCKET_STREAM' && parsed.providerTransport !== 'REST_POLLING') {
-    return { valid: false, reason: `Redis option quote has invalid providerTransport: ${parsed.providerTransport}` };
+  // Active Connection Identity / Epoch Check
+  if (typeof activeConnectionOrEpoch === 'object' && activeConnectionOrEpoch !== null) {
+    if (activeConnectionOrEpoch.providerTransport) {
+      if (parsed.providerTransport !== activeConnectionOrEpoch.providerTransport) {
+        return {
+          valid: false,
+          reason: `Redis option quote providerTransport '${parsed.providerTransport}' does not match active connection transport '${activeConnectionOrEpoch.providerTransport}'`,
+          errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+        };
+      }
+      if (parsed.providerId !== activeConnectionOrEpoch.providerId) {
+        return {
+          valid: false,
+          reason: `Redis option quote providerId '${parsed.providerId}' does not match active connection providerId '${activeConnectionOrEpoch.providerId}'`,
+          errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+        };
+      }
+      if (parsed.connectionEpoch !== activeConnectionOrEpoch.connectionEpoch) {
+        return {
+          valid: false,
+          reason: `Redis option quote is from obsolete connection epoch ${parsed.connectionEpoch} (active epoch: ${activeConnectionOrEpoch.connectionEpoch})`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+      if (parsed.providerConnectionId !== activeConnectionOrEpoch.providerConnectionId) {
+        return {
+          valid: false,
+          reason: `Redis option quote is from provider connection '${parsed.providerConnectionId ?? 'none'}' (active provider connection: '${activeConnectionOrEpoch.providerConnectionId}')`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+      if (parsed.providerInstanceId !== activeConnectionOrEpoch.providerInstanceId) {
+        return {
+          valid: false,
+          reason: `Redis option quote is from provider instance '${parsed.providerInstanceId ?? 'none'}' (active provider instance: '${activeConnectionOrEpoch.providerInstanceId}')`,
+          errorType: 'EPOCH_MISMATCH',
+        };
+      }
+    }
+  } else if (typeof activeConnectionOrEpoch === 'number') {
+    const activeEpoch = activeConnectionOrEpoch;
+    if (parsed.connectionEpoch !== activeEpoch) {
+      return {
+        valid: false,
+        reason: `Redis option quote is from obsolete connection epoch ${parsed.connectionEpoch} (active epoch: ${activeEpoch})`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (activeProviderConnectionId !== undefined && parsed.providerConnectionId !== activeProviderConnectionId) {
+      return {
+        valid: false,
+        reason: `Redis option quote is from obsolete provider connection ${parsed.providerConnectionId ?? 'none'} (active provider connection: ${activeProviderConnectionId})`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (activeProviderInstanceId !== undefined && parsed.providerInstanceId !== activeProviderInstanceId) {
+      return {
+        valid: false,
+        reason: `Redis option quote is from provider instance ${parsed.providerInstanceId ?? 'none'} (active provider instance: ${activeProviderInstanceId})`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
   }
 
   // Signature verification to prevent arbitrary/forged Redis JSON elevation

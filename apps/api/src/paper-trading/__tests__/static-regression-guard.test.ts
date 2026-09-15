@@ -181,7 +181,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(monitorContent).not.toMatch(/provenance:\s*parsed\.provenance/);
 
     // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
-    expect(streamerContent).toContain("providerState === 'CONNECTED' || this.providerState === 'RECONNECTED'");
+    expect(streamerContent).toContain("streamConnectionState === 'CONNECTED' || this.streamConnectionState === 'RECONNECTED'");
   });
 
   it('RULE 10: AI FIX 155 Structural Guards — canonical option authority is provider-derived and explicitly signed', () => {
@@ -205,7 +205,34 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/providerId\s*=\s*params\.providerId/);
     expect(streamerContent).toContain('NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
     expect(streamerContent).toContain('NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
-    expect(streamerContent).toContain('providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId');
-    expect(streamerContent).toContain('providerId: NSE_REST_OPTION_PROVIDER_ADAPTER.providerId');
+    expect(streamerContent).toContain('getCurrentOptionProviderConnection(params.providerId)');
+  });
+
+  it('RULE 11: AI FIX 159 Structural Guards — Final Transport-Specific Connection Authority', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. Zero references to global providerConnectionEpoch field in streamer
+    expect(streamerContent).not.toMatch(/private\s+providerConnectionEpoch\b/);
+    expect(streamerContent).not.toMatch(/this\.providerConnectionEpoch\b/);
+
+    // 2. Zero references to global providerConnected field in streamer
+    expect(streamerContent).not.toMatch(/private\s+providerConnected\b/);
+
+    // 3. getCurrentOptionProviderConnection must reject unknown providerId and not default to a valid provider connection
+    expect(streamerContent).toContain('getCurrentOptionProviderConnection');
+    expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+    expect(streamerContent).not.toMatch(/default:\s*\n?\s*return\s+this\.(stream|rest)ProviderConnection/);
+
+    // 4. Stream reconnect creates stream connection ONLY (no global beginProviderConnections or REST reset)
+    expect(streamerContent).toContain('this.beginStreamProviderConnection()');
+    expect(streamerContent).not.toContain('this.beginProviderConnections()');
+    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] || '';
+    expect(handleReconnectFn).not.toContain('beginRestProviderConnection');
+
+    // 5. REST recovery creates REST connection ONLY (no global beginProviderConnections or Stream reset)
+    expect(streamerContent).toContain('this.beginRestProviderConnection()');
+    const setRestHealthFn = streamerContent.match(/setRestHealthState\([\s\S]*?this\.beginRestProviderConnection\(\)/)?.[0] || '';
+    expect(setRestHealthFn).not.toContain('beginStreamProviderConnection');
   });
 });

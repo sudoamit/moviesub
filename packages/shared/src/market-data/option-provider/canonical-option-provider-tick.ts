@@ -221,6 +221,7 @@ export interface IOptionProviderAdapter {
     raw: RawOptionProviderEvent,
     connectionGuard?: ProviderConnectionIdentity,
   ): ValidatedCanonicalOptionProviderTick;
+  resetForTests(): void;
 }
 
 function createOptionProviderAdapter(
@@ -244,6 +245,7 @@ function createOptionProviderAdapter(
         providerId: validator.providerId,
         providerInstanceId,
         connectionEpoch,
+        providerTransport: validator.providerTransport,
       });
       return currentConnection;
     },
@@ -282,6 +284,10 @@ function createOptionProviderAdapter(
       }
       return brandCanonicalOptionProviderTick(validated, currentConnection);
     },
+    resetForTests(): void {
+      connectionEpoch = 0;
+      currentConnection = null;
+    },
   });
 }
 
@@ -296,3 +302,9 @@ export const NSE_REST_OPTION_PROVIDER_ADAPTER = createOptionProviderAdapter(
 export const BINANCE_OPTION_PROVIDER_ADAPTER = createOptionProviderAdapter(
   BINANCE_OPTION_PROVIDER_VALIDATOR,
 );
+
+export function resetAllOptionProviderAdaptersForTests(): void {
+  NSE_STREAM_OPTION_PROVIDER_ADAPTER.resetForTests();
+  NSE_REST_OPTION_PROVIDER_ADAPTER.resetForTests();
+  BINANCE_OPTION_PROVIDER_ADAPTER.resetForTests();
+}

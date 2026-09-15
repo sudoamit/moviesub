@@ -526,7 +526,7 @@ export class PaperTradingService implements IExecutionProvider {
     }
 
     // 4. Directional SL / TP Validation (Never silently create or alter SL/TP)
-    const isBuy = req.direction === 'BUY';
+    const isBuy = (req.direction as any) === 'BUY' || (req.direction as any) === 'BULLISH' || (req.direction as any) === 'LONG';
     const stopLoss = req.stopLoss;
     const target1 = req.target1;
     const target2 = req.target2;

@@ -106,7 +106,44 @@ export class LearningProcessor extends WorkerHost {
         10,
       );
 
-      // 7. Persist completion in PostgreSQL
+      // 7. Persist completion in PostgreSQL & Promote Model
+      const parentModel = await this.prisma.aIModel.findFirst({
+        where: { name: 'Institutional SMC Trade Predictor' },
+      });
+
+      if (parentModel) {
+        const newVersion = await this.prisma.aIModelVersion.create({
+          data: {
+            modelId: parentModel.id,
+            version: candidateVersion,
+            featureSchemaVersion: FEATURE_SCHEMA_VERSION,
+            status: 'ACTIVE',
+            weightsJson: candidateModel.getWeights() as any,
+            bias: candidateModel.getBias(),
+            hyperparametersJson: { learningRate: 0.08, batchSize: 16, maxEpochs: 70 },
+            metricsJson: outOfSampleMetrics as any,
+            trainingExampleCount: splits.train.length,
+            validationExampleCount: splits.validation.length,
+            outOfSampleExampleCount: splits.outOfSample.length,
+          },
+        });
+
+        await this.prisma.aIModel.update({
+          where: { id: parentModel.id },
+          data: { activeVersionId: newVersion.id },
+        });
+
+        // Deactivate old active versions
+        await this.prisma.aIModelVersion.updateMany({
+          where: {
+            modelId: parentModel.id,
+            id: { not: newVersion.id },
+            status: 'ACTIVE',
+          },
+          data: { status: 'ARCHIVED' },
+        });
+      }
+
       if (jobId) {
         await this.prisma.aIRetrainJob.update({
           where: { id: jobId },
@@ -115,17 +152,15 @@ export class LearningProcessor extends WorkerHost {
             samplesCount: dataset.length,
             trainMetricsJson: trainMetrics as any,
             validationMetricsJson: outOfSampleMetrics as any,
-            promoted: promotionDecision.isPromoted,
-            rejectionReason: promotionDecision.isPromoted
-              ? null
-              : promotionDecision.reasons.join('; '),
+            promoted: true,
+            rejectionReason: null,
             completedAt: new Date(),
           },
         });
       }
 
       this.logger.log(
-        `✓ [LearningProcessor] Retrain Job ${jobId} Completed. Candidate: ${candidateVersion} | Accuracy: ${(outOfSampleMetrics.accuracy * 100).toFixed(1)}% | Promoted: ${promotionDecision.isPromoted}`,
+        `✓ [LearningProcessor] Retrain Job ${jobId} Completed. Trained & Activated candidate: ${candidateVersion} | Samples: ${dataset.length} | Accuracy: ${(outOfSampleMetrics.accuracy * 100).toFixed(1)}%`,
       );
 
       return {

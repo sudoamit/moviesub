@@ -213,13 +213,14 @@ function DashboardContent() {
           livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
           closedThrough: data.closedThrough || (closed.length > 0 ? closed[closed.length - 1].timestamp : undefined),
           asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
-          marketAsOf: data.marketAsOf || data.asOfTimestamp || new Date().toISOString(),
+          marketAsOf: data.marketAsOf,
           observedAt: data.observedAt || data.asOfTimestamp || new Date().toISOString(),
           sessionKey: data.sessionKey,
           sessionVolumeWatermark: data.sessionVolumeWatermark,
           streamState: data.streamState,
           dataProvenance: data.dataProvenance || 'LIVE',
           sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
+          isDegraded: data.isDegraded ?? (data.marketAsOf === undefined),
           smcSnapshot: data.smcSnapshot || null,
         };
 

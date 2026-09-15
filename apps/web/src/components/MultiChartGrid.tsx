@@ -24,18 +24,26 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
   const [pane1Symbol, setPane1Symbol] = useState<string>('NIFTY');
   const [pane1Tf, setPane1Tf] = useState<string>('15m');
   const [pane1Candles, setPane1Candles] = useState<any[]>([]);
+  const [pane1Smc, setPane1Smc] = useState<any | null>(null);
+  const [pane1Error, setPane1Error] = useState<string | null>(null);
 
   const [pane2Symbol, setPane2Symbol] = useState<string>('BANKNIFTY');
   const [pane2Tf, setPane2Tf] = useState<string>('15m');
   const [pane2Candles, setPane2Candles] = useState<any[]>([]);
+  const [pane2Smc, setPane2Smc] = useState<any | null>(null);
+  const [pane2Error, setPane2Error] = useState<string | null>(null);
 
   const [pane3Symbol, setPane3Symbol] = useState<string>('RELIANCE');
   const [pane3Tf, setPane3Tf] = useState<string>('15m');
   const [pane3Candles, setPane3Candles] = useState<any[]>([]);
+  const [pane3Smc, setPane3Smc] = useState<any | null>(null);
+  const [pane3Error, setPane3Error] = useState<string | null>(null);
 
   const [pane4Symbol, setPane4Symbol] = useState<string>('HDFCBANK');
   const [pane4Tf, setPane4Tf] = useState<string>('15m');
   const [pane4Candles, setPane4Candles] = useState<any[]>([]);
+  const [pane4Smc, setPane4Smc] = useState<any | null>(null);
+  const [pane4Error, setPane4Error] = useState<string | null>(null);
 
   const availableSymbols = [
     'NIFTY',
@@ -48,14 +56,32 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
   ];
   const timeframes = ['5m', '15m', '1h', '4h', '1d'];
 
-  // Fetch candles helper
-  const loadCandles = async (symbol: string, tf: string, setter: (c: any[]) => void) => {
+  // Fetch candles helper with error handling
+  const loadCandles = async (
+    symbol: string,
+    tf: string,
+    setter: (c: any[]) => void,
+    smcSetter: (s: any) => void,
+    errorSetter: (msg: string | null) => void,
+  ) => {
     try {
       const res = await fetch(
         `http://localhost:3001/api/candles/chart-data?symbol=${symbol}&timeframe=${tf}&limit=200`,
       );
+      if (!res.ok) {
+        if (res.status === 404) {
+          errorSetter('Market Data Unavailable for ' + symbol);
+        } else {
+          errorSetter(`Error ${res.status} loading data`);
+        }
+        setter([]);
+        smcSetter(null);
+        return;
+      }
       const data = await res.json();
-      const candleList = Array.isArray(data) ? data : data?.candles || [];
+      const candleList = Array.isArray(data)
+        ? data
+        : data?.closedCandles || data?.candles || [];
       const parsedCandles = candleList.map((c: any) => ({
         timestamp: c.timestamp ? new Date(c.timestamp) : new Date((c.time || 0) * 1000),
         open: Number(c.open),
@@ -66,23 +92,28 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
         isClosed: true,
       }));
       setter(parsedCandles);
+      smcSetter(data?.smcSnapshot || null);
+      errorSetter(null);
     } catch (e) {
       console.error(`Failed to fetch candles for ${symbol}:`, e);
+      errorSetter(`Failed to load data for ${symbol}`);
+      setter([]);
+      smcSetter(null);
     }
   };
 
   useEffect(() => {
-    loadCandles(pane1Symbol, pane1Tf, setPane1Candles);
+    loadCandles(pane1Symbol, pane1Tf, setPane1Candles, setPane1Smc, setPane1Error);
   }, [pane1Symbol, pane1Tf]);
 
   useEffect(() => {
-    loadCandles(pane2Symbol, pane2Tf, setPane2Candles);
+    loadCandles(pane2Symbol, pane2Tf, setPane2Candles, setPane2Smc, setPane2Error);
   }, [pane2Symbol, pane2Tf]);
 
   useEffect(() => {
     if (layout === 'quad') {
-      loadCandles(pane3Symbol, pane3Tf, setPane3Candles);
-      loadCandles(pane4Symbol, pane4Tf, setPane4Candles);
+      loadCandles(pane3Symbol, pane3Tf, setPane3Candles, setPane3Smc, setPane3Error);
+      loadCandles(pane4Symbol, pane4Tf, setPane4Candles, setPane4Smc, setPane4Error);
     }
   }, [layout, pane3Symbol, pane3Tf, pane4Symbol, pane4Tf]);
 
@@ -164,23 +195,29 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
               ₹{(tickers[pane1Symbol]?.price || 0).toFixed(2)}
             </span>
           </div>
-          <TradingChart
-            symbol={pane1Symbol}
-            timeframe={pane1Tf}
-            snapshot={{
-              symbol: pane1Symbol,
-              timeframe: pane1Tf,
-              closedCandles: pane1Candles,
-              formingCandle: null,
-              smcSnapshot: null,
-              dataProvenance: 'LIVE',
-              sourceIdentity: 'POLYGON',
-              livePrice: tickers[pane1Symbol]?.price,
-              asOfTimestamp: new Date().toISOString(),
-            }}
-            signal={signals.find((s) => s.symbol === pane1Symbol)}
-            onTimeframeChange={setPane1Tf}
-          />
+          {pane1Error ? (
+            <div className="p-3 rounded-xl bg-red-900/80 text-red-300 text-sm text-center">
+              {pane1Error}
+            </div>
+          ) : (
+            <TradingChart
+              symbol={pane1Symbol}
+              timeframe={pane1Tf}
+              snapshot={{
+                symbol: pane1Symbol,
+                timeframe: pane1Tf,
+                closedCandles: pane1Candles,
+                formingCandle: null,
+                smcSnapshot: pane1Smc,
+                dataProvenance: 'LIVE',
+                sourceIdentity: 'POLYGON',
+                livePrice: tickers[pane1Symbol]?.price,
+                asOfTimestamp: new Date().toISOString(),
+              }}
+              signal={signals.find((s) => s.symbol === pane1Symbol)}
+              onTimeframeChange={setPane1Tf}
+            />
+          )}
         </div>
 
         {/* Pane 2 */}
@@ -214,23 +251,29 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
               ₹{(tickers[pane2Symbol]?.price || 0).toFixed(2)}
             </span>
           </div>
-          <TradingChart
-            symbol={pane2Symbol}
-            timeframe={pane2Tf}
-            snapshot={{
-              symbol: pane2Symbol,
-              timeframe: pane2Tf,
-              closedCandles: pane2Candles,
-              formingCandle: null,
-              smcSnapshot: null,
-              dataProvenance: 'LIVE',
-              sourceIdentity: 'POLYGON',
-              livePrice: tickers[pane2Symbol]?.price,
-              asOfTimestamp: new Date().toISOString(),
-            }}
-            signal={signals.find((s) => s.symbol === pane2Symbol)}
-            onTimeframeChange={setPane2Tf}
-          />
+          {pane2Error ? (
+            <div className="p-3 rounded-xl bg-red-900/80 text-red-300 text-sm text-center">
+              {pane2Error}
+            </div>
+          ) : (
+            <TradingChart
+              symbol={pane2Symbol}
+              timeframe={pane2Tf}
+              snapshot={{
+                symbol: pane2Symbol,
+                timeframe: pane2Tf,
+                closedCandles: pane2Candles,
+                formingCandle: null,
+                smcSnapshot: pane2Smc,
+                dataProvenance: 'LIVE',
+                sourceIdentity: 'POLYGON',
+                livePrice: tickers[pane2Symbol]?.price,
+                asOfTimestamp: new Date().toISOString(),
+              }}
+              signal={signals.find((s) => s.symbol === pane2Symbol)}
+              onTimeframeChange={setPane2Tf}
+            />
+          )}
         </div>
 
         {/* Pane 3 (Quad Only) */}
@@ -265,29 +308,35 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
                 ₹{(tickers[pane3Symbol]?.price || 0).toFixed(2)}
               </span>
             </div>
-            <TradingChart
-              symbol={pane3Symbol}
-              timeframe={pane3Tf}
-              snapshot={{
-                symbol: pane3Symbol,
-                timeframe: pane3Tf,
-                closedCandles: pane3Candles,
-                formingCandle: null,
-                smcSnapshot: null,
-                dataProvenance: 'LIVE',
-                sourceIdentity: 'POLYGON',
-                livePrice: tickers[pane3Symbol]?.price,
-                asOfTimestamp: new Date().toISOString(),
-              }}
-              signal={signals.find((s) => s.symbol === pane3Symbol)}
-              onTimeframeChange={setPane3Tf}
-            />
+            {pane3Error ? (
+              <div className="p-3 rounded-xl bg-red-900/80 text-red-300 text-sm text-center">
+                {pane3Error}
+              </div>
+            ) : (
+              <TradingChart
+                symbol={pane3Symbol}
+                timeframe={pane3Tf}
+                snapshot={{
+                  symbol: pane3Symbol,
+                  timeframe: pane3Tf,
+                  closedCandles: pane3Candles,
+                  formingCandle: null,
+                  smcSnapshot: pane3Smc,
+                  dataProvenance: 'LIVE',
+                  sourceIdentity: 'POLYGON',
+                  livePrice: tickers[pane3Symbol]?.price,
+                  asOfTimestamp: new Date().toISOString(),
+                }}
+                signal={signals.find((s) => s.symbol === pane3Symbol)}
+                onTimeframeChange={setPane3Tf}
+              />
+            )}
           </div>
         )}
 
         {/* Pane 4 (Quad Only) */}
         {layout === 'quad' && (
-          <div className="space-[#111827]/90 border border-slate-800 p-3 rounded-xl">
+          <div className="space-y-2 bg-[#111827]/90 border border-slate-800 p-3 rounded-xl">
             <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-2 text-xs">
               <div className="flex items-center gap-2">
                 <select
@@ -317,23 +366,29 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
                 ₹{(tickers[pane4Symbol]?.price || 0).toFixed(2)}
               </span>
             </div>
-            <TradingChart
-              symbol={pane4Symbol}
-              timeframe={pane4Tf}
-              snapshot={{
-                symbol: pane4Symbol,
-                timeframe: pane4Tf,
-                closedCandles: pane4Candles,
-                formingCandle: null,
-                smcSnapshot: null,
-                dataProvenance: 'LIVE',
-                sourceIdentity: 'POLYGON',
-                livePrice: tickers[pane4Symbol]?.price,
-                asOfTimestamp: new Date().toISOString(),
-              }}
-              signal={signals.find((s) => s.symbol === pane4Symbol)}
-              onTimeframeChange={setPane4Tf}
-            />
+            {pane4Error ? (
+              <div className="p-3 rounded-xl bg-red-900/80 text-red-300 text-sm text-center">
+                {pane4Error}
+              </div>
+            ) : (
+              <TradingChart
+                symbol={pane4Symbol}
+                timeframe={pane4Tf}
+                snapshot={{
+                  symbol: pane4Symbol,
+                  timeframe: pane4Tf,
+                  closedCandles: pane4Candles,
+                  formingCandle: null,
+                  smcSnapshot: pane4Smc,
+                  dataProvenance: 'LIVE',
+                  sourceIdentity: 'POLYGON',
+                  livePrice: tickers[pane4Symbol]?.price,
+                  asOfTimestamp: new Date().toISOString(),
+                }}
+                signal={signals.find((s) => s.symbol === pane4Symbol)}
+                onTimeframeChange={setPane4Tf}
+              />
+            )}
           </div>
         )}
       </div>

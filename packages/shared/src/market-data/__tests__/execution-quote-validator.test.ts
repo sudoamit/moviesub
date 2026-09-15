@@ -171,6 +171,7 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
       price: 65000.5,
       provenance: 'LIVE_PROVIDER',
       providerId: 'BINANCE_DIRECT',
+      providerTransport: 'WEBSOCKET_STREAM' as const,
       connectionEpoch: 2,
       marketEventTime: now - 500,
     };
