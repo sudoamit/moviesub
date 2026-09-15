@@ -344,8 +344,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
     const validatorContent = fs.readFileSync(validatorFile, 'utf8');
 
-    // 1. setProviderRuntimeConnection exists for isolated connection replacement
-    expect(streamerContent).toContain('private setProviderRuntimeConnection');
+    // 1. rotateProviderConnection exists for isolated connection replacement
+    expect(streamerContent).toContain('private rotateProviderConnection');
 
     // 2. Structured freshnessStore Map exists
     expect(streamerContent).toContain('freshnessStore');
@@ -365,8 +365,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 2. transitionProviderRuntime wraps snapshots in Object.freeze
     expect(streamerContent).toContain('Object.freeze(');
 
-    // 3. setProviderRuntimeConnection requires mode option and throws [INVALID_CONNECTION_ROTATION] on invariant violation
-    expect(streamerContent).toContain("mode?: 'initialization' | 'rotation'");
+    // 3. rotateProviderConnection exists and throws [INVALID_CONNECTION_ROTATION] on invariant violation
+    expect(streamerContent).toContain('rotateProviderConnection');
     expect(streamerContent).toContain('[INVALID_CONNECTION_ROTATION]');
 
     // 4. Nested 3-level Map freshnessStore exists for transport/provider/connection isolation
@@ -374,8 +374,36 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 5. setRestHealthState mints connection before transitioning state to CONNECTED
     const setRestHealthFn = streamerContent.match(/setRestHealthState\([\s\S]*?this\.logger\.log/)?.[0] || streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] || streamerContent;
-    expect(setRestHealthFn).toMatch(/beginRestProviderConnection[\s\S]*?transitionProviderRuntime/);
+    expect(setRestHealthFn).toMatch(/rotateProviderRuntime[\s\S]*?transitionProviderRuntime/);
+  });
+
+  it('RULE 18: AI FIX 167 Structural Guards — Provider-Runtime Lifecycle Authority Hardening', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. Connection creation helpers are strictly private
+    expect(streamerContent).toContain('private beginStreamProviderConnection(');
+    expect(streamerContent).toContain('private beginRestProviderConnection(');
+
+    // 2. Distinct initial installation and rotation helpers exist
+    expect(streamerContent).toContain('private installInitialProviderConnection(');
+    expect(streamerContent).toContain('private rotateProviderConnection(');
+    expect(streamerContent).toContain('private rotateProviderRuntime(');
+
+    // 3. Initial installation throws [INITIAL_PROVIDER_RUNTIME_ALREADY_EXISTS]
+    expect(streamerContent).toContain('[INITIAL_PROVIDER_RUNTIME_ALREADY_EXISTS]');
+
+    // 4. Zero mode parameters on connection replacement
+    expect(streamerContent).not.toContain("mode?: 'initialization' | 'rotation'");
+    expect(streamerContent).not.toContain("setProviderRuntimeConnection");
+
+    // 5. Zero direct in-place mutation of runtime properties
+    expect(streamerContent).not.toMatch(/\bruntime\.currentConnection\s*=(?!=)/);
+    expect(streamerContent).not.toMatch(/\bruntime\.connectionState\s*=(?!=)/);
+    expect(streamerContent).not.toMatch(/\bruntime\.providerConnected\s*=(?!=)/);
   });
 });
+
+
 
 

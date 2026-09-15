@@ -526,82 +526,32 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       providerInstanceId: this.providerInstanceId,
     });
     NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: nseConn });
-    this.streamRuntimeStateMap.set(
-      'NSE_STREAM_GATEWAY',
-      Object.freeze({
-        providerId: 'NSE_STREAM_GATEWAY',
-        providerTransport: 'WEBSOCKET_STREAM',
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: nseConn,
-        reconnectedAt: null,
-      }),
-    );
+    this.installInitialProviderConnection('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM', nseConn);
 
     // 2. BINANCE_DIRECT
     const binanceConn = BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
     BINANCE_OPTION_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: binanceConn });
-    this.streamRuntimeStateMap.set(
-      'BINANCE_DIRECT',
-      Object.freeze({
-        providerId: 'BINANCE_DIRECT',
-        providerTransport: 'WEBSOCKET_STREAM',
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: binanceConn,
-        reconnectedAt: null,
-      }),
-    );
+    this.installInitialProviderConnection('BINANCE_DIRECT', 'WEBSOCKET_STREAM', binanceConn);
 
     // REST Providers
     const nseRestConn = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
-    this.restRuntimeStateMap.set(
-      'NSE_REST_OPTION_PROVIDER',
-      Object.freeze({
-        providerId: 'NSE_REST_OPTION_PROVIDER',
-        providerTransport: 'REST_POLLING',
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: nseRestConn,
-        reconnectedAt: null,
-      }),
-    );
+    this.installInitialProviderConnection('NSE_REST_OPTION_PROVIDER', 'REST_POLLING', nseRestConn);
 
     const yahooRestConn = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
     NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: yahooRestConn });
-    this.restRuntimeStateMap.set(
-      'NSE_YAHOO_REST',
-      Object.freeze({
-        providerId: 'NSE_YAHOO_REST',
-        providerTransport: 'REST_POLLING',
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: yahooRestConn,
-        reconnectedAt: null,
-      }),
-    );
+    this.installInitialProviderConnection('NSE_YAHOO_REST', 'REST_POLLING', yahooRestConn);
 
     const binanceRestConn = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
     BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: binanceRestConn });
-    this.restRuntimeStateMap.set(
-      'BINANCE_REST',
-      Object.freeze({
-        providerId: 'BINANCE_REST',
-        providerTransport: 'REST_POLLING',
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: binanceRestConn,
-        reconnectedAt: null,
-      }),
-    );
+    this.installInitialProviderConnection('BINANCE_REST', 'REST_POLLING', binanceRestConn);
   }
 
   // Structured Map: transport -> normId -> connectionId -> Set<symbol>
@@ -648,6 +598,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING') return false;
     const normId = normalizeCanonicalProviderId(providerId);
     return this.freshnessStore.get(providerTransport)?.get(normId)?.get(connectionId)?.has(symbol.toUpperCase()) ?? false;
+  }
+
+  private purgeFreshnessForConnection(
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+    providerId: string,
+    connectionId: string,
+  ): void {
+    if (!providerTransport || !providerId || !connectionId) return;
+    const normId = normalizeCanonicalProviderId(providerId);
+    this.freshnessStore.get(providerTransport)?.get(normId)?.delete(connectionId);
   }
 
   private purgeFreshnessForProvider(
@@ -733,14 +693,58 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return frozenState;
   }
 
-  private setProviderRuntimeConnection(
+  private installInitialProviderConnection(
+    providerId: string,
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+    connection: ProviderConnectionIdentity,
+  ): Readonly<ProviderRuntimeState> {
+    if (!isProviderConnectionIdentity(connection)) {
+      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] connection must be a branded ProviderConnectionIdentity');
+    }
+    const normId = normalizeCanonicalProviderId(providerId);
+    const connNormId = normalizeCanonicalProviderId(connection.providerId);
+    if (normId !== connNormId) {
+      throw new Error(
+        `[PROVIDER_TRANSPORT_MISMATCH] Connection providerId '${connection.providerId}' (canonical: '${connNormId}') does not match target '${normId}'`,
+      );
+    }
+    if (providerTransport !== connection.providerTransport) {
+      throw new Error(
+        `[PROVIDER_TRANSPORT_MISMATCH] Connection providerTransport '${connection.providerTransport}' does not match target '${providerTransport}'`,
+      );
+    }
+    if (connection.providerInstanceId !== this.providerInstanceId) {
+      throw new Error(
+        `[INVALID_SHARED_CONNECTION_IDENTITY] Connection providerInstanceId '${connection.providerInstanceId}' does not match streamer instance '${this.providerInstanceId}'`,
+      );
+    }
+
+    const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
+    if (map.has(normId)) {
+      throw new Error(
+        `[INITIAL_PROVIDER_RUNTIME_ALREADY_EXISTS] Cannot install initial connection: provider runtime for '${normId}' (${providerTransport}) already exists`,
+      );
+    }
+
+    const initialRuntime: Readonly<ProviderRuntimeState> = Object.freeze({
+      providerId: normId,
+      providerTransport,
+      connectionState: 'CONNECTED',
+      providerConnected: true,
+      currentConnection: connection,
+      reconnectedAt: null,
+    });
+    map.set(normId, initialRuntime);
+    return initialRuntime;
+  }
+
+  private rotateProviderConnection(
     providerId: string,
     providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
     newConnection: ProviderConnectionIdentity,
-    options?: { mode?: 'initialization' | 'rotation' },
   ): Readonly<ProviderRuntimeState> {
     if (!isProviderConnectionIdentity(newConnection)) {
-      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] newConnection must be a valid ProviderConnectionIdentity');
+      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] newConnection must be a branded ProviderConnectionIdentity');
     }
     const normId = normalizeCanonicalProviderId(providerId);
     const connNormId = normalizeCanonicalProviderId(newConnection.providerId);
@@ -763,44 +767,55 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
     const existing = map.get(normId);
 
-    if (existing) {
-      const oldConn = existing.currentConnection;
-      const mode = options?.mode ?? 'rotation';
-      if (mode === 'rotation') {
-        if (newConnection.connectionEpoch <= oldConn.connectionEpoch) {
-          throw new Error(
-            `[INVALID_CONNECTION_ROTATION] New connection epoch ${newConnection.connectionEpoch} must be strictly greater than old epoch ${oldConn.connectionEpoch}`,
-          );
-        }
-        if (newConnection.providerConnectionId === oldConn.providerConnectionId) {
-          throw new Error(
-            `[INVALID_CONNECTION_ROTATION] New providerConnectionId '${newConnection.providerConnectionId}' must differ from old connection ID '${oldConn.providerConnectionId}'`,
-          );
-        }
-      }
-
-      const frozenState: Readonly<ProviderRuntimeState> = Object.freeze({
-        providerId: existing.providerId,
-        providerTransport: existing.providerTransport,
-        connectionState: existing.connectionState,
-        providerConnected: existing.providerConnected,
-        currentConnection: newConnection,
-        reconnectedAt: existing.reconnectedAt,
-      });
-      map.set(normId, frozenState);
-      return frozenState;
-    } else {
-      const newRuntime: Readonly<ProviderRuntimeState> = Object.freeze({
-        providerId: normId,
-        providerTransport,
-        connectionState: 'CONNECTED',
-        providerConnected: true,
-        currentConnection: newConnection,
-        reconnectedAt: null,
-      });
-      map.set(normId, newRuntime);
-      return newRuntime;
+    if (!existing || !existing.currentConnection) {
+      throw new Error(
+        `[INVALID_CONNECTION_ROTATION] Cannot rotate connection: no active provider runtime exists for '${normId}' (${providerTransport})`,
+      );
     }
+
+    const oldConn = existing.currentConnection;
+    if (newConnection.connectionEpoch <= oldConn.connectionEpoch) {
+      throw new Error(
+        `[INVALID_CONNECTION_ROTATION] New connection epoch ${newConnection.connectionEpoch} must be strictly greater than old epoch ${oldConn.connectionEpoch}`,
+      );
+    }
+    if (newConnection.providerConnectionId === oldConn.providerConnectionId) {
+      throw new Error(
+        `[INVALID_CONNECTION_ROTATION] New providerConnectionId '${newConnection.providerConnectionId}' must differ from old connection ID '${oldConn.providerConnectionId}'`,
+      );
+    }
+
+    const frozenState: Readonly<ProviderRuntimeState> = Object.freeze({
+      providerId: existing.providerId,
+      providerTransport: existing.providerTransport,
+      connectionState: existing.connectionState,
+      providerConnected: existing.providerConnected,
+      currentConnection: newConnection,
+      reconnectedAt: existing.reconnectedAt,
+    });
+    map.set(normId, frozenState);
+    return frozenState;
+  }
+
+  private rotateProviderRuntime(
+    providerId: string,
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+  ): Readonly<ProviderRuntimeState> {
+    const existing = this.resolveCurrentProviderRuntime(providerId, providerTransport);
+    const oldConnection = existing.currentConnection;
+    const normId = normalizeCanonicalProviderId(providerId);
+
+    let newConn: ProviderConnectionIdentity;
+    if (providerTransport === 'WEBSOCKET_STREAM') {
+      newConn = this.beginStreamProviderConnection(normId);
+    } else {
+      newConn = this.beginRestProviderConnection(normId);
+    }
+
+    // Atomic connection-level freshness invalidation for old connection ID
+    this.purgeFreshnessForConnection(providerTransport, normId, oldConnection.providerConnectionId);
+
+    return this.resolveCurrentProviderRuntime(normId, providerTransport);
   }
 
   public getCurrentProviderConnection(
@@ -861,7 +876,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const wasUnhealthy = !runtime.providerConnected || runtime.connectionState !== 'CONNECTED';
     if (state === 'HEALTHY') {
       if (wasUnhealthy) {
-        this.beginRestProviderConnection(normId, { mode: 'rotation' });
+        this.rotateProviderRuntime(normId, 'REST_POLLING');
       }
       this.transitionProviderRuntime(normId, 'REST_POLLING', {
         connectionState: 'CONNECTED',
@@ -937,9 +952,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return this.getCurrentProviderConnection(providerId, providerTransport).providerConnectionId;
   }
 
-  public beginStreamProviderConnection(
+  private beginStreamProviderConnection(
     providerId: string,
-    options?: { existingConnection?: ProviderConnectionIdentity; mode?: 'initialization' | 'rotation' },
+    options?: { existingConnection?: ProviderConnectionIdentity },
   ): ProviderConnectionIdentity {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
@@ -974,15 +989,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       });
       NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
     }
-    const existingRuntime = this.streamRuntimeStateMap.get(normId);
-    const mode = options?.mode ?? (existingRuntime ? 'rotation' : 'initialization');
-    this.setProviderRuntimeConnection(normId, 'WEBSOCKET_STREAM', conn, { mode });
+    this.rotateProviderConnection(normId, 'WEBSOCKET_STREAM', conn);
     return conn;
   }
 
-  public beginRestProviderConnection(
+  private beginRestProviderConnection(
     providerId: string,
-    options?: { existingConnection?: ProviderConnectionIdentity; mode?: 'initialization' | 'rotation' },
+    options?: { existingConnection?: ProviderConnectionIdentity },
   ): ProviderConnectionIdentity {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
@@ -1021,9 +1034,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     } else {
       throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin REST connection for unknown provider '${providerId}'`);
     }
-    const existingRuntime = this.restRuntimeStateMap.get(normId);
-    const mode = options?.mode ?? (existingRuntime ? 'rotation' : 'initialization');
-    this.setProviderRuntimeConnection(normId, 'REST_POLLING', conn, { mode });
+    this.rotateProviderConnection(normId, 'REST_POLLING', conn);
     return conn;
   }
 
@@ -1060,16 +1071,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       !state.providerConnected ||
       (state.connectionState !== 'CONNECTED' && state.connectionState !== 'RECONNECTED');
     if (wasNotConnected) {
-      // 1. Mint new connection with explicit rotation mode
-      this.beginStreamProviderConnection(normId, { mode: 'rotation' });
-      // 2. Transition frozen state to RECONNECTED
+      // 1. Atomic rotation & connection-level freshness invalidation for old connection ID
+      this.rotateProviderRuntime(normId, 'WEBSOCKET_STREAM');
+      // 2. Transition state snapshot to RECONNECTED
       this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
         connectionState: 'RECONNECTED',
         providerConnected: true,
         reconnectedAt: Date.now(),
       });
-      // 3. Purge old freshness
-      this.purgeFreshnessForProvider('WEBSOCKET_STREAM', normId);
       this.logger.log(`Market data stream provider '${normId}' reconnected. New stream connection epoch assigned.`);
     }
   }

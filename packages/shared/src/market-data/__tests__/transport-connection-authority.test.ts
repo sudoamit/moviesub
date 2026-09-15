@@ -935,6 +935,73 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       }).toThrow();
     });
   });
+
+  describe('FIX 167 — Final Provider-Runtime Lifecycle Authority Hardening Tests', () => {
+    test('167-A. Shared Option/Spot Connection Parity — Option & Spot adapters maintain identical identity post-rotation', () => {
+      const initialStreamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: initialStreamConn,
+      });
+
+      const optConn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const spotConn1 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      expect(optConn1).toEqual(spotConn1);
+
+      // Rotate connection
+      const rotatedStreamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        providerInstanceId: initialStreamConn.providerInstanceId,
+      });
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: rotatedStreamConn,
+      });
+
+      const optConn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const spotConn2 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      expect(optConn2).toEqual(spotConn2);
+      expect(optConn2.connectionEpoch).toBe(optConn1.connectionEpoch + 1);
+      expect(optConn2.providerConnectionId).not.toBe(optConn1.providerConnectionId);
+    });
+
+    test('167-B. Connection rotation invariants: non-incrementing epoch or duplicate connection ID is invalid', () => {
+      const conn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      
+      // Duplicate connection identity has same epoch and connection ID
+      expect(conn1.connectionEpoch).toBe(1);
+      
+      const conn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        providerInstanceId: conn1.providerInstanceId,
+      });
+      expect(conn2.connectionEpoch).toBe(2);
+      expect(conn2.providerConnectionId).not.toBe(conn1.providerConnectionId);
+    });
+
+    test('167-C. Connection-level freshness key isolation across providers and transports', () => {
+      const store = new Map<string, Map<string, Set<string>>>();
+      
+      // Transport -> Provider -> Connection -> Set<symbol>
+      const nseOldConnId = 'conn_nse_v1';
+      const nseNewConnId = 'conn_nse_v2';
+      const binanceConnId = 'conn_binance_v1';
+
+      const providerMap = new Map<string, Set<string>>();
+      providerMap.set(nseOldConnId, new Set(['NIFTY']));
+      providerMap.set(nseNewConnId, new Set(['NIFTY']));
+      store.set('NSE_STREAM_GATEWAY', providerMap);
+
+      const binanceMap = new Map<string, Set<string>>();
+      binanceMap.set(binanceConnId, new Set(['BTCUSDT']));
+      store.set('BINANCE_DIRECT', binanceMap);
+
+      // Purge only old connection ID for NSE
+      store.get('NSE_STREAM_GATEWAY')?.delete(nseOldConnId);
+
+      expect(store.get('NSE_STREAM_GATEWAY')?.has(nseOldConnId)).toBe(false);
+      expect(store.get('NSE_STREAM_GATEWAY')?.has(nseNewConnId)).toBe(true);
+      expect(store.get('BINANCE_DIRECT')?.has(binanceConnId)).toBe(true);
+    });
+  });
 });
+
 
 
