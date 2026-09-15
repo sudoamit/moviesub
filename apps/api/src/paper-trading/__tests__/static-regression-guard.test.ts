@@ -327,6 +327,15 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 5. Zero freshSymbolsAfterReconnect.clear() calls in whole streamer file
     expect(streamerContent).not.toContain('freshSymbolsAfterReconnect.clear()');
+
+    // 6. Zero default transport initializers in RealMarketStreamerService signatures
+    expect(streamerContent).not.toMatch(/providerTransport\s*:\s*[^=,\)\n]*=\s*['"]WEBSOCKET_STREAM['"]/);
+
+    // 7. Zero default provider initializers in RealMarketStreamerService signatures
+    expect(streamerContent).not.toMatch(/providerId\s*:\s*[^=,\)\n]*=\s*['"]NSE_STREAM_GATEWAY['"]/);
+
+    // 8. transitionProviderRuntime exists for centralized state mutation
+    expect(streamerContent).toContain('private transitionProviderRuntime');
   });
 });
 

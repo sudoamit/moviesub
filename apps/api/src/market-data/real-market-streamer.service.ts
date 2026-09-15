@@ -640,6 +640,32 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
+  private transitionProviderRuntime(
+    providerId: string,
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+    updates: {
+      connectionState?: ProviderConnectionState;
+      providerConnected?: boolean;
+      currentConnection?: ProviderConnectionIdentity;
+      reconnectedAt?: number | null;
+    },
+  ): ProviderRuntimeState {
+    const runtime = this.resolveCurrentProviderRuntime(providerId, providerTransport);
+    if (updates.connectionState !== undefined) {
+      runtime.connectionState = updates.connectionState;
+    }
+    if (updates.providerConnected !== undefined) {
+      runtime.providerConnected = updates.providerConnected;
+    }
+    if (updates.currentConnection !== undefined) {
+      runtime.currentConnection = updates.currentConnection;
+    }
+    if (updates.reconnectedAt !== undefined) {
+      runtime.reconnectedAt = updates.reconnectedAt;
+    }
+    return runtime;
+  }
+
   public getCurrentProviderConnection(
     providerId: string,
     providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
@@ -664,7 +690,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   public getProviderState(
     providerId: string,
-    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING' = 'WEBSOCKET_STREAM',
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
   ): ProviderConnectionState {
     const runtime = this.resolveCurrentProviderRuntime(providerId, providerTransport);
     return runtime.connectionState;
@@ -682,29 +708,38 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return runtime.connectionState === 'RECONNECTING' ? 'DEGRADED' : 'UNAVAILABLE';
   }
 
+  /**
+   * Models REST polling provider health as a logical provider connection session.
+   * HEALTHY maps to CONNECTED state.
+   * DEGRADED maps to RECONNECTING state.
+   * UNAVAILABLE maps to DISCONNECTED state.
+   */
   public setRestHealthState(
     state: 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE',
     providerId: string,
   ): void {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
-    const runtime = this.restRuntimeStateMap.get(normId);
-    if (!runtime) {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown REST provider '${providerId}' (canonical: '${normId}')`);
-    }
+    const runtime = this.resolveCurrentProviderRuntime(normId, 'REST_POLLING');
     const wasUnhealthy = !runtime.providerConnected || runtime.connectionState !== 'CONNECTED';
     if (state === 'HEALTHY') {
-      runtime.connectionState = 'CONNECTED';
-      runtime.providerConnected = true;
+      this.transitionProviderRuntime(normId, 'REST_POLLING', {
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+      });
       if (wasUnhealthy) {
         this.beginRestProviderConnection(normId);
       }
     } else if (state === 'DEGRADED') {
-      runtime.connectionState = 'RECONNECTING';
-      runtime.providerConnected = false;
+      this.transitionProviderRuntime(normId, 'REST_POLLING', {
+        connectionState: 'RECONNECTING',
+        providerConnected: false,
+      });
     } else {
-      runtime.connectionState = 'DISCONNECTED';
-      runtime.providerConnected = false;
+      this.transitionProviderRuntime(normId, 'REST_POLLING', {
+        connectionState: 'DISCONNECTED',
+        providerConnected: false,
+      });
     }
   }
 
@@ -749,7 +784,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   public getConnectionEpoch(
     providerId: string,
-    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING' = 'WEBSOCKET_STREAM',
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
   ): number {
     return this.getCurrentProviderConnection(providerId, providerTransport).connectionEpoch;
   }
@@ -760,7 +795,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   public getProviderConnectionId(
     providerId: string,
-    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING' = 'WEBSOCKET_STREAM',
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
   ): string {
     return this.getCurrentProviderConnection(providerId, providerTransport).providerConnectionId;
   }
@@ -869,15 +904,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   public handleStreamProviderDisconnect(providerId: string, reason?: string): void {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
-    const state = this.streamRuntimeStateMap.get(normId);
-    if (!state) {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
-    }
+    const state = this.resolveCurrentProviderRuntime(normId, 'WEBSOCKET_STREAM');
     if (state.providerConnected || state.connectionState !== 'DISCONNECTED') {
       this.logger.warn(`Market data stream provider '${normId}' disconnected: ${reason || 'Connection lost'}`);
     }
-    state.connectionState = 'DISCONNECTED';
-    state.providerConnected = false;
+    this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
+      connectionState: 'DISCONNECTED',
+      providerConnected: false,
+    });
 
     const prefix = `WEBSOCKET_STREAM:${normId}:`;
     Array.from(this.freshSymbolsAfterReconnect)
@@ -888,12 +922,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   public handleStreamProviderReconnecting(providerId: string): void {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
-    const state = this.streamRuntimeStateMap.get(normId);
-    if (!state) {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
-    }
-    state.connectionState = 'RECONNECTING';
-    state.providerConnected = false;
+    this.resolveCurrentProviderRuntime(normId, 'WEBSOCKET_STREAM');
+    this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
+      connectionState: 'RECONNECTING',
+      providerConnected: false,
+    });
 
     const prefix = `WEBSOCKET_STREAM:${normId}:`;
     Array.from(this.freshSymbolsAfterReconnect)
@@ -904,17 +937,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   public handleStreamProviderReconnect(providerId: string): void {
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
-    const state = this.streamRuntimeStateMap.get(normId);
-    if (!state) {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown stream provider '${providerId}' (canonical: '${normId}')`);
-    }
+    const state = this.resolveCurrentProviderRuntime(normId, 'WEBSOCKET_STREAM');
     const wasNotConnected =
       !state.providerConnected ||
       (state.connectionState !== 'CONNECTED' && state.connectionState !== 'RECONNECTED');
     if (wasNotConnected) {
-      state.connectionState = 'RECONNECTED';
-      state.providerConnected = true;
-      state.reconnectedAt = Date.now();
+      this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
+        connectionState: 'RECONNECTED',
+        providerConnected: true,
+        reconnectedAt: Date.now(),
+      });
       this.beginStreamProviderConnection(normId);
 
       const prefix = `WEBSOCKET_STREAM:${normId}:`;
@@ -1372,7 +1404,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     const params = providerTick.toRecordInput();
     if (!this.isExecutionDataHealthy(params.providerTransport, params.providerId)) {
-      this.logger.warn(`Cannot publish canonical option quote for ${params?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState(params.providerId)}' state`);
+      this.logger.warn(`Cannot publish canonical option quote for ${params?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState(params.providerId, params.providerTransport)}' state`);
       return null;
     }
 

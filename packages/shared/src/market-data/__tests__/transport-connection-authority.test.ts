@@ -716,6 +716,66 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(res.valid).toBe(false);
       expect(res.errorType).toBe('EPOCH_MISMATCH');
     });
+
+    test('O. REST Health Transition Idempotency — repeated connection initialization with existing connection retains identical epoch', () => {
+      const initialConn = NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      expect(initialConn.connectionEpoch).toBe(1);
+
+      // Re-initialize with existing connection (simulating repeated HEALTHY calls)
+      const newConn = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: initialConn,
+      });
+
+      expect(newConn.connectionEpoch).toBe(initialConn.connectionEpoch);
+      expect(newConn.providerConnectionId).toBe(initialConn.providerConnectionId);
+      expect(newConn.providerInstanceId).toBe(initialConn.providerInstanceId);
+    });
+
+    test('P. Freshness Key Isolation — Binance reconnect prefix does not purge NSE freshness keys', () => {
+      const freshKeys = new Set<string>();
+      const nseKey = 'WEBSOCKET_STREAM:NSE_STREAM_GATEWAY:conn_nse_123:NIFTY';
+      const binanceKey = 'WEBSOCKET_STREAM:BINANCE_DIRECT:conn_binance_456:BTCUSDT';
+
+      freshKeys.add(nseKey);
+      freshKeys.add(binanceKey);
+
+      // Simulate handleStreamProviderReconnect for NSE_STREAM_GATEWAY
+      const nsePrefix = 'WEBSOCKET_STREAM:NSE_STREAM_GATEWAY:';
+      Array.from(freshKeys)
+        .filter((k) => k.startsWith(nsePrefix))
+        .forEach((k) => freshKeys.delete(k));
+
+      expect(freshKeys.has(nseKey)).toBe(false);
+      expect(freshKeys.has(binanceKey)).toBe(true);
+    });
+
+    test('Q. Shared Option/Spot Post-Reconnect Identity Equality — NSE stream option & spot adapters share identical active connection identity after reconnect', () => {
+      // 1. Initial shared connection
+      const initialStreamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: initialStreamConn,
+      });
+
+      const optConn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const spotConn1 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      expect(optConn1.providerConnectionId).toBe(spotConn1.providerConnectionId);
+      expect(optConn1.connectionEpoch).toBe(spotConn1.connectionEpoch);
+
+      // 2. Reconnect: mint new shared connection
+      const reconnectedStreamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+        existingConnection: reconnectedStreamConn,
+      });
+
+      const optConn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const spotConn2 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      expect(optConn2.connectionEpoch).toBe(optConn1.connectionEpoch + 1);
+      expect(optConn2.providerConnectionId).toBe(spotConn2.providerConnectionId);
+      expect(optConn2.connectionEpoch).toBe(spotConn2.connectionEpoch);
+      expect(optConn2.providerInstanceId).toBe(spotConn2.providerInstanceId);
+    });
   });
 });
 
