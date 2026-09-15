@@ -203,27 +203,38 @@ export interface IExecutionQuoteValidationResult {
 }
 
 export function normalizeCanonicalProviderId(providerId: unknown): string {
-  if (typeof providerId !== 'string') return '';
+  if (typeof providerId !== 'string' || providerId.trim().length === 0) {
+    throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] Provider ID cannot be empty or non-string');
+  }
   const trimmed = providerId.trim();
   switch (trimmed) {
     case 'NSE_OPTION_STREAM':
     case 'NSE_OPTION_PROVIDER':
     case 'NSE_STREAM_GATEWAY':
+    case 'NSE_STREAM':
+    case 'NSE_WEBSOCKET':
       return 'NSE_STREAM_GATEWAY';
     case 'NSE_OPTION_REST':
     case 'NSE_REST_OPTION_PROVIDER':
+    case 'NSE_REST':
       return 'NSE_REST_OPTION_PROVIDER';
     case 'BINANCE_OPTION_STREAM':
     case 'BINANCE_DIRECT':
+    case 'BINANCE_STREAM':
+    case 'BINANCE':
+    case 'BINANCE_WEBSOCKET':
       return 'BINANCE_DIRECT';
     case 'BINANCE_REST':
+    case 'BINANCE_POLLING':
       return 'BINANCE_REST';
     case 'NSE_YAHOO_REST':
+    case 'NSE_YAHOO':
+    case 'YAHOO_REST':
       return 'NSE_YAHOO_REST';
     case 'REAL_MARKET_STREAMER':
       return 'REAL_MARKET_STREAMER';
     default:
-      return trimmed;
+      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Unknown or unsupported provider ID '${trimmed}'`);
   }
 }
 
@@ -235,6 +246,7 @@ export const CANONICAL_PROVIDER_IDS = new Set([
   'BINANCE_REST',
   'REAL_MARKET_STREAMER',
 ]);
+
 
 const SUPPORTED_PROVIDER_IDS = new Set([
   'NSE_STREAM_GATEWAY',
@@ -291,7 +303,17 @@ export function validateAuthoritativeExecutionQuote(
     };
   }
 
-  const normProviderId = normalizeCanonicalProviderId(quote.providerId);
+  let normProviderId: string;
+  try {
+    normProviderId = normalizeCanonicalProviderId(quote.providerId);
+  } catch (err: any) {
+    return {
+      valid: false,
+      reason: `Quote providerId '${quote.providerId}' is unknown or non-canonical`,
+      errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+    };
+  }
+
   if (!normProviderId || !CANONICAL_PROVIDER_IDS.has(normProviderId)) {
     return {
       valid: false,
@@ -460,6 +482,14 @@ export function validateAuthoritativeExecutionQuote(
 
   return { valid: true };
 }
+
+export function validateCurrentProviderExecutionQuote(
+  quote: any,
+  ctx: IExecutionQuoteValidationContext = {},
+): IExecutionQuoteValidationResult {
+  return validateAuthoritativeExecutionQuote(quote, ctx);
+}
+
 
 export function parseAndValidateRedisOptionQuote(
   rawJson: string | null | undefined,

@@ -247,10 +247,39 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 2. Sealed spot ingestion path required
     expect(streamerContent).toContain('public ingestCanonicalSpotTick');
 
-    // 3. Binance PAXG polling uses BINANCE_REST_PROVIDER_ADAPTER
-    expect(streamerContent).toContain('BINANCE_REST_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+    // 3. Binance PAXG polling uses BINANCE_REST_SPOT_PROVIDER_ADAPTER
+    expect(streamerContent).toContain('BINANCE_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick');
 
     // 4. getValidatedTicker calls validateAuthoritativeExecutionQuote
     expect(streamerContent).toContain('validateAuthoritativeExecutionQuote');
   });
+
+  it('RULE 13: AI FIX 161 Structural Guards — Final Execution-Authority Hardening', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorContent = fs.readFileSync(validatorFile, 'utf8');
+
+    // 1. ingestCanonicalSpotTick must use ValidatedCanonicalSpotProviderTick (NOT option tick!)
+    expect(streamerContent).toContain('ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalSpotProviderTick');
+    expect(streamerContent).not.toContain('ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalOptionProviderTick');
+
+    // 2. getCurrentStreamProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
+    const getStreamConnFn = streamerContent.match(/getCurrentStreamProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
+    expect(getStreamConnFn).not.toContain('this.beginStreamProviderConnection');
+    expect(getStreamConnFn).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+
+    // 3. getCurrentRestProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
+    const getRestConnFn = streamerContent.match(/getCurrentRestProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
+    expect(getRestConnFn).not.toContain('this.beginRestProviderConnection');
+    expect(getRestConnFn).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+
+    // 4. normalizeCanonicalProviderId must throw [UNKNOWN_PROVIDER_ID_REJECTED] on unknown provider IDs
+    expect(validatorContent).toContain('normalizeCanonicalProviderId');
+    expect(validatorContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
+
+    // 5. validateCurrentProviderExecutionQuote helper must exist
+    expect(validatorContent).toContain('export function validateCurrentProviderExecutionQuote');
+  });
 });
+

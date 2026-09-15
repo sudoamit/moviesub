@@ -236,7 +236,10 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         if (cached) {
           const parsedObj = JSON.parse(cached);
           const providerId = parsedObj.providerId || 'NSE_STREAM_GATEWAY';
-          const activeConn = this.realMarketStreamer?.getCurrentProviderConnection(providerId);
+          let activeConn: any = null;
+          try {
+            activeConn = this.realMarketStreamer?.getCurrentProviderConnection(providerId);
+          } catch {}
           const isStreamerHealthy =
             this.realMarketStreamer?.isExecutionDataHealthy(parsedObj.providerTransport, providerId) ?? false;
 

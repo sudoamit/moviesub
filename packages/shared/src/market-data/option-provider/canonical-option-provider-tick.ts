@@ -217,6 +217,7 @@ export interface IOptionProviderAdapter {
   readonly providerTransport: CanonicalProviderTransport;
   beginProviderConnection(options?: {
     readonly providerInstanceId?: string;
+    readonly existingConnection?: ProviderConnectionIdentity;
   }): ProviderConnectionIdentity;
   getCurrentProviderConnection(): ProviderConnectionIdentity | null;
   validateProviderEvent(raw: RawOptionProviderEvent): ValidatedOptionProviderEvent;
@@ -238,7 +239,15 @@ function createOptionProviderAdapter(
   return Object.freeze({
     providerId: validator.providerId,
     providerTransport: validator.providerTransport,
-    beginProviderConnection(options?: { readonly providerInstanceId?: string }): ProviderConnectionIdentity {
+    beginProviderConnection(options?: {
+      readonly providerInstanceId?: string;
+      readonly existingConnection?: ProviderConnectionIdentity;
+    }): ProviderConnectionIdentity {
+      if (options?.existingConnection && isProviderConnectionIdentity(options.existingConnection)) {
+        currentConnection = options.existingConnection;
+        connectionEpoch = currentConnection.connectionEpoch;
+        return currentConnection;
+      }
       const providerInstanceId =
         typeof options?.providerInstanceId === 'string' && options.providerInstanceId.trim().length > 0
           ? options.providerInstanceId.trim()
@@ -314,15 +323,11 @@ export const BINANCE_REST_PROVIDER_ADAPTER = createOptionProviderAdapter(
   BINANCE_REST_PROVIDER_VALIDATOR,
 );
 
-export const BINANCE_SPOT_PROVIDER_ADAPTER = createOptionProviderAdapter(
-  BINANCE_SPOT_PROVIDER_VALIDATOR,
-);
-
 export function resetAllOptionProviderAdaptersForTests(): void {
   NSE_STREAM_OPTION_PROVIDER_ADAPTER.resetForTests();
   NSE_REST_OPTION_PROVIDER_ADAPTER.resetForTests();
   BINANCE_OPTION_PROVIDER_ADAPTER.resetForTests();
   NSE_YAHOO_REST_PROVIDER_ADAPTER.resetForTests();
   BINANCE_REST_PROVIDER_ADAPTER.resetForTests();
-  BINANCE_SPOT_PROVIDER_ADAPTER.resetForTests();
 }
+

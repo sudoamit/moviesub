@@ -983,6 +983,11 @@ describe('Worker Processors', () => {
         aIRetrainJob: {
           update: jest.fn().mockResolvedValue({ id: 'job-1', status: 'COMPLETED' }),
         },
+        aIModel: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue({ id: 'model-1' }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
         instrument: {
           findUnique: jest.fn().mockResolvedValue({ id: 'inst-1', symbol: 'NIFTY' }),
         },

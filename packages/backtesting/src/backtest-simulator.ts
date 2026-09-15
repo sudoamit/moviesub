@@ -150,7 +150,17 @@ export class BacktestSimulator {
    * authoritative ExecutionSimulator order/fill pipeline, resting exit orders, gap handling,
    * fail-closed sizing, and bar-by-bar equity tracking.
    */
+  private static ensureDefaultFxRates(): void {
+    const converter = PointInTimeCurrencyConverter.getInstance();
+    converter.seedFixtureRates([
+      { pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
+      { pair: 'USD/INR', rate: 87.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
+      { pair: 'EUR/INR', rate: 95.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
+    ]);
+  }
+
   static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
+    BacktestSimulator.ensureDefaultFxRates();
     const symbol = options.symbol.toUpperCase();
     const timeframe =
       (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;

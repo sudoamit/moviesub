@@ -666,7 +666,8 @@ describe('AI FIX 153 — Execution Quote Validator & Market-Data Authority', () 
         if (
           /mintProviderConnectionIdentity/.test(text) &&
           rel !== 'packages/shared/src/market-data/option-provider/provider-connection-identity.ts' &&
-          rel !== 'packages/shared/src/market-data/option-provider/canonical-option-provider-tick.ts'
+          rel !== 'packages/shared/src/market-data/option-provider/canonical-option-provider-tick.ts' &&
+          rel !== 'packages/shared/src/market-data/spot-provider/canonical-spot-provider-tick.ts'
         ) {
           violations.push(`${rel}: directly mints provider identity`);
         }

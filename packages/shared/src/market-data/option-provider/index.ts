@@ -25,7 +25,6 @@ export {
 export {
   BINANCE_OPTION_PROVIDER_ADAPTER,
   BINANCE_REST_PROVIDER_ADAPTER,
-  BINANCE_SPOT_PROVIDER_ADAPTER,
   ICanonicalOptionProviderTickInput,
   IOptionProviderAdapter,
   isValidatedCanonicalOptionProviderTick,

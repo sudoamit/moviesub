@@ -1,10 +1,21 @@
 import {
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   NSE_REST_OPTION_PROVIDER_ADAPTER,
+  NSE_YAHOO_REST_PROVIDER_ADAPTER,
+  BINANCE_REST_PROVIDER_ADAPTER,
   resetAllOptionProviderAdaptersForTests,
 } from '../option-provider/canonical-option-provider-tick';
 import {
+  BINANCE_SPOT_PROVIDER_ADAPTER,
+  BINANCE_REST_SPOT_PROVIDER_ADAPTER,
+  NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER,
+  NSE_STREAM_SPOT_PROVIDER_ADAPTER,
+  isValidatedCanonicalSpotProviderTick,
+  resetAllSpotProviderAdaptersForTests,
+} from '../spot-provider/canonical-spot-provider-tick';
+import {
   validateAuthoritativeExecutionQuote,
+  normalizeCanonicalProviderId,
   setCanonicalSigningSecret,
   resetCanonicalSigningSecretForTests,
 } from '../execution-quote-validator';
@@ -14,14 +25,22 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
 
   beforeEach(() => {
     resetAllOptionProviderAdaptersForTests();
+    resetAllSpotProviderAdaptersForTests();
     setCanonicalSigningSecret(TEST_SECRET);
     NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
     NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+    NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection();
+    BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection();
+    BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
   });
 
   afterEach(() => {
     resetCanonicalSigningSecretForTests();
     resetAllOptionProviderAdaptersForTests();
+    resetAllSpotProviderAdaptersForTests();
   });
 
   test('1. stream reconnect does not change REST connection identity', () => {
@@ -344,4 +363,130 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(validateAuthoritativeExecutionQuote(prevEpochQuote, { activeStreamConnection: streamConn, streamConnectionState: 'CONNECTED', isStreamConnected: true, currentTimeMs: now }).valid).toBe(false);
     });
   });
+
+  describe('FIX 161 — Final Execution-Authority Hardening Pass Tests', () => {
+    beforeEach(() => {
+      resetAllSpotProviderAdaptersForTests();
+      BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+    });
+
+    test('1. ValidatedCanonicalSpotProviderTick root-of-trust and branding', () => {
+      const now = Date.now();
+      const binanceConn = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      // Valid branded spot tick
+      const tick = BINANCE_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+        providerSymbol: 'BTCUSDT',
+        price: 79500,
+        providerEventTime: now - 100,
+      });
+
+      expect(isValidatedCanonicalSpotProviderTick(tick)).toBe(true);
+      expect(tick.symbol).toBe('BTCUSDT');
+      const rec = tick.toRecordInput();
+      expect(rec.providerId).toBe('BINANCE_DIRECT');
+      expect(rec.providerTransport).toBe('WEBSOCKET_STREAM');
+      expect(rec.connectionEpoch).toBe(binanceConn.connectionEpoch);
+      expect(rec.providerConnectionId).toBe(binanceConn.providerConnectionId);
+
+      // Unbranded object returns false
+      expect(isValidatedCanonicalSpotProviderTick({ symbol: 'BTCUSDT', price: 79500 })).toBe(false);
+    });
+
+    test('4. normalizeCanonicalProviderId fails closed on unknown/empty/whitespace/malformed provider IDs', () => {
+      expect(() => normalizeCanonicalProviderId('')).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+      expect(() => normalizeCanonicalProviderId('   ')).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+      expect(() => normalizeCanonicalProviderId('UNKNOWN_PROVIDER_XYZ')).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+      expect(() => normalizeCanonicalProviderId('UNSUPPORTED_ALIAS_123')).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+      expect(() => normalizeCanonicalProviderId(null as any)).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+      expect(() => normalizeCanonicalProviderId(12345 as any)).toThrow('[UNKNOWN_PROVIDER_ID_REJECTED]');
+
+      // Valid alias normalizations
+      expect(normalizeCanonicalProviderId('NSE_OPTION_STREAM')).toBe('NSE_STREAM_GATEWAY');
+      expect(normalizeCanonicalProviderId('NSE_OPTION_REST')).toBe('NSE_REST_OPTION_PROVIDER');
+      expect(normalizeCanonicalProviderId('BINANCE_OPTION_STREAM')).toBe('BINANCE_DIRECT');
+      expect(normalizeCanonicalProviderId('BINANCE_REST')).toBe('BINANCE_REST');
+      expect(normalizeCanonicalProviderId('NSE_YAHOO_REST')).toBe('NSE_YAHOO_REST');
+    });
+
+    test('11. Lifecycle Test Matrix A through H', () => {
+      const bStream1 = BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const nStream1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const yRest1 = NSE_YAHOO_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const bRest1 = BINANCE_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const nRest1 = NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+
+      // A: Binance stream reconnect -> only Binance stream epoch/id changes
+      const bStream2 = BINANCE_SPOT_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(bStream2.connectionEpoch).toBe(bStream1.connectionEpoch + 1);
+      expect(NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(nStream1);
+      expect(NSE_YAHOO_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(yRest1);
+      expect(BINANCE_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bRest1);
+      expect(NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(nRest1);
+
+      // B: NSE stream reconnect -> only NSE stream epoch/id changes
+      const nStream2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(nStream2.connectionEpoch).toBe(nStream1.connectionEpoch + 1);
+      expect(BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bStream2);
+      expect(NSE_YAHOO_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(yRest1);
+
+      // C: NSE Yahoo REST recovery -> only NSE Yahoo REST epoch/id changes
+      const yRest2 = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(yRest2.connectionEpoch).toBe(yRest1.connectionEpoch + 1);
+      expect(BINANCE_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bRest1);
+      expect(BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bStream2);
+
+      // D: Binance REST recovery -> only Binance REST epoch/id changes
+      const bRest2 = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(bRest2.connectionEpoch).toBe(bRest1.connectionEpoch + 1);
+      expect(NSE_YAHOO_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(yRest2);
+      expect(BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bStream2);
+
+      // E: NSE REST recovery -> NSE REST changes, Binance REST unchanged, stream unchanged
+      const nRest2 = NSE_REST_OPTION_PROVIDER_ADAPTER.beginProviderConnection();
+      expect(nRest2.connectionEpoch).toBe(nRest1.connectionEpoch + 1);
+      expect(BINANCE_REST_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bRest2);
+      expect(BINANCE_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(bStream2);
+      expect(NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()).toEqual(nStream2);
+
+      // F: old quote from previous connection -> rejected
+      const now = Date.now();
+      const oldQuote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now - 100,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: nStream1.connectionEpoch,
+        providerInstanceId: nStream1.providerInstanceId,
+        providerConnectionId: nStream1.providerConnectionId,
+      };
+      expect(validateAuthoritativeExecutionQuote(oldQuote, { activeStreamConnection: nStream2 }).valid).toBe(false);
+
+      // G: quote from another provider -> rejected
+      const wrongProviderQuote = {
+        ...oldQuote,
+        connectionEpoch: nStream2.connectionEpoch,
+        providerInstanceId: nStream2.providerInstanceId,
+        providerConnectionId: nStream2.providerConnectionId,
+        providerId: 'BINANCE_DIRECT',
+      };
+      expect(validateAuthoritativeExecutionQuote(wrongProviderQuote, { activeStreamConnection: nStream2 }).valid).toBe(false);
+
+      // H: quote from another transport -> rejected
+      const wrongTransportQuote = {
+        ...oldQuote,
+        connectionEpoch: nStream2.connectionEpoch,
+        providerInstanceId: nStream2.providerInstanceId,
+        providerConnectionId: nStream2.providerConnectionId,
+        providerTransport: 'REST_POLLING',
+      };
+      expect(validateAuthoritativeExecutionQuote(wrongTransportQuote, { activeStreamConnection: nStream2 }).valid).toBe(false);
+    });
+  });
 });
+

@@ -15,6 +15,7 @@ import {
   NSE_STREAM_OPTION_PROVIDER_ADAPTER,
   NSE_REST_OPTION_PROVIDER_ADAPTER,
   NSE_YAHOO_REST_PROVIDER_ADAPTER,
+  NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER,
   BINANCE_SPOT_PROVIDER_ADAPTER,
   BINANCE_REST_PROVIDER_ADAPTER,
   setCanonicalSigningSecret,
@@ -1006,7 +1007,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const providerTime = Date.now() - 1000;
     realStreamer.ingestCanonicalSpotTick(
-      NSE_YAHOO_REST_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
         providerSymbol: 'NIFTY',
         price: 50000,
         providerEventTime: providerTime,
@@ -1027,7 +1028,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // Push live provider tick crossing TP2 into unmocked RealMarketStreamerService
     const tpEventTime = Date.now();
     realStreamer.ingestCanonicalSpotTick(
-      NSE_YAHOO_REST_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
         providerSymbol: 'NIFTY',
         price: 52050,
         providerEventTime: tpEventTime,
@@ -1402,7 +1403,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // 1. Valid tick (1s old <= 5s maxAge)
     realStreamer.ingestCanonicalSpotTick(
-      NSE_YAHOO_REST_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+      NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
         providerSymbol: 'NIFTY',
         price: 24175.65,
         providerEventTime: now - 1000,
