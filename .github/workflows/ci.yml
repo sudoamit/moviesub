@@ -10,6 +10,10 @@ jobs:
   test-and-build:
     name: Build, Typecheck & Test
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/quant_test?schema=public"
+      JWT_SECRET: "ci_jwt_secret_test_key_123456789"
+      APP_ENV: "test"
 
     steps:
       - name: Checkout Repository
@@ -28,7 +32,7 @@ jobs:
         run: npx prisma generate --schema=./prisma/schema.prisma
 
       - name: Typecheck Workspace
-        run: npx tsc -b packages/shared packages/trading-engine packages/risk-engine packages/learning-engine packages/backtesting apps/api apps/worker apps/web
+        run: npx tsc -b packages/config packages/indicators packages/shared packages/trading-engine packages/risk-engine packages/learning-engine packages/backtesting apps/api apps/worker apps/web
 
       - name: Run Workspace Tests
         run: npm test
