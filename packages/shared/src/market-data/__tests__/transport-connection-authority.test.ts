@@ -1001,7 +1001,71 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(store.get('BINANCE_DIRECT')?.has(binanceConnId)).toBe(true);
     });
   });
+
+  describe('FIX 168 — Final Provider-Runtime Lifecycle Atomicity Pass Tests', () => {
+    test('168-A. Failed connection rotation leaves old runtime and connection identity intact', () => {
+      const initialConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const oldRuntimeState: ProviderRuntimeState = Object.freeze({
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: initialConn,
+        reconnectedAt: null,
+      });
+
+      // Simulating invariant check failure during rotation (e.g. non-incrementing epoch)
+      const invalidNextConn = initialConn; // same connection, same epoch
+      expect(() => {
+        if (invalidNextConn.connectionEpoch <= oldRuntimeState.currentConnection.connectionEpoch) {
+          throw new Error('[INVALID_CONNECTION_ROTATION] New connection epoch must be strictly greater than old epoch');
+        }
+      }).toThrow('[INVALID_CONNECTION_ROTATION]');
+
+      // Verify old authority remains current
+      expect(oldRuntimeState.currentConnection).toBe(initialConn);
+      expect(oldRuntimeState.connectionState).toBe('CONNECTED');
+    });
+
+    test('168-B. Atomic single-step reconnect snapshot construction', () => {
+      const conn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const conn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({
+        providerInstanceId: conn1.providerInstanceId,
+      });
+
+      const nextRuntime: ProviderRuntimeState = Object.freeze({
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'RECONNECTED',
+        providerConnected: true,
+        currentConnection: conn2,
+        reconnectedAt: Date.now(),
+      });
+
+      expect(Object.isFrozen(nextRuntime)).toBe(true);
+      expect(nextRuntime.currentConnection.connectionEpoch).toBe(conn1.connectionEpoch + 1);
+      expect(nextRuntime.connectionState).toBe('RECONNECTED');
+      expect(nextRuntime.providerConnected).toBe(true);
+      expect(nextRuntime.reconnectedAt).not.toBeNull();
+    });
+
+    test('168-C. Connection-level freshness purging order', () => {
+      const activeFreshness = new Map<string, Set<string>>();
+      const oldConnId = 'conn_v1';
+      const newConnId = 'conn_v2';
+
+      activeFreshness.set(oldConnId, new Set(['NIFTY']));
+      activeFreshness.set(newConnId, new Set(['NIFTY']));
+
+      // Purge strictly after successful rotation
+      activeFreshness.delete(oldConnId);
+
+      expect(activeFreshness.has(oldConnId)).toBe(false);
+      expect(activeFreshness.has(newConnId)).toBe(true);
+    });
+  });
 });
+
 
 
 

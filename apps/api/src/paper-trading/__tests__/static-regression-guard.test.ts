@@ -226,15 +226,15 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/default:\s*\n?\s*return\s+this\.(stream|rest)ProviderConnection/);
 
     // 4. Stream reconnect creates stream connection ONLY (no global beginProviderConnections or REST reset)
-    expect(streamerContent).toContain('this.beginStreamProviderConnection');
+    expect(streamerContent).toContain('this.createStreamProviderConnection');
     expect(streamerContent).not.toContain('this.beginProviderConnections()');
-    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] || '';
-    expect(handleReconnectFn).not.toContain('beginRestProviderConnection');
+    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] || streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] || '';
+    expect(handleReconnectFn).not.toContain('createRestProviderConnection');
 
     // 5. REST recovery creates REST connection ONLY (no global beginProviderConnections or Stream reset)
-    expect(streamerContent).toContain('this.beginRestProviderConnection');
-    const setRestHealthFn = streamerContent.match(/setRestHealthState\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
-    expect(setRestHealthFn).not.toContain('beginStreamProviderConnection');
+    expect(streamerContent).toContain('this.createRestProviderConnection');
+    const setRestHealthFn = streamerContent.match(/setRestHealthState\([^)]*\):[\s\S]*?\}\n/)?.[0] || streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] || '';
+    expect(setRestHealthFn).not.toContain('createStreamProviderConnection');
   });
 
   it('RULE 12: AI FIX 160 Structural Guards — Production-Hardening Spot Authority & Truthful Transport Identity', () => {
@@ -344,8 +344,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
     const validatorContent = fs.readFileSync(validatorFile, 'utf8');
 
-    // 1. rotateProviderConnection exists for isolated connection replacement
-    expect(streamerContent).toContain('private rotateProviderConnection');
+    // 1. rotateProviderRuntime exists for single-authority connection replacement
+    expect(streamerContent).toContain('private rotateProviderRuntime');
 
     // 2. Structured freshnessStore Map exists
     expect(streamerContent).toContain('freshnessStore');
@@ -365,8 +365,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 2. transitionProviderRuntime wraps snapshots in Object.freeze
     expect(streamerContent).toContain('Object.freeze(');
 
-    // 3. rotateProviderConnection exists and throws [INVALID_CONNECTION_ROTATION] on invariant violation
-    expect(streamerContent).toContain('rotateProviderConnection');
+    // 3. rotateProviderRuntime exists and throws [INVALID_CONNECTION_ROTATION] on invariant violation
+    expect(streamerContent).toContain('rotateProviderRuntime');
     expect(streamerContent).toContain('[INVALID_CONNECTION_ROTATION]');
 
     // 4. Nested 3-level Map freshnessStore exists for transport/provider/connection isolation
@@ -382,12 +382,11 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. Connection creation helpers are strictly private
-    expect(streamerContent).toContain('private beginStreamProviderConnection(');
-    expect(streamerContent).toContain('private beginRestProviderConnection(');
+    expect(streamerContent).toContain('private createStreamProviderConnection(');
+    expect(streamerContent).toContain('private createRestProviderConnection(');
 
     // 2. Distinct initial installation and rotation helpers exist
     expect(streamerContent).toContain('private installInitialProviderConnection(');
-    expect(streamerContent).toContain('private rotateProviderConnection(');
     expect(streamerContent).toContain('private rotateProviderRuntime(');
 
     // 3. Initial installation throws [INITIAL_PROVIDER_RUNTIME_ALREADY_EXISTS]
@@ -402,7 +401,36 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/\bruntime\.connectionState\s*=(?!=)/);
     expect(streamerContent).not.toMatch(/\bruntime\.providerConnected\s*=(?!=)/);
   });
+
+  it('RULE 19: AI FIX 168 Structural Guards — Single Rotation Authority & Pure Connection Creation', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+
+    // 1. rotateProviderConnection is deleted
+    expect(streamerContent).not.toContain('rotateProviderConnection');
+
+    // 2. Connection creation helpers contain zero Map mutation
+    const createStreamFn = streamerContent.match(/createStreamProviderConnection\([\s\S]*?return conn;/)?.[0] || '';
+    expect(createStreamFn).not.toContain('streamRuntimeStateMap.set');
+    expect(createStreamFn).not.toContain('rotateProviderConnection');
+
+    const createRestFn = streamerContent.match(/createRestProviderConnection\([\s\S]*?return[^\n]*;/)?.[0] || '';
+    expect(createRestFn).not.toContain('restRuntimeStateMap.set');
+    expect(createRestFn).not.toContain('rotateProviderConnection');
+
+    // 3. handleStreamProviderReconnect performs rotation in a single atomic call without trailing transitionProviderRuntime
+    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] || '';
+    expect(handleReconnectFn).toContain('rotateProviderRuntime');
+    expect(handleReconnectFn).not.toContain('transitionProviderRuntime');
+
+    // 4. rotateProviderRuntime is the single rotation authority and performs single Map.set
+    expect(streamerContent).toContain('private rotateProviderRuntime(');
+    const rotateFn = streamerContent.match(/rotateProviderRuntime\([\s\S]*?return nextRuntime;/)?.[0] || '';
+    expect(rotateFn).toContain('map.set(normId, nextRuntime)');
+    expect(rotateFn).toContain('purgeFreshnessForConnection');
+  });
 });
+
 
 
 
