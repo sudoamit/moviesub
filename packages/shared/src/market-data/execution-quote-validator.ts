@@ -165,7 +165,7 @@ export function validateExecutionQuoteTimestamp(
   return { valid: true, ageMs };
 }
 
-import { ProviderConnectionIdentity } from './option-provider/provider-connection-identity';
+import { ProviderConnectionIdentity, isProviderConnectionIdentity } from './option-provider/provider-connection-identity';
 
 export interface ProviderRuntimeState {
   providerId: string;
@@ -360,6 +360,31 @@ export function validateAuthoritativeExecutionQuote(
         errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
       };
     }
+
+    const conn = rs.currentConnection;
+    if (!conn || !isProviderConnectionIdentity(conn)) {
+      return {
+        valid: false,
+        reason: `Provider runtimeState currentConnection is missing or invalid`,
+        errorType: 'PROVIDER_DISCONNECTED',
+      };
+    }
+    const connNormId = normalizeCanonicalProviderId(conn.providerId);
+    if (connNormId !== rsNormId) {
+      return {
+        valid: false,
+        reason: `Runtime connection providerId '${conn.providerId}' (canonical: '${connNormId}') does not match runtime providerId '${rs.providerId}' (canonical: '${rsNormId}')`,
+        errorType: 'UNKNOWN_PROVIDER_ID_REJECTED',
+      };
+    }
+    if (conn.providerTransport !== rs.providerTransport) {
+      return {
+        valid: false,
+        reason: `Runtime connection transport '${conn.providerTransport}' does not match runtime transport '${rs.providerTransport}'`,
+        errorType: 'PROVIDER_TRANSPORT_MISMATCH',
+      };
+    }
+
     if (rs.connectionState === 'RECONNECTING') {
       return {
         valid: false,
@@ -374,29 +399,26 @@ export function validateAuthoritativeExecutionQuote(
         errorType: 'PROVIDER_DISCONNECTED',
       };
     }
-    const conn = rs.currentConnection;
-    if (conn) {
-      if (quote.connectionEpoch !== conn.connectionEpoch) {
-        return {
-          valid: false,
-          reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${conn.connectionEpoch}). A fresh tick from the active connection is required.`,
-          errorType: 'EPOCH_MISMATCH',
-        };
-      }
-      if (quote.providerConnectionId !== conn.providerConnectionId) {
-        return {
-          valid: false,
-          reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${conn.providerConnectionId}).`,
-          errorType: 'EPOCH_MISMATCH',
-        };
-      }
-      if (quote.providerInstanceId !== conn.providerInstanceId) {
-        return {
-          valid: false,
-          reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${conn.providerInstanceId}).`,
-          errorType: 'EPOCH_MISMATCH',
-        };
-      }
+    if (quote.connectionEpoch !== conn.connectionEpoch) {
+      return {
+        valid: false,
+        reason: `Market quote is from connection epoch ${quote.connectionEpoch ?? 'none'} (active connection epoch: ${conn.connectionEpoch}). A fresh tick from the active connection is required.`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (quote.providerConnectionId !== conn.providerConnectionId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider connection '${quote.providerConnectionId ?? 'none'}' (active provider connection: ${conn.providerConnectionId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
+    }
+    if (quote.providerInstanceId !== conn.providerInstanceId) {
+      return {
+        valid: false,
+        reason: `Market quote is from provider instance '${quote.providerInstanceId ?? 'none'}' (active provider instance: ${conn.providerInstanceId}).`,
+        errorType: 'EPOCH_MISMATCH',
+      };
     }
   }
 

@@ -777,5 +777,98 @@ describe('AI FIX 159 — Final Transport-Specific Connection Authority', () => {
       expect(optConn2.providerInstanceId).toBe(spotConn2.providerInstanceId);
     });
   });
+
+  describe('FIX 165 — Final Provider-Runtime Atomicity & Authority Hardening Tests', () => {
+    test('165-A. Validator rejects runtimeState with mismatched connection providerId or transport', () => {
+      const streamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const restConn = NSE_REST_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+
+      const quote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn.connectionEpoch,
+        providerInstanceId: streamConn.providerInstanceId,
+        providerConnectionId: streamConn.providerConnectionId,
+      };
+
+      // Mismatched currentConnection inside runtimeState
+      const corruptRuntimeState: ProviderRuntimeState = {
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: restConn, // REST connection passed into WEBSOCKET_STREAM runtimeState
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState: corruptRuntimeState });
+      expect(res.valid).toBe(false);
+      expect(['PROVIDER_TRANSPORT_MISMATCH', 'UNKNOWN_PROVIDER_ID_REJECTED']).toContain(res.errorType);
+    });
+
+    test('165-B. Validator rejects runtimeState with invalid or missing currentConnection', () => {
+      const streamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+
+      const quote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn.connectionEpoch,
+        providerInstanceId: streamConn.providerInstanceId,
+        providerConnectionId: streamConn.providerConnectionId,
+      };
+
+      const unbrandedRuntimeState: any = {
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: { connectionEpoch: 1, providerConnectionId: 'fake' }, // unbranded
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState: unbrandedRuntimeState });
+      expect(res.valid).toBe(false);
+      expect(res.errorType).toBe('PROVIDER_DISCONNECTED');
+    });
+
+    test('165-C. Validator accepts fully consistent runtimeState with matching quote', () => {
+      const streamConn = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
+      const now = Date.now();
+
+      const quote = {
+        contractSymbol: 'NIFTY26SEP25000CE',
+        price: 150.5,
+        marketEventTime: now,
+        provenance: 'LIVE_PROVIDER',
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionEpoch: streamConn.connectionEpoch,
+        providerInstanceId: streamConn.providerInstanceId,
+        providerConnectionId: streamConn.providerConnectionId,
+      };
+
+      const validRuntimeState: ProviderRuntimeState = {
+        providerId: 'NSE_STREAM_GATEWAY',
+        providerTransport: 'WEBSOCKET_STREAM',
+        connectionState: 'CONNECTED',
+        providerConnected: true,
+        currentConnection: streamConn,
+        reconnectedAt: null,
+      };
+
+      const res = validateAuthoritativeExecutionQuote(quote, { runtimeState: validRuntimeState });
+      expect(res.valid).toBe(true);
+    });
+  });
 });
 

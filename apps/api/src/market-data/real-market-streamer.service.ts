@@ -439,8 +439,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
 
     this.tickers.set(sym, updated);
-    const freshnessKey = `${params.providerTransport}:${params.providerId}:${params.providerConnectionId}:${sym}`;
-    this.freshSymbolsAfterReconnect.add(freshnessKey);
+    this.recordFreshSymbol(params.providerTransport, params.providerId, params.providerConnectionId, sym);
     return updated;
   }
 
@@ -590,7 +589,46 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     });
   }
 
-  private freshSymbolsAfterReconnect = new Set<string>();
+  // Structured Map: `${providerTransport}:${normId}:${connectionId}` -> Set<symbol>
+  private freshnessStore = new Map<string, Set<string>>();
+
+  private recordFreshSymbol(
+    providerTransport: string,
+    providerId: string,
+    connectionId: string,
+    symbol: string,
+  ): void {
+    if (!providerTransport || !providerId || !connectionId || !symbol) return;
+    const normId = normalizeCanonicalProviderId(providerId);
+    const key = `${providerTransport}:${normId}:${connectionId}`;
+    let set = this.freshnessStore.get(key);
+    if (!set) {
+      set = new Set<string>();
+      this.freshnessStore.set(key, set);
+    }
+    set.add(symbol.toUpperCase());
+  }
+
+  private isFreshSymbolPresent(
+    providerTransport: string | undefined,
+    providerId: string | undefined,
+    connectionId: string | undefined,
+    symbol: string,
+  ): boolean {
+    if (!providerTransport || !providerId || !connectionId || !symbol) return false;
+    const normId = normalizeCanonicalProviderId(providerId);
+    const key = `${providerTransport}:${normId}:${connectionId}`;
+    return this.freshnessStore.get(key)?.has(symbol.toUpperCase()) ?? false;
+  }
+
+  private purgeFreshnessForProvider(providerTransport: string, providerId: string): void {
+    if (!providerTransport || !providerId) return;
+    const normId = normalizeCanonicalProviderId(providerId);
+    const prefix = `${providerTransport}:${normId}:`;
+    Array.from(this.freshnessStore.keys())
+      .filter((k) => k.startsWith(prefix))
+      .forEach((k) => this.freshnessStore.delete(k));
+  }
 
   public resolveCurrentProviderRuntime(
     providerId: string,
@@ -646,7 +684,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     updates: {
       connectionState?: ProviderConnectionState;
       providerConnected?: boolean;
-      currentConnection?: ProviderConnectionIdentity;
       reconnectedAt?: number | null;
     },
   ): ProviderRuntimeState {
@@ -657,13 +694,50 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (updates.providerConnected !== undefined) {
       runtime.providerConnected = updates.providerConnected;
     }
-    if (updates.currentConnection !== undefined) {
-      runtime.currentConnection = updates.currentConnection;
-    }
     if (updates.reconnectedAt !== undefined) {
       runtime.reconnectedAt = updates.reconnectedAt;
     }
     return runtime;
+  }
+
+  private setProviderRuntimeConnection(
+    providerId: string,
+    providerTransport: 'WEBSOCKET_STREAM' | 'REST_POLLING',
+    newConnection: ProviderConnectionIdentity,
+  ): ProviderRuntimeState {
+    if (!isProviderConnectionIdentity(newConnection)) {
+      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] newConnection must be a valid ProviderConnectionIdentity');
+    }
+    const normId = normalizeCanonicalProviderId(providerId);
+    const connNormId = normalizeCanonicalProviderId(newConnection.providerId);
+    if (normId !== connNormId) {
+      throw new Error(
+        `[PROVIDER_TRANSPORT_MISMATCH] Connection providerId '${newConnection.providerId}' (canonical: '${connNormId}') does not match target '${normId}'`,
+      );
+    }
+    if (providerTransport !== newConnection.providerTransport) {
+      throw new Error(
+        `[PROVIDER_TRANSPORT_MISMATCH] Connection providerTransport '${newConnection.providerTransport}' does not match target '${providerTransport}'`,
+      );
+    }
+
+    const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
+    const existing = map.get(normId);
+    if (existing) {
+      existing.currentConnection = newConnection;
+      return existing;
+    }
+
+    const newRuntime: ProviderRuntimeState = {
+      providerId: normId,
+      providerTransport,
+      connectionState: 'CONNECTED',
+      providerConnected: true,
+      currentConnection: newConnection,
+      reconnectedAt: null,
+    };
+    map.set(normId, newRuntime);
+    return newRuntime;
   }
 
   public getCurrentProviderConnection(
@@ -723,13 +797,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const runtime = this.resolveCurrentProviderRuntime(normId, 'REST_POLLING');
     const wasUnhealthy = !runtime.providerConnected || runtime.connectionState !== 'CONNECTED';
     if (state === 'HEALTHY') {
+      if (wasUnhealthy) {
+        this.beginRestProviderConnection(normId);
+      }
       this.transitionProviderRuntime(normId, 'REST_POLLING', {
         connectionState: 'CONNECTED',
         providerConnected: true,
       });
-      if (wasUnhealthy) {
-        this.beginRestProviderConnection(normId);
-      }
     } else if (state === 'DEGRADED') {
       this.transitionProviderRuntime(normId, 'REST_POLLING', {
         connectionState: 'RECONNECTING',
@@ -837,15 +911,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       });
       NSE_STREAM_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: conn });
     }
-    const state = this.streamRuntimeStateMap.get(normId);
-    this.streamRuntimeStateMap.set(normId, {
-      providerId: normId,
-      providerTransport: 'WEBSOCKET_STREAM',
-      connectionState: state?.connectionState || 'CONNECTED',
-      providerConnected: state?.providerConnected ?? true,
-      currentConnection: conn,
-      reconnectedAt: state?.reconnectedAt ?? null,
-    });
+    this.setProviderRuntimeConnection(normId, 'WEBSOCKET_STREAM', conn);
     return conn;
   }
 
@@ -890,14 +956,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     } else {
       throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin REST connection for unknown provider '${providerId}'`);
     }
-    this.restRuntimeStateMap.set(normId, {
-      providerId: normId,
-      providerTransport: 'REST_POLLING',
-      connectionState: 'CONNECTED',
-      providerConnected: true,
-      currentConnection: conn,
-      reconnectedAt: null,
-    });
+    this.setProviderRuntimeConnection(normId, 'REST_POLLING', conn);
     return conn;
   }
 
@@ -912,11 +971,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       connectionState: 'DISCONNECTED',
       providerConnected: false,
     });
-
-    const prefix = `WEBSOCKET_STREAM:${normId}:`;
-    Array.from(this.freshSymbolsAfterReconnect)
-      .filter((k) => k.startsWith(prefix))
-      .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
+    this.purgeFreshnessForProvider('WEBSOCKET_STREAM', normId);
   }
 
   public handleStreamProviderReconnecting(providerId: string): void {
@@ -927,11 +982,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       connectionState: 'RECONNECTING',
       providerConnected: false,
     });
-
-    const prefix = `WEBSOCKET_STREAM:${normId}:`;
-    Array.from(this.freshSymbolsAfterReconnect)
-      .filter((k) => k.startsWith(prefix))
-      .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
+    this.purgeFreshnessForProvider('WEBSOCKET_STREAM', normId);
   }
 
   public handleStreamProviderReconnect(providerId: string): void {
@@ -942,18 +993,13 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       !state.providerConnected ||
       (state.connectionState !== 'CONNECTED' && state.connectionState !== 'RECONNECTED');
     if (wasNotConnected) {
+      this.beginStreamProviderConnection(normId);
       this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
         connectionState: 'RECONNECTED',
         providerConnected: true,
         reconnectedAt: Date.now(),
       });
-      this.beginStreamProviderConnection(normId);
-
-      const prefix = `WEBSOCKET_STREAM:${normId}:`;
-      Array.from(this.freshSymbolsAfterReconnect)
-        .filter((k) => k.startsWith(prefix))
-        .forEach((k) => this.freshSymbolsAfterReconnect.delete(k));
-
+      this.purgeFreshnessForProvider('WEBSOCKET_STREAM', normId);
       this.logger.log(`Market data stream provider '${normId}' reconnected. New stream connection epoch assigned.`);
     }
   }
@@ -1188,8 +1234,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
     const reconnectedAt = streamState?.reconnectedAt ?? null;
 
-    const freshnessKey = `${ticker.providerTransport}:${normProviderId}:${ticker.providerConnectionId}:${key}`;
-    if (reconnectedAt !== null && !this.freshSymbolsAfterReconnect.has(freshnessKey) && !this.freshSymbolsAfterReconnect.has(`OPTION:${key}`)) {
+    if (
+      reconnectedAt !== null &&
+      !this.isFreshSymbolPresent(ticker.providerTransport, ticker.providerId, ticker.providerConnectionId, key)
+    ) {
       return null;
     }
 
@@ -1268,11 +1316,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
     const reconnectedAt = streamState?.reconnectedAt ?? null;
 
-    const freshnessKey = `${ticker.providerTransport}:${normProviderId}:${ticker.providerConnectionId}:${sym}`;
     if (
       reconnectedAt !== null &&
-      !this.freshSymbolsAfterReconnect.has(freshnessKey) &&
-      !this.freshSymbolsAfterReconnect.has(`SPOT:${sym}`)
+      !this.isFreshSymbolPresent(ticker.providerTransport, ticker.providerId, ticker.providerConnectionId, sym)
     ) {
       throw new MarketDataUnavailableError(
         sym,

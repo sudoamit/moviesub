@@ -302,7 +302,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 5. Freshness invalidation on reconnect is provider-scoped (no global clear in handleStreamProviderReconnect)
     const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?\}\n  \}/)?.[0] || '';
     expect(handleReconnectFn).not.toContain('this.freshSymbolsAfterReconnect.clear()');
-    expect(handleReconnectFn).toContain('WEBSOCKET_STREAM:');
+    expect(handleReconnectFn).toContain('WEBSOCKET_STREAM');
 
     // 6. beginStreamProviderConnection and beginRestProviderConnection validate shared existingConnection identity
     expect(streamerContent).toContain('[INVALID_SHARED_CONNECTION_IDENTITY]');
@@ -336,6 +336,22 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 8. transitionProviderRuntime exists for centralized state mutation
     expect(streamerContent).toContain('private transitionProviderRuntime');
+  });
+
+  it('RULE 16: AI FIX 165 Structural Guards — Final Provider-Runtime Atomicity & Authority Hardening', () => {
+    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerContent = fs.readFileSync(streamerFile, 'utf8');
+    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorContent = fs.readFileSync(validatorFile, 'utf8');
+
+    // 1. setProviderRuntimeConnection exists for isolated connection replacement
+    expect(streamerContent).toContain('private setProviderRuntimeConnection');
+
+    // 2. Structured freshnessStore Map exists
+    expect(streamerContent).toContain('private freshnessStore = new Map<string, Set<string>>();');
+
+    // 3. Execution quote validator enforces internal runtimeState consistency via isProviderConnectionIdentity
+    expect(validatorContent).toContain('isProviderConnectionIdentity(conn)');
   });
 });
 
