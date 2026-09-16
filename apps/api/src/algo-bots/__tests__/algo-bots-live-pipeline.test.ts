@@ -9,7 +9,7 @@ import {
 import { CanonicalMarketSnapshotBuilder, SignalGenerator } from '@quant/trading-engine';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
-describe('Fix 180 — Live Candidate E2E Execution Test', () => {
+describe('AlgoBotsService execution integration test', () => {
   let algoBotsService: AlgoBotsService;
   let mockPaperTradingService: any;
   let mockAlertsService: any;

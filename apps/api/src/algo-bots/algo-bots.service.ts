@@ -250,12 +250,7 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   public isPaperExecutionEnabled(): boolean {
-    return (
-      process.env.ENABLE_PAPER_ALGO_BOTS === 'true' ||
-      process.env.PAPER_TRADING_ENABLED === 'true' ||
-      process.env.NODE_ENV === 'development' ||
-      process.env.NODE_ENV === 'test'
-    );
+    return process.env.PAPER_TRADING_ENABLED === 'true';
   }
 
   async onModuleInit() {
@@ -1339,9 +1334,7 @@ export class AlgoBotsService implements OnModuleInit {
     const activeBotCount = bots.filter((b) => b.isActive).length;
     const enabledBotCount = bots.filter((b) => b.isActive && b.autoExecutePaper).length;
 
-    const paperExecutionEnabled =
-      process.env.PAPER_TRADING_ENABLED === 'true' ||
-      process.env.ENABLE_PAPER_ALGO_BOTS === 'true';
+    const paperExecutionEnabled = process.env.PAPER_TRADING_ENABLED === 'true';
 
     return {
       paperExecutionEnabled,
@@ -1363,31 +1356,39 @@ export class AlgoBotsService implements OnModuleInit {
     const bots = await this.listBots();
     const results: IAlgoBotExecutionResult[] = [];
 
-    const canonicalDecisionDate = signal.canonicalDecisionTime
-      ? signal.canonicalDecisionTime
-      : signal.canonicalCandleTime
-        ? new Date(signal.canonicalCandleTime)
-        : undefined;
+    const canonicalCandleTime = signal.canonicalCandleTime;
+    const canonicalDecisionTime = signal.canonicalDecisionTime
+      ? signal.canonicalDecisionTime instanceof Date
+        ? signal.canonicalDecisionTime
+        : new Date(signal.canonicalDecisionTime)
+      : undefined;
+
+    const isValidTimestamp =
+      Number.isFinite(canonicalCandleTime) &&
+      canonicalDecisionTime &&
+      !isNaN(canonicalDecisionTime.getTime()) &&
+      canonicalCandleTime === canonicalDecisionTime.getTime();
+
+    if (!isValidTimestamp) {
+      const reason = 'CANONICAL_TIMESTAMP_INVALID';
+      this.lastExecutionRejectionReason = reason;
+      results.push({
+        botId: 'N/A',
+        symbol: signal.symbol,
+        status: 'REJECTED',
+        reasonCode: reason,
+        details:
+          'Signal setup fails strict canonical timestamp invariant (canonicalCandleTime required and must equal canonicalDecisionTime.getTime())',
+      });
+      return results;
+    }
+
+    const canonicalCandleFormatted = canonicalDecisionTime.toISOString();
 
     for (const bot of bots) {
       if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
         continue;
       }
-
-      if (!canonicalDecisionDate || isNaN(canonicalDecisionDate.getTime())) {
-        const reason = 'CANONICAL_DECISION_TIMESTAMP_REQUIRED';
-        this.lastExecutionRejectionReason = reason;
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: reason,
-          details: 'Signal setup lacks authoritative canonicalCandleTime or canonicalDecisionTime',
-        });
-        continue;
-      }
-
-      const canonicalCandleFormatted = canonicalDecisionDate.toISOString();
 
       this.logger.log(
         `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,

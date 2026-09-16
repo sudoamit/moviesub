@@ -295,7 +295,7 @@ export class SignalGenerator {
             rr2: 2.5,
             rr3: 4.0,
           },
-          reasoning: {} as any,
+          reasoning: det.reasoning || ({} as any),
           scoreBreakdown: {} as any,
           triggerEvidence: det.triggerEvidence || {
             orderBlock: { matched: true },
@@ -309,6 +309,8 @@ export class SignalGenerator {
           features: det.features,
           marketState: det.marketState,
           prediction: det.prediction,
+          canonicalCandleTime: det.canonicalCandleTime ?? currTime,
+          canonicalDecisionTime: det.canonicalDecisionTime ?? decisionTimestamp,
           timestamp: new Date(currTime),
           state: SignalState.ACTIVE,
         } as any;

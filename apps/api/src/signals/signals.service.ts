@@ -82,6 +82,7 @@ export class SignalsService implements OnModuleInit {
     symbol: string,
     executionTimeframe: Timeframe = Timeframe.M15,
     strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+    options?: { strategyConfig?: Record<string, any> },
   ): Promise<ISignalSetup> {
     const sym = symbol.toUpperCase();
 
@@ -151,6 +152,7 @@ export class SignalsService implements OnModuleInit {
       htf1Snapshot,
       htf2Snapshot,
       strategyMode: strategy,
+      strategyConfig: options?.strategyConfig,
     });
 
     signal.instrumentId = inst.id;
@@ -182,6 +184,7 @@ export class SignalsService implements OnModuleInit {
   async getAllSignals(
     timeframe: Timeframe = Timeframe.M15,
     strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+    options?: { strategyConfig?: Record<string, any> },
   ): Promise<ISignalSetup[]> {
     const instruments = await this.prisma.instrument.findMany({
       where: { isActive: true },
@@ -190,7 +193,7 @@ export class SignalsService implements OnModuleInit {
     const signals: ISignalSetup[] = [];
     for (const inst of instruments) {
       try {
-        const sig = await this.generateSignalForSymbol(inst.symbol, timeframe, strategy);
+        const sig = await this.generateSignalForSymbol(inst.symbol, timeframe, strategy, options);
         signals.push(sig);
       } catch (err) {
         this.logger.warn(`Failed to generate signal for ${inst.symbol}: ${(err as Error).message}`);

@@ -38,7 +38,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async triggerScan(timeframe: Timeframe = Timeframe.M15) {
+  async triggerScan(
+    timeframe: Timeframe = Timeframe.M15,
+    options?: { strategyConfig?: Record<string, any> },
+  ) {
     if (this.isScanning) {
       this.logger.debug(
         `[SCANNER_LOCKED] Previous market scan is still executing. Skipping overlapping scan trigger.`,
@@ -86,11 +89,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const startTime = Date.now();
-      const signals = await this.signalsService.getAllSignals(timeframe);
+      const signals = await this.signalsService.getAllSignals(timeframe, 'SMC', options);
 
       let noTradeCount = 0;
       let neutralCount = 0;
       let activeCount = 0;
+      let h1AvailableCount = 0;
+      let h4AvailableCount = 0;
+      let scoreThresholdMetCount = 0;
+      let botMatchedCount = 0;
+      let botEligibleCount = 0;
+      let executionAttemptedCount = 0;
       let rejectedByScoreCount = 0;
       let rejectedByBotCount = 0;
       let failedCount = 0;
@@ -101,6 +110,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
       for (const sig of signals) {
         let botResultSummary = 'N/A';
+
+        const isH1Missing = sig.reasoning?.htfStructure?.includes('H1') && sig.reasoning?.htfStructure?.includes('unavailable');
+        if (!isH1Missing) {
+          h1AvailableCount++;
+        }
+        const isH4Missing = sig.reasoning?.htfStructure?.includes('H4') && sig.reasoning?.htfStructure?.includes('unavailable');
+        if (!isH4Missing) {
+          h4AvailableCount++;
+        }
 
         if (sig.grade === SignalGrade.NO_TRADE || sig.state === SignalState.INVALIDATED) {
           noTradeCount++;
@@ -114,10 +132,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             rejectedByScoreCount++;
             botResultSummary = 'rejected by score (<60)';
           } else {
+            scoreThresholdMetCount++;
             validSignals.push(sig);
             try {
               // Authoritative Single Pass: execute & retrieve per-bot machine-readable execution results
               const executionResults = await this.algoBotsService.evaluateSignalForBots(sig);
+
+              if (executionResults.length > 0 && executionResults[0].botId !== 'NONE' && executionResults[0].botId !== 'N/A') {
+                botMatchedCount += executionResults.length;
+              }
 
               const executed = executionResults.filter((r) => r.status === 'EXECUTED');
               const failed = executionResults.filter((r) => r.status === 'FAILED');
@@ -125,10 +148,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
               const skipped = executionResults.filter((r) => r.status === 'SKIPPED');
 
               if (executed.length > 0) {
+                executionAttemptedCount += executed.length;
                 executedCount += executed.length;
+                botEligibleCount += executed.length;
                 botResultSummary = `EXECUTED (${executed.map((e) => `bot:${e.botId} pos:${e.orderPositionId}`).join(', ')})`;
               } else if (failed.length > 0) {
+                executionAttemptedCount += failed.length;
                 failedCount += failed.length;
+                botEligibleCount += failed.length;
                 botResultSummary = `FAILED (${failed.map((f) => `${f.botId}:${f.reasonCode}`).join(', ')})`;
               } else if (rejected.length > 0) {
                 rejectedByBotCount += rejected.length;
@@ -167,10 +194,20 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         timestamp: new Date().toISOString(),
         timeframe,
         scannedCount: signals.length,
+        instrumentsScanned: signals.length,
+        signalsGenerated: signals.length,
         signalsFound: validSignals.length,
         noTradeCount,
         neutralCount,
         activeCount,
+        h1AvailableCount,
+        h4AvailableCount,
+        scoreThresholdMetCount,
+        botMatchedCount,
+        botEligibleCount,
+        executionAttemptedCount,
+        executionSucceededCount: executedCount,
+        executionFailedCount: failedCount,
         rejectedByScoreCount,
         rejectedByBotCount,
         failedCount,
@@ -190,7 +227,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       }
 
       this.logger.log(
-        `[SCANNER SUMMARY] Scanned: ${signals.length} symbols | NO_TRADE: ${noTradeCount} | NEUTRAL: ${neutralCount} | ACTIVE: ${activeCount} | RejectedByScore: ${rejectedByScoreCount} | RejectedByBot: ${rejectedByBotCount} | Executed: ${executedCount} (Duration: ${duration}ms)`,
+        `[SCANNER SUMMARY] Scanned: ${signals.length} symbols | NO_TRADE: ${noTradeCount} | NEUTRAL: ${neutralCount} | ACTIVE: ${activeCount} | Score>=60: ${scoreThresholdMetCount} | BotMatched: ${botMatchedCount} | ExecAttempted: ${executionAttemptedCount} | Executed: ${executedCount} | Failed: ${failedCount} (Duration: ${duration}ms)`,
       );
       return summary;
     } finally {
