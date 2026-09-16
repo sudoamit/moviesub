@@ -4,6 +4,8 @@ import React, { useState } from 'react';
 import { ISignalSetup } from '@quant/shared';
 import { Radar, ArrowUpRight, ArrowDownRight, RefreshCw, Filter, Sparkles } from 'lucide-react';
 
+import { EmptyState } from './common/EmptyState';
+
 interface ScannerTableProps {
   signals: ISignalSetup[];
   selectedSymbol: string;
@@ -112,25 +114,33 @@ export const ScannerTable: React.FC<ScannerTableProps> = ({
       </div>
 
       {/* Scanner Table View */}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs min-w-[650px]">
-          <thead>
-            <tr className="text-[10px] uppercase text-slate-500 border-b border-slate-800">
-              <th className="pb-2.5">Asset</th>
-              <th className="pb-2.5">Direction</th>
-              <th className="pb-2.5">Setup Score</th>
-              <th className="pb-2.5">Grade</th>
-              <th className="pb-2.5">TF</th>
-              <th className="pb-2.5">Entry Zone</th>
-              <th className="pb-2.5">Stop Loss</th>
-              <th className="pb-2.5">Target 2</th>
-              <th className="pb-2.5">R:R</th>
-              <th className="pb-2.5 text-right">Trigger Confluence</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/50">
-            {filteredSignals.map((signal) => {
-              const isSelected = selectedSymbol === signal.symbol;
+      {filteredSignals.length === 0 ? (
+        <EmptyState
+          preset="no-scan-results"
+          actionLabel="Scan Watchlist Now"
+          onAction={onRefreshScan}
+          className="my-2"
+        />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs min-w-[650px]">
+            <thead>
+              <tr className="text-[10px] uppercase text-slate-500 border-b border-slate-800">
+                <th className="pb-2.5">Asset</th>
+                <th className="pb-2.5">Direction</th>
+                <th className="pb-2.5">Setup Score</th>
+                <th className="pb-2.5">Grade</th>
+                <th className="pb-2.5">TF</th>
+                <th className="pb-2.5">Entry Zone</th>
+                <th className="pb-2.5">Stop Loss</th>
+                <th className="pb-2.5">Target 2</th>
+                <th className="pb-2.5">R:R</th>
+                <th className="pb-2.5 text-right">Trigger Confluence</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/50">
+              {filteredSignals.map((signal) => {
+                const isSelected = selectedSymbol === signal.symbol;
               const isLong = signal.direction === 'BULLISH';
 
               return (
@@ -221,6 +231,7 @@ export const ScannerTable: React.FC<ScannerTableProps> = ({
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 };

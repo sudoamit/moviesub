@@ -18,8 +18,9 @@ import {
   BarChart2,
   Cpu,
   BookOpen,
-  ChevronDown,
 } from 'lucide-react';
+import { NavGroupButton } from './NavGroupButton';
+import { NavDropdown } from './NavDropdown';
 
 export type NavGroup = 'terminal' | 'analyze' | 'trade' | 'research' | 'automation' | 'history';
 
@@ -307,81 +308,35 @@ export const PrimaryNavigation: React.FC<PrimaryNavigationProps> = ({
 
         return (
           <div key={group.id} className="relative">
-            <button
-              ref={(el) => {
-                triggerRefs.current[group.id] = el;
-              }}
-              type="button"
-              id={`nav-group-${group.id}`}
-              aria-expanded={isDropdownOpen}
-              aria-haspopup={group.items.length > 1 ? 'menu' : undefined}
-              aria-controls={group.items.length > 1 ? `dropdown-menu-${group.id}` : undefined}
+            <NavGroupButton
+              groupId={group.id}
+              label={group.label}
+              hasDropdown={group.items.length > 1}
+              isActive={isGroupActive}
+              isOpen={isDropdownOpen}
               onClick={() => handleGroupClick(group)}
               onKeyDown={(e) => handleTriggerKeyDown(e, group)}
-              className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center gap-1.5 outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:ring-offset-1 focus-visible:ring-offset-surface-subtle ${
-                isGroupActive
-                  ? 'bg-surface-elevated text-cyan-400 border border-cyan-500/30 shadow-sm'
-                  : 'text-slate-300 hover:text-white hover:bg-surface-hover'
-              }`}
-            >
-              <span>{group.label}</span>
-              {group.items.length > 1 && (
-                <ChevronDown
-                  className={`w-3 h-3 text-slate-400 transition-transform ${
-                    isDropdownOpen ? 'rotate-180' : ''
-                  }`}
-                />
-              )}
-            </button>
+              buttonRef={(el) => {
+                triggerRefs.current[group.id] = el;
+              }}
+            />
 
-            {/* Dropdown Menu for Multi-Item Groups */}
             {isDropdownOpen && group.items.length > 1 && (
-              <div
-                id={`dropdown-menu-${group.id}`}
-                role="menu"
-                aria-labelledby={`nav-group-${group.id}`}
+              <NavDropdown
+                groupId={group.id}
+                groupLabel={group.label}
+                items={group.items}
+                activeTab={activeTab}
+                focusedIndex={focusedIndex}
+                onSelectTab={(tabId) => {
+                  onSelectTab(tabId);
+                  setOpenDropdownGroup(null);
+                  setFocusedIndex(-1);
+                  triggerRefs.current[group.id]?.focus();
+                }}
                 onKeyDown={(e) => handleMenuKeyDown(e, group)}
-                className="absolute top-full left-0 mt-2 w-56 bg-surface-elevated border border-surface-border rounded-xl p-1.5 shadow-2xl z-50 animate-in fade-in slide-in-from-top-2 duration-150 focus:outline-none"
-              >
-                <div className="px-2 py-1 text-[10px] text-slate-400 uppercase tracking-wider font-semibold border-b border-surface-border mb-1">
-                  {group.label} Tools
-                </div>
-                {group.items.map((item, idx) => {
-                  const isItemActive = activeTab === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      ref={(el) => {
-                        menuItemRefs.current[idx] = el;
-                      }}
-                      type="button"
-                      role="menuitem"
-                      tabIndex={focusedIndex === idx ? 0 : -1}
-                      onClick={() => {
-                        onSelectTab(item.id);
-                        setOpenDropdownGroup(null);
-                        setFocusedIndex(-1);
-                        triggerRefs.current[group.id]?.focus();
-                      }}
-                      className={`w-full text-left px-2.5 py-2 rounded-lg text-xs font-mono transition-colors flex items-center justify-between outline-none focus-visible:bg-surface-hover focus-visible:text-white ${
-                        isItemActive
-                          ? 'bg-cyan-500/20 text-cyan-300 font-bold'
-                          : 'text-slate-300 hover:bg-surface-hover hover:text-white'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        {item.icon}
-                        <span>{item.label}</span>
-                      </div>
-                      {item.badge && (
-                        <span className="text-[9px] px-1 py-0.5 rounded font-black bg-cyan-950 text-cyan-400 border border-cyan-800">
-                          {item.badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+                itemRefs={menuItemRefs}
+              />
             )}
           </div>
         );

@@ -16,6 +16,7 @@ import {
   ArrowRight,
   ShieldCheck,
 } from 'lucide-react';
+import { EmptyState } from './common/EmptyState';
 
 export const AlgoStrategyBuilder: React.FC = () => {
   const [bots, setBots] = useState<any[]>([]);
@@ -270,7 +271,15 @@ export const AlgoStrategyBuilder: React.FC = () => {
             DEPLOYED ALGORITHMIC STRATEGIES ({bots.length})
           </h4>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {bots.length === 0 ? (
+            <EmptyState
+              preset="no-research-runs"
+              title="No Deployed Strategy Bots"
+              description="Configure rule parameters above to deploy your first automated execution bot."
+              className="my-3"
+            />
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {bots.map((bot) => (
               <div
                 key={bot.id}
@@ -354,6 +363,7 @@ export const AlgoStrategyBuilder: React.FC = () => {
               </div>
             ))}
           </div>
+          )}
         </div>
       </div>
     </div>

@@ -32,6 +32,7 @@ import {
   formatPriceWithCurrency,
   formatPnlWithCurrency,
 } from '@quant/shared';
+import { EmptyState } from './common/EmptyState';
 
 type ITradeRecord = ITradeJournalRecord & {
   pnlAmount?: number;
@@ -521,32 +522,35 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
       </div>
 
       {/* Completed Trades Records Ledger Table with Explicit Trade Reason & Confluence */}
-      <div className="overflow-x-auto border border-slate-800 rounded-lg shadow-inner">
-        <table className="w-full text-left border-collapse text-xs font-mono min-w-[1100px]">
-          <thead>
-            <tr className="bg-slate-900/95 text-slate-400 border-b border-slate-800 text-[10px] uppercase tracking-wider">
-              <th className="py-3 px-3">Instrument</th>
-              <th className="py-3 px-3">Bias</th>
-              <th className="py-3 px-3">Entry & Exit Price</th>
-              <th className="py-3 px-3 min-w-[280px]">Trade Setup Rationale & Reason</th>
-              <th className="py-3 px-3">Outcome / Exit Reason</th>
-              <th className="py-3 px-3 text-right">Realized Return</th>
-              <th className="py-3 px-3 text-right">R-Multiple</th>
-              <th className="py-3 px-3 text-left">
-                <span className="flex items-center gap-1">
-                  <Calendar className="w-3 h-3 text-cyan-400" />
-                  Entry & Close Time
-                </span>
-              </th>
-              <th className="py-3 px-3 text-center">
-                <span className="flex items-center justify-center gap-1">
-                  <Timer className="w-3 h-3 text-amber-400" />
-                  Duration
-                </span>
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60 bg-slate-950/50">
+      {filteredTrades.length === 0 ? (
+        <EmptyState preset="no-trades" className="my-3" />
+      ) : (
+        <div className="overflow-x-auto border border-slate-800 rounded-lg shadow-inner">
+          <table className="w-full text-left border-collapse text-xs font-mono min-w-[1100px]">
+            <thead>
+              <tr className="bg-slate-900/95 text-slate-400 border-b border-slate-800 text-[10px] uppercase tracking-wider">
+                <th className="py-3 px-3">Instrument</th>
+                <th className="py-3 px-3">Bias</th>
+                <th className="py-3 px-3">Entry & Exit Price</th>
+                <th className="py-3 px-3 min-w-[280px]">Trade Setup Rationale & Reason</th>
+                <th className="py-3 px-3">Outcome / Exit Reason</th>
+                <th className="py-3 px-3 text-right">Realized Return</th>
+                <th className="py-3 px-3 text-right">R-Multiple</th>
+                <th className="py-3 px-3 text-left">
+                  <span className="flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-cyan-400" />
+                    Entry & Close Time
+                  </span>
+                </th>
+                <th className="py-3 px-3 text-center">
+                  <span className="flex items-center justify-center gap-1">
+                    <Timer className="w-3 h-3 text-amber-400" />
+                    Duration
+                  </span>
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 bg-slate-950/50">
             {filteredTrades.map((t) => {
               const isCrypto = t.symbol === 'BTCUSDT' || t.symbol?.includes('BTC');
               const isGold = t.symbol === 'XAUUSD' || t.symbol === 'GOLD';
@@ -843,6 +847,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
           </tbody>
         </table>
       </div>
+      )}
 
       {/* Trade Reason & Confluence Checklist Modal Popup */}
       {selectedTradeReason && (

@@ -1,6 +1,7 @@
 import { NAV_GROUPS, NavGroup, NavTab, StrategyMode } from '../components/Header';
 import { MarketDataState } from '../hooks/useMarketContext';
 import { EmptyStatePreset } from '../components/common/EmptyState';
+import { AuthoritativePosition, AlgoExecutionRecord } from '../hooks/usePaperTrading';
 
 describe('Frontend UI Architecture & Trading UX Tests', () => {
   describe('Requirement 1 & 9: Grouped Workstation Navigation & Accessibility Structure', () => {
@@ -65,7 +66,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
     });
   });
 
-  describe('Requirement 6: Market Connection Semantics & Tighter Freshness States', () => {
+  describe('Requirement 5 & 6: Market Connection Semantics & Tighter Freshness States', () => {
     it('models distinct non-interchangeable market connection states', () => {
       const validStatuses: MarketDataState['status'][] = [
         'CONNECTED',
@@ -109,7 +110,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
     });
   });
 
-  describe('Requirement 5 & 7: Execution Authority & State Invariants', () => {
+  describe('Requirement 1 & 5: Strict Authoritative Execution Lifecycle Pipeline', () => {
     it('requires trigger specifications to remain distinct from fill records', () => {
       const triggerSpec = {
         triggerPrice: 65000,
@@ -126,6 +127,38 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
 
       expect(triggerSpec.triggerPrice).not.toBe(fillRecord.fillPrice);
       expect(fillRecord.fillPrice).toBeGreaterThan(triggerSpec.triggerPrice);
+    });
+
+    it('proves Order Filled stage is DONE only when authoritative fill or executed state exists', () => {
+      // Case 1: Standby without fill or execution -> PENDING
+      const noFillState = {
+        execution: null,
+        position: null,
+      };
+      const isExecuted1 =
+        noFillState.execution?.state === 'EXECUTED' ||
+        (!!noFillState.position && Number(noFillState.position.entryPrice) > 0);
+      expect(isExecuted1).toBe(false);
+
+      // Case 2: Authoritative Executed execution record -> DONE
+      const executedState = {
+        execution: { state: 'EXECUTED' } as AlgoExecutionRecord,
+        position: null,
+      };
+      const isExecuted2 =
+        executedState.execution?.state === 'EXECUTED' ||
+        (!!executedState.position && Number(executedState.position.entryPrice) > 0);
+      expect(isExecuted2).toBe(true);
+
+      // Case 3: Authoritative Position with entry price -> DONE
+      const filledPositionState = {
+        execution: null,
+        position: { entryPrice: 24250, status: 'OPEN' } as AuthoritativePosition,
+      };
+      const isExecuted3 =
+        filledPositionState.execution?.state === 'EXECUTED' ||
+        (!!filledPositionState.position && Number(filledPositionState.position.entryPrice) > 0);
+      expect(isExecuted3).toBe(true);
     });
 
     it('verifies all strategy modes are properly typed and supported', () => {

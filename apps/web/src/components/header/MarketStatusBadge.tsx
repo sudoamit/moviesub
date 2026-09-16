@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Wifi, WifiOff, AlertTriangle, RefreshCw } from 'lucide-react';
+import { WifiOff, AlertTriangle, RefreshCw, Clock } from 'lucide-react';
 import { MarketDataState } from '../../hooks/useMarketContext';
 
 interface MarketStatusBadgeProps {
@@ -15,10 +15,10 @@ export const MarketStatusBadge: React.FC<MarketStatusBadgeProps> = ({
 }) => {
   const status = marketDataState?.status || 'CONNECTED';
   const isStale = marketDataState?.isStale;
+  const latencyMs = marketDataState?.latencyMs;
   const provider = marketDataState?.providerId || 'FEED';
   const provenance = marketDataState?.dataProvenance || 'LIVE';
 
-  // Compute status presentation
   if (status === 'UNAVAILABLE') {
     return (
       <div
@@ -61,16 +61,17 @@ export const MarketStatusBadge: React.FC<MarketStatusBadgeProps> = ({
     );
   }
 
-  if (isStale) {
+  if (isStale || status === 'STALE') {
+    const ageStr = latencyMs ? `${(latencyMs / 1000).toFixed(1)}s old` : 'Stale Feed';
     return (
       <div
         role="status"
         aria-label="Market Data Connected Stale"
-        title={`Provider: ${provider} | Provenance: ${provenance} | Status: Stale Feed`}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-panel border border-amber-500/30 text-xs font-mono ${className}`}
+        title={`Provider: ${provider} | Provenance: ${provenance} | Data is ${ageStr}`}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-panel border border-amber-500/40 text-xs font-mono ${className}`}
       >
-        <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
-        <span className="text-[11px] font-bold text-amber-400">CONNECTED · STALE</span>
+        <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+        <span className="text-[11px] font-bold text-amber-400">STALE · {ageStr}</span>
       </div>
     );
   }
