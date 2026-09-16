@@ -29,6 +29,9 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
   beforeEach(async () => {
     if (prismaClient) {
       try {
+        await prismaClient.tradeDecision.deleteMany({
+          where: { symbol: 'BTCUSDT' },
+        });
         await prismaClient.algoBotExecution.deleteMany({
           where: { symbol: 'BTCUSDT' },
         });

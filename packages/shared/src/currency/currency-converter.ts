@@ -64,6 +64,7 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
     if (!record || typeof record.rate !== 'number' || !Number.isFinite(record.rate) || record.rate <= 0) {
       throw new Error(`INVALID_FX_RATE: Rate must be a positive finite number, got ${record?.rate}`);
     }
+    this.explicitlyCleared = false;
     const pairKey = this.normalizePair(record.pair);
     const existing = this.rateHistory.get(pairKey) || [];
     existing.push({
@@ -239,9 +240,14 @@ export class PointInTimeCurrencyConverter implements ICurrencyConverter {
    * Helper for deterministic test fixtures to register mock rates in bulk.
    */
   public seedFixtureRates(rates: IFxRateRecord[]): void {
+    if (this.explicitlyCleared) return;
     for (const r of rates) {
       this.registerRate(r);
     }
+  }
+
+  public isExplicitlyCleared(): boolean {
+    return this.explicitlyCleared;
   }
 }
 

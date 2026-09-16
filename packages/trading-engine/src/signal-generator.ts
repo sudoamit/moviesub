@@ -77,7 +77,26 @@ export class SignalGenerator {
       );
     }
 
-    // 2. Fail-Closed Invariant: Both HTF1 (H1) and HTF2 (H4) Confirmations are Required for Production Signal Generation
+    // 2. Strict Point-in-Time HTF Alignment Invariants (Lookahead Rejection)
+    if (options.htf1Snapshot) {
+      const htf1ClosedMs = options.htf1Snapshot.closedThroughTimestamp.getTime();
+      if (htf1ClosedMs > decisionTimeMs) {
+        throw new Error(
+          `HTF_LOOKAHEAD_VIOLATION: HTF1 closedThroughTimestamp (${options.htf1Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
+        );
+      }
+    }
+
+    if (options.htf2Snapshot) {
+      const htf2ClosedMs = options.htf2Snapshot.closedThroughTimestamp.getTime();
+      if (htf2ClosedMs > decisionTimeMs) {
+        throw new Error(
+          `HTF_LOOKAHEAD_VIOLATION: HTF2 closedThroughTimestamp (${options.htf2Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
+        );
+      }
+    }
+
+    // 3. Fail-Closed Invariant: Both HTF1 (H1) and HTF2 (H4) Confirmations are Required for Production Signal Generation
     const missingHtfs: string[] = [];
     if (!options.htf1Snapshot || !options.htf1Snapshot.candles || options.htf1Snapshot.candles.length === 0) {
       missingHtfs.push('H1');
@@ -127,25 +146,6 @@ export class SignalGenerator {
         } as any,
         triggerEvidence: {},
       };
-    }
-
-    // 3. Strict Point-in-Time HTF Alignment Invariants
-    if (options.htf1Snapshot) {
-      const htf1ClosedMs = options.htf1Snapshot.closedThroughTimestamp.getTime();
-      if (htf1ClosedMs > decisionTimeMs) {
-        throw new Error(
-          `HTF_LOOKAHEAD_VIOLATION: HTF1 closedThroughTimestamp (${options.htf1Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
-        );
-      }
-    }
-
-    if (options.htf2Snapshot) {
-      const htf2ClosedMs = options.htf2Snapshot.closedThroughTimestamp.getTime();
-      if (htf2ClosedMs > decisionTimeMs) {
-        throw new Error(
-          `HTF_LOOKAHEAD_VIOLATION: HTF2 closedThroughTimestamp (${options.htf2Snapshot.closedThroughTimestamp.toISOString()}) exceeds execution decision boundary (${decisionTimestamp.toISOString()})`,
-        );
-      }
     }
 
     // 3. Delegate to canonical execution using confirmed immutable snapshot candles

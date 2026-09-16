@@ -2,19 +2,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 describe('Architectural Data Authority & Single Aggregation Implementation Test', () => {
-  const pagePath = path.resolve(__dirname, '../../../../apps/web/src/app/page.tsx');
+  const hookPath = path.resolve(__dirname, '../../../../apps/web/src/hooks/useMarketContext.ts');
   const chartPath = path.resolve(__dirname, '../../../../apps/web/src/components/TradingChart.tsx');
 
-  test('P0 Authority: page.tsx delegates live tick aggregation exclusively to CanonicalCandleAggregator', () => {
-    const pageContent = fs.readFileSync(pagePath, 'utf8');
+  test('P0 Authority: useMarketContext.ts delegates live tick aggregation exclusively to CanonicalCandleAggregator', () => {
+    const hookContent = fs.readFileSync(hookPath, 'utf8');
 
-    // Assert CanonicalCandleAggregator is imported and invoked via aggregatorRef in page.tsx
-    expect(pageContent).toContain('CanonicalCandleAggregator');
-    expect(pageContent).toContain('aggregatorRef.current.processTick');
+    // Assert CanonicalCandleAggregator is imported and invoked via aggregatorRef in useMarketContext.ts
+    expect(hookContent).toContain('CanonicalCandleAggregator');
+    expect(hookContent).toContain('aggregatorRef.current.processTick');
 
-    // Assert page.tsx does NOT independently perform bucket calculation or manual forming candle construction
-    expect(pageContent).not.toContain('isRollover');
-    expect(pageContent).not.toContain('Math.max(currentForming.high, liveP)');
+    // Assert does NOT independently perform bucket calculation or manual forming candle construction
+    expect(hookContent).not.toContain('isRollover');
+    expect(hookContent).not.toContain('Math.max(currentForming.high, liveP)');
   });
 
   test('P0 Authority: TradingChart.tsx only consumes canonical snapshot state without tick aggregation logic', () => {

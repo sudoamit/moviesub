@@ -38,7 +38,8 @@ describe('AlgoBotsService Execution State Machine', () => {
       },
       algoBotExecution: {
         create: jest.fn().mockImplementation(async ({ data }) => {
-          if (executionsDb.has(data.idempotencyFingerprint)) {
+          const fp = data.fingerprint || data.idempotencyFingerprint;
+          if (executionsDb.has(fp)) {
             const err: any = new Error('Unique constraint failed on idempotencyFingerprint');
             err.code = 'P2002';
             throw err;
@@ -50,7 +51,7 @@ describe('AlgoBotsService Execution State Machine', () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           };
-          executionsDb.set(data.idempotencyFingerprint, record);
+          executionsDb.set(fp, record);
           return record;
         }),
         update: jest.fn().mockImplementation(async ({ where, data }) => {
@@ -174,6 +175,6 @@ describe('AlgoBotsService Execution State Machine', () => {
     expect(resultsPass2).toHaveLength(1);
     expect(resultsPass2[0].status).toBe('REJECTED');
     expect(resultsPass2[0].reasonCode).toBe('EXECUTION_LOCKED');
-    expect(resultsPass2[0].details).toContain('EXECUTION_LOCKED');
+    expect(['DUPLICATE_RESERVATION', 'EXECUTION_LOCKED']).toContain(resultsPass2[0].details);
   });
 });

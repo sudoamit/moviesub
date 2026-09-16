@@ -22,7 +22,10 @@ import {
   SignalState,
   StaleMarketDataError,
   Timeframe,
+  TradeDecisionType,
+  TradeLifecycleState,
 } from '@quant/shared';
+import { TradeDecisionService } from './trade-decision.service';
 import * as crypto from 'crypto';
 
 export enum ExecutionFailureReason {
@@ -55,6 +58,10 @@ export interface IAlgoBotExecutionResult {
   details?: string;
   executionId?: string;
   orderPositionId?: string;
+  tradeDecisionId?: string;
+  decision?: 'TAKE' | 'REJECT';
+  lifecycleState?: string;
+  correlationId?: string;
 }
 
 export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
@@ -293,7 +300,11 @@ export class AlgoBotsService implements OnModuleInit {
     private readonly alertsService: AlertsService,
     @Optional() private readonly prisma?: PrismaService,
     @Optional() private readonly redis?: RedisService,
+    @Optional() private tradeDecisionService?: TradeDecisionService,
   ) {
+    if (!this.tradeDecisionService) {
+      this.tradeDecisionService = new TradeDecisionService(this.prisma);
+    }
     this.logger.log('Algo Strategy Studio Service Initialized.');
   }
 
@@ -1520,6 +1531,8 @@ export class AlgoBotsService implements OnModuleInit {
         symbol: signal.symbol,
         status: 'REJECTED',
         reasonCode: reason,
+        decision: 'REJECT',
+        lifecycleState: TradeLifecycleState.ELIGIBILITY_EVALUATED,
         details:
           'Signal setup fails strict canonical timestamp invariant (canonicalCandleTime required and must equal canonicalDecisionTime.getTime())',
       });
@@ -1537,12 +1550,37 @@ export class AlgoBotsService implements OnModuleInit {
         `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
       );
 
-      const diag = await this.evaluateBotForSignalDiagnostics(bot, signal);
-      const isRejected = !diag.matches;
-      const primaryReason = diag.reasons[0] || 'UNKNOWN';
+      // Fetch Live Portfolio & Live Market Quote for Pre-Trade Decision Evaluation
+      let portfolio = null;
+      let portfolioError: any = null;
+      try {
+        portfolio = await this.paperTradingService.getPortfolio();
+      } catch (err: any) {
+        portfolioError = err;
+      }
 
-      if (isRejected) {
-        if (diag.reasons.length === 1 && diag.reasons[0] === 'AUTO_EXECUTE_DISABLED') {
+      let liveQuote = null;
+      let liveQuoteError: any = null;
+      try {
+        liveQuote = await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+      } catch (err: any) {
+        liveQuoteError = err;
+      }
+
+      // 1. Authoritative Pre-Trade Decision Evaluation
+      const decisionResult = this.tradeDecisionService!.evaluatePreTradeDecision({
+        bot,
+        signal,
+        portfolio,
+        portfolioError,
+        liveQuote,
+        liveQuoteError,
+      } as any);
+
+      const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, signal);
+
+      if (decisionResult.decision === TradeDecisionType.REJECT) {
+        if (decisionResult.decisionReasonCode === 'AUTO_EXECUTE_DISABLED') {
           this.lastExecutionRejectionReason = 'AUTO_EXECUTE_PAPER_DISABLED';
           await this.recordBotTrigger(bot.id, signal);
           this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
@@ -1552,11 +1590,23 @@ export class AlgoBotsService implements OnModuleInit {
             status: 'SKIPPED',
             reasonCode: 'AUTO_EXECUTE_PAPER_DISABLED',
             details: `Bot '${bot.id}' autoExecutePaper is false`,
+            decision: 'REJECT',
+            lifecycleState: TradeLifecycleState.ELIGIBILITY_EVALUATED,
+            correlationId: fingerprint,
           });
           continue;
         }
 
-        this.lastExecutionRejectionReason = primaryReason;
+        // Commit REJECT trade decision to DB
+        const commitRes = await this.tradeDecisionService!.commitTradeDecisionAndReservation({
+          bot,
+          signal,
+          decisionResult,
+          fingerprint,
+          correlationId: fingerprint,
+        });
+
+        this.lastExecutionRejectionReason = decisionResult.decisionReasonCode;
         this.logger.warn(
           `[ALGO EXECUTION DECISION]\n` +
             `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
@@ -1565,187 +1615,70 @@ export class AlgoBotsService implements OnModuleInit {
             `canonicalCandle=${canonicalCandleFormatted}\n` +
             `bot=${bot.id}\n` +
             `result=REJECTED\n` +
-            `reason=${primaryReason}`,
+            `reason=${decisionResult.decisionReasonCode}`,
         );
+
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
           status: 'REJECTED',
-          reasonCode: primaryReason,
-          details: `Diagnostic check failed: ${diag.reasons.join(', ')}`,
+          reasonCode: decisionResult.decisionReasonCode,
+          details: decisionResult.decisionReason,
+          tradeDecisionId: commitRes.tradeDecisionId,
+          decision: 'REJECT',
+          lifecycleState: commitRes.lifecycleState,
+          correlationId: fingerprint,
         });
         continue;
       }
 
-      // Log candidate status prior to order placement
-      this.logger.warn(
-        `[ALGO EXECUTION DECISION]\n` +
-          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
-          `signal=${signal.state}\n` +
-          `score=${signal.score}\n` +
-          `canonicalCandle=${canonicalCandleFormatted}\n` +
-          `bot=${bot.id}\n` +
-          `result=READY_TO_EXECUTE\n` +
-          `reason=DIAGNOSTICS_PASSED`,
-      );
-
-      // 1. Validate Bot Active & Signal Eligibility (ACTIVE state, trade levels, freshness)
-      const eligibility = this.validateExecutionEligibility(bot, signal);
-      if (!eligibility.matches) {
-        const reason = eligibility.reasonCode || 'ELIGIBILITY_FAILED';
-        this.lastExecutionRejectionReason = reason;
-        this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' eligibility failed for ${signal.symbol}: ${reason}`,
-        );
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: reason,
-          details: eligibility.details,
-        });
-        continue;
-      }
-
-      // 2. Authoritative Strategy Matching (Symbol, Timeframe, Direction, MinScore, Canonical SMC Evidence)
-      const match = this.matchesBotStrategy(bot, signal);
-      if (!match.matches) {
-        const reason = match.reasonCode || 'STRATEGY_MISMATCH';
-        this.lastExecutionRejectionReason = reason;
-        this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' strategy mismatch for ${signal.symbol}: ${reason}`,
-        );
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: reason,
-          details: match.details,
-        });
-        continue;
-      }
-
-      // P0 #3: NEVER RESERVE BEFORE autoExecutePaper CHECK
-      if (!bot.autoExecutePaper) {
-        this.lastExecutionRejectionReason = 'AUTO_EXECUTE_PAPER_DISABLED';
-        this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
-        await this.recordBotTrigger(bot.id, signal);
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'SKIPPED',
-          reasonCode: 'AUTO_EXECUTE_PAPER_DISABLED',
-          details: `Bot '${bot.id}' autoExecutePaper is false`,
-        });
-        continue;
-      }
-
-      // 🔴 #9: Check Bot Position Scope Guard BEFORE DB Reservation to prevent consuming reservation rows
-      try {
-        const portfolio = await this.paperTradingService.getPortfolio();
-        const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
-        if (alreadyOpen) {
-          this.lastExecutionRejectionReason = 'POSITION_ALREADY_OPEN';
-          this.logger.warn(
-            `[ALGO EXECUTION REJECTED] Bot '${bot.id}' already has an open position for ${bot.symbol}`,
-          );
-          results.push({
-            botId: bot.id,
-            symbol: bot.symbol,
-            status: 'REJECTED',
-            reasonCode: 'POSITION_ALREADY_OPEN',
-            details: `Position for '${bot.symbol}' is already open in paper portfolio`,
-          });
-          continue;
-        }
-      } catch (err: any) {
-        const reason = `PORTFOLIO_CHECK_FAILED: ${err?.message || err}`;
-        this.lastExecutionRejectionReason = reason;
-        this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' portfolio check failed for ${bot.symbol}: ${reason}`,
-        );
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: 'PORTFOLIO_CHECK_FAILED',
-          details: String(err?.message || err),
-        });
-        continue;
-      }
-
-      // 3. 🟠 #13: Early Live Market Data Availability Check (Eligibility Gate)
-      try {
-        await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
-      } catch (err: any) {
-        const reason = `MARKET_PRICE_UNAVAILABLE: ${err?.message || err}`;
-        this.lastExecutionRejectionReason = reason;
-        this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' market price check failed for ${bot.symbol}: ${reason}`,
-        );
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: 'MARKET_PRICE_UNAVAILABLE',
-          details: String(err?.message || err),
-        });
-        continue;
-      }
-
-      // 4. P0 #4 & P1 #12: Resolve Order Quantity via Authoritative Instrument Registry
-      let quantity: number;
-      try {
-        const instrument = getAuthoritativeInstrument(bot.symbol);
-        quantity = this.resolveBotOrderQuantity(bot, instrument);
-      } catch (err: any) {
-        const reason = `QUANTITY_RESOLUTION_FAILED: ${err?.message || err}`;
-        this.lastExecutionRejectionReason = reason;
-        this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' quantity resolution failed for ${bot.symbol}: ${reason}`,
-        );
-        results.push({
-          botId: bot.id,
-          symbol: bot.symbol,
-          status: 'REJECTED',
-          reasonCode: 'QUANTITY_RESOLUTION_FAILED',
-          details: String(err?.message || err),
-        });
-        continue;
-      }
-
-      // 5. P0 #1: Compute Versioned Fingerprint & Reserve Execution Lock via Database `@unique` constraint
-      const fingerprint = this.getSignalFingerprint(bot, signal);
-
+      // 2. Decision is TAKE -> Atomically Commit Trade Decision & Reserve Execution Lock
       this.logger.log(
-        `[PIPELINE TRACE 5/6] Reserving execution lock: bot=${bot.id}, fingerprint=${fingerprint}`,
+        `[PIPELINE TRACE 5/6] Committing trade decision & reservation: bot=${bot.id}, fingerprint=${fingerprint}`,
       );
 
-      const reservation = await this.reserveExecutionLock(bot, signal, fingerprint);
+      const commitRes = await this.tradeDecisionService!.commitTradeDecisionAndReservation({
+        bot,
+        signal,
+        decisionResult,
+        fingerprint,
+        correlationId: fingerprint,
+      });
 
-      if (!reservation.success || !reservation.executionId) {
-        const reason = `EXECUTION_LOCKED: ${reservation.reason}`;
+      if (commitRes.isDuplicate || !commitRes.executionId) {
+        const reason = 'EXECUTION_LOCKED';
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(
-          `[ALGO EXECUTION REJECTED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: ${reservation.reason})`,
+          `[ALGO EXECUTION REJECTED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: DUPLICATE_RESERVATION)`,
         );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
           status: 'REJECTED',
-          reasonCode: 'EXECUTION_LOCKED',
-          details: reservation.reason,
+          reasonCode: reason,
+          details: 'DUPLICATE_RESERVATION',
+          tradeDecisionId: commitRes.tradeDecisionId,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.RESERVATION_FAILED,
+          correlationId: fingerprint,
         });
         continue;
       }
 
-      const executionId = reservation.executionId;
+      const executionId = commitRes.executionId;
+      const tradeDecisionId = commitRes.tradeDecisionId;
       await this.recordBotTrigger(bot.id, signal);
 
-      // 6. P0 #2: Execution State Machine Lifecycle Management
+      // 3. Execution State Machine Lifecycle Management
+      const quantity = decisionResult.plannedLevels?.quantity || 1;
       try {
         this.lastExecutionAttempt = new Date();
         await this.markExecutionStarted(executionId);
+        await this.tradeDecisionService!.updateTradeLifecycleState(
+          tradeDecisionId,
+          TradeLifecycleState.ORDER_SUBMITTED,
+          { executionId },
+        );
 
         this.logger.log(
           `[PIPELINE TRACE 5.1/6] Marked execution started: executionId=${executionId}`,
@@ -1772,6 +1705,12 @@ export class AlgoBotsService implements OnModuleInit {
         });
 
         await this.markExecutionExecuted(executionId, orderResult.id);
+        await this.tradeDecisionService!.updateTradeLifecycleState(
+          tradeDecisionId,
+          TradeLifecycleState.POSITION_OPENED,
+          { executionId, orderPositionId: orderResult.id },
+        );
+
         this.lastExecutionSuccess = new Date();
 
         this.logger.warn(
@@ -1800,6 +1739,10 @@ export class AlgoBotsService implements OnModuleInit {
           reasonCode: 'ORDER_PLACED_SUCCESSFULLY',
           executionId,
           orderPositionId: orderResult.id,
+          tradeDecisionId,
+          decision: 'TAKE',
+          lifecycleState: TradeLifecycleState.POSITION_OPENED,
+          correlationId: fingerprint,
         });
       } catch (e: any) {
         const classification = classifyExecutionFailure(e);
@@ -1809,6 +1752,12 @@ export class AlgoBotsService implements OnModuleInit {
           e.stack,
         );
         await this.markExecutionFailed(executionId, e, classification);
+        await this.tradeDecisionService!.updateTradeLifecycleState(
+          tradeDecisionId,
+          TradeLifecycleState.TRADE_FAILED,
+          { executionId },
+        );
+
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1816,6 +1765,10 @@ export class AlgoBotsService implements OnModuleInit {
           reasonCode: classification.reasonCode,
           details: classification.message,
           executionId,
+          tradeDecisionId,
+          decision: 'TAKE',
+          lifecycleState: TradeLifecycleState.TRADE_FAILED,
+          correlationId: fingerprint,
         });
       }
     }
