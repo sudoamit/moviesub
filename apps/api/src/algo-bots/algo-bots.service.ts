@@ -671,7 +671,7 @@ export class AlgoBotsService implements OnModuleInit {
    * P0 #8 & P1 #8: Canonical Decision Fingerprint Generator with Bot Configuration Versioning
    */
   public getSignalFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
-    const canonicalTimeRaw = (signal as any).canonicalCandleTime || (signal as any).candleTimestamp || signal.timestamp || signal.createdAt || new Date();
+    const canonicalTimeRaw = signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
     const signalTimeMs = new Date(canonicalTimeRaw).getTime();
     const normTf = this.normalizeTimeframe(signal.timeframe);
     const normSymbol = bot.symbol.toUpperCase();
@@ -679,7 +679,7 @@ export class AlgoBotsService implements OnModuleInit {
 
     const tfMs = this.getMaxSignalAgeMs(normTf);
     // Use canonical candle timestamp if present; otherwise fall back to timeframe floor boundary
-    const canonicalCandleBoundaryMs = (signal as any).canonicalCandleTime || (Math.floor(signalTimeMs / tfMs) * tfMs);
+    const canonicalCandleBoundaryMs = signal.canonicalCandleTime || (Math.floor(signalTimeMs / tfMs) * tfMs);
 
     // Strategy configuration hash to uniquely represent bot parameters
     const configHash = crypto
@@ -689,6 +689,97 @@ export class AlgoBotsService implements OnModuleInit {
       .substring(0, 8);
 
     return `bot_exec:${bot.id}:v${configHash}:${normSymbol}:${normTf}:${normDir}:${canonicalCandleBoundaryMs}`;
+  }
+
+  /**
+   * P0 #1, #2, #3: Single-Authority Atomic Conditional Execution State Transition Helper
+   *
+   * Enforces strict state machine flow:
+   *   RESERVED  -> EXECUTING
+   *   EXECUTING -> EXECUTED
+   *   EXECUTING (or RESERVED) -> FAILED_RETRYABLE / FAILED_FINAL
+   *   FAILED_RETRYABLE        -> RESERVED (Clean Retry Reset)
+   *
+   * Rejects any transition if current state does not match expectedState(s).
+   */
+  public async transitionExecutionState(
+    executionId: string,
+    expectedStates: 'RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL' | ('RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL')[],
+    targetState: 'RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL',
+    updateData?: {
+      orderPositionId?: string | null;
+      failureReason?: string | null;
+    },
+  ): Promise<{ success: boolean; count: number }> {
+    if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) {
+      return { success: true, count: 1 };
+    }
+
+    const expectedArray = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
+
+    const data: any = {
+      state: targetState,
+      updatedAt: new Date(),
+    };
+
+    if (targetState === 'EXECUTING') {
+      data.startedAt = new Date();
+    } else if (targetState === 'EXECUTED') {
+      data.completedAt = new Date();
+      if (updateData?.orderPositionId !== undefined) {
+        data.orderPositionId = updateData.orderPositionId;
+      }
+    } else if (targetState === 'FAILED_RETRYABLE' || targetState === 'FAILED_FINAL') {
+      data.failedAt = new Date();
+      data.failureReason = updateData?.failureReason || null;
+    } else if (targetState === 'RESERVED') {
+      // P0 #4: Clean retry reset invariant — clear all transient failure & execution data
+      data.failureReason = null;
+      data.failedAt = null;
+      data.startedAt = null;
+      data.completedAt = null;
+      data.orderPositionId = null;
+    }
+
+    try {
+      const result = await this.prisma.algoBotExecution.updateMany({
+        where: {
+          id: executionId,
+          state: { in: expectedArray as any },
+        },
+        data,
+      });
+
+      if (result.count === 0) {
+        this.logger.error(
+          `Invalid state transition for execution '${executionId}': expected state [${expectedArray.join(', ')}], target '${targetState}'`,
+        );
+        throw new InternalServerErrorException(
+          `STATE_TRANSITION_REJECTED: Execution '${executionId}' is not in expected state [${expectedArray.join(', ')}] for transition to ${targetState}`,
+        );
+      }
+
+      // If transitioning to FAILED_RETRYABLE, purge in-memory lock
+      if (targetState === 'FAILED_RETRYABLE') {
+        const execution = await this.prisma.algoBotExecution.findUnique({
+          where: { id: executionId },
+          select: { fingerprint: true },
+        });
+        if (execution?.fingerprint) {
+          this.inMemoryLocks.delete(execution.fingerprint);
+        }
+      }
+
+      return { success: true, count: result.count };
+    } catch (err: any) {
+      if (err instanceof InternalServerErrorException) {
+        throw err;
+      }
+      this.logger.error(`Database error during state transition for ${executionId}: ${err.message}`);
+      throw new InternalServerErrorException(
+        `Execution state transition to ${targetState} failed: ${err.message}`,
+      );
+    }
   }
 
   /**
@@ -703,7 +794,7 @@ export class AlgoBotsService implements OnModuleInit {
       return { success: false, reason: 'LOCAL_LOCK_ACTIVE' };
     }
 
-    const signalTimestamp = (signal as any).canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
+    const signalTimestamp = signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
 
     if (this.prisma) {
       try {
@@ -730,27 +821,17 @@ export class AlgoBotsService implements OnModuleInit {
             where: { fingerprint },
           });
 
-          // Atomic retry state transition via updateMany (prevents retry race conditions)
+          // Atomic retry state transition via updateMany (prevents retry race conditions & restores clean RESERVED state)
           if (existing && existing.state === 'FAILED_RETRYABLE') {
-            const updateResult = await this.prisma.algoBotExecution.updateMany({
-              where: {
-                id: existing.id,
-                state: 'FAILED_RETRYABLE',
-              },
-              data: {
-                state: 'RESERVED',
-                failureReason: null,
-                failedAt: null,
-                updatedAt: new Date(),
-              },
-            });
-
-            if (updateResult.count === 1) {
-              this.inMemoryLocks.add(fingerprint);
-              return { success: true, executionId: existing.id };
+            try {
+              const res = await this.transitionExecutionState(existing.id, 'FAILED_RETRYABLE', 'RESERVED');
+              if (res.count === 1) {
+                this.inMemoryLocks.add(fingerprint);
+                return { success: true, executionId: existing.id };
+              }
+            } catch {
+              // Retry race lost (another worker already claimed or transitioned state)
             }
-
-            // Another concurrent worker/process claimed the retry transition first
             this.inMemoryLocks.add(fingerprint);
             return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
           }
@@ -775,52 +856,21 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Executing (Must throw on DB error)
+   * P0 #1: Atomic Conditional Lifecycle Transition — Mark Executing (RESERVED -> EXECUTING)
    */
   public async markExecutionStarted(executionId: string): Promise<void> {
-    if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
-      try {
-        await this.prisma.algoBotExecution.update({
-          where: { id: executionId },
-          data: {
-            state: 'EXECUTING',
-            startedAt: new Date(),
-          },
-        });
-      } catch (err: any) {
-        this.logger.error(`Failed to update execution state to EXECUTING (${executionId}): ${err.message}`);
-        throw new InternalServerErrorException(
-          `Execution state transition to EXECUTING failed: ${err.message}`,
-        );
-      }
-    }
+    await this.transitionExecutionState(executionId, 'RESERVED', 'EXECUTING');
   }
 
   /**
-   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Executed (Must throw on DB error)
+   * P0 #1: Atomic Conditional Lifecycle Transition — Mark Executed (EXECUTING -> EXECUTED)
    */
   public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
-    if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
-      try {
-        await this.prisma.algoBotExecution.update({
-          where: { id: executionId },
-          data: {
-            state: 'EXECUTED',
-            orderPositionId: orderPositionId || null,
-            completedAt: new Date(),
-          },
-        });
-      } catch (err: any) {
-        this.logger.error(`Failed to update execution state to EXECUTED (${executionId}): ${err.message}`);
-        throw new InternalServerErrorException(
-          `Execution state transition to EXECUTED failed: ${err.message}`,
-        );
-      }
-    }
+    await this.transitionExecutionState(executionId, 'EXECUTING', 'EXECUTED', { orderPositionId });
   }
 
   /**
-   * P0 #2 & 🔴 #1: Failure-Safe Lifecycle State Transition — Mark Failed (Must throw on DB error)
+   * P0 #1 & #3: Atomic Conditional Lifecycle Transition — Mark Failed ([EXECUTING, RESERVED] -> FAILED_RETRYABLE / FAILED_FINAL)
    */
   public async markExecutionFailed(executionId: string, err: any, reasonCode?: string): Promise<void> {
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
@@ -831,6 +881,8 @@ export class AlgoBotsService implements OnModuleInit {
       err instanceof StaleMarketDataError ||
       err?.name === 'MarketDataUnavailableError' ||
       err?.name === 'StaleMarketDataError' ||
+      err?.code === 'MARKET_DATA_UNAVAILABLE' ||
+      err?.code === 'STALE_MARKET_DATA' ||
       err?.message?.includes('MarketDataUnavailableError') ||
       err?.message?.includes('StaleMarketDataError') ||
       err?.message?.includes('streamer') ||
@@ -840,29 +892,16 @@ export class AlgoBotsService implements OnModuleInit {
       isRetryable = true;
     }
 
-    const state = isRetryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
+    const targetState = isRetryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
     const codePrefix = reasonCode ? `[${reasonCode}] ` : '';
     const failureReason = `${codePrefix}${err?.message || String(err)}`;
 
-    try {
-      const updated = await this.prisma.algoBotExecution.update({
-        where: { id: executionId },
-        data: {
-          state,
-          failedAt: new Date(),
-          failureReason,
-        },
-      });
-
-      if (isRetryable) {
-        this.inMemoryLocks.delete(updated.fingerprint);
-      }
-    } catch (dbErr: any) {
-      this.logger.error(`Failed to record execution failure state (${executionId}): ${dbErr.message}`);
-      throw new InternalServerErrorException(
-        `Execution state transition to FAILED failed: ${dbErr.message}`,
-      );
-    }
+    await this.transitionExecutionState(
+      executionId,
+      ['EXECUTING', 'RESERVED'],
+      targetState,
+      { failureReason },
+    );
   }
 
   private async recordBotTrigger(botId: string, signal: ISignalSetup): Promise<void> {
@@ -877,8 +916,8 @@ export class AlgoBotsService implements OnModuleInit {
             lastTriggerDetails: details,
           },
         });
-      } catch {
-        // ignore trigger count increment error
+      } catch (err: any) {
+        this.logger.warn(`[TELEMETRY_WARNING] Failed to increment bot trigger count for ${botId}: ${err.message}`);
       }
     }
   }

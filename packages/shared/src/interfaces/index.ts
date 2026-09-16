@@ -298,6 +298,7 @@ export interface ISignalSetup {
   pnlAmount?: number;
   pnlRMultiple?: number;
   timestamp?: Date;
+  canonicalCandleTime?: number;
   createdAt?: Date;
   quantSnapshot?: any;
   quantScore?: any;

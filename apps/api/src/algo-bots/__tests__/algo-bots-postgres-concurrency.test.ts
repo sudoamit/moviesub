@@ -540,4 +540,105 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
     const fingerprint = algoBotsServiceA.getSignalFingerprint(bot, signal);
     expect(fingerprint).toContain(`:1700000000000`);
   });
+
+  it('9. Invalid State Transition Protection — attempting to transition an EXECUTED row to EXECUTING or FAILED throws exception', async () => {
+    if (!DB_URL) return;
+
+    const botId = `bot_invalid_tr_${Date.now()}`;
+    await prismaA.algoBot.create({
+      data: {
+        id: botId,
+        name: 'Invalid Transition Bot',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        timeframe: '15m',
+        isActive: true,
+        autoExecutePaper: true,
+        minScore: 70,
+        lots: 1,
+        smcCondition: 'ANY_CONFLUENCE',
+      },
+    });
+
+    const bot: IAlgoBot = {
+      id: botId,
+      name: 'Invalid Transition Bot',
+      symbol: 'BTCUSDT',
+      direction: 'BULLISH',
+      timeframe: '15m',
+      isActive: true,
+      autoExecutePaper: true,
+      minScore: 70,
+      lots: 1,
+      smcCondition: 'ANY_CONFLUENCE',
+      configVersion: 'v1.0.0',
+      notifyWebhook: false,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    };
+
+    const now = Date.now();
+    const signal: ISignalSetup = {
+      id: `sig_invalid_tr_${Date.now()}`,
+      symbol: 'BTCUSDT',
+      direction: Direction.BULLISH,
+      grade: SignalGrade.A_PLUS,
+      score: 85,
+      entryZone: { min: 49900, max: 50100, optimal: 50000 },
+      stopLoss: 49500,
+      takeProfits: { tp1: 51000, tp2: 52000, tp3: 53000 },
+      riskRewardRatios: { rr1: 2.0, rr2: 4.0, rr3: 6.0 },
+      timeframe: Timeframe.M15,
+      timestamp: now as any,
+      canonicalCandleTime: Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000),
+      state: SignalState.ACTIVE,
+      triggerEvidence: {
+        fvg: { matched: true, timestamp: new Date(now) },
+      },
+      reasoning: {
+        htfStructure: 'Bullish',
+        liquidityReason: 'Swept',
+        triggerReason: 'FVG',
+        invalidationReason: 'SL',
+        confirmedChecklist: ['FVG'],
+        summary: 'Bullish FVG',
+      },
+      scoreBreakdown: {
+        htfBias: 20,
+        liquiditySweep: 15,
+        bos: 15,
+        fvg: 20,
+        orderBlock: 0,
+        displacement: 10,
+        volumeConfirmation: 5,
+        premiumDiscount: 0,
+        riskReward: 0,
+        indicatorAlignment: 0,
+        totalScore: 85,
+        grade: SignalGrade.A_PLUS,
+      },
+    };
+
+    const fingerprint = algoBotsServiceA.getSignalFingerprint(bot, signal);
+
+    try {
+      const res = await algoBotsServiceA.reserveExecutionLock(bot, signal, fingerprint);
+      const execId = res.executionId!;
+
+      await algoBotsServiceA.markExecutionStarted(execId);
+      await algoBotsServiceA.markExecutionExecuted(execId, 'ord_done_1');
+
+      // Attempting to transition EXECUTED row back to EXECUTING or FAILED must throw InternalServerErrorException
+      await expect(algoBotsServiceA.markExecutionStarted(execId)).rejects.toThrow(
+        InternalServerErrorException,
+      );
+
+      await expect(algoBotsServiceA.markExecutionFailed(execId, new Error('Stale failure'))).rejects.toThrow(
+        InternalServerErrorException,
+      );
+    } finally {
+      await prismaA.algoBotExecution.deleteMany({ where: { fingerprint } });
+      await prismaA.algoBot.deleteMany({ where: { id: botId } });
+    }
+  });
 });
