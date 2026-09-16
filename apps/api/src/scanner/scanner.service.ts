@@ -54,6 +54,33 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    // Distributed Leader Election Lock for Multi-Instance API Deployments (8s TTL)
+    const lockKey = `scanner:master_lock:${timeframe}`;
+    const lockId = `instance_${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
+    const redisClient = this.redis.getClient();
+
+    if (redisClient && redisClient.status === 'ready') {
+      try {
+        const setRes = await redisClient.set(lockKey, lockId, 'PX', 8000, 'NX');
+        if (!setRes) {
+          this.logger.debug(
+            `[SCANNER_FOLLOWER_SKIPPED] Scanner leader lease held by another API instance. Skipping trigger.`,
+          );
+          return {
+            timestamp: new Date().toISOString(),
+            timeframe,
+            scannedCount: 0,
+            signalsFound: 0,
+            durationMs: 0,
+            signals: [],
+            status: 'SKIPPED_FOLLOWER_INSTANCE',
+          };
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed acquiring Redis scanner master lock: ${err?.message || err}`);
+      }
+    }
+
     this.isScanning = true;
     this.algoBotsService.recordScanTime();
 
@@ -66,6 +93,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       let activeCount = 0;
       let rejectedByScoreCount = 0;
       let rejectedByBotCount = 0;
+      let failedCount = 0;
+      let skippedCount = 0;
       let executedCount = 0;
 
       const validSignals: typeof signals = [];
@@ -91,16 +120,22 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
               const executionResults = await this.algoBotsService.evaluateSignalForBots(sig);
 
               const executed = executionResults.filter((r) => r.status === 'EXECUTED');
+              const failed = executionResults.filter((r) => r.status === 'FAILED');
               const rejected = executionResults.filter((r) => r.status === 'REJECTED');
+              const skipped = executionResults.filter((r) => r.status === 'SKIPPED');
 
               if (executed.length > 0) {
                 executedCount += executed.length;
                 botResultSummary = `EXECUTED (${executed.map((e) => `bot:${e.botId} pos:${e.orderPositionId}`).join(', ')})`;
+              } else if (failed.length > 0) {
+                failedCount += failed.length;
+                botResultSummary = `FAILED (${failed.map((f) => `${f.botId}:${f.reasonCode}`).join(', ')})`;
               } else if (rejected.length > 0) {
                 rejectedByBotCount += rejected.length;
                 botResultSummary = `REJECTED (${rejected.map((r) => `${r.botId}:${r.reasonCode}`).join(', ')})`;
-              } else {
-                botResultSummary = `SKIPPED (${executionResults.map((r) => `${r.botId}:${r.reasonCode}`).join(', ')})`;
+              } else if (skipped.length > 0) {
+                skippedCount += skipped.length;
+                botResultSummary = `SKIPPED (${skipped.map((s) => `${s.botId}:${s.reasonCode}`).join(', ')})`;
               }
             } catch (err) {
               botResultSummary = `error (${(err as Error).message})`;
@@ -138,6 +173,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         activeCount,
         rejectedByScoreCount,
         rejectedByBotCount,
+        failedCount,
+        skippedCount,
         executedCount,
         durationMs: duration,
         signals: validSignals,

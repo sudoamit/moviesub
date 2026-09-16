@@ -77,8 +77,16 @@ export class SignalGenerator {
       );
     }
 
-    // 2. Fail-Closed Invariant: HTF1 Confirmation is Required for Production Signal Generation
+    // 2. Fail-Closed Invariant: Both HTF1 (H1) and HTF2 (H4) Confirmations are Required for Production Signal Generation
+    const missingHtfs: string[] = [];
     if (!options.htf1Snapshot || !options.htf1Snapshot.candles || options.htf1Snapshot.candles.length === 0) {
+      missingHtfs.push('H1');
+    }
+    if (!options.htf2Snapshot || !options.htf2Snapshot.candles || options.htf2Snapshot.candles.length === 0) {
+      missingHtfs.push('H4');
+    }
+
+    if (missingHtfs.length > 0) {
       const execCandles = execSnap.candles as ICandle[];
       const lastCandle = execCandles && execCandles.length > 0 ? execCandles[execCandles.length - 1] : null;
       const currentPrice = lastCandle ? lastCandle.close : 0;
@@ -99,14 +107,14 @@ export class SignalGenerator {
         takeProfits: { tp1: currentPrice, tp2: currentPrice, tp3: currentPrice },
         riskRewardRatios: { rr1: 0, rr2: 0, rr3: 0 },
         reasoning: {
-          htfStructure: 'NO_TRADE: Required H1 HTF snapshot was unavailable or empty',
+          htfStructure: `NO_TRADE: Required Higher Timeframe (${missingHtfs.join(', ')}) snapshot was unavailable or empty`,
           execStructure: 'NO_TRADE: Missing HTF alignment context',
           orderBlock: 'None',
           fvg: 'None',
           liquidity: 'None',
-          confluenceSummary: 'Fail-closed: Missing HTF market snapshot',
+          confluenceSummary: `Fail-closed: Missing HTF (${missingHtfs.join(', ')}) market snapshot`,
         } as any,
-        reasons: ['HTF_DATA_UNAVAILABLE: Required H1 market data was unavailable or empty'],
+        reasons: [`HTF_DATA_UNAVAILABLE: Required ${missingHtfs.join(', ')} market data was unavailable or empty`],
         scoreBreakdown: {
           htfTrend: 0,
           structureBreak: 0,
@@ -199,7 +207,10 @@ export class SignalGenerator {
         : undefined;
 
     if (detList && detList.length > 0) {
-      if (process.env.NODE_ENV === 'production' && process.env.APP_ENV === 'production') {
+      const isProduction =
+        process.env.NODE_ENV === 'production' ||
+        process.env.APP_ENV === 'production';
+      if (isProduction) {
         throw new Error(
           'DETERMINISTIC_SIGNAL_INJECTION_PROHIBITED: Deterministic test signal injection is strictly prohibited in production mode',
         );

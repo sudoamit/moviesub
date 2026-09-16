@@ -39,7 +39,7 @@ export interface IExecutionFailureClassification {
 export interface IAlgoBotExecutionResult {
   botId: string;
   symbol: string;
-  status: 'EXECUTED' | 'REJECTED' | 'SKIPPED';
+  status: 'EXECUTED' | 'REJECTED' | 'FAILED' | 'SKIPPED';
   reasonCode: string;
   details?: string;
   executionId?: string;
@@ -1339,7 +1339,9 @@ export class AlgoBotsService implements OnModuleInit {
     const activeBotCount = bots.filter((b) => b.isActive).length;
     const enabledBotCount = bots.filter((b) => b.isActive && b.autoExecutePaper).length;
 
-    const paperExecutionEnabled = process.env.PAPER_TRADING_ENABLED !== 'false';
+    const paperExecutionEnabled =
+      process.env.PAPER_TRADING_ENABLED === 'true' ||
+      process.env.ENABLE_PAPER_ALGO_BOTS === 'true';
 
     return {
       paperExecutionEnabled,
@@ -1360,16 +1362,32 @@ export class AlgoBotsService implements OnModuleInit {
     this.lastSignalTime = new Date();
     const bots = await this.listBots();
     const results: IAlgoBotExecutionResult[] = [];
-    const canonicalCandleFormatted = signal.canonicalCandleTime
-      ? new Date(signal.canonicalCandleTime).toISOString()
-      : signal.timestamp
-        ? new Date(signal.timestamp).toISOString()
-        : 'UNKNOWN';
+
+    const canonicalDecisionDate = signal.canonicalDecisionTime
+      ? signal.canonicalDecisionTime
+      : signal.canonicalCandleTime
+        ? new Date(signal.canonicalCandleTime)
+        : undefined;
 
     for (const bot of bots) {
       if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
         continue;
       }
+
+      if (!canonicalDecisionDate || isNaN(canonicalDecisionDate.getTime())) {
+        const reason = 'CANONICAL_DECISION_TIMESTAMP_REQUIRED';
+        this.lastExecutionRejectionReason = reason;
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          details: 'Signal setup lacks authoritative canonicalCandleTime or canonicalDecisionTime',
+        });
+        continue;
+      }
+
+      const canonicalCandleFormatted = canonicalDecisionDate.toISOString();
 
       this.logger.log(
         `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
@@ -1545,7 +1563,7 @@ export class AlgoBotsService implements OnModuleInit {
           botId: bot.id,
           symbol: bot.symbol,
           status: 'REJECTED',
-          reasonCode: `EXECUTION_LOCKED_${reservation.reason}`,
+          reasonCode: 'EXECUTION_LOCKED',
           details: reservation.reason,
         });
         continue;
@@ -1574,7 +1592,7 @@ export class AlgoBotsService implements OnModuleInit {
           quantity,
           orderType: 'MARKET',
           signalPrice: signal.entryZone.optimal,
-          signalTime: signal.timestamp ? new Date(signal.timestamp).toISOString() : undefined,
+          signalTime: canonicalCandleFormatted,
           stopLoss: signal.stopLoss,
           target1: signal.takeProfits.tp1,
           target2: signal.takeProfits.tp2,
@@ -1621,7 +1639,7 @@ export class AlgoBotsService implements OnModuleInit {
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
-          status: 'REJECTED',
+          status: 'FAILED',
           reasonCode: 'ORDER_PLACEMENT_FAILED',
           details: String(e?.message || e),
           executionId,
