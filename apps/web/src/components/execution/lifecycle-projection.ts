@@ -24,9 +24,14 @@ export function calculateExecutionLifecycle({
   const isPositionOpen = position?.status === 'OPEN';
   const isPositionClosed = position?.status === 'CLOSED';
 
-  // 1. Stage 1: Signal Detection (Authoritative Signal Identity & Canonical Event Evidence)
+  // 1. Stage 1: Signal Detection (Authoritative Canonical Event Evidence)
+  // Contract: Signal detection strictly requires canonical market-data event timestamps
+  // (canonicalCandleTime AND canonicalDecisionTime) or authoritative persisted signal identity (id)
+  // with canonical timestamps. Uninitialized or client-only { symbol, timeframe } shells are rejected.
   const isSignalDetected = Boolean(
-    signal && (signal.id || (signal.canonicalCandleTime && signal.canonicalDecisionTime))
+    signal &&
+      ((signal.canonicalCandleTime && signal.canonicalDecisionTime) ||
+        (signal.id && (signal.canonicalCandleTime || signal.timestamp)))
   );
   const signalStatus: StageState = isSignalDetected ? 'DONE' : 'PENDING';
   const signalReason =
@@ -35,11 +40,14 @@ export function calculateExecutionLifecycle({
       : undefined;
 
   // 2. Stage 2: Eligibility Gate (Consumes Authoritative Backend Eligibility Evidence)
+  // Contract: Progression downstream (RESERVED/EXECUTING/EXECUTED) must NEVER substitute for
+  // explicit eligibility evidence. If authoritative eligibility evidence is absent, status is PENDING.
   let eligibilityStatus: StageState = 'PENDING';
   let eligibilityReason: string | undefined;
 
   if (!signal) {
     eligibilityStatus = 'PENDING';
+    eligibilityReason = undefined;
   } else if (execution?.eligibilityState) {
     switch (execution.eligibilityState) {
       case 'ELIGIBLE':
@@ -88,16 +96,10 @@ export function calculateExecutionLifecycle({
   ) {
     eligibilityStatus = 'BLOCKED';
     eligibilityReason = (signal as any).rejectionReasons[0];
-  } else if (
-    execution?.state === 'RESERVED' ||
-    execution?.state === 'EXECUTING' ||
-    execution?.state === 'EXECUTED'
-  ) {
-    eligibilityStatus = 'DONE';
-    eligibilityReason = 'Verified by execution engine';
   } else {
     // Strictest contract: Without authoritative backend execution/signal eligibility evidence, stage is PENDING
     eligibilityStatus = 'PENDING';
+    eligibilityReason = 'Awaiting backend eligibility evaluation';
   }
 
   // 3. Stage 3: DB Reservation (Requires Explicit Authoritative Reservation Evidence)

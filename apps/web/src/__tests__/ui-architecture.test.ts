@@ -189,7 +189,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(stagesCanonical.find((s) => s.id === 'signal')?.reason).toBe('NIFTY 15m • BULLISH');
     });
 
-    it('evaluates Eligibility Gate strictly from backend evidence and remains PENDING without browser policy recalculation', () => {
+    it('evaluates Eligibility Gate strictly from backend evidence without substituting downstream execution states', () => {
       const signal: ISignalSetup = {
         id: 'sig_1',
         symbol: 'NIFTY',
@@ -198,6 +198,8 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         state: SignalState.ACTIVE,
         grade: SignalGrade.A,
         score: 80,
+        canonicalCandleTime: 1789559700000,
+        canonicalDecisionTime: new Date(1789559700000),
         entryZone: { min: 24200, max: 24220, optimal: 24210 },
         stopLoss: 24150,
         takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
@@ -206,44 +208,122 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         scoreBreakdown: {} as any,
       };
 
-      // Case 1: No backend eligibility evidence -> Must remain PENDING (No browser policy recalculation)
-      const stagesNoEvidence = calculateExecutionLifecycle({
-        signal,
-        execution: null,
-        position: null,
-      });
-
-      expect(stagesNoEvidence.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
-
-      // Case 2: Backend execution record states trade is INELIGIBLE
-      const ineligibleExecution: AlgoExecutionRecord = {
-        id: 'exec_ineligible',
+      // 1. RESERVED execution with no eligibilityState => eligibility PENDING
+      const reservedNoEligibility: AlgoExecutionRecord = {
+        id: 'exec_res_1',
         botId: 'bot_1',
         symbol: 'NIFTY',
         timeframe: '15m',
         direction: 'BULLISH',
-        state: 'FAILED_FINAL',
-        failureReasonCode: 'INELIGIBLE_FOR_EXECUTION',
-        failureReason: 'Daily risk budget exceeded',
+        state: 'RESERVED',
+        reservationFingerprint: 'bot_exec:bot_1:fp',
         signalTimestamp: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-
-      const stagesIneligible = calculateExecutionLifecycle({
+      const stagesReserved = calculateExecutionLifecycle({
         signal,
-        execution: ineligibleExecution,
+        execution: reservedNoEligibility,
         position: null,
       });
+      expect(stagesReserved.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
+      expect(stagesReserved.find((s) => s.id === 'eligibility')?.reason).toBe(
+        'Awaiting backend eligibility evaluation'
+      );
 
-      const eligibilityStage = stagesIneligible.find((s) => s.id === 'eligibility');
-      expect(eligibilityStage?.status).toBe('BLOCKED');
-      expect(eligibilityStage?.reason).toBe('Daily risk budget exceeded');
+      // 2. EXECUTING execution with no eligibilityState => eligibility PENDING
+      const executingNoEligibility: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        state: 'EXECUTING',
+      };
+      const stagesExecuting = calculateExecutionLifecycle({
+        signal,
+        execution: executingNoEligibility,
+        position: null,
+      });
+      expect(stagesExecuting.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
 
-      // Subsequent stages must be NOT_REACHED
-      expect(stagesIneligible.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
-      expect(stagesIneligible.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
-      expect(stagesIneligible.find((s) => s.id === 'placed')?.status).toBe('NOT_REACHED');
+      // 3. EXECUTED execution with no eligibilityState => eligibility PENDING
+      const executedNoEligibility: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        state: 'EXECUTED',
+      };
+      const stagesExecuted = calculateExecutionLifecycle({
+        signal,
+        execution: executedNoEligibility,
+        position: null,
+      });
+      expect(stagesExecuted.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
+
+      // 4. Explicit ELIGIBLE => DONE
+      const eligibleExec: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        eligibilityState: 'ELIGIBLE',
+        eligibilityReason: 'Passed all institutional risk & score gates',
+      };
+      const stagesEligible = calculateExecutionLifecycle({
+        signal,
+        execution: eligibleExec,
+        position: null,
+      });
+      expect(stagesEligible.find((s) => s.id === 'eligibility')?.status).toBe('DONE');
+      expect(stagesEligible.find((s) => s.id === 'eligibility')?.reason).toBe(
+        'Passed all institutional risk & score gates'
+      );
+
+      // 5. Explicit BLOCKED => BLOCKED
+      const blockedExec: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        eligibilityState: 'BLOCKED',
+        eligibilityReasonCode: 'MAX_DRAWDOWN_REACHED',
+        eligibilityReason: 'Max drawdown reached for account',
+      };
+      const stagesBlocked = calculateExecutionLifecycle({
+        signal,
+        execution: blockedExec,
+        position: null,
+      });
+      expect(stagesBlocked.find((s) => s.id === 'eligibility')?.status).toBe('BLOCKED');
+      expect(stagesBlocked.find((s) => s.id === 'eligibility')?.reason).toBe(
+        'Max drawdown reached for account'
+      );
+      // Downstream stages must be NOT_REACHED
+      expect(stagesBlocked.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
+      expect(stagesBlocked.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
+      expect(stagesBlocked.find((s) => s.id === 'placed')?.status).toBe('NOT_REACHED');
+
+      // 6. Explicit FAILED => FAILED
+      const failedExec: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        eligibilityState: 'FAILED',
+        eligibilityReasonCode: 'EVALUATION_TIMEOUT',
+        eligibilityReason: 'Eligibility engine evaluation timed out',
+      };
+      const stagesFailed = calculateExecutionLifecycle({
+        signal,
+        execution: failedExec,
+        position: null,
+      });
+      expect(stagesFailed.find((s) => s.id === 'eligibility')?.status).toBe('FAILED');
+      expect(stagesFailed.find((s) => s.id === 'eligibility')?.reason).toBe(
+        'Eligibility engine evaluation timed out'
+      );
+      expect(stagesFailed.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
+
+      // 7. Explicit PENDING => PENDING
+      const pendingExec: AlgoExecutionRecord = {
+        ...reservedNoEligibility,
+        eligibilityState: 'PENDING',
+      };
+      const stagesPending = calculateExecutionLifecycle({
+        signal,
+        execution: pendingExec,
+        position: null,
+      });
+      expect(stagesPending.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
+      expect(stagesPending.find((s) => s.id === 'eligibility')?.reason).toBe(
+        'Awaiting backend eligibility evaluation'
+      );
     });
 
     it('strictly requires explicit reservation evidence for DB Reservation stage', () => {
