@@ -1,17 +1,20 @@
 'use client';
 
-import React from 'react';
-import { TrendingUp, TrendingDown, Clock, Shield, Database, Radio } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { TrendingUp, TrendingDown, Clock, Database, ChevronDown } from 'lucide-react';
 import { MarketDataState } from '../hooks/useMarketContext';
 import { ITickerInfo } from './LiveTickerBar';
+import { StrategyMode } from './Header';
 
 interface MarketContextBarProps {
   selectedSymbol: string;
   selectedTimeframe: string;
   currentTicker: ITickerInfo;
   marketDataState: MarketDataState;
+  selectedStrategy?: StrategyMode;
   onSelectSymbol: (symbol: string) => void;
   onSelectTimeframe: (timeframe: string) => void;
+  onSelectStrategy?: (strategy: StrategyMode) => void;
 }
 
 const SUPPORTED_SYMBOLS = [
@@ -34,14 +37,25 @@ const TIMEFRAMES = [
   { id: '1d', label: '1D' },
 ];
 
+const STRATEGIES: { id: StrategyMode; label: string; tag: string }[] = [
+  { id: 'SMC', label: 'SMC Core Engine', tag: 'SMC' },
+  { id: 'SAIYAN_OCC', label: 'Saiyan OCC Flow', tag: 'SAIYAN' },
+  { id: 'HYBRID', label: 'Hybrid SMC + OCC', tag: 'HYBRID' },
+];
+
 export const MarketContextBar: React.FC<MarketContextBarProps> = ({
   selectedSymbol,
   selectedTimeframe,
   currentTicker,
   marketDataState,
+  selectedStrategy = 'SMC',
   onSelectSymbol,
   onSelectTimeframe,
+  onSelectStrategy,
 }) => {
+  const [isStrategyMenuOpen, setIsStrategyMenuOpen] = useState(false);
+  const strategyRef = useRef<HTMLDivElement>(null);
+
   const isBullish = (currentTicker.changePercent ?? 0) >= 0;
   const isCrypto = selectedSymbol === 'BTCUSDT';
   const isGold = selectedSymbol === 'XAUUSD';
@@ -58,14 +72,26 @@ export const MarketContextBar: React.FC<MarketContextBarProps> = ({
       ? `${isBullish ? '+' : ''}${currentTicker.changePercent.toFixed(2)}%`
       : '0.00%';
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (strategyRef.current && !strategyRef.current.contains(e.target as Node)) {
+        setIsStrategyMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const activeStrategyObj = STRATEGIES.find((s) => s.id === selectedStrategy) || STRATEGIES[0];
+
   return (
     <section
       aria-label="Market Context Bar"
       className="bg-surface-subtle border-b border-surface-border px-3 sm:px-6 py-2"
     >
       <div className="flex flex-wrap items-center justify-between gap-3 max-w-[1720px] mx-auto font-mono text-xs">
-        {/* Left: Symbol & Timeframe Selectors */}
-        <div className="flex flex-wrap items-center gap-3">
+        {/* Left: Symbol, Timeframe & Strategy Selectors */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {/* Symbol Select Buttons */}
           <div className="flex items-center bg-surface-panel border border-surface-border rounded-lg p-0.5 overflow-x-auto">
             {SUPPORTED_SYMBOLS.map((item) => {
@@ -107,6 +133,59 @@ export const MarketContextBar: React.FC<MarketContextBarProps> = ({
               );
             })}
           </div>
+
+          {/* Compact Strategy Selector (Requirement 3: Downgrade from header) */}
+          {onSelectStrategy && (
+            <div ref={strategyRef} className="relative">
+              <button
+                type="button"
+                aria-expanded={isStrategyMenuOpen}
+                aria-label="Select Trading Strategy"
+                onClick={() => setIsStrategyMenuOpen((prev) => !prev)}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-surface-panel hover:bg-surface-hover border border-surface-border text-slate-300 font-bold transition-colors"
+              >
+                <span className="text-[10px] text-slate-500 uppercase">Strat:</span>
+                <span className="text-cyan-400">{activeStrategyObj.tag}</span>
+                <ChevronDown
+                  className={`w-3 h-3 text-slate-400 transition-transform ${
+                    isStrategyMenuOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+
+              {isStrategyMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute top-full left-0 mt-1.5 w-48 bg-surface-elevated border border-surface-border rounded-xl p-1 shadow-2xl z-50 animate-in fade-in slide-in-from-top-1 duration-150"
+                >
+                  <div className="px-2 py-1 text-[10px] text-slate-500 uppercase tracking-wider font-semibold border-b border-surface-border mb-1">
+                    Select Strategy
+                  </div>
+                  {STRATEGIES.map((strat) => (
+                    <button
+                      key={strat.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        onSelectStrategy(strat.id);
+                        setIsStrategyMenuOpen(false);
+                      }}
+                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition-colors flex items-center justify-between ${
+                        selectedStrategy === strat.id
+                          ? 'bg-cyan-500/20 text-cyan-300 font-bold'
+                          : 'text-slate-300 hover:bg-surface-hover hover:text-white'
+                      }`}
+                    >
+                      <span>{strat.label}</span>
+                      <span className="text-[9px] px-1 py-0.2 rounded font-black bg-cyan-950 text-cyan-400 border border-cyan-800">
+                        {strat.tag}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Center: Live Price & Dynamics */}

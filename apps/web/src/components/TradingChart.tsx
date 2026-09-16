@@ -1797,104 +1797,39 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         </div>
       </div>
 
-      {/* 2. Real-Time Dynamic Trade Status & Setup Level Pills Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 py-1.5 px-3 bg-slate-900/90 border border-slate-800 rounded-lg mb-2 text-xs font-mono shadow-md">
-        <div className="flex flex-wrap items-center gap-2.5">
-          {paperPosition && isTradeActive ? (
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+      {/* 2. Technical Key Levels & Order Flow Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 py-1.5 px-3 bg-surface-panel border border-surface-border rounded-lg mb-2 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-3 text-slate-300">
+          <span className="text-[11px] text-slate-400">
+            Entry: <strong className="text-white">{currSymbol}{entryPrice.toFixed(2)}</strong>
+          </span>
+          <span className="text-slate-600">•</span>
+          <span className="text-[11px] text-slate-400">
+            SL: <strong className="text-rose-400">{currSymbol}{slPrice.toFixed(2)}</strong>
+          </span>
+          <span className="text-slate-600">•</span>
+          <span className="text-[11px] text-slate-400">
+            TP1: <strong className="text-emerald-400">{currSymbol}{tp1Price.toFixed(2)}</strong>
+          </span>
+          {tp2Price > 0 && (
+            <>
+              <span className="text-slate-600">•</span>
+              <span className="text-[11px] text-slate-400">
+                TP2: <strong className="text-teal-400">{currSymbol}{tp2Price.toFixed(2)}</strong>
               </span>
-              <span className="font-black text-cyan-300 flex items-center gap-1">
-                RUNNING {paperPosition.quantity}{' '}
-                {symbol === 'BTCUSDT'
-                  ? 'BTC'
-                  : symbol === 'XAUUSD' || symbol === 'GOLD'
-                    ? 'oz'
-                    : 'Qty'}{' '}
-                @ {currSymbol}
-                {Number(paperPosition.averageEntryPrice).toFixed(2)}
-              </span>
-              <span
-                className={`px-2.5 py-0.5 rounded font-black border flex items-center gap-1 ${
-                  paperPosition.unrealizedPnL >= 0
-                    ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50 shadow-sm shadow-emerald-500/20'
-                    : 'bg-rose-950/80 text-rose-400 border-rose-500/50'
-                }`}
-              >
-                UNREALIZED P&L: {paperPosition.unrealizedPnL >= 0 ? '+' : ''}
-                {currSymbol}
-                {Math.abs(paperPosition.unrealizedPnL).toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
-              </span>
-            </div>
-          ) : effSignal?.state === 'SL_HIT' ? (
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
-              </span>
-              <span className="bg-rose-950/90 text-rose-300 border border-rose-500/50 px-2.5 py-0.5 rounded font-black flex items-center gap-1">
-                🛑 TRADE CUT & CLOSED (STOP LOSS HIT)
-              </span>
-              <span className="text-slate-400 text-[11px]">
-                Exit:{' '}
-                <strong className="text-rose-400">
-                  {currSymbol}
-                  {slPrice.toFixed(2)}
-                </strong>{' '}
-                | Realized: <strong className="text-rose-400">-1.0R</strong>
-              </span>
-            </div>
-          ) : effSignal?.state === 'TP2_HIT' || effSignal?.state === 'TP3_HIT' ? (
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-500" />
-              </span>
-              <span className="bg-teal-950/90 text-teal-300 border border-teal-500/50 px-2.5 py-0.5 rounded font-black flex items-center gap-1">
-                🎯 TRADE COMPLETED (TARGET 2 HIT)
-              </span>
-              <span className="text-slate-400 text-[11px]">
-                Exit:{' '}
-                <strong className="text-teal-300">
-                  {currSymbol}
-                  {tp2Price.toFixed(2)}
-                </strong>{' '}
-                | Realized: <strong className="text-teal-300">+2.5R</strong>
-              </span>
-            </div>
-          ) : effSignal?.state === 'TP1_HIT' ? (
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
-              </span>
-              <span className="bg-emerald-950/90 text-emerald-300 border border-emerald-500/50 px-2.5 py-0.5 rounded font-black flex items-center gap-1">
-                ✅ TARGET 1 HIT (+2.0R) — RUNNER ACTIVE
-              </span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-slate-600" />
-              <span className="text-slate-400 font-bold">
-                STANDBY: Order Block Entry ({currSymbol}
-                {entryPrice.toFixed(2)})
-              </span>
-            </div>
+            </>
           )}
         </div>
 
         <div className="flex items-center gap-2">
           <span
-            className={`px-3 py-1 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 shadow-md ${
+            className={`px-2.5 py-0.5 rounded text-[11px] font-bold flex items-center gap-1.5 border ${
               isBullish
-                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 shadow-emerald-500/10'
-                : 'bg-rose-500/20 border border-rose-500/40 text-rose-300 shadow-rose-500/10'
+                ? 'bg-emerald-950/60 border-emerald-500/30 text-emerald-400'
+                : 'bg-rose-950/60 border-rose-500/30 text-rose-400'
             }`}
           >
-            {isBullish ? '🟢 BULLISH ORDER FLOW' : '🔴 BEARISH ORDER FLOW'}
+            {isBullish ? 'BULLISH FLOW' : 'BEARISH FLOW'}
           </span>
         </div>
       </div>

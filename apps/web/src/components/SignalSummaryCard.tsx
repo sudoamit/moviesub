@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { ISignalSetup, Direction, SignalGrade } from '@quant/shared';
 
+import { EmptyState } from './common/EmptyState';
+
 interface SignalSummaryCardProps {
   signal: ISignalSetup | null;
   symbol: string;
@@ -29,15 +31,11 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
 }) => {
   if (!signal) {
     return (
-      <div className="terminal-panel p-4 flex flex-col items-center justify-center text-center h-full min-h-[300px] font-mono">
-        <div className="w-10 h-10 rounded-xl bg-surface-panel border border-surface-border flex items-center justify-center text-slate-500 mb-3">
-          <AlertCircle className="w-5 h-5" />
-        </div>
-        <h3 className="text-sm font-bold text-white mb-1">No Active Setup</h3>
-        <p className="text-xs text-slate-400 max-w-xs">
-          Market conditions for {symbol} do not currently satisfy institutional confluence criteria.
-        </p>
-      </div>
+      <EmptyState
+        preset="no-signal"
+        description={`Market conditions for ${symbol} do not currently satisfy institutional confluence criteria.`}
+        className="min-h-[300px]"
+      />
     );
   }
 

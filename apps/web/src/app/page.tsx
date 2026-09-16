@@ -120,8 +120,10 @@ function DashboardContent() {
         selectedTimeframe={selectedTimeframe}
         currentTicker={currentTicker}
         marketDataState={marketDataState}
+        selectedStrategy={selectedStrategy}
         onSelectSymbol={setSelectedSymbol}
         onSelectTimeframe={setSelectedTimeframe}
+        onSelectStrategy={handleSelectStrategy}
       />
 
       {/* 3. Main Product Workspace */}
