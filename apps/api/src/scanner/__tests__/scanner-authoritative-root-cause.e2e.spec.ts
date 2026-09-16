@@ -1,436 +1,194 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ScannerService } from '../scanner.service';
 import { SignalsService } from '../../signals/signals.service';
-import { AlgoBotsService } from '../../algo-bots/algo-bots.service';
+import { AlgoBotsService, ExecutionFailureReason } from '../../algo-bots/algo-bots.service';
 import { PaperTradingService } from '../../paper-trading/paper-trading.service';
 import { CandlesService } from '../../candles/candles.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { AlertsService } from '../../alerts/alerts.service';
 import { RealMarketStreamerService } from '../../market-data/real-market-streamer.service';
-import { Direction, ICandle, IMarketDataProvider, MarketDataUnavailableError, SignalGrade, SignalState, Timeframe } from '@quant/shared';
+import {
+  Direction,
+  ICandle,
+  IMarketDataProvider,
+  MarketDataUnavailableError,
+  RealLiveMarketDataProvider,
+  SignalGrade,
+  SignalState,
+  StaleMarketDataError,
+  Timeframe,
+} from '@quant/shared';
 
-/**
- * Controlled Live Market Data Provider Fixture implementing IMarketDataProvider.
- * Produces LIVE provenance candles for BTCUSDT without allowing synthetic fallbacks in production.
- * Enforces strict symbol identity (BTCUSDT only).
- */
-class ControlledLiveMarketDataProvider implements IMarketDataProvider {
-  readonly providerName = 'controlled_live_provider_fixture';
-  private readonly candleStream: { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] };
-  private readonly decisionTime: Date;
-
-  constructor(decisionTime: Date, candleStream: { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] }) {
-    this.decisionTime = decisionTime;
-    this.candleStream = candleStream;
-  }
-
-  async getHistoricalCandles(symbol: string, timeframe: Timeframe | string, limit = 200): Promise<ICandle[]> {
-    const sym = symbol.toUpperCase();
-    if (sym !== 'BTCUSDT') return [];
-
-    const tfStr = String(timeframe).toUpperCase();
-    let source: ICandle[] = [];
-    if (tfStr === 'M15' || tfStr === '15M') source = this.candleStream.m15;
-    else if (tfStr === 'H1' || tfStr === '1H') source = this.candleStream.h1;
-    else if (tfStr === 'H4' || tfStr === '4H') source = this.candleStream.h4;
-
-    const slice = source.slice(-limit);
-    return slice.map((c) => ({
-      ...c,
-      timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
-      isClosed: true,
-      provenance: 'LIVE',
-    }));
-  }
-
-  async getLatestCandle(symbol: string, timeframe: Timeframe | string): Promise<ICandle> {
-    const candles = await this.getHistoricalCandles(symbol, timeframe, 1);
-    if (!candles || candles.length === 0) {
-      throw new MarketDataUnavailableError(symbol);
-    }
-    return candles[0];
-  }
-
-  async subscribeToMarketData(symbol: string, timeframe: Timeframe | string, onCandle: (candle: ICandle) => void): Promise<void> {}
-
-  async unsubscribeFromMarketData(symbol: string, timeframe: Timeframe | string): Promise<void> {}
-
-  async getLatestQuote(symbol: string): Promise<any> {
-    if (symbol.toUpperCase() !== 'BTCUSDT') {
-      throw new MarketDataUnavailableError(symbol);
-    }
-    const candles = this.candleStream.m15;
-    const last = candles[candles.length - 1];
-    const price = last ? last.close : 65000;
-
-    const marketAsOf = this.decisionTime;
-    const observedAt = new Date(this.decisionTime.getTime() + 100);
-
-    return {
-      symbol: 'BTCUSDT',
-      bid: price - 0.5,
-      ask: price + 0.5,
-      last: price,
-      volume: last ? last.volume : 1000,
-      timestamp: observedAt,
-      marketAsOf,
-      observedAt,
-      dataProvenance: 'LIVE',
-      providerId: this.providerName,
-    };
-  }
-
-  async getMarketHealth(): Promise<{ isHealthy: boolean; latencyMs: number }> {
-    return { isHealthy: true, latencyMs: 12 };
-  }
-}
-
-describe('Fix 182 — Authoritative Root-Cause Test for Zero Live Paper Trades', () => {
+describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real PostgreSQL & Real Provider Adapter)', () => {
+  let moduleRef: TestingModule;
   let scannerService: ScannerService;
   let signalsService: SignalsService;
   let algoBotsService: AlgoBotsService;
   let paperTradingService: PaperTradingService;
+  let prismaService: PrismaService;
+  let realProvider: RealLiveMarketDataProvider;
 
-  let mockPrisma: any;
   let mockRedis: any;
-
-  let executionsDb: Map<string, any>;
-  let positionsDb: Map<string, any>;
-  let botsDb: Map<string, any>;
-  let instrumentsDb: Map<string, any>;
-
   let decisionTime: Date;
+  let originalFetch: typeof global.fetch;
 
   /**
-   * Constructs valid BTCUSDT M15, H1, H4 candle streams satisfying natural SMC Order Block signal generation
+   * Constructs raw Binance klines JSON payloads for M15, H1, H4.
+   * Produces a natural Bullish Liquidity Sweep + BOS setup for BTCUSDT.
    */
-  const buildLiveCandleStream = (asOfTime: Date): { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] } => {
-    const m15: ICandle[] = [];
+  const buildBinanceKlinesPayload = (asOfTime: Date): { m15: any[]; h1: any[]; h4: any[] } => {
+    const m15: any[] = [];
     const baseM15 = new Date(asOfTime.getTime() - 49 * 15 * 60 * 1000);
-    let price = 65000;
+    let price = 64900;
 
     for (let i = 0; i < 50; i++) {
-      const time = new Date(baseM15.getTime() + i * 15 * 60 * 1000);
+      const openTime = baseM15.getTime() + i * 15 * 60 * 1000;
+      const closeTime = openTime + 15 * 60 * 1000 - 1;
       let open = price;
-      let high = price + 100;
-      let low = price - 100;
-      let close = price + 50;
+      let high = price + 30;
+      let low = price - 30;
+      let close = price + 10;
       let volume = 1000;
 
       if (i === 15) {
-        // Swing high anchor
-        open = 65000;
-        high = 66000;
-        low = 64900;
-        close = 65800;
+        // Swing Low anchor at index 15
+        open = 64900;
+        high = 64950;
+        low = 64750; // Key swing low
+        close = 64850;
       } else if (i === 34) {
-        // Order Block candle (bearish push before bullish reversal)
-        open = 65800;
-        high = 65900;
-        low = 64200;
-        close = 64300;
-        volume = 4000;
+        // Institutional Order Block POI (bearish down candle before displacement)
+        open = 65000;
+        high = 65050;
+        low = 64850;
+        close = 64900;
+        volume = 2500;
       } else if (i === 35) {
-        // Liquidity Sweep (wicks below previous swing low of 63900)
-        open = 64300;
-        high = 64500;
-        low = 63700;
-        close = 64400;
+        // Sell-side Liquidity Pool Sweep (wicks below 64750 to 64700, closes back above at 64950)
+        open = 64900;
+        high = 65000;
+        low = 64700;
+        close = 64950;
         volume = 5000;
       } else if (i === 36) {
-        // Bullish Displacement & BOS (breaks 66000 swing high, creates FVG)
-        open = 64400;
-        high = 66800;
-        low = 64550;
-        close = 66700;
-        volume = 9000;
-      } else if (i > 36) {
-        open = price;
-        high = price + 100;
-        low = price - 50;
-        close = price + 80;
+        // Bullish Displacement & BOS (breaks higher, strong expansion volume, creates FVG)
+        open = 64950;
+        high = 65200;
+        low = 64920;
+        close = 65150;
+        volume = 8000;
+      } else if (i >= 37 && i <= 44) {
+        // Healthy consolidation
+        open = 65150 - (i - 37) * 10;
+        high = open + 30;
+        low = open - 20;
+        close = open + 5;
+        volume = 1200;
+      } else if (i === 45 || i === 46) {
+        // Pullback into FVG / OTE dealing range
+        open = 65050;
+        high = 65080;
+        low = 64920;
+        close = 64950;
         volume = 2000;
+      } else if (i === 47 || i === 48) {
+        // Reversal bounce with expanding volume
+        open = 64950;
+        high = 65000;
+        low = 64930;
+        close = 64980;
+        volume = 3500;
+      } else if (i === 49) {
+        // High volume confirmation candle closing near high (optimal RSI ~60)
+        open = 64980;
+        high = 65020;
+        low = 64960;
+        close = 65000;
+        volume = 4500;
       }
 
       price = close;
-      m15.push({
-        timestamp: time,
-        open,
-        high,
-        low,
-        close,
-        volume,
-        isClosed: true,
-      });
+      m15.push([
+        openTime,
+        open.toFixed(2),
+        high.toFixed(2),
+        low.toFixed(2),
+        close.toFixed(2),
+        volume.toFixed(2),
+        closeTime,
+        '100000.00',
+        100,
+        '500.00',
+        '50000.00',
+        '0',
+      ]);
     }
 
-    const h1: ICandle[] = [];
-    let h1Price = 60000;
+    const h1: any[] = [];
+    let h1Price = 58000;
     for (let i = 40; i >= 1; i--) {
-      const htfTime = new Date(asOfTime.getTime() - i * 60 * 60 * 1000);
-      h1.push({
-        timestamp: htfTime,
-        open: h1Price,
-        high: h1Price + 500,
-        low: h1Price - 200,
-        close: h1Price + 400,
-        volume: 4000,
-        isClosed: true,
-      });
-      h1Price += 150;
+      const openTime = asOfTime.getTime() - i * 60 * 60 * 1000;
+      const closeTime = openTime + 60 * 60 * 1000 - 1;
+      const open = h1Price;
+      const high = h1Price + 500;
+      const low = h1Price - 100;
+      const close = h1Price + 400;
+      const volume = 8000;
+      h1.push([
+        openTime,
+        open.toFixed(2),
+        high.toFixed(2),
+        low.toFixed(2),
+        close.toFixed(2),
+        volume.toFixed(2),
+        closeTime,
+        '200000.00',
+        200,
+        '1000.00',
+        '100000.00',
+        '0',
+      ]);
+      h1Price += 180;
     }
 
-    const h4: ICandle[] = [];
-    let h4Price = 58000;
+    const h4: any[] = [];
+    let h4Price = 54000;
     for (let i = 25; i >= 1; i--) {
-      const htfTime = new Date(asOfTime.getTime() - i * 4 * 60 * 60 * 1000);
-      h4.push({
-        timestamp: htfTime,
-        open: h4Price,
-        high: h4Price + 800,
-        low: h4Price - 300,
-        close: h4Price + 600,
-        volume: 8000,
-        isClosed: true,
-      });
-      h4Price += 300;
+      const openTime = asOfTime.getTime() - i * 4 * 60 * 60 * 1000;
+      const closeTime = openTime + 4 * 60 * 60 * 1000 - 1;
+      const open = h4Price;
+      const high = h4Price + 800;
+      const low = h4Price - 150;
+      const close = h4Price + 650;
+      const volume = 15000;
+      h4.push([
+        openTime,
+        open.toFixed(2),
+        high.toFixed(2),
+        low.toFixed(2),
+        close.toFixed(2),
+        volume.toFixed(2),
+        closeTime,
+        '500000.00',
+        500,
+        '2500.00',
+        '250000.00',
+        '0',
+      ]);
+      h4Price += 400;
     }
 
     return { m15, h1, h4 };
   };
 
-  beforeEach(async () => {
+  beforeAll(async () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
     process.env.NODE_ENV = 'test';
     delete process.env.APP_ENV;
 
-    decisionTime = new Date();
-    executionsDb = new Map();
-    positionsDb = new Map();
-    botsDb = new Map();
-    instrumentsDb = new Map();
-
-    const candleStream = buildLiveCandleStream(decisionTime);
-    const liveProvider = new ControlledLiveMarketDataProvider(decisionTime, candleStream);
-
-    // Seed Instrument
-    instrumentsDb.set('BTCUSDT', {
-      id: 'inst_btcusdt',
-      symbol: 'BTCUSDT',
-      name: 'Bitcoin',
-      type: 'CRYPTO',
-      currency: 'USD',
-      lotSize: 0.01,
-      minimumQuantity: 0.001,
-      quantityPrecision: 4,
-      pricePrecision: 2,
-      isActive: true,
-    });
-
-    // Seed Active Execution Bot using ANY_CONFLUENCE to match generated SMC evidence
-    botsDb.set('bot_btc_order_block', {
-      id: 'bot_btc_order_block',
-      name: 'BTCUSDT 15m Order Block Hunter',
-      symbol: 'BTCUSDT',
-      direction: 'ANY',
-      timeframe: '15m',
-      minScore: 70,
-      smcCondition: 'ANY_CONFLUENCE',
-      lots: 1,
-      autoExecutePaper: true,
-      notifyWebhook: false,
-      isActive: true,
-      createdAt: new Date(),
-      triggerCount: 0,
-    });
-
-    mockPrisma = {
-      instrument: {
-        findUnique: jest.fn().mockImplementation(async ({ where }) => {
-          return instrumentsDb.get(where.symbol) || null;
-        }),
-        findMany: jest.fn().mockResolvedValue(Array.from(instrumentsDb.values())),
-      },
-      algoBot: {
-        findMany: jest.fn().mockImplementation(async (query) => {
-          const all = Array.from(botsDb.values());
-          if (query?.where?.isActive !== undefined) {
-            return all.filter((b) => b.isActive === query.where.isActive);
-          }
-          return all;
-        }),
-        findUnique: jest.fn().mockImplementation(async ({ where }) => botsDb.get(where.id) || null),
-        count: jest.fn().mockImplementation(async () => botsDb.size),
-        update: jest.fn().mockImplementation(async ({ where, data }) => {
-          const bot = botsDb.get(where.id);
-          if (bot) {
-            if (data.triggerCount?.increment) bot.triggerCount += data.triggerCount.increment;
-            bot.lastTriggeredAt = data.lastTriggeredAt || bot.lastTriggeredAt;
-            bot.lastTriggerDetails = data.lastTriggerDetails || bot.lastTriggerDetails;
-          }
-          return bot;
-        }),
-      },
-      paperAccount: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'acc_paper_e2e',
-          name: 'Primary Paper Account',
-          currency: 'USD',
-          cashBalance: 100000.0,
-          usedMargin: 0,
-          isActive: true,
-        }),
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'acc_paper_e2e',
-          name: 'Primary Paper Account',
-          currency: 'USD',
-          cashBalance: 100000.0,
-          usedMargin: 0,
-          isActive: true,
-        }),
-        update: jest.fn().mockResolvedValue({ id: 'acc_paper_e2e' }),
-      },
-      paperOrder: {
-        create: jest.fn().mockResolvedValue({ id: `ord_e2e_${Date.now()}` }),
-        findUnique: jest.fn().mockResolvedValue(null),
-        count: jest.fn().mockResolvedValue(0),
-      },
-      paperFill: {
-        create: jest.fn().mockResolvedValue({ id: `fill_e2e_${Date.now()}` }),
-      },
-      auditEvent: {
-        createMany: jest.fn().mockResolvedValue({ count: 1 }),
-        create: jest.fn().mockResolvedValue({ id: `audit_e2e_${Date.now()}` }),
-      },
-      paperTrade: {
-        findMany: jest.fn().mockResolvedValue([]),
-        create: jest.fn().mockResolvedValue({ id: `trade_e2e_${Date.now()}` }),
-      },
-      tradingSystemConfig: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'SYSTEM_DEFAULT',
-          paperTradingEnabled: true,
-          liveTradingEnabled: false,
-          emergencyStop: false,
-          maxDailyLossPercent: 3.0,
-          maxPositionRiskPercent: 1.0,
-          maxTotalExposurePercent: 20.0,
-          maxOpenPositions: 5,
-          maxTradesPerDay: 20,
-          maxConsecutiveLosses: 3,
-          maxLeverage: 5.0,
-          maxSlippageBps: 50,
-          maxMarketDataAgeSeconds: 5,
-        }),
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'SYSTEM_DEFAULT',
-          paperTradingEnabled: true,
-          liveTradingEnabled: false,
-          emergencyStop: false,
-          maxDailyLossPercent: 3.0,
-          maxPositionRiskPercent: 1.0,
-          maxTotalExposurePercent: 20.0,
-          maxOpenPositions: 5,
-          maxTradesPerDay: 20,
-          maxConsecutiveLosses: 3,
-          maxLeverage: 5.0,
-          maxSlippageBps: 50,
-          maxMarketDataAgeSeconds: 5,
-        }),
-        create: jest.fn().mockResolvedValue({ id: 'SYSTEM_DEFAULT' }),
-        upsert: jest.fn().mockResolvedValue({ id: 'SYSTEM_DEFAULT' }),
-      },
-      algoBotExecution: {
-        create: jest.fn().mockImplementation(async ({ data }) => {
-          const id = `exec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-          const rec = {
-            id,
-            ...data,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          };
-          executionsDb.set(data.fingerprint, rec);
-          executionsDb.set(id, rec);
-          return rec;
-        }),
-        findUnique: jest.fn().mockImplementation(async ({ where }) => {
-          if (where.fingerprint) return executionsDb.get(where.fingerprint) || null;
-          if (where.id) return executionsDb.get(where.id) || null;
-          return null;
-        }),
-        updateMany: jest.fn().mockImplementation(async ({ where, data }) => {
-          const rec = executionsDb.get(where.id);
-          if (!rec) return { count: 0 };
-          const expectedStates = Array.isArray(where.state?.in)
-            ? where.state.in
-            : where.state
-              ? [where.state]
-              : [];
-          if (expectedStates.length > 0 && !expectedStates.includes(rec.state)) {
-            return { count: 0 };
-          }
-          Object.assign(rec, data);
-          return { count: 1 };
-        }),
-      },
-      paperPosition: {
-        findMany: jest.fn().mockImplementation(async (query) => {
-          const all = Array.from(positionsDb.values());
-          if (query?.where?.status) {
-            const allowed = Array.isArray(query.where.status?.in)
-              ? query.where.status.in
-              : Array.isArray(query.where.status)
-                ? query.where.status
-                : [query.where.status];
-            return all.filter((p) => allowed.includes(p.status));
-          }
-          return all;
-        }),
-        findFirst: jest.fn().mockImplementation(async (query) => {
-          const all = Array.from(positionsDb.values());
-          return (
-            all.find((p) => {
-              if (query?.where?.symbol && p.symbol !== query.where.symbol) return false;
-              if (query?.where?.status) {
-                const allowed = Array.isArray(query.where.status?.in)
-                  ? query.where.status.in
-                  : Array.isArray(query.where.status)
-                    ? query.where.status
-                    : [query.where.status];
-                if (!allowed.includes(p.status)) return false;
-              }
-              return true;
-            }) || null
-          );
-        }),
-        count: jest.fn().mockImplementation(async (query) => {
-          const all = Array.from(positionsDb.values());
-          if (query?.where?.status) {
-            return all.filter((p) => p.status === query.where.status).length;
-          }
-          return all.length;
-        }),
-        create: jest.fn().mockImplementation(async ({ data }) => {
-          const id = `pos_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-          const pos = { id, ...data, createdAt: new Date() };
-          positionsDb.set(id, pos);
-          return pos;
-        }),
-      },
-      paperBalance: {
-        findFirst: jest.fn().mockResolvedValue({ balance: 100000, equity: 100000 }),
-        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-      },
-      signal: {
-        count: jest.fn().mockResolvedValue(10),
-        findMany: jest.fn().mockResolvedValue([]),
-      },
-      $transaction: jest.fn().mockImplementation(async (cb) => {
-        if (typeof cb === 'function') return cb(mockPrisma);
-        return cb;
-      }),
-    };
+    originalFetch = global.fetch;
+    realProvider = new RealLiveMarketDataProvider();
 
     mockRedis = {
       getClient: jest.fn().mockReturnValue({
@@ -442,19 +200,26 @@ describe('Fix 182 — Authoritative Root-Cause Test for Zero Live Paper Trades',
       get: jest.fn().mockResolvedValue(null),
     };
 
-    const moduleRef: TestingModule = await Test.createTestingModule({
+    moduleRef = await Test.createTestingModule({
       providers: [
         ScannerService,
         SignalsService,
         AlgoBotsService,
         PaperTradingService,
+        PrismaService,
         {
           provide: RealMarketStreamerService,
           useValue: {
-            getValidatedTicker: jest.fn().mockReturnValue({
-              price: 64850.0,
-              marketEventTime: Date.now(),
-              lastUpdated: Date.now(),
+            getValidatedTicker: jest.fn().mockImplementation((sym: string) => {
+              if (sym.toUpperCase() !== 'BTCUSDT') {
+                throw new MarketDataUnavailableError(sym);
+              }
+              const now = Date.now();
+              return {
+                price: 64985.0,
+                marketEventTime: now - 100,
+                lastUpdated: now,
+              };
             }),
           },
         },
@@ -466,14 +231,10 @@ describe('Fix 182 — Authoritative Root-Cause Test for Zero Live Paper Trades',
           provide: CandlesService,
           useValue: {
             getCandles: jest.fn().mockImplementation(async ({ symbol, timeframe, limit }) => {
-              const candles = await liveProvider.getHistoricalCandles(symbol, timeframe, limit);
+              const candles = await realProvider.getHistoricalCandles(symbol, timeframe, limit);
               return { candles };
             }),
           },
-        },
-        {
-          provide: PrismaService,
-          useValue: mockPrisma,
         },
         {
           provide: RedisService,
@@ -486,42 +247,166 @@ describe('Fix 182 — Authoritative Root-Cause Test for Zero Live Paper Trades',
     signalsService = moduleRef.get<SignalsService>(SignalsService);
     algoBotsService = moduleRef.get<AlgoBotsService>(AlgoBotsService);
     paperTradingService = moduleRef.get<PaperTradingService>(PaperTradingService);
+    prismaService = moduleRef.get<PrismaService>(PrismaService);
+
+    await prismaService.$connect();
   });
 
-  afterEach(() => {
-    jest.restoreAllMocks();
+  afterAll(async () => {
+    global.fetch = originalFetch;
+    if (prismaService) {
+      await prismaService.$disconnect();
+    }
   });
 
-  it('1. REAL SCANNER E2E: ScannerService.triggerScan() executes complete pipeline to paper order', async () => {
-    const evaluateSpy = jest.spyOn(algoBotsService, 'evaluateSignalForBots');
+  beforeEach(async () => {
+    decisionTime = new Date();
 
-    // 1. Authoritative Entry Point: Trigger scan from ScannerService with deterministic signal setup
-    const scanResult: any = await scannerService.triggerScan(Timeframe.M15, {
-      strategyConfig: {
-        deterministicSignal: {
-          symbol: 'BTCUSDT',
-          direction: Direction.BEARISH,
-          score: 85,
-          grade: SignalGrade.A_PLUS,
-          entryZone: { min: 64800, max: 64900, optimal: 64850 },
-          stopLoss: 65500,
-          takeProfits: { tp1: 64000, tp2: 63500, tp3: 62000 },
-          canonicalCandleTime: decisionTime.getTime(),
-          canonicalDecisionTime: decisionTime,
-          timestamp: decisionTime,
-          triggerEvidence: {
-            orderBlock: { matched: true, timestamp: decisionTime },
-            fvg: { matched: true, timestamp: decisionTime },
-            liquiditySweep: { matched: true, timestamp: decisionTime },
-            structureBreak: { matched: true, timestamp: decisionTime },
-          },
-          reasoning: {
-            htfStructure: '1H/4H Bearish Alignment',
-            marketStructure: 'Confirmed BOS',
-          },
-        },
+    // Clean execution and trade tables in real PostgreSQL
+    await prismaService.algoBotExecution.deleteMany({});
+    await prismaService.paperFill.deleteMany({});
+    await prismaService.paperTrade.deleteMany({});
+    await prismaService.paperPosition.deleteMany({});
+    await prismaService.paperOrder.deleteMany({});
+    await prismaService.signal.deleteMany({});
+
+    // Deactivate non-test instruments
+    await prismaService.instrument.updateMany({
+      where: { symbol: { not: 'BTCUSDT' } },
+      data: { isActive: false },
+    });
+
+    // Seed Instrument
+    await prismaService.instrument.upsert({
+      where: { symbol: 'BTCUSDT' },
+      update: { isActive: true },
+      create: {
+        id: 'inst_btcusdt',
+        symbol: 'BTCUSDT',
+        name: 'Bitcoin',
+        exchange: 'BINANCE',
+        assetType: 'CRYPTO',
+        tickSize: 0.01,
+        lotSize: 1,
+        currency: 'USD',
+        isActive: true,
       },
     });
+
+    // Seed Trading System Config
+    await prismaService.tradingSystemConfig.upsert({
+      where: { id: 'SYSTEM_DEFAULT' },
+      update: {
+        paperTradingEnabled: true,
+        liveTradingEnabled: false,
+        emergencyStop: false,
+        maxOpenPositions: 5,
+        maxTradesPerDay: 20,
+      },
+      create: {
+        id: 'SYSTEM_DEFAULT',
+        paperTradingEnabled: true,
+        liveTradingEnabled: false,
+        emergencyStop: false,
+        maxDailyLossPercent: 3.0,
+        maxPositionRiskPercent: 1.0,
+        maxTotalExposurePercent: 20.0,
+        maxOpenPositions: 5,
+        maxTradesPerDay: 20,
+        maxConsecutiveLosses: 3,
+        maxLeverage: 5.0,
+        maxSlippageBps: 50,
+        maxMarketDataAgeSeconds: 5,
+      },
+    });
+
+    // Seed Primary Paper Account & Balance
+    await prismaService.paperAccount.upsert({
+      where: { id: 'acc_paper_e2e' },
+      update: { cashBalance: 100000.0, isActive: true },
+      create: {
+        id: 'acc_paper_e2e',
+        name: 'Primary Paper Account',
+        currency: 'USD',
+        cashBalance: 100000.0,
+        initialCapital: 100000.0,
+        usedMargin: 0,
+        isActive: true,
+      },
+    });
+
+    // Seed Production-Grade Bot for Liquidity Sweep
+    await prismaService.algoBot.upsert({
+      where: { id: 'bot_btc_liquidity_sweep' },
+      update: {
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        timeframe: '15m',
+        minScore: 75,
+        smcCondition: 'LIQUIDITY_SWEEP',
+        lots: 1,
+        autoExecutePaper: true,
+        isActive: true,
+      },
+      create: {
+        id: 'bot_btc_liquidity_sweep',
+        name: 'BTCUSDT 15m Liquidity Pool Sweeper',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        timeframe: '15m',
+        minScore: 75,
+        smcCondition: 'LIQUIDITY_SWEEP',
+        lots: 1,
+        autoExecutePaper: true,
+        notifyWebhook: false,
+        isActive: true,
+        createdAt: new Date(),
+        triggerCount: 0,
+      },
+    });
+
+    // Mock HTTP transport for RealLiveMarketDataProvider
+    const klines = buildBinanceKlinesPayload(decisionTime);
+    global.fetch = jest.fn().mockImplementation(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('symbol=BTCUSDT')) {
+        if (urlStr.includes('interval=15m')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => klines.m15,
+          } as any;
+        }
+        if (urlStr.includes('interval=1h')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => klines.h1,
+          } as any;
+        }
+        if (urlStr.includes('interval=4h')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => klines.h4,
+          } as any;
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [],
+      } as any;
+    });
+  });
+
+  it('1. PRIMARY RELEASE-GATE TEST: ScannerService.triggerScan() executes complete pipeline to PostgreSQL database', async () => {
+    const evaluateSpy = jest.spyOn(algoBotsService, 'evaluateSignalForBots');
+    const placeOrderSpy = jest.spyOn(paperTradingService, 'placeOrder');
+
+    // 1. Authoritative Entry Point: Trigger scan from ScannerService
+    const scanResult: any = await scannerService.triggerScan(Timeframe.M15);
+    console.log('EVAL RESULTS:', JSON.stringify(await evaluateSpy.mock.results[0]?.value, null, 2));
 
     // Assert Scanner summary metrics
     expect(scanResult.scannedCount).toBeGreaterThanOrEqual(1);
@@ -532,42 +417,108 @@ describe('Fix 182 — Authoritative Root-Cause Test for Zero Live Paper Trades',
     expect(scanResult.executionFailedCount).toBe(0);
     expect(scanResult.executedCount).toBe(1);
 
-    // 2. Verify AlgoBotsService.evaluateSignalForBots() was invoked by ScannerService for BTCUSDT
+    // 2. Verify AlgoBotsService was invoked with generated signal
     expect(evaluateSpy).toHaveBeenCalledTimes(1);
-    // 3. Verify SignalsService produced the active signal setup via real SignalGenerator
-    const btcSignal = scanResult.signals[0];
-    expect(btcSignal).toBeDefined();
+    const evaluatedSignal = evaluateSpy.mock.calls[0][0];
+    expect(evaluatedSignal.symbol).toBe('BTCUSDT');
+    expect(evaluatedSignal.direction).toBe(Direction.BULLISH);
+    expect(evaluatedSignal.state).toBe(SignalState.ACTIVE);
+    expect(evaluatedSignal.score).toBeGreaterThanOrEqual(75);
+    expect(evaluatedSignal.triggerEvidence?.liquiditySweep?.matched).toBe(true);
 
-    expect(btcSignal!.symbol).toBe('BTCUSDT');
-    expect(String(btcSignal!.timeframe)).toBe('15m');
-    expect(btcSignal!.state).toBe(SignalState.ACTIVE);
-    expect(btcSignal!.direction).toBe(Direction.BEARISH);
-    expect(btcSignal!.score).toBeGreaterThanOrEqual(70);
+    // Canonical timestamp invariant
+    expect(evaluatedSignal.canonicalCandleTime).toBeDefined();
+    expect(evaluatedSignal.canonicalDecisionTime).toBeDefined();
+    expect(evaluatedSignal.canonicalCandleTime).toBe(
+      new Date(evaluatedSignal.canonicalDecisionTime!).getTime(),
+    );
 
-    // Canonical timestamp strict assertions
-    expect(btcSignal!.canonicalCandleTime).toBeDefined();
-    expect(btcSignal!.canonicalDecisionTime).toBeDefined();
-    expect(btcSignal!.canonicalCandleTime).toBe(btcSignal!.canonicalDecisionTime!.getTime());
+    // 3. Verify real PaperTradingService.placeOrder() was called with canonical decision time
+    expect(placeOrderSpy).toHaveBeenCalledTimes(1);
+    expect(placeOrderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        symbol: 'BTCUSDT',
+        direction: 'BUY',
+        signalTime: new Date(evaluatedSignal.canonicalDecisionTime!).toISOString(),
+      }),
+    );
 
-    // Evidence & HTF presence assertions
-    expect(btcSignal!.triggerEvidence).toBeDefined();
-    expect(btcSignal!.reasoning?.htfStructure).not.toContain('unavailable');
+    // 4. ASSERT ACTUAL POSTGRESQL DATABASE ROWS
+    const dbExecution = await prismaService.algoBotExecution.findFirst({
+      where: { botId: 'bot_btc_liquidity_sweep' },
+    });
+    expect(dbExecution).not.toBeNull();
+    expect(dbExecution!.state).toBe('EXECUTED');
+    expect(dbExecution!.symbol).toBe('BTCUSDT');
+    expect(dbExecution!.direction).toBe(Direction.BULLISH);
+    expect(dbExecution!.orderPositionId).toBeDefined();
+    expect(dbExecution!.signalTimestamp.getTime()).toBe(evaluatedSignal.canonicalCandleTime);
 
-    // 4. Verify complete state machine execution & paper position creation in DB
-    const executions = Array.from(executionsDb.values()).filter((e) => e.fingerprint);
-    expect(executions.length).toBeGreaterThanOrEqual(1);
+    const dbPosition = await prismaService.paperPosition.findFirst({
+      where: { symbol: 'BTCUSDT' },
+    });
+    expect(dbPosition).not.toBeNull();
+    expect(dbPosition!.symbol).toBe('BTCUSDT');
+    expect(dbPosition!.direction).toBe(Direction.BULLISH);
+    expect(dbPosition!.status).toBe('OPEN');
+    expect(Number(dbPosition!.entryPrice)).toBeGreaterThan(0);
+    expect(dbPosition!.id).toBe(dbExecution!.orderPositionId);
+  });
 
-    const activeExec = executions[0];
-    expect(activeExec.state).toBe('EXECUTED');
-    expect(activeExec.orderPositionId).toBeDefined();
+  it('2. FAIL-CLOSED INVARIANT: Missing H1 or H4 HTF data produces zero executions', async () => {
+    // Return empty array for H1
+    global.fetch = jest.fn().mockImplementation(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('interval=1h')) {
+        return { ok: true, status: 200, json: async () => [] } as any;
+      }
+      const klines = buildBinanceKlinesPayload(decisionTime);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (urlStr.includes('interval=15m') ? klines.m15 : klines.h4),
+      } as any;
+    });
 
-    const positions = Array.from(positionsDb.values());
-    expect(positions.length).toBe(1);
-    const pos = positions[0];
-    expect(pos.symbol).toBe('BTCUSDT');
-    expect(pos.direction).toBe(Direction.BEARISH);
-    expect(pos.status).toBe('OPEN');
-    expect(Number(pos.entryPrice)).toBeGreaterThan(0);
-    expect(activeExec.signalTimestamp.getTime()).toBe(btcSignal!.canonicalCandleTime);
+    const res: any = await scannerService.triggerScan(Timeframe.M15);
+    expect(res.executedCount).toBe(0);
+    expect(res.executionAttemptedCount).toBe(0);
+
+    const dbPositions = await prismaService.paperPosition.findMany({});
+    expect(dbPositions.length).toBe(0);
+  });
+
+  it('3. ERROR CLASSIFICATION & RETRY SEMANTICS: Broker 503 classifies as BROKER_UNAVAILABLE and transitions to FAILED_RETRYABLE', async () => {
+    jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValueOnce(
+      new Error('Broker connection refused (503 Service Unavailable)'),
+    );
+
+    const res: any = await scannerService.triggerScan(Timeframe.M15);
+    expect(res.executedCount).toBe(0);
+    expect(res.executionFailedCount).toBe(1);
+
+    const dbExecution = await prismaService.algoBotExecution.findFirst({
+      where: { botId: 'bot_btc_liquidity_sweep' },
+    });
+    expect(dbExecution).not.toBeNull();
+    expect(dbExecution!.state).toBe('FAILED_RETRYABLE');
+    expect(dbExecution!.failureReasonCode).toBe(ExecutionFailureReason.BROKER_UNAVAILABLE);
+  });
+
+  it('4. ERROR CLASSIFICATION: Permanent broker rejection classifies as BROKER_REJECTED and transitions to FAILED_FINAL', async () => {
+    jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValueOnce(
+      new Error('ORDER_REJECTED: Margin insufficient for requested lots'),
+    );
+
+    const res: any = await scannerService.triggerScan(Timeframe.M15);
+    expect(res.executedCount).toBe(0);
+    expect(res.executionFailedCount).toBe(1);
+
+    const dbExecution = await prismaService.algoBotExecution.findFirst({
+      where: { botId: 'bot_btc_liquidity_sweep' },
+    });
+    expect(dbExecution).not.toBeNull();
+    expect(dbExecution!.state).toBe('FAILED_FINAL');
+    expect(dbExecution!.failureReasonCode).toBe(ExecutionFailureReason.BROKER_REJECTED);
   });
 });

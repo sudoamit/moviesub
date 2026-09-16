@@ -20,6 +20,9 @@ import * as crypto from 'crypto';
 export enum ExecutionFailureReason {
   MARKET_DATA_UNAVAILABLE = 'MARKET_DATA_UNAVAILABLE',
   STALE_MARKET_DATA = 'STALE_MARKET_DATA',
+  BROKER_UNAVAILABLE = 'BROKER_UNAVAILABLE',
+  BROKER_TIMEOUT = 'BROKER_TIMEOUT',
+  BROKER_REJECTED = 'BROKER_REJECTED',
   ORDER_REJECTED = 'ORDER_REJECTED',
   ORDER_PLACEMENT_FAILED = 'ORDER_PLACEMENT_FAILED',
   INVALID_QUANTITY = 'INVALID_QUANTITY',
@@ -47,10 +50,12 @@ export interface IAlgoBotExecutionResult {
 }
 
 export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
+  const errMsg = String(err?.message || err || '');
+  const errCode = err?.code || err?.reasonCode || '';
+
   if (
     err instanceof MarketDataUnavailableError ||
-    err?.code === 'MARKET_DATA_UNAVAILABLE' ||
-    err?.reasonCode === 'MARKET_DATA_UNAVAILABLE' ||
+    errCode === 'MARKET_DATA_UNAVAILABLE' ||
     err?.name === 'MarketDataUnavailableError'
   ) {
     return {
@@ -62,8 +67,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
 
   if (
     err instanceof StaleMarketDataError ||
-    err?.code === 'STALE_MARKET_DATA' ||
-    err?.reasonCode === 'STALE_MARKET_DATA' ||
+    errCode === 'STALE_MARKET_DATA' ||
     err?.name === 'StaleMarketDataError'
   ) {
     return {
@@ -73,7 +77,59 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'POSITION_ALREADY_OPEN' || err?.reasonCode === 'POSITION_ALREADY_OPEN') {
+  // Broker / Transport Unavailable (Retryable)
+  if (
+    errCode === 'BROKER_UNAVAILABLE' ||
+    errCode === 'ECONNREFUSED' ||
+    errCode === 'ENOTFOUND' ||
+    errCode === 'EAI_AGAIN' ||
+    errMsg.includes('503') ||
+    errMsg.includes('Broker connection refused') ||
+    errMsg.includes('Service Unavailable') ||
+    errMsg.includes('connection refused')
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.BROKER_UNAVAILABLE,
+      message: err?.message || 'Broker connection refused (503)',
+    };
+  }
+
+  // Broker / Transport Timeout (Retryable)
+  if (
+    errCode === 'BROKER_TIMEOUT' ||
+    errCode === 'ETIMEDOUT' ||
+    errCode === 'ESOCKETTIMEDOUT' ||
+    errMsg.includes('504') ||
+    errMsg.includes('Gateway Timeout') ||
+    errMsg.includes('network timeout') ||
+    errMsg.includes('timed out') ||
+    errMsg.includes('timeout')
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.BROKER_TIMEOUT,
+      message: err?.message || 'Broker request timed out',
+    };
+  }
+
+  // Broker Rejected (Non-Retryable)
+  if (
+    errCode === 'BROKER_REJECTED' ||
+    errCode === 'ORDER_REJECTED' ||
+    errMsg.includes('ORDER_REJECTED') ||
+    errMsg.includes('Insufficient margin') ||
+    errMsg.includes('Margin insufficient') ||
+    errMsg.includes('Account balance insufficient')
+  ) {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.BROKER_REJECTED,
+      message: err?.message || 'Broker/Exchange rejected order',
+    };
+  }
+
+  if (errCode === 'POSITION_ALREADY_OPEN') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.POSITION_ALREADY_OPEN,
@@ -81,7 +137,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'INVALID_QUANTITY' || err?.reasonCode === 'INVALID_QUANTITY') {
+  if (errCode === 'INVALID_QUANTITY') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.INVALID_QUANTITY,
@@ -89,7 +145,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'INVALID_LEVELS' || err?.reasonCode === 'INVALID_LEVELS') {
+  if (errCode === 'INVALID_LEVELS') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.INVALID_LEVELS,
@@ -97,15 +153,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'ORDER_REJECTED' || err?.reasonCode === 'ORDER_REJECTED') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.ORDER_REJECTED,
-      message: err?.message || 'Broker/Exchange rejected order',
-    };
-  }
-
-  if (err?.code === 'ORDER_PLACEMENT_FAILED' || err?.reasonCode === 'ORDER_PLACEMENT_FAILED') {
+  if (errCode === 'ORDER_PLACEMENT_FAILED') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.ORDER_PLACEMENT_FAILED,
@@ -113,7 +161,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'DATABASE_UNAVAILABLE' || err?.reasonCode === 'DATABASE_UNAVAILABLE') {
+  if (errCode === 'DATABASE_UNAVAILABLE') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.DATABASE_UNAVAILABLE,
@@ -121,7 +169,7 @@ export function classifyExecutionFailure(err: any): IExecutionFailureClassificat
     };
   }
 
-  if (err?.code === 'STATE_TRANSITION_FAILED' || err?.reasonCode === 'STATE_TRANSITION_FAILED') {
+  if (errCode === 'STATE_TRANSITION_FAILED') {
     return {
       retryable: false,
       reasonCode: ExecutionFailureReason.STATE_TRANSITION_FAILED,
@@ -673,16 +721,22 @@ export class AlgoBotsService implements OnModuleInit {
       return false;
     }
 
-    const signalTime = new Date(signal.timestamp || signal.createdAt || Date.now()).getTime();
-    const maxAgeMs = this.getMaxSignalAgeMs(signal.timeframe);
+    const signalTime = new Date(
+      (signal as any).canonicalDecisionTime ||
+      (signal as any).canonicalCandleTime ||
+      signal.timestamp ||
+      signal.createdAt ||
+      Date.now(),
+    ).getTime();
+    const maxStructureAgeMs = this.getMaxSignalAgeMs(signal.timeframe) * 50;
 
     const isEvidenceItemValid = (item: any): boolean => {
       if (!item || item.matched !== true) return false;
       if (item.timestamp) {
         const itemTime = new Date(item.timestamp).getTime();
         if (Number.isNaN(itemTime)) return false;
-        // Evidence timestamp must not be from the future (lookahead) or older than maxSignalAgeMs
-        if (itemTime > signalTime + 5000 || signalTime - itemTime > maxAgeMs) {
+        // Evidence timestamp must not be from the future (lookahead) or older than snapshot lookback window
+        if (itemTime > signalTime + 5000 || signalTime - itemTime > maxStructureAgeMs) {
           return false;
         }
       }

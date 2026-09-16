@@ -132,24 +132,42 @@ describe('AlgoBotsService Execution State Machine', () => {
     triggerEvidence: { orderBlock: { matched: true } },
   };
 
-  it('correctly transitions state machine: RESERVED -> EXECUTING -> FAILED_FINAL on placeOrder failure', async () => {
+  it('correctly transitions state machine: RESERVED -> EXECUTING -> FAILED_RETRYABLE on retryable broker error', async () => {
     const results = await service.evaluateSignalForBots(validSignal);
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('FAILED');
-    expect(results[0].reasonCode).toBe('UNKNOWN_EXECUTION_ERROR');
+    expect(results[0].reasonCode).toBe('BROKER_UNAVAILABLE');
     expect(results[0].details).toContain('Broker connection refused');
 
     // Inspect the stored record state in executionsDb
     const records = Array.from(executionsDb.values());
     expect(records).toHaveLength(1);
-    expect(records[0].state).toBe('FAILED_FINAL');
-    expect(records[0].failureReasonCode).toBe('UNKNOWN_EXECUTION_ERROR');
+    expect(records[0].state).toBe('FAILED_RETRYABLE');
+    expect(records[0].failureReasonCode).toBe('BROKER_UNAVAILABLE');
     expect(records[0].failureReason).toContain('Broker connection refused');
   });
 
+  it('correctly transitions state machine: RESERVED -> EXECUTING -> FAILED_FINAL on permanent rejection', async () => {
+    mockPaperTradingService.placeOrder.mockRejectedValueOnce(
+      new Error('ORDER_REJECTED: Margin insufficient for requested lots'),
+    );
+
+    const signal2 = { ...validSignal, id: 'sig_sm_btc_final' };
+    const results = await service.evaluateSignalForBots(signal2);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe('FAILED');
+    expect(results[0].reasonCode).toBe('BROKER_REJECTED');
+
+    const records = Array.from(executionsDb.values());
+    expect(records).toHaveLength(1);
+    expect(records[0].state).toBe('FAILED_FINAL');
+    expect(records[0].failureReasonCode).toBe('BROKER_REJECTED');
+  });
+
   it('prevents re-execution when fingerprint lock already exists in DB', async () => {
-    // Pass 1: fails order placement and leaves state as FAILED_FINAL
+    // Pass 1: fails order placement and leaves state as FAILED_RETRYABLE or FAILED_FINAL
     await service.evaluateSignalForBots(validSignal);
 
     // Pass 2: evaluate same signal again
