@@ -112,7 +112,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const snap1 = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: 'USDT',
-      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime1.getTime()),
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate(
+        'USDT',
+        'INR',
+        entryTime1.getTime(),
+      ),
       contractSize: 1,
       lotSize: 10.0,
       resolvedMarginModel: resolveMarginModel(inst1, { requestedLeverage: 1 }),
@@ -181,7 +185,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       });
       const exitTurnover = 52100.0 * 5.0;
       const exitCharges = paperTradingA.calculateCharges(exitTurnover, true);
-      const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+      const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate(
+        'USDT',
+        'INR',
+        Date.now(),
+      ).fxRate;
       const expectedPartialNetPnL = Number(
         ((52100 - 50000) * btcFxRate * 5.0 - exitCharges.totalCharges).toFixed(2),
       );
@@ -192,7 +200,15 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       expect(Number(updatedAccount!.totalChargesPaid)).toBeCloseTo(exitCharges.totalCharges, 2);
     } finally {
       // Cleanup in FK dependency order: PaperFill -> PaperOrder -> PaperPosition -> PaperAccount
-      await prismaA.paperFill.deleteMany({ where: { orderId: { in: (await prismaA.paperOrder.findMany({ where: { accountId: account.id } })).map((o) => o.id) } } });
+      await prismaA.paperFill.deleteMany({
+        where: {
+          orderId: {
+            in: (await prismaA.paperOrder.findMany({ where: { accountId: account.id } })).map(
+              (o) => o.id,
+            ),
+          },
+        },
+      });
       await prismaA.paperOrder.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperPosition.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperAccount.delete({ where: { id: account.id } });
@@ -218,7 +234,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const snap2 = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: 'USDT',
-      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime2.getTime()),
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate(
+        'USDT',
+        'INR',
+        entryTime2.getTime(),
+      ),
       contractSize: 1,
       lotSize: 10.0,
       resolvedMarginModel: resolveMarginModel(inst2, { requestedLeverage: 1 }),
@@ -253,7 +273,9 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         paperTradingB.closePosition(position.id, 'TP2 Hit'),
       ]);
 
-      const fulfilled = results.filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled');
+      const fulfilled = results.filter(
+        (r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled',
+      );
       expect(fulfilled.length).toBeGreaterThanOrEqual(1);
 
       if (fulfilled.length === 2) {
@@ -292,7 +314,15 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     } finally {
       // Cleanup in FK dependency order: PaperTrade -> PaperFill -> PaperOrder -> PaperPosition -> PaperAccount
       await prismaA.paperTrade.deleteMany({ where: { positionId: position.id } });
-      await prismaA.paperFill.deleteMany({ where: { orderId: { in: (await prismaA.paperOrder.findMany({ where: { accountId: account.id } })).map((o) => o.id) } } });
+      await prismaA.paperFill.deleteMany({
+        where: {
+          orderId: {
+            in: (await prismaA.paperOrder.findMany({ where: { accountId: account.id } })).map(
+              (o) => o.id,
+            ),
+          },
+        },
+      });
       await prismaA.paperOrder.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperPosition.deleteMany({ where: { accountId: account.id } });
       await prismaA.paperAccount.delete({ where: { id: account.id } });
@@ -397,7 +427,9 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       const ordersB = await prismaB.paperOrder.findMany({ where: { accountId: account.id } });
       expect(ordersB.length).toBe(0);
 
-      const fillsB = await prismaB.paperFill.findMany({ where: { orderId: { in: ordersB.map((o) => o.id) } } });
+      const fillsB = await prismaB.paperFill.findMany({
+        where: { orderId: { in: ordersB.map((o) => o.id) } },
+      });
       expect(fillsB.length).toBe(0);
 
       const positionsB = await prismaB.paperPosition.findMany({ where: { accountId: account.id } });
@@ -432,7 +464,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const snap3 = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: 'USDT',
-      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime3.getTime()),
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate(
+        'USDT',
+        'INR',
+        entryTime3.getTime(),
+      ),
       contractSize: 1,
       lotSize: 2.0,
       resolvedMarginModel: resolveMarginModel(inst3, { requestedLeverage: 5 }),
@@ -521,7 +557,11 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const snap = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: 'USDT',
-      fxResult: PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', entryTime.getTime()),
+      fxResult: PointInTimeCurrencyConverter.getInstance().getRate(
+        'USDT',
+        'INR',
+        entryTime.getTime(),
+      ),
       contractSize: 1,
       lotSize: 1.0,
       resolvedMarginModel: resolveMarginModel(inst, { requestedLeverage: 1 }),
@@ -561,14 +601,18 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       realStreamer.setProviderConnected(false);
 
       await expect(
-        prodService.closePosition(pos.id, 'Disconnect Exit', { executionMode: 'LIVE_MARKET' as any }),
+        prodService.closePosition(pos.id, 'Disconnect Exit', {
+          executionMode: 'LIVE_MARKET' as any,
+        }),
       ).rejects.toThrow(/\[MARKET_DATA_UNAVAILABLE\]/);
 
       // 2. Reconnect provider -> cached tick rejected
       realStreamer.setProviderConnected(true);
 
       await expect(
-        prodService.closePosition(pos.id, 'Cached Quote Exit', { executionMode: 'LIVE_MARKET' as any }),
+        prodService.closePosition(pos.id, 'Cached Quote Exit', {
+          executionMode: 'LIVE_MARKET' as any,
+        }),
       ).rejects.toThrow(/cached tick from before provider reconnection/);
 
       // 3. Ingest fresh valid tick -> closePosition against real PostgreSQL succeeds
@@ -579,7 +623,9 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         closeTime: tFresh,
       });
 
-      const trade = await prodService.closePosition(pos.id, 'Reconnected Valid Exit', { executionMode: 'LIVE_MARKET' as any });
+      const trade = await prodService.closePosition(pos.id, 'Reconnected Valid Exit', {
+        executionMode: 'LIVE_MARKET' as any,
+      });
       expect(trade).toBeDefined();
       expect(Number(trade.exitPrice)).toBe(53000.0);
 

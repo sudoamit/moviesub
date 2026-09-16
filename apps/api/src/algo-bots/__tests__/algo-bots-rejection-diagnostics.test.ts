@@ -100,7 +100,9 @@ describe('Fix 177 — Diagnostic Rejection Gate Suite (NIFTY, BANKNIFTY, BTCUSDT
 
     for (const bot of presetBots) {
       const diag = await algoBotsService.evaluateBotForSignalDiagnostics(bot, sampleSignal);
-      console.log(`[DIAGNOSTIC UNCONFIGURED] ${bot.id} -> matches=${diag.matches}, reasons=${diag.reasons.join(', ')}`);
+      console.log(
+        `[DIAGNOSTIC UNCONFIGURED] ${bot.id} -> matches=${diag.matches}, reasons=${diag.reasons.join(', ')}`,
+      );
       expect(diag.matches).toBe(false);
       expect(diag.reasons).toContain('BOT_INACTIVE');
       expect(diag.reasons).toContain('AUTO_EXECUTE_DISABLED');
@@ -148,8 +150,13 @@ describe('Fix 177 — Diagnostic Rejection Gate Suite (NIFTY, BANKNIFTY, BTCUSDT
       },
     };
 
-    const niftyDiag = await algoBotsService.evaluateBotForSignalDiagnostics(niftyBot, niftySignalNoOB);
-    console.log(`[DIAGNOSTIC NIFTY] matches=${niftyDiag.matches}, reasons=${niftyDiag.reasons.join(', ')}`);
+    const niftyDiag = await algoBotsService.evaluateBotForSignalDiagnostics(
+      niftyBot,
+      niftySignalNoOB,
+    );
+    console.log(
+      `[DIAGNOSTIC NIFTY] matches=${niftyDiag.matches}, reasons=${niftyDiag.reasons.join(', ')}`,
+    );
     expect(niftyDiag.matches).toBe(false);
     expect(niftyDiag.reasons).toContain('SMC_CONDITION_MISMATCH');
 
@@ -174,8 +181,13 @@ describe('Fix 177 — Diagnostic Rejection Gate Suite (NIFTY, BANKNIFTY, BTCUSDT
       },
     };
 
-    const bankniftyDiag = await algoBotsService.evaluateBotForSignalDiagnostics(bankniftyBot, bankniftyBullSignal);
-    console.log(`[DIAGNOSTIC BANKNIFTY] matches=${bankniftyDiag.matches}, reasons=${bankniftyDiag.reasons.join(', ')}`);
+    const bankniftyDiag = await algoBotsService.evaluateBotForSignalDiagnostics(
+      bankniftyBot,
+      bankniftyBullSignal,
+    );
+    console.log(
+      `[DIAGNOSTIC BANKNIFTY] matches=${bankniftyDiag.matches}, reasons=${bankniftyDiag.reasons.join(', ')}`,
+    );
     expect(bankniftyDiag.matches).toBe(false);
     expect(bankniftyDiag.reasons).toContain('DIRECTION_MISMATCH');
 
@@ -201,7 +213,9 @@ describe('Fix 177 — Diagnostic Rejection Gate Suite (NIFTY, BANKNIFTY, BTCUSDT
     };
 
     const btcDiag = await algoBotsService.evaluateBotForSignalDiagnostics(btcBot, btcValidSignal);
-    console.log(`[DIAGNOSTIC BTCUSDT] matches=${btcDiag.matches}, reasons=${btcDiag.reasons.join(', ')}`);
+    console.log(
+      `[DIAGNOSTIC BTCUSDT] matches=${btcDiag.matches}, reasons=${btcDiag.reasons.join(', ')}`,
+    );
     expect(btcDiag.matches).toBe(true);
     expect(btcDiag.reasons).toContain('READY_TO_EXECUTE');
   });

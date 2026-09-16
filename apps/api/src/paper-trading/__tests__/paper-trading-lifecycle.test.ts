@@ -3,7 +3,10 @@ import { PaperTradingService, ExecutionMode } from '../paper-trading.service';
 import { PaperPositionMonitorService } from '../paper-position-monitor.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CandlesService } from '../../candles/candles.service';
-import { RealMarketStreamerService, ILiveRealTicker } from '../../market-data/real-market-streamer.service';
+import {
+  RealMarketStreamerService,
+  ILiveRealTicker,
+} from '../../market-data/real-market-streamer.service';
 import {
   Direction,
   PositionState,
@@ -82,31 +85,45 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           const acc = dbAccounts.find((a) => a.id === args.where.id) || dbAccounts[0];
           if (acc) {
             if (args.data.cashBalance?.decrement) {
-              acc.cashBalance = new Decimal(Number(acc.cashBalance) - Number(args.data.cashBalance.decrement));
+              acc.cashBalance = new Decimal(
+                Number(acc.cashBalance) - Number(args.data.cashBalance.decrement),
+              );
             } else if (args.data.cashBalance?.increment) {
-              acc.cashBalance = new Decimal(Number(acc.cashBalance) + Number(args.data.cashBalance.increment));
+              acc.cashBalance = new Decimal(
+                Number(acc.cashBalance) + Number(args.data.cashBalance.increment),
+              );
             } else if (args.data.cashBalance !== undefined) {
               acc.cashBalance = new Decimal(args.data.cashBalance);
             }
 
             if (args.data.usedMargin?.decrement) {
-              acc.usedMargin = new Decimal(Number(acc.usedMargin) - Number(args.data.usedMargin.decrement));
+              acc.usedMargin = new Decimal(
+                Number(acc.usedMargin) - Number(args.data.usedMargin.decrement),
+              );
             } else if (args.data.usedMargin?.increment) {
-              acc.usedMargin = new Decimal(Number(acc.usedMargin) + Number(args.data.usedMargin.increment));
+              acc.usedMargin = new Decimal(
+                Number(acc.usedMargin) + Number(args.data.usedMargin.increment),
+              );
             } else if (args.data.usedMargin !== undefined) {
               acc.usedMargin = new Decimal(args.data.usedMargin);
             }
 
             if (args.data.realizedPnL?.decrement) {
-              acc.realizedPnL = new Decimal(Number(acc.realizedPnL) - Number(args.data.realizedPnL.decrement));
+              acc.realizedPnL = new Decimal(
+                Number(acc.realizedPnL) - Number(args.data.realizedPnL.decrement),
+              );
             } else if (args.data.realizedPnL?.increment) {
-              acc.realizedPnL = new Decimal(Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment));
+              acc.realizedPnL = new Decimal(
+                Number(acc.realizedPnL) + Number(args.data.realizedPnL.increment),
+              );
             } else if (args.data.realizedPnL !== undefined) {
               acc.realizedPnL = new Decimal(args.data.realizedPnL);
             }
 
             if (args.data.totalChargesPaid?.increment) {
-              acc.totalChargesPaid = new Decimal(Number(acc.totalChargesPaid) + Number(args.data.totalChargesPaid.increment));
+              acc.totalChargesPaid = new Decimal(
+                Number(acc.totalChargesPaid) + Number(args.data.totalChargesPaid.increment),
+              );
             } else if (args.data.totalChargesPaid !== undefined) {
               acc.totalChargesPaid = new Decimal(args.data.totalChargesPaid);
             }
@@ -137,8 +154,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           return Promise.resolve(order || null);
         }),
         create: jest.fn().mockImplementation((args) => {
-          if (args.data.idempotencyKey && dbOrders.some((o) => o.idempotencyKey === args.data.idempotencyKey)) {
-            const err: any = new Error('Unique constraint failed on the fields: (`idempotencyKey`)');
+          if (
+            args.data.idempotencyKey &&
+            dbOrders.some((o) => o.idempotencyKey === args.data.idempotencyKey)
+          ) {
+            const err: any = new Error(
+              'Unique constraint failed on the fields: (`idempotencyKey`)',
+            );
             err.code = 'P2002';
             return Promise.reject(err);
           }
@@ -240,11 +262,16 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
               totalChargesPaid: new Decimal(a.totalChargesPaid),
             })),
           );
-          dbOrders.length = 0; dbOrders.push(...snapOrders);
-          dbFills.length = 0; dbFills.push(...snapFills);
-          dbPositions.length = 0; dbPositions.push(...snapPositions);
-          dbTrades.length = 0; dbTrades.push(...snapTrades);
-          dbAudits.length = 0; dbAudits.push(...snapAudits);
+          dbOrders.length = 0;
+          dbOrders.push(...snapOrders);
+          dbFills.length = 0;
+          dbFills.push(...snapFills);
+          dbPositions.length = 0;
+          dbPositions.push(...snapPositions);
+          dbTrades.length = 0;
+          dbTrades.push(...snapTrades);
+          dbAudits.length = 0;
+          dbAudits.push(...snapAudits);
           throw err;
         }
       }),
@@ -1174,7 +1201,10 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     (paperService as any).realMarketStreamer = realStreamer;
 
     // Test rejection of malformed provider tick without timestamp or with invalid price
-    const invalidTickResult = (realStreamer as any).ingestBinanceTickerData({ s: 'BTCUSDT', c: '80000.00' });
+    const invalidTickResult = (realStreamer as any).ingestBinanceTickerData({
+      s: 'BTCUSDT',
+      c: '80000.00',
+    });
     expect(invalidTickResult).toBeNull(); // Rejected: missing closeTime / C
 
     const providerTime = Date.now() - 500;
@@ -1322,10 +1352,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     );
 
     // Run parallel monitor checks concurrently across Worker A and Worker B
-    await Promise.all([
-      monitorA.evaluateActivePositions(),
-      monitorB.evaluateActivePositions(),
-    ]);
+    await Promise.all([monitorA.evaluateActivePositions(), monitorB.evaluateActivePositions()]);
 
     const partialFills = dbFills.filter((f) => f.orderId !== dbOrders[0].id);
     expect(partialFills.length).toBe(1);
@@ -1371,20 +1398,34 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // 3. Missing closeTime
     expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00' })).toBeNull();
     // 4. Timestamp = 0
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 0 })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 0 }),
+    ).toBeNull();
     // 4. Timestamp < 0
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: -100 })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: -100 }),
+    ).toBeNull();
     // 5. Timestamp = NaN
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 'NaN' })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: 'NaN' }),
+    ).toBeNull();
     // 6. Timestamp = Infinity
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: Infinity })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '50000.00', closeTime: Infinity }),
+    ).toBeNull();
 
     // 7. Price = 0
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '0', closeTime: Date.now() })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '0', closeTime: Date.now() }),
+    ).toBeNull();
     // 8. Price < 0
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '-500', closeTime: Date.now() })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: '-500', closeTime: Date.now() }),
+    ).toBeNull();
     // 9. Price = NaN
-    expect(realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: 'invalid', closeTime: Date.now() })).toBeNull();
+    expect(
+      realStreamer.ingestBinanceTickerData({ s: 'BTCUSDT', c: 'invalid', closeTime: Date.now() }),
+    ).toBeNull();
 
     // 10. No hybrid merging from cached ticker when fields missing
     const noHybrid = realStreamer.ingestBinanceTickerData({
@@ -1393,7 +1434,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       closeTime: Date.now() - 300,
     });
     expect(noHybrid).not.toBeNull();
-    expect(noHybrid!.open).toBe(3000.00); // Defaults to livePrice, NOT old cached value
+    expect(noHybrid!.open).toBe(3000.0); // Defaults to livePrice, NOT old cached value
     expect(noHybrid!.volume).toBe(0); // Defaults to 0, NOT old cached value
   });
 
@@ -1493,7 +1534,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(Number(tp1Pos.stopLoss)).toBe(50000); // Moved to breakeven
 
     const tp1Fill = dbFills[dbFills.length - 1];
-    const btcFx140 = ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ?? PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    const btcFx140 =
+      ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ??
+      PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
     const tp1NetPnL = (51000 - 50000) * btcFx140 * 5 - Number(tp1Fill.fee);
 
     // 3. Price drops back to SL Breakeven @ 49,900 -> close remaining 5 units
@@ -1565,7 +1608,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     currentEventTime += 5000;
     await monitorService.evaluateActivePositions();
     const tp1Fill = dbFills[dbFills.length - 1];
-    const btcFx141 = ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ?? PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    const btcFx141 =
+      ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ??
+      PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
     const tp1GrossPnL = (51000 - 50000) * btcFx141 * 5;
     const tp1ExitFees = Number(tp1Fill.fee);
     const tp1NetPnL = tp1GrossPnL - tp1ExitFees;
@@ -1579,7 +1624,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const finalExitFees = Number(finalFill.fee);
     const finalLegNetPnL = finalGrossPnL - finalExitFees;
 
-    const totalLifecycleNetPnL = tp1GrossPnL + finalGrossPnL - entryFees - tp1ExitFees - finalExitFees;
+    const totalLifecycleNetPnL =
+      tp1GrossPnL + finalGrossPnL - entryFees - tp1ExitFees - finalExitFees;
     const cashDelta = totalLifecycleNetPnL;
 
     const finalAccount = dbAccounts[0];
@@ -1696,7 +1742,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         marketEventTime: undefined as any,
       }),
     ).toThrow(/\[UNAUTHORITATIVE_SPOT_TICK_REJECTED\]/);
-    expect(() => streamer.getValidatedTicker('NEW_MANDATORY_SYM', 5)).toThrow(/No active market data stream available for symbol/);
+    expect(() => streamer.getValidatedTicker('NEW_MANDATORY_SYM', 5)).toThrow(
+      /No active market data stream available for symbol/,
+    );
 
     // 1. Place order with valid ticker
     (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
@@ -1763,11 +1811,19 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // 1. Unbranded updateTicker rejected for LIVE_PROVIDER
     expect(() =>
-      streamer.updateTicker('TEST_SYM', { price: 100, provenance: 'LIVE_PROVIDER', marketEventTime: undefined }),
+      streamer.updateTicker('TEST_SYM', {
+        price: 100,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: undefined,
+      }),
     ).toThrow(/\[UNAUTHORITATIVE_SPOT_TICK_REJECTED\]/);
 
     expect(() =>
-      streamer.updateOptionTicker('NIFTY24DEC24000CE', { price: 50, provenance: 'LIVE_PROVIDER', marketEventTime: undefined }),
+      streamer.updateOptionTicker('NIFTY24DEC24000CE', {
+        price: 50,
+        provenance: 'LIVE_PROVIDER',
+        marketEventTime: undefined,
+      }),
     ).toThrow(/\[UNAUTHORITATIVE_OPTION_TICK_REJECTED\]/);
 
     // 2. Valid sealed canonical tick -> Accepted
@@ -2102,7 +2158,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // Force failure midway inside mockPrisma.paperPosition.create
     const origCreatePosition = mockPrisma.paperPosition.create;
     (mockPrisma.paperPosition.create as jest.Mock) = jest.fn().mockImplementation(() => {
-      throw new Error('[FORCED_DB_FAILURE_INJECTION] Database connection lost midway through transaction');
+      throw new Error(
+        '[FORCED_DB_FAILURE_INJECTION] Database connection lost midway through transaction',
+      );
     });
 
     try {
@@ -2369,7 +2427,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const trade1 = dbTrades.find((t) => t.positionId === pos1.id)!;
     const grossPnL95 = (55000 - 50000) * 1 * 95.0; // ₹475,000
 
-    expect((trade1.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL).toBeCloseTo(grossPnL95, 2);
+    expect(
+      (trade1.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL,
+    ).toBeCloseTo(grossPnL95, 2);
 
     // 2. Register FX rate USDT/INR = 85.0
     converter.registerRate({
@@ -2413,7 +2473,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const trade2 = dbTrades.find((t) => t.positionId === pos2.id)!;
     const grossPnL85 = (55000 - 50000) * 1 * 85.0; // ₹425,000
 
-    expect((trade2.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL).toBeCloseTo(grossPnL85, 2);
+    expect(
+      (trade2.outcomeSnapshotJson as any).legs.find((l: any) => l.role === 'FINAL_EXIT').grossPnL,
+    ).toBeCloseTo(grossPnL85, 2);
     expect(grossPnL95).not.toEqual(grossPnL85);
   });
 
@@ -2443,17 +2505,29 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const invalidQuoteCases = [
       // 1. Missing ticker
-      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Stream disconnected'); },
+      () => {
+        throw new MarketDataUnavailableError('BTCUSDT', 'Stream disconnected');
+      },
       // 2. Stale ticker (>5s)
-      () => { throw new StaleMarketDataError('BTCUSDT', 10, 5, new Date(now - 10000)); },
+      () => {
+        throw new StaleMarketDataError('BTCUSDT', 10, 5, new Date(now - 10000));
+      },
       // 3. Future beyond skew (>5s)
-      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Future timestamp exceeds clock skew'); },
+      () => {
+        throw new MarketDataUnavailableError('BTCUSDT', 'Future timestamp exceeds clock skew');
+      },
       // 4. Non-finite price
-      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Non-finite price NaN'); },
+      () => {
+        throw new MarketDataUnavailableError('BTCUSDT', 'Non-finite price NaN');
+      },
       // 5. Non-positive price
-      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Non-positive price 0'); },
+      () => {
+        throw new MarketDataUnavailableError('BTCUSDT', 'Non-positive price 0');
+      },
       // 6. Wrong provenance
-      () => { throw new MarketDataUnavailableError('BTCUSDT', 'Invalid provenance REST_POLL'); },
+      () => {
+        throw new MarketDataUnavailableError('BTCUSDT', 'Invalid provenance REST_POLL');
+      },
     ];
 
     try {
@@ -2531,7 +2605,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // The singleton persists rates from prior tests. We register at Date.now() to be the
     // latest-at-or-before rate when placeOrder calls getRate(fillExecutionTime).
     const tEntry = Date.now();
-    converter.registerRate({ pair: 'USDT/INR', rate: 95.0, timestamp: tEntry, source: 'TEST_147_ENTRY', version: '1.0' });
+    converter.registerRate({
+      pair: 'USDT/INR',
+      rate: 95.0,
+      timestamp: tEntry,
+      source: 'TEST_147_ENTRY',
+      version: '1.0',
+    });
 
     let currentPrice = 50000;
     let currentEventTime = tEntry;
@@ -2570,8 +2650,20 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     // still be 95.0 because it was frozen at entry.
     const tTP1 = tEntry + 5000;
     const tExit = tEntry + 10000;
-    converter.registerRate({ pair: 'USDT/INR', rate: 85.0, timestamp: tTP1, source: 'TEST_147_TP1', version: '1.0' });
-    converter.registerRate({ pair: 'USDT/INR', rate: 75.0, timestamp: tExit, source: 'TEST_147_EXIT', version: '1.0' });
+    converter.registerRate({
+      pair: 'USDT/INR',
+      rate: 85.0,
+      timestamp: tTP1,
+      source: 'TEST_147_TP1',
+      version: '1.0',
+    });
+    converter.registerRate({
+      pair: 'USDT/INR',
+      rate: 75.0,
+      timestamp: tExit,
+      source: 'TEST_147_EXIT',
+      version: '1.0',
+    });
 
     // Verify market FX is now 75.0 at tExit
     expect(converter.getRate('USDT', 'INR', tExit).fxRate).toBe(75.0);
@@ -2595,7 +2687,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const partialLegs = (tp1Pos.executionEventsJson as any)?.partialLegs || [];
     expect(partialLegs.length).toBe(1);
     // Assert TP1 partial leg stored fxRate is 95.0 (from entry snapshot)
-    expect(partialLegs[0].fxRate ?? partialLegs[0].snapshotFxRate ?? entrySnapshot.fxRate).toBe(95.0);
+    expect(partialLegs[0].fxRate ?? partialLegs[0].snapshotFxRate ?? entrySnapshot.fxRate).toBe(
+      95.0,
+    );
 
     // ── Step 5: FINAL EXIT @ 55,000 ──
     // closePosition uses openingSnapshot.fxRate (95.0) NOT the live market FX (75.0)
@@ -2655,7 +2749,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const malformedPayloads = [
       // 1. Future timestamp beyond 5s clock skew
-      { symbol: 'BTCUSDT', price: '55000', closeTime: now + 10000, provenance: 'LIVE_PROVIDER' as const },
+      {
+        symbol: 'BTCUSDT',
+        price: '55000',
+        closeTime: now + 10000,
+        provenance: 'LIVE_PROVIDER' as const,
+      },
       // 2. Non-finite price NaN
       { symbol: 'BTCUSDT', price: 'NaN', closeTime: now, provenance: 'LIVE_PROVIDER' as const },
       // 3. Zero / negative price
@@ -2663,7 +2762,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // 4. Non-LIVE_PROVIDER provenance
       { symbol: 'BTCUSDT', price: '55000', closeTime: now, provenance: 'REST_POLL' as any },
       // 5. Missing timestamp
-      { symbol: 'BTCUSDT', price: '55000', closeTime: undefined as any, provenance: 'LIVE_PROVIDER' as const },
+      {
+        symbol: 'BTCUSDT',
+        price: '55000',
+        closeTime: undefined as any,
+        provenance: 'LIVE_PROVIDER' as const,
+      },
     ];
 
     try {
@@ -2787,7 +2891,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         throw new MarketDataUnavailableError('NIFTY', 'Missing quote');
       });
       await expect(
-        paperService.closePosition(posLive2.id, 'Test Close', { executionMode: ExecutionMode.LIVE_MARKET }),
+        paperService.closePosition(posLive2.id, 'Test Close', {
+          executionMode: ExecutionMode.LIVE_MARKET,
+        }),
       ).rejects.toThrow();
 
       expect(Number(dbAccounts[0].cashBalance)).toBe(initialCash);
@@ -2987,10 +3093,14 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
           const legs: any[] = trade.outcomeSnapshotJson?.legs || [];
           expect(legs.length).toBeGreaterThanOrEqual(1);
-          const sumLegsNetPnL = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2));
+          const sumLegsNetPnL = Number(
+            legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2),
+          );
           expect(tradePnl).toBeCloseTo(sumLegsNetPnL, 1);
 
-          const sumLegFees = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.fee || 0), 0).toFixed(2));
+          const sumLegFees = Number(
+            legs.reduce((acc: number, leg: any) => acc + Number(leg.fee || 0), 0).toFixed(2),
+          );
           expect(chargesDelta).toBeCloseTo(sumLegFees, 1);
 
           expect(finalMargin).toBe(0.0);
@@ -3220,10 +3330,14 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           expect(cashDelta).toBeCloseTo(tradePnl, 1);
           expect(realizedDelta).toBeCloseTo(tradePnl, 1);
 
-          const sumLegsNetPnL = Number(legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2));
+          const sumLegsNetPnL = Number(
+            legs.reduce((acc: number, leg: any) => acc + Number(leg.netPnL || 0), 0).toFixed(2),
+          );
           expect(tradePnl).toBeCloseTo(sumLegsNetPnL, 1);
 
-          const sumFillFees = Number(dbFills.reduce((acc: number, f: any) => acc + Number(f.fee || 0), 0).toFixed(2));
+          const sumFillFees = Number(
+            dbFills.reduce((acc: number, f: any) => acc + Number(f.fee || 0), 0).toFixed(2),
+          );
           const tradeTotalCharges = Number(Number(trade.chargesJson?.totalCharges || 0).toFixed(2));
           expect(sumFillFees).toBeCloseTo(tradeTotalCharges, 1);
           expect(chargesDelta).toBeCloseTo(sumFillFees, 1);
@@ -3385,7 +3499,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // 5. Provider reconnected -> rejects cached ticks from before reconnection
       realStreamer.setProviderConnected(true);
       expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(MarketDataUnavailableError);
-      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(/DEGRADED|cached tick|reconnection/i);
+      expect(() => realStreamer.getValidatedTicker('BTCUSDT')).toThrow(
+        /DEGRADED|cached tick|reconnection/i,
+      );
 
       // 6. Fresh valid tick after reconnection -> succeeds
       const freshTick = realStreamer.ingestBinanceTickerData({
@@ -3506,7 +3622,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const testService = new PaperTradingService(mockPrisma as any, {} as any, realStreamer);
 
       const converter = PointInTimeCurrencyConverter.getInstance();
-      converter.registerRate({ pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'TEST', version: '1.0' });
+      converter.registerRate({
+        pair: 'USDT/INR',
+        rate: 92.0,
+        timestamp: 0,
+        source: 'TEST',
+        version: '1.0',
+      });
 
       // 1. Initial valid ticker arrives and order is placed
       realStreamer.ingestBinanceTickerData({
@@ -3530,15 +3652,15 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // 2. Disconnect provider
       realStreamer.disconnectProvider();
       // Order/exit must fail closed
-      await expect(
-        testService.closePosition(pos.id, 'Manual Exit'),
-      ).rejects.toThrow(/disconnected/i);
+      await expect(testService.closePosition(pos.id, 'Manual Exit')).rejects.toThrow(
+        /disconnected/i,
+      );
 
       // 3. Reconnect provider — cached quote still exists from before reconnection
       realStreamer.setProviderConnected(true);
-      await expect(
-        testService.closePosition(pos.id, 'Manual Exit'),
-      ).rejects.toThrow(/connection epoch|cached tick|reconnection/i);
+      await expect(testService.closePosition(pos.id, 'Manual Exit')).rejects.toThrow(
+        /connection epoch|cached tick|reconnection/i,
+      );
 
       // 4. Fresh valid tick arrives after reconnection
       realStreamer.ingestBinanceTickerData({
@@ -3583,7 +3705,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const t0 = Date.now();
       const converter = PointInTimeCurrencyConverter.getInstance();
       converter.seedFixtureRates([
-        { pair: 'USDT/INR', rate: 92.5, timestamp: t0 - 10000, source: 'TEST_FIXTURE', version: '1.0' },
+        {
+          pair: 'USDT/INR',
+          rate: 92.5,
+          timestamp: t0 - 10000,
+          source: 'TEST_FIXTURE',
+          version: '1.0',
+        },
       ]);
 
       (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
@@ -3635,7 +3763,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(dbTrades.length).toBe(1);
 
       // Check the leg snapshot in trade outcome metadata
-      const closeLeg = (dbTrades[0].outcomeSnapshotJson as any)?.legs?.find((l: any) => l.role === 'FINAL_EXIT');
+      const closeLeg = (dbTrades[0].outcomeSnapshotJson as any)?.legs?.find(
+        (l: any) => l.role === 'FINAL_EXIT',
+      );
       expect(closeLeg).toBeDefined();
       expect(closeLeg.fxRate).toBe(92.5);
 
@@ -3661,13 +3791,18 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       const statusBefore = malformedPos.status;
 
       // Attempting closePosition must reject immediately with [MALFORMED_LIFECYCLE]
-      await expect(
-        paperService.closePosition('pos_malformed', 'Exit Malformed'),
-      ).rejects.toThrow(/\[MALFORMED_LIFECYCLE\]/);
+      await expect(paperService.closePosition('pos_malformed', 'Exit Malformed')).rejects.toThrow(
+        /\[MALFORMED_LIFECYCLE\]/,
+      );
 
       // Attempting monitor TP1 scale-out must reject immediately with [MALFORMED_LIFECYCLE]
       await expect(
-        (monitorService as any).executePartialScaleOut(malformedPos, 52000.0, 52000.0, new Date(2000)),
+        (monitorService as any).executePartialScaleOut(
+          malformedPos,
+          52000.0,
+          52000.0,
+          new Date(2000),
+        ),
       ).rejects.toThrow(/\[MALFORMED_LIFECYCLE\]/);
 
       // Full Database Mutation Guarantee: Zero side effects across orders, fills, trades, accounts, and positions
@@ -3764,8 +3899,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // 4. Provider reconnects: exactly one new epoch is assigned
       realStreamer.handleProviderDisconnect('Simulated connection drop');
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('DISCONNECTED');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'DISCONNECTED',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        false,
+      );
 
       // Re-querying during DISCONNECTED fails closed -> DEGRADED
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
@@ -3774,8 +3913,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       // Provider transitions to RECONNECTING: still fails closed -> DEGRADED
       realStreamer.handleProviderReconnecting();
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTING');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'RECONNECTING',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        false,
+      );
 
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
       const reconnectingQuote = await (testMonitor as any).getOptionContractQuote(pos);
@@ -3784,10 +3927,17 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       // Provider finishes reconnection -> exactly one epoch increment
       realStreamer.handleProviderReconnect();
       const newEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
-      const newProviderConnectionId = realStreamer.getProviderConnectionId('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const newProviderConnectionId = realStreamer.getProviderConnectionId(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       expect(newEpoch).toBe(activeEpoch + 1);
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTED');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(true);
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'RECONNECTED',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        true,
+      );
 
       // Cached quote from old epoch is rejected even after reconnection
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(authenticRecord));
@@ -3795,12 +3945,14 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(obsoleteEpochQuote.provenance).toBe('DEGRADED');
 
       // Fresh quote produced on new connection epoch is accepted as LIVE_PROVIDER
-      const freshRecord = createCanonicalOptionQuoteRecord(makeValidatedTick({
-        contractSymbol: 'NIFTY26SEP24500CE',
-        price: 165.0,
-        marketEventTime: Date.now() - 100,
-        connectionEpoch: newEpoch,
-      }));
+      const freshRecord = createCanonicalOptionQuoteRecord(
+        makeValidatedTick({
+          contractSymbol: 'NIFTY26SEP24500CE',
+          price: 165.0,
+          marketEventTime: Date.now() - 100,
+          connectionEpoch: newEpoch,
+        }),
+      );
       mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(freshRecord));
       const freshEpochQuote = await (testMonitor as any).getOptionContractQuote(pos);
       expect(freshEpochQuote.provenance).toBe('LIVE_PROVIDER');
@@ -3810,29 +3962,52 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     it('TEST 153-1 (Deterministic Connection Epoch Lifecycle): Disconnect and Reconnecting do NOT mint premature epochs; Reconnect mints exactly one new epoch', () => {
       const realStreamer = new RealMarketStreamerService({} as any);
-      const initialEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const initialEpoch = realStreamer.getConnectionEpoch(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
 
       // Disconnect
       realStreamer.handleProviderDisconnect('Network blip');
-      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch);
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('DISCONNECTED');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        initialEpoch,
+      );
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'DISCONNECTED',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        false,
+      );
 
       // Reconnecting
       realStreamer.handleProviderReconnecting();
-      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch);
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTING');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(false);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        initialEpoch,
+      );
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'RECONNECTING',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        false,
+      );
 
       // Reconnect completes -> exactly one new epoch
       realStreamer.handleProviderReconnect();
-      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch + 1);
-      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe('RECONNECTED');
-      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(true);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        initialEpoch + 1,
+      );
+      expect(realStreamer.getProviderState('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        'RECONNECTED',
+      );
+      expect(realStreamer.isExecutionDataHealthy('WEBSOCKET_STREAM', 'NSE_STREAM_GATEWAY')).toBe(
+        true,
+      );
 
       // Subsequent duplicate call does not bump epoch again
       realStreamer.handleProviderReconnect();
-      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(initialEpoch + 1);
+      expect(realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM')).toBe(
+        initialEpoch + 1,
+      );
     });
 
     it('TEST 153-2 (Spot Execution Fail-Closed on RECONNECTING and DISCONNECTED): getValidatedTicker strictly blocks execution', () => {
@@ -3900,7 +4075,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
       const contract = 'NIFTY24OCT25000PE';
       const now = Date.now();
-      const staleTickBeforeReconnect = (realStreamer as any).createValidatedOptionProviderTickFromNseStream({
+      const staleTickBeforeReconnect = (
+        realStreamer as any
+      ).createValidatedOptionProviderTickFromNseStream({
         contractSymbol: 'NIFTY24OCT25300PE',
         price: 213.0,
         marketEventTime: Date.now() - 100,
@@ -3931,31 +4108,38 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(retrievedQuote.provenance).toBe('LIVE_PROVIDER');
       expect(retrievedQuote.price).toBe(210.5);
       expect(retrievedQuote.providerId).toBe('NSE_STREAM_GATEWAY');
-      expect(retrievedQuote.providerConnectionId).toBe(realStreamer.getProviderConnectionId('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM'));
+      expect(retrievedQuote.providerConnectionId).toBe(
+        realStreamer.getProviderConnectionId('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM'),
+      );
       expect(retrievedQuote.providerInstanceId).toBe(realStreamer.getProviderInstanceId());
 
       const publicationCount = () => mockRedisClient.set.mock.calls.length;
       const beforeDisconnected = publicationCount();
       realStreamer.handleProviderDisconnect('Writer gate test');
-      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
-        contractSymbol: 'NIFTY24OCT25100PE',
-        price: 211.0,
-        marketEventTime: Date.now() - 100,
-      })).resolves.toBeNull();
+      await expect(
+        realStreamer.publishNseStreamCanonicalOptionQuote({
+          contractSymbol: 'NIFTY24OCT25100PE',
+          price: 211.0,
+          marketEventTime: Date.now() - 100,
+        }),
+      ).resolves.toBeNull();
       expect(publicationCount()).toBe(beforeDisconnected);
 
       realStreamer.handleProviderReconnecting();
-      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
-        contractSymbol: 'NIFTY24OCT25200PE',
-        price: 212.0,
-        marketEventTime: Date.now() - 100,
-      })).resolves.toBeNull();
+      await expect(
+        realStreamer.publishNseStreamCanonicalOptionQuote({
+          contractSymbol: 'NIFTY24OCT25200PE',
+          price: 212.0,
+          marketEventTime: Date.now() - 100,
+        }),
+      ).resolves.toBeNull();
       expect(publicationCount()).toBe(beforeDisconnected);
 
       realStreamer.handleProviderReconnect();
       const freshEpoch = realStreamer.getConnectionEpoch('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
-      await expect((realStreamer as any).publishCanonicalOptionQuote(staleTickBeforeReconnect))
-        .resolves.toBeNull();
+      await expect(
+        (realStreamer as any).publishCanonicalOptionQuote(staleTickBeforeReconnect),
+      ).resolves.toBeNull();
       expect(publicationCount()).toBe(beforeDisconnected);
 
       const freshPublication = await realStreamer.publishNseStreamCanonicalOptionQuote({
@@ -3975,27 +4159,33 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       expect(tamperedQuote.provenance).toBe('DEGRADED');
 
       // 4. Round-trip fails when future-skewed beyond limit
-      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
-        contractSymbol: contract,
-        price: 212.0,
-        marketEventTime: Date.now() + 10000,
-      })).rejects.toThrow(/timestamp rejected/);
+      await expect(
+        realStreamer.publishNseStreamCanonicalOptionQuote({
+          contractSymbol: contract,
+          price: 212.0,
+          marketEventTime: Date.now() + 10000,
+        }),
+      ).rejects.toThrow(/timestamp rejected/);
 
       // 5. Round-trip fails when stale beyond limit
-      await expect(realStreamer.publishNseStreamCanonicalOptionQuote({
-        contractSymbol: contract,
-        price: 212.0,
-        marketEventTime: Date.now() - 10000,
-      })).rejects.toThrow(/timestamp rejected/);
+      await expect(
+        realStreamer.publishNseStreamCanonicalOptionQuote({
+          contractSymbol: contract,
+          price: 212.0,
+          marketEventTime: Date.now() - 10000,
+        }),
+      ).rejects.toThrow(/timestamp rejected/);
 
       // Public writer surface does not accept arbitrary providerId/price/event-time primitives.
       expect(typeof (realStreamer as any).publishCanonicalOptionQuote).toBe('function');
-      await expect((realStreamer as any).publishCanonicalOptionQuote({
-        contractSymbol: contract,
-        price: 999.0,
-        marketEventTime: Date.now() - 100,
-        providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
-      })).rejects.toThrow(/validated provider-origin tick/);
+      await expect(
+        (realStreamer as any).publishCanonicalOptionQuote({
+          contractSymbol: contract,
+          price: 999.0,
+          marketEventTime: Date.now() - 100,
+          providerId: NSE_STREAM_OPTION_PROVIDER_ADAPTER.providerId,
+        }),
+      ).rejects.toThrow(/validated provider-origin tick/);
 
       // 7. A signed payload from a non-current provider connection is degraded.
       const wrongConnection = NSE_STREAM_OPTION_PROVIDER_ADAPTER.beginProviderConnection({

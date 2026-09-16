@@ -289,9 +289,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
             const item = executionsDb.get(key);
             if (item.id === where.id) {
               if (where.state) {
-                const targetStates = Array.isArray(where.state.in)
-                  ? where.state.in
-                  : [where.state];
+                const targetStates = Array.isArray(where.state.in) ? where.state.in : [where.state];
                 if (!targetStates.includes(item.state)) continue;
               }
               executionsDb.set(key, { ...item, ...data, updatedAt: new Date() });
@@ -325,7 +323,10 @@ describe('Scanner Live Pipeline E2E Test', () => {
             }),
           },
         },
-        { provide: AlertsService, useValue: { sendAlert: jest.fn().mockResolvedValue({ success: true }) } },
+        {
+          provide: AlertsService,
+          useValue: { sendAlert: jest.fn().mockResolvedValue({ success: true }) },
+        },
         { provide: CandlesService, useValue: mockCandlesService },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: RedisService, useValue: mockRedis },

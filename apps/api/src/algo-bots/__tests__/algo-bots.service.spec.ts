@@ -2,7 +2,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AlgoBotsService, IAlgoBot, classifyExecutionFailure } from '../algo-bots.service';
 import { PaperTradingService } from '../../paper-trading/paper-trading.service';
 import { AlertsService } from '../../alerts/alerts.service';
-import { Direction, ISignalSetup, MarketDataUnavailableError, SignalGrade, SignalState } from '@quant/shared';
+import {
+  Direction,
+  ISignalSetup,
+  MarketDataUnavailableError,
+  SignalGrade,
+  SignalState,
+} from '@quant/shared';
 import { SignalGenerator } from '@quant/trading-engine';
 import { InternalServerErrorException } from '@nestjs/common';
 
@@ -77,7 +83,9 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
   beforeEach(async () => {
     mockPaperTradingService = {
       getPortfolio: jest.fn().mockResolvedValue({ openPositions: [] }),
-      getValidatedMarketPrice: jest.fn().mockResolvedValue({ price: 24000.0, timestamp: new Date() }),
+      getValidatedMarketPrice: jest
+        .fn()
+        .mockResolvedValue({ price: 24000.0, timestamp: new Date() }),
       placeOrder: jest.fn().mockResolvedValue({ id: 'pos_123', entryPrice: 24000.0 }),
     };
 
@@ -160,7 +168,9 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
 
       const fingerprint = service.getSignalFingerprint(bot, signal);
 
-      expect(fingerprint).toMatch(/^bot_exec:bot_nifty_ob_test:v[a-f0-9]{8}:NIFTY:15m:BULLISH:\d+$/);
+      expect(fingerprint).toMatch(
+        /^bot_exec:bot_nifty_ob_test:v[a-f0-9]{8}:NIFTY:15m:BULLISH:\d+$/,
+      );
     });
   });
 

@@ -176,7 +176,9 @@ describe('SignalsService Journal Validation & Integrity', () => {
 
       mockPrisma.paperTrade.count.mockResolvedValueOnce(40).mockResolvedValueOnce(60);
       mockPrisma.paperTrade.findMany.mockImplementation((args: any) => {
-        const sorted = [...verifiedTrades].sort((a, b) => b.exitTime.getTime() - a.exitTime.getTime());
+        const sorted = [...verifiedTrades].sort(
+          (a, b) => b.exitTime.getTime() - a.exitTime.getTime(),
+        );
         return Promise.resolve(sorted.slice(0, args.take || 50));
       });
 

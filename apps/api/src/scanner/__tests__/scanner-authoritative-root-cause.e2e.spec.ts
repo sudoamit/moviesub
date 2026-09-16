@@ -489,9 +489,9 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
   });
 
   it('3. ERROR CLASSIFICATION & RETRY SEMANTICS: Broker 503 classifies as BROKER_UNAVAILABLE and transitions to FAILED_RETRYABLE', async () => {
-    jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValueOnce(
-      new Error('Broker connection refused (503 Service Unavailable)'),
-    );
+    jest
+      .spyOn(paperTradingService, 'placeOrder')
+      .mockRejectedValueOnce(new Error('Broker connection refused (503 Service Unavailable)'));
 
     const res: any = await scannerService.triggerScan(Timeframe.M15);
     expect(res.executedCount).toBe(0);
@@ -506,9 +506,9 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
   });
 
   it('4. ERROR CLASSIFICATION: Permanent broker rejection classifies as BROKER_REJECTED and transitions to FAILED_FINAL', async () => {
-    jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValueOnce(
-      new Error('ORDER_REJECTED: Margin insufficient for requested lots'),
-    );
+    jest
+      .spyOn(paperTradingService, 'placeOrder')
+      .mockRejectedValueOnce(new Error('ORDER_REJECTED: Margin insufficient for requested lots'));
 
     const res: any = await scannerService.triggerScan(Timeframe.M15);
     expect(res.executedCount).toBe(0);

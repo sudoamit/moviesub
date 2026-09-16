@@ -2,16 +2,8 @@ import { PrismaClient } from '@prisma/client';
 import { AlgoBotsService, IAlgoBot } from '../algo-bots.service';
 import { SignalsService } from '../../signals/signals.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import {
-  Direction,
-  ICandle,
-  SignalState,
-  Timeframe,
-} from '@quant/shared';
-import {
-  SignalGenerator,
-  CanonicalMarketSnapshotBuilder,
-} from '@quant/trading-engine';
+import { Direction, ICandle, SignalState, Timeframe } from '@quant/shared';
+import { SignalGenerator, CanonicalMarketSnapshotBuilder } from '@quant/trading-engine';
 
 describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
   let prismaClient: any = null;

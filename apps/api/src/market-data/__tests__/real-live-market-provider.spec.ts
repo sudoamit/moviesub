@@ -20,8 +20,24 @@ describe('RealLiveMarketDataProvider Transport & Canonical Mapping Smoke Test', 
     const candle2Open = nowMs - durationMs;
 
     const mockBinanceData = [
-      [candle1Open, '64000.00', '64500.00', '63800.00', '64300.00', '150.5', candle1Open + durationMs - 1],
-      [candle2Open, '64300.00', '65000.00', '64200.00', '64900.00', '210.0', candle2Open + durationMs - 1],
+      [
+        candle1Open,
+        '64000.00',
+        '64500.00',
+        '63800.00',
+        '64300.00',
+        '150.5',
+        candle1Open + durationMs - 1,
+      ],
+      [
+        candle2Open,
+        '64300.00',
+        '65000.00',
+        '64200.00',
+        '64900.00',
+        '210.0',
+        candle2Open + durationMs - 1,
+      ],
     ];
 
     global.fetch = jest.fn().mockResolvedValue({
@@ -32,7 +48,9 @@ describe('RealLiveMarketDataProvider Transport & Canonical Mapping Smoke Test', 
     const candles = await provider.getHistoricalCandles('BTCUSDT', Timeframe.M15, 10);
 
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('api.binance.com/api/v3/klines?symbol=BTCUSDT'));
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('api.binance.com/api/v3/klines?symbol=BTCUSDT'),
+    );
 
     expect(candles).toHaveLength(2);
     expect(candles[0].open).toBe(64000);
@@ -52,7 +70,15 @@ describe('RealLiveMarketDataProvider Transport & Canonical Mapping Smoke Test', 
     const candleOpen = nowMs - durationMs;
 
     const mockBinanceData = [
-      [candleOpen, '65000.00', '65300.00', '64900.00', '65200.00', '500.0', candleOpen + durationMs - 1],
+      [
+        candleOpen,
+        '65000.00',
+        '65300.00',
+        '64900.00',
+        '65200.00',
+        '500.0',
+        candleOpen + durationMs - 1,
+      ],
     ];
 
     global.fetch = jest.fn().mockResolvedValue({

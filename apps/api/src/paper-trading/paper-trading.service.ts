@@ -267,9 +267,14 @@ export class PaperTradingService implements IExecutionProvider {
       const riskAnchor = initialStopLoss ?? stopLoss;
       const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
       const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
-      const unrealizedR = pnlCalc.realizedR !== undefined && Number.isFinite(pnlCalc.realizedR) && pnlCalc.realizedR !== 0
-        ? pnlCalc.realizedR
-        : (riskDistance > 0 ? Number((priceDiff / riskDistance).toFixed(2)) : 0);
+      const unrealizedR =
+        pnlCalc.realizedR !== undefined &&
+        Number.isFinite(pnlCalc.realizedR) &&
+        pnlCalc.realizedR !== 0
+          ? pnlCalc.realizedR
+          : riskDistance > 0
+            ? Number((priceDiff / riskDistance).toFixed(2))
+            : 0;
       const notionalValue = Number((livePrice * quantity).toFixed(2));
       const usedMargin = Number(pos.usedMargin);
 
@@ -372,18 +377,28 @@ export class PaperTradingService implements IExecutionProvider {
         correlationId: t.correlationId,
         accountCurrency: (t.outcomeSnapshotJson as any)?.accountCurrency || 'INR',
         quoteCurrency: (t.outcomeSnapshotJson as any)?.quoteCurrency || 'INR',
-        fxRateUsed: (t.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ?? (t.outcomeSnapshotJson as any)?.fxRateUsed,
-        fxRateTimestamp: (t.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ?? (t.outcomeSnapshotJson as any)?.fxRateTimestamp,
-        accountingSnapshotHash: (t.outcomeSnapshotJson as any)?.accountingSnapshotHash || (t.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
+        fxRateUsed:
+          (t.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ??
+          (t.outcomeSnapshotJson as any)?.fxRateUsed,
+        fxRateTimestamp:
+          (t.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ??
+          (t.outcomeSnapshotJson as any)?.fxRateTimestamp,
+        accountingSnapshotHash:
+          (t.outcomeSnapshotJson as any)?.accountingSnapshotHash ||
+          (t.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
       };
     });
 
     const totalTrades = formattedHistory.length;
-    const completedTrades = formattedHistory.filter((t) => t.realizedPnL !== null && t.realizedPnL !== undefined);
+    const completedTrades = formattedHistory.filter(
+      (t) => t.realizedPnL !== null && t.realizedPnL !== undefined,
+    );
     const winningTrades = completedTrades.filter((t) => (t.realizedPnL || 0) > 0).length;
     const losingTrades = completedTrades.filter((t) => (t.realizedPnL || 0) <= 0).length;
     const winRate =
-      completedTrades.length > 0 ? Number(((winningTrades / completedTrades.length) * 100).toFixed(1)) : 0.0;
+      completedTrades.length > 0
+        ? Number(((winningTrades / completedTrades.length) * 100).toFixed(1))
+        : 0.0;
 
     const grossWins = completedTrades
       .filter((t) => (t.realizedPnL || 0) > 0)
@@ -526,7 +541,10 @@ export class PaperTradingService implements IExecutionProvider {
     }
 
     // 4. Directional SL / TP Validation (Never silently create or alter SL/TP)
-    const isBuy = (req.direction as any) === 'BUY' || (req.direction as any) === 'BULLISH' || (req.direction as any) === 'LONG';
+    const isBuy =
+      (req.direction as any) === 'BUY' ||
+      (req.direction as any) === 'BULLISH' ||
+      (req.direction as any) === 'LONG';
     const stopLoss = req.stopLoss;
     const target1 = req.target1;
     const target2 = req.target2;
@@ -792,7 +810,10 @@ export class PaperTradingService implements IExecutionProvider {
     const todayRealizedPnL = todayTrades.reduce((acc, t) => acc + Number(t.realizedPnL), 0);
     // Use beginning-of-day balance (current balance minus today's PnL swing) as the denominator
     // so the limit scales with the actual account size, not the fixed initial capital.
-    const beginOfDayBalance = Math.max(initialCapital, Number(account.cashBalance) - todayRealizedPnL);
+    const beginOfDayBalance = Math.max(
+      initialCapital,
+      Number(account.cashBalance) - todayRealizedPnL,
+    );
     const maxDailyLossAllowed = beginOfDayBalance * (Number(config.maxDailyLossPercent) / 100);
 
     if (todayRealizedPnL < -maxDailyLossAllowed) {
@@ -856,7 +877,11 @@ export class PaperTradingService implements IExecutionProvider {
     const openingInst = getAuthoritativeInstrument(symbol);
     const openingQuoteCurrency = openingInst.currency;
     const openingConverter = PointInTimeCurrencyConverter.getInstance();
-    const openingFxRes = openingConverter.getRate(openingQuoteCurrency, 'INR', fillExecutionTime.getTime());
+    const openingFxRes = openingConverter.getRate(
+      openingQuoteCurrency,
+      'INR',
+      fillExecutionTime.getTime(),
+    );
     const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
 
     const openingAccountingSnapshot = buildAccountingSnapshot({
@@ -1056,8 +1081,12 @@ export class PaperTradingService implements IExecutionProvider {
       exitPrice: Number(trade.exitPrice),
       realizedPnL: Number(trade.realizedPnL),
       realizedR: Number(trade.realizedR),
-      maxFavorableExcursion: trade.maxFavorableExcursion ? Number(trade.maxFavorableExcursion) : undefined,
-      maxAdverseExcursion: trade.maxAdverseExcursion ? Number(trade.maxAdverseExcursion) : undefined,
+      maxFavorableExcursion: trade.maxFavorableExcursion
+        ? Number(trade.maxFavorableExcursion)
+        : undefined,
+      maxAdverseExcursion: trade.maxAdverseExcursion
+        ? Number(trade.maxAdverseExcursion)
+        : undefined,
       holdingDurationSeconds: trade.holdingDurationSeconds || 0,
       exitReason: trade.exitReason,
       openedAt: new Date(trade.entryTime).toISOString(),
@@ -1068,9 +1097,15 @@ export class PaperTradingService implements IExecutionProvider {
       correlationId: trade.correlationId,
       accountCurrency: (trade.outcomeSnapshotJson as any)?.accountCurrency || 'INR',
       quoteCurrency: (trade.outcomeSnapshotJson as any)?.quoteCurrency || 'INR',
-      fxRateUsed: (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ?? (trade.outcomeSnapshotJson as any)?.fxRateUsed,
-      fxRateTimestamp: (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ?? (trade.outcomeSnapshotJson as any)?.fxRateTimestamp,
-      accountingSnapshotHash: (trade.outcomeSnapshotJson as any)?.accountingSnapshotHash || (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
+      fxRateUsed:
+        (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.fxRate ??
+        (trade.outcomeSnapshotJson as any)?.fxRateUsed,
+      fxRateTimestamp:
+        (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.calculatedAt ??
+        (trade.outcomeSnapshotJson as any)?.fxRateTimestamp,
+      accountingSnapshotHash:
+        (trade.outcomeSnapshotJson as any)?.accountingSnapshotHash ||
+        (trade.outcomeSnapshotJson as any)?.accountingSnapshot?.snapshotHash,
     };
   }
 
@@ -1110,9 +1145,7 @@ export class PaperTradingService implements IExecutionProvider {
     });
 
     if (!pos) {
-      throw new NotFoundException(
-        `Active position with ID '${positionId}' not found`,
-      );
+      throw new NotFoundException(`Active position with ID '${positionId}' not found`);
     }
 
     if (pos.status === PositionState.CLOSED || pos.status === PositionState.CLOSING) {
@@ -1139,7 +1172,8 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    const correlationId = correlationIdOverride || correlationIdOpt || pos.correlationId || `corr_${Date.now()}`;
+    const correlationId =
+      correlationIdOverride || correlationIdOpt || pos.correlationId || `corr_${Date.now()}`;
     const symbol = pos.symbol;
     const isCrypto = symbol === 'BTCUSDT' || symbol === 'BTCUSD';
     const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
@@ -1148,7 +1182,7 @@ export class PaperTradingService implements IExecutionProvider {
     // Authoritative Lifecycle Invariant: A position lacking an immutable opening snapshot cannot be closed
     const openingSnapshot =
       (pos.executionEventsJson as any)?.accountingSnapshot ??
-      (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
+      ((pos.featureSnapshotJson as any)?.accountingSnapshot as any);
 
     if (!openingSnapshot) {
       throw new BadRequestException(
@@ -1180,7 +1214,12 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    if (allowPriceOverride && (isInternalCall || isTestOrSimulated) && exitPriceOverride && exitPriceOverride > 0) {
+    if (
+      allowPriceOverride &&
+      (isInternalCall || isTestOrSimulated) &&
+      exitPriceOverride &&
+      exitPriceOverride > 0
+    ) {
       exitPrice = exitPriceOverride;
       priceSource = ExecutionPriceSource.SIMULATED_FILL;
     } else {
@@ -1240,7 +1279,9 @@ export class PaperTradingService implements IExecutionProvider {
       const updated = await tx.paperPosition.updateMany({
         where: {
           id: pos.id,
-          status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
+          status: {
+            in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING],
+          },
         },
         data: {
           status: PositionState.CLOSING,
@@ -1370,7 +1411,7 @@ export class PaperTradingService implements IExecutionProvider {
       const quoteCurrency = inst.currency;
       const openingSnapshot =
         (pos.executionEventsJson as any)?.accountingSnapshot ??
-        (pos.featureSnapshotJson as any)?.accountingSnapshot as any;
+        ((pos.featureSnapshotJson as any)?.accountingSnapshot as any);
 
       if (!openingSnapshot) {
         throw new BadRequestException(
@@ -1398,12 +1439,32 @@ export class PaperTradingService implements IExecutionProvider {
       const entryPrice = Number(pos.entryPrice);
 
       const totalPositionQuantity = partialQtyTotal + finalQty;
-      const totalLifecycleCharges = Number((entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2));
-      const effectiveExitPrice = totalPositionQuantity > 0
-        ? Number((((partialLegs.reduce((acc: number, l: any) => acc + (Number(l.price ?? l.fillPrice) * Number(l.quantity)), 0)) + (finalExitPrice * finalQty)) / totalPositionQuantity).toFixed(2))
-        : finalExitPrice;
-      const effectiveEntryPrice = hasAuthoritativeEntryFills && aggregated.entry ? aggregated.entry.weightedPrice : Number(pos.entryPrice);
-      const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
+      const totalLifecycleCharges = Number(
+        (entryCharges.totalCharges + partialFeesTotal + finalExitCharges).toFixed(2),
+      );
+      const effectiveExitPrice =
+        totalPositionQuantity > 0
+          ? Number(
+              (
+                (partialLegs.reduce(
+                  (acc: number, l: any) =>
+                    acc + Number(l.price ?? l.fillPrice) * Number(l.quantity),
+                  0,
+                ) +
+                  finalExitPrice * finalQty) /
+                totalPositionQuantity
+              ).toFixed(2),
+            )
+          : finalExitPrice;
+      const effectiveEntryPrice =
+        hasAuthoritativeEntryFills && aggregated.entry
+          ? aggregated.entry.weightedPrice
+          : Number(pos.entryPrice);
+      const initialSL = pos.initialStopLoss
+        ? Number(pos.initialStopLoss)
+        : pos.stopLoss
+          ? Number(pos.stopLoss)
+          : undefined;
 
       const finalLegSettlement = TradeAccountingEngine.settleExecutionLeg({
         role: 'FINAL_EXIT',
@@ -1419,8 +1480,11 @@ export class PaperTradingService implements IExecutionProvider {
       const finalNetPnL = finalLegSettlement.netPnL;
       const finalRealizedR = finalLegSettlement.realizedR;
 
-      const totalWeightedRSum = partialWeightedRSum + (finalRealizedR * finalQty);
-      const weightedLifecycleR = totalPositionQuantity > 0 ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2)) : 0;
+      const totalWeightedRSum = partialWeightedRSum + finalRealizedR * finalQty;
+      const weightedLifecycleR =
+        totalPositionQuantity > 0
+          ? Number((totalWeightedRSum / totalPositionQuantity).toFixed(2))
+          : 0;
 
       const entryLegSettlement = TradeAccountingEngine.settleExecutionLeg({
         role: 'ENTRY',
@@ -1455,7 +1519,8 @@ export class PaperTradingService implements IExecutionProvider {
                 price: effectiveEntryPrice,
                 timestamp: pos.entryTime,
                 fxRate: snapshot.fxRate,
-                accountingSnapshotHash: entryLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
+                accountingSnapshotHash:
+                  entryLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
               },
             ]
           : []),
@@ -1464,7 +1529,9 @@ export class PaperTradingService implements IExecutionProvider {
           role: 'FINAL_EXIT',
           quantity: finalQty,
           triggerPrice: triggerPriceOpt ?? null,
-          triggerMarketEventTime: triggerMarketEventTimeOpt ? new Date(triggerMarketEventTimeOpt).toISOString() : null,
+          triggerMarketEventTime: triggerMarketEventTimeOpt
+            ? new Date(triggerMarketEventTimeOpt).toISOString()
+            : null,
           fillPrice: finalExitPrice,
           fillTimestamp: exitTime.toISOString(),
           marketEventTime: sourceTimestamp.toISOString(),
@@ -1483,7 +1550,8 @@ export class PaperTradingService implements IExecutionProvider {
           price: finalExitPrice,
           timestamp: exitTime.toISOString(),
           fxRate: snapshot.fxRate,
-          accountingSnapshotHash: finalLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
+          accountingSnapshotHash:
+            finalLegSettlement.accountingSnapshotHash ?? snapshot.snapshotHash,
         },
       ];
 
@@ -1522,14 +1590,23 @@ export class PaperTradingService implements IExecutionProvider {
           optionType: pos.optionType,
           direction: pos.direction,
           quantity: new Decimal(totalPositionQuantity),
-          entryPrice: hasAuthoritativeEntryFills && aggregated.entry ? new Decimal(effectiveEntryPrice) : new Decimal(entryPrice),
+          entryPrice:
+            hasAuthoritativeEntryFills && aggregated.entry
+              ? new Decimal(effectiveEntryPrice)
+              : new Decimal(entryPrice),
           exitPrice: new Decimal(effectiveExitPrice),
           realizedPnL: new Decimal(canonicalRealizedPnL),
           realizedR: new Decimal(canonicalRealizedR),
           maxFavorableExcursion: pos.maxFavorableExcursion,
           maxAdverseExcursion: pos.maxAdverseExcursion,
-          holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
-          entryTime: hasAuthoritativeEntryFills && aggregated.entry ? new Date(aggregated.entry.earliestFillTimestamp) : pos.entryTime,
+          holdingDurationSeconds:
+            aggregated.durationMs !== null
+              ? Math.max(0, Math.floor(aggregated.durationMs / 1000))
+              : null,
+          entryTime:
+            hasAuthoritativeEntryFills && aggregated.entry
+              ? new Date(aggregated.entry.earliestFillTimestamp)
+              : pos.entryTime,
           exitTime: new Date(aggregated.exit.latestFillTimestamp),
           exitReason,
           chargesJson: {
@@ -1549,7 +1626,9 @@ export class PaperTradingService implements IExecutionProvider {
             executionPriceSource: priceSource,
             sourceTimestamp: sourceTimestamp.toISOString(),
             triggerPrice: triggerPriceOpt ?? null,
-            triggerMarketEventTime: triggerMarketEventTimeOpt ? new Date(triggerMarketEventTimeOpt).toISOString() : null,
+            triggerMarketEventTime: triggerMarketEventTimeOpt
+              ? new Date(triggerMarketEventTimeOpt).toISOString()
+              : null,
             exitQuotePrice: exitPrice,
             exitExecutionTime: exitTime.toISOString(),
             exitFillPrice: finalExitPrice,
@@ -1574,7 +1653,10 @@ export class PaperTradingService implements IExecutionProvider {
             accountingSnapshot: snapshot as any,
             accountingSnapshotHash: snapshot.snapshotHash,
             realizedR: canonicalRealizedR,
-            holdingDurationSeconds: aggregated.durationMs !== null ? Math.max(0, Math.floor(aggregated.durationMs / 1000)) : null,
+            holdingDurationSeconds:
+              aggregated.durationMs !== null
+                ? Math.max(0, Math.floor(aggregated.durationMs / 1000))
+                : null,
             durationMs: aggregated.durationMs,
             durationMinutes: aggregated.durationMinutes,
             entryFillCount: aggregated.entry ? aggregated.entry.fillCount : 0,
@@ -1796,11 +1878,20 @@ export class PaperTradingService implements IExecutionProvider {
       featureSnapshotJson: pos.featureSnapshotJson || undefined,
       executionEventsJson: pos.executionEventsJson || undefined,
       charges,
-      accountCurrency: (pos.executionEventsJson as any)?.accountingSnapshot?.accountCurrency || 'INR',
-      quoteCurrency: (pos.executionEventsJson as any)?.accountingSnapshot?.quoteCurrency || (pos.symbol === 'BTCUSDT' ? 'USDT' : (pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD' ? 'USD' : 'INR')),
+      accountCurrency:
+        (pos.executionEventsJson as any)?.accountingSnapshot?.accountCurrency || 'INR',
+      quoteCurrency:
+        (pos.executionEventsJson as any)?.accountingSnapshot?.quoteCurrency ||
+        (pos.symbol === 'BTCUSDT'
+          ? 'USDT'
+          : pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD'
+            ? 'USD'
+            : 'INR'),
       fxRateUsed: (pos.executionEventsJson as any)?.accountingSnapshot?.fxRate ?? 1.0,
       fxRateTimestamp: (pos.executionEventsJson as any)?.accountingSnapshot?.calculatedAt,
-      accountingSnapshotHash: (pos.executionEventsJson as any)?.accountingSnapshot?.snapshotHash ?? (pos.executionEventsJson as any)?.accountingSnapshotHash,
+      accountingSnapshotHash:
+        (pos.executionEventsJson as any)?.accountingSnapshot?.snapshotHash ??
+        (pos.executionEventsJson as any)?.accountingSnapshotHash,
     };
   }
 }

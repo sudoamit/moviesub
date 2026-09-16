@@ -95,7 +95,10 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 7: Single Accounting Authority Structural Invariant — PaperPositionMonitorService and PaperTradingService have zero local financial P&L math and strictly require immutable lifecycle snapshots', () => {
-    const monitorFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-position-monitor.service.ts');
+    const monitorFile = path.join(
+      rootDir,
+      'apps/api/src/paper-trading/paper-position-monitor.service.ts',
+    );
     const monitorContent = fs.readFileSync(monitorFile, 'utf8');
 
     // 1. Monitor must invoke TradeAccountingEngine.settleExecutionLeg
@@ -109,7 +112,9 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(monitorContent).not.toMatch(/\bdelta\s*\*\s*fx/);
     // 3. Monitor must strictly fail closed if openingSnapshot is missing during TP1 scale-out (NO silent converter.getRate fallback!)
     expect(monitorContent).toContain('[MALFORMED_LIFECYCLE] Cannot execute partial TP1 scale-out');
-    expect(monitorContent).not.toMatch(/openingSnapshot\?\.fxRate\s*\?\?\s*PointInTimeCurrencyConverter/);
+    expect(monitorContent).not.toMatch(
+      /openingSnapshot\?\.fxRate\s*\?\?\s*PointInTimeCurrencyConverter/,
+    );
 
     const tradingFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-trading.service.ts');
     const tradingContent = fs.readFileSync(tradingFile, 'utf8');
@@ -117,7 +122,9 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 4. Trading service must invoke TradeAccountingEngine.settleExecutionLeg
     expect(tradingContent).toContain('TradeAccountingEngine.settleExecutionLeg');
     // 5. closePosition derives canonicalRealizedPnL strictly from leg.netPnL sum
-    expect(tradingContent).toContain('allLegsBreakdown.reduce((sum, leg) => sum + Number(leg.netPnL || 0), 0)');
+    expect(tradingContent).toContain(
+      'allLegsBreakdown.reduce((sum, leg) => sum + Number(leg.netPnL || 0), 0)',
+    );
     // 6. Zero fallback or ad-hoc calculation in closePosition
     expect(tradingContent).not.toContain('fullLifecycleCalc');
     expect(tradingContent).not.toContain('convertPnL');
@@ -162,7 +169,10 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 9: AI FIX 153 Structural Guards — Zero Date.now() marketEventTime fallback, no unauthenticated Redis LIVE_PROVIDER elevation, and RECONNECTING fails closed', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. Streamer must not use Date.now() as marketEventTime fallback
@@ -174,7 +184,10 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('isExecutionDataHealthy()');
 
     // 3. Monitor must use parseAndValidateRedisOptionQuote
-    const monitorFile = path.join(rootDir, 'apps/api/src/paper-trading/paper-position-monitor.service.ts');
+    const monitorFile = path.join(
+      rootDir,
+      'apps/api/src/paper-trading/paper-position-monitor.service.ts',
+    );
     const monitorContent = fs.readFileSync(monitorFile, 'utf8');
     expect(monitorContent).toContain('parseAndValidateRedisOptionQuote');
 
@@ -182,13 +195,21 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(monitorContent).not.toMatch(/provenance:\s*parsed\.provenance/);
 
     // 5. Invariant: Monitor must fail closed when streamer is in RECONNECTING state
-    expect(streamerContent).toMatch(/connectionState === 'CONNECTED' \|\| (this\.|state\.|runtime\.)?connectionState === 'RECONNECTED'/);
+    expect(streamerContent).toMatch(
+      /connectionState === 'CONNECTED' \|\| (this\.|state\.|runtime\.)?connectionState === 'RECONNECTED'/,
+    );
   });
 
   it('RULE 10: AI FIX 155 Structural Guards — canonical option authority is provider-derived and explicitly signed', () => {
-    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorFile = path.join(
+      rootDir,
+      'packages/shared/src/market-data/execution-quote-validator.ts',
+    );
     const validatorContent = fs.readFileSync(validatorFile, 'utf8');
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     expect(validatorContent).toContain('process.env.CANONICAL_OPTION_QUOTE_SECRET');
@@ -204,13 +225,20 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).not.toMatch(/public async publishCanonicalOptionQuote/);
     const publishFn = streamerContent.match(/publishCanonicalOptionQuote\([\s\S]*?\}\n/)?.[0] || '';
     expect(publishFn).not.toMatch(/providerId\s*:\s*params\.providerId/);
-    expect(streamerContent).toContain('NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+    expect(streamerContent).toContain(
+      'NSE_STREAM_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick',
+    );
     expect(streamerContent).toContain('NSE_REST_OPTION_PROVIDER_ADAPTER.toCanonicalExecutionTick');
-    expect(streamerContent).toContain('getCurrentOptionProviderConnection(params.providerId, params.providerTransport)');
+    expect(streamerContent).toContain(
+      'getCurrentOptionProviderConnection(params.providerId, params.providerTransport)',
+    );
   });
 
   it('RULE 11: AI FIX 159 Structural Guards — Final Transport-Specific Connection Authority', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. Zero references to global providerConnectionEpoch field in streamer
@@ -223,22 +251,33 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     // 3. getCurrentOptionProviderConnection must reject unknown providerId and not default to a valid provider connection
     expect(streamerContent).toContain('getCurrentOptionProviderConnection');
     expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
-    expect(streamerContent).not.toMatch(/default:\s*\n?\s*return\s+this\.(stream|rest)ProviderConnection/);
+    expect(streamerContent).not.toMatch(
+      /default:\s*\n?\s*return\s+this\.(stream|rest)ProviderConnection/,
+    );
 
     // 4. Stream reconnect creates stream connection ONLY (no global beginProviderConnections or REST reset)
     expect(streamerContent).toContain('this.createStreamProviderConnection');
     expect(streamerContent).not.toContain('this.beginProviderConnections()');
-    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] || streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] || '';
+    const handleReconnectFn =
+      streamerContent.match(/handleStreamProviderReconnect\(\)[\s\S]*?this\.logger\.log/)?.[0] ||
+      streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] ||
+      '';
     expect(handleReconnectFn).not.toContain('createRestProviderConnection');
 
     // 5. REST recovery creates REST connection ONLY (no global beginProviderConnections or Stream reset)
     expect(streamerContent).toContain('this.createRestProviderConnection');
-    const setRestHealthFn = streamerContent.match(/setRestHealthState\([^)]*\):[\s\S]*?\}\n/)?.[0] || streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] || '';
+    const setRestHealthFn =
+      streamerContent.match(/setRestHealthState\([^)]*\):[\s\S]*?\}\n/)?.[0] ||
+      streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] ||
+      '';
     expect(setRestHealthFn).not.toContain('createStreamProviderConnection');
   });
 
   it('RULE 12: AI FIX 160 Structural Guards — Production-Hardening Spot Authority & Truthful Transport Identity', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. updateTicker rejects unbranded generic LIVE_PROVIDER input
@@ -249,29 +288,43 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('public ingestCanonicalSpotTick');
 
     // 3. Binance PAXG polling uses BINANCE_REST_SPOT_PROVIDER_ADAPTER
-    expect(streamerContent).toContain('BINANCE_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick');
+    expect(streamerContent).toContain(
+      'BINANCE_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick',
+    );
 
     // 4. getValidatedTicker calls validateAuthoritativeExecutionQuote
     expect(streamerContent).toContain('validateAuthoritativeExecutionQuote');
   });
 
   it('RULE 13: AI FIX 161 Structural Guards — Final Execution-Authority Hardening', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
-    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorFile = path.join(
+      rootDir,
+      'packages/shared/src/market-data/execution-quote-validator.ts',
+    );
     const validatorContent = fs.readFileSync(validatorFile, 'utf8');
 
     // 1. ingestCanonicalSpotTick must use ValidatedCanonicalSpotProviderTick (NOT option tick!)
-    expect(streamerContent).toContain('ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalSpotProviderTick');
-    expect(streamerContent).not.toContain('ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalOptionProviderTick');
+    expect(streamerContent).toContain(
+      'ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalSpotProviderTick',
+    );
+    expect(streamerContent).not.toContain(
+      'ingestCanonicalSpotTick(\n    canonicalTick: ValidatedCanonicalOptionProviderTick',
+    );
 
     // 2. getCurrentStreamProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
-    const getStreamConnFn = streamerContent.match(/getCurrentStreamProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
+    const getStreamConnFn =
+      streamerContent.match(/getCurrentStreamProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
     expect(getStreamConnFn).not.toContain('this.beginStreamProviderConnection');
     expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
 
     // 3. getCurrentRestProviderConnection must be pure and throw [UNKNOWN_PROVIDER_ID_REJECTED] without creating connections
-    const getRestConnFn = streamerContent.match(/getCurrentRestProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
+    const getRestConnFn =
+      streamerContent.match(/getCurrentRestProviderConnection\([^)]*\):[\s\S]*?\}\n/)?.[0] || '';
     expect(getRestConnFn).not.toContain('this.beginRestProviderConnection');
     expect(streamerContent).toContain('[UNKNOWN_PROVIDER_ID_REJECTED]');
 
@@ -284,11 +337,16 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 14: AI FIX 162 Structural Guards — Final Provider-Runtime-State Hardening', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. Zero global streamConnectionState field in RealMarketStreamerService
-    expect(streamerContent).not.toMatch(/private\s+streamConnectionState\s*:\s*ProviderConnectionState/);
+    expect(streamerContent).not.toMatch(
+      /private\s+streamConnectionState\s*:\s*ProviderConnectionState/,
+    );
 
     // 2. Zero global streamProviderConnected field in RealMarketStreamerService
     expect(streamerContent).not.toMatch(/private\s+streamProviderConnected\s*=/);
@@ -300,7 +358,8 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('[PROVIDER_TRANSPORT_MISMATCH]');
 
     // 5. Freshness invalidation on reconnect is provider-scoped (no global clear in handleStreamProviderReconnect)
-    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?\}\n  \}/)?.[0] || '';
+    const handleReconnectFn =
+      streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?\}\n  \}/)?.[0] || '';
     expect(handleReconnectFn).not.toContain('this.freshSymbolsAfterReconnect.clear()');
     expect(handleReconnectFn).toContain('WEBSOCKET_STREAM');
 
@@ -309,39 +368,60 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 15: AI FIX 163 Structural Guards — Final Provider-Runtime Authority Hardening', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. getCurrentProviderConnection requires providerTransport in signature (not optional)
-    expect(streamerContent).toMatch(/getCurrentProviderConnection\(\s*providerId\s*:\s*string\s*,\s*providerTransport\s*:\s*'WEBSOCKET_STREAM'\s*\|\s*'REST_POLLING'/);
+    expect(streamerContent).toMatch(
+      /getCurrentProviderConnection\(\s*providerId\s*:\s*string\s*,\s*providerTransport\s*:\s*'WEBSOCKET_STREAM'\s*\|\s*'REST_POLLING'/,
+    );
 
     // 2. resolveCurrentProviderRuntime exists as pure resolver
     expect(streamerContent).toContain('public resolveCurrentProviderRuntime');
 
     // 3. Symmetric streamRuntimeStateMap and restRuntimeStateMap exist
-    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
-    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
+    expect(streamerContent).toContain(
+      'private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>',
+    );
+    expect(streamerContent).toContain(
+      'private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>',
+    );
 
     // 4. Zero fallback catch blocks converting unknown provider IDs to valid providers
-    expect(streamerContent).not.toMatch(/catch\s*\{[\s\S]*?normId\s*=\s*['"]NSE_STREAM_GATEWAY['"]/);
+    expect(streamerContent).not.toMatch(
+      /catch\s*\{[\s\S]*?normId\s*=\s*['"]NSE_STREAM_GATEWAY['"]/,
+    );
 
     // 5. Zero freshSymbolsAfterReconnect.clear() calls in whole streamer file
     expect(streamerContent).not.toContain('freshSymbolsAfterReconnect.clear()');
 
     // 6. Zero default transport initializers in RealMarketStreamerService signatures
-    expect(streamerContent).not.toMatch(/providerTransport\s*:\s*[^=,\)\n]*=\s*['"]WEBSOCKET_STREAM['"]/);
+    expect(streamerContent).not.toMatch(
+      /providerTransport\s*:\s*[^=,\)\n]*=\s*['"]WEBSOCKET_STREAM['"]/,
+    );
 
     // 7. Zero default provider initializers in RealMarketStreamerService signatures
-    expect(streamerContent).not.toMatch(/providerId\s*:\s*[^=,\)\n]*=\s*['"]NSE_STREAM_GATEWAY['"]/);
+    expect(streamerContent).not.toMatch(
+      /providerId\s*:\s*[^=,\)\n]*=\s*['"]NSE_STREAM_GATEWAY['"]/,
+    );
 
     // 8. transitionProviderRuntime exists for centralized state mutation
     expect(streamerContent).toContain('private transitionProviderRuntime');
   });
 
   it('RULE 16: AI FIX 165 Structural Guards — Final Provider-Runtime Atomicity & Authority Hardening', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
-    const validatorFile = path.join(rootDir, 'packages/shared/src/market-data/execution-quote-validator.ts');
+    const validatorFile = path.join(
+      rootDir,
+      'packages/shared/src/market-data/execution-quote-validator.ts',
+    );
     const validatorContent = fs.readFileSync(validatorFile, 'utf8');
 
     // 1. rotateProviderRuntime exists for single-authority connection replacement
@@ -355,12 +435,19 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 17: AI FIX 166 Structural Guards — Provider-Runtime Atomicity & Connection Rotation Invariants', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. streamRuntimeStateMap and restRuntimeStateMap store Readonly<ProviderRuntimeState>
-    expect(streamerContent).toContain('private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
-    expect(streamerContent).toContain('private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>');
+    expect(streamerContent).toContain(
+      'private streamRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>',
+    );
+    expect(streamerContent).toContain(
+      'private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>>',
+    );
 
     // 2. transitionProviderRuntime wraps snapshots in Object.freeze
     expect(streamerContent).toContain('Object.freeze(');
@@ -373,12 +460,18 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
     expect(streamerContent).toContain('Map<');
 
     // 5. setRestHealthState mints connection before transitioning state to CONNECTED
-    const setRestHealthFn = streamerContent.match(/setRestHealthState\([\s\S]*?this\.logger\.log/)?.[0] || streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] || streamerContent;
+    const setRestHealthFn =
+      streamerContent.match(/setRestHealthState\([\s\S]*?this\.logger\.log/)?.[0] ||
+      streamerContent.match(/setRestHealthState\([\s\S]*?\}\n  \}/)?.[0] ||
+      streamerContent;
     expect(setRestHealthFn).toMatch(/rotateProviderRuntime[\s\S]*?transitionProviderRuntime/);
   });
 
   it('RULE 18: AI FIX 167 Structural Guards — Provider-Runtime Lifecycle Authority Hardening', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. Connection creation helpers are strictly private
@@ -394,7 +487,7 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
 
     // 4. Zero mode parameters on connection replacement
     expect(streamerContent).not.toContain("mode?: 'initialization' | 'rotation'");
-    expect(streamerContent).not.toContain("setProviderRuntimeConnection");
+    expect(streamerContent).not.toContain('setProviderRuntimeConnection');
 
     // 5. Zero direct in-place mutation of runtime properties
     expect(streamerContent).not.toMatch(/\bruntime\.currentConnection\s*=(?!=)/);
@@ -403,35 +496,37 @@ describe('AI FIX 148 — Static Regression Guard & Architectural Invariants', ()
   });
 
   it('RULE 19: AI FIX 168 Structural Guards — Single Rotation Authority & Pure Connection Creation', () => {
-    const streamerFile = path.join(rootDir, 'apps/api/src/market-data/real-market-streamer.service.ts');
+    const streamerFile = path.join(
+      rootDir,
+      'apps/api/src/market-data/real-market-streamer.service.ts',
+    );
     const streamerContent = fs.readFileSync(streamerFile, 'utf8');
 
     // 1. rotateProviderConnection is deleted
     expect(streamerContent).not.toContain('rotateProviderConnection');
 
     // 2. Connection creation helpers contain zero Map mutation
-    const createStreamFn = streamerContent.match(/createStreamProviderConnection\([\s\S]*?return conn;/)?.[0] || '';
+    const createStreamFn =
+      streamerContent.match(/createStreamProviderConnection\([\s\S]*?return conn;/)?.[0] || '';
     expect(createStreamFn).not.toContain('streamRuntimeStateMap.set');
     expect(createStreamFn).not.toContain('rotateProviderConnection');
 
-    const createRestFn = streamerContent.match(/createRestProviderConnection\([\s\S]*?return[^\n]*;/)?.[0] || '';
+    const createRestFn =
+      streamerContent.match(/createRestProviderConnection\([\s\S]*?return[^\n]*;/)?.[0] || '';
     expect(createRestFn).not.toContain('restRuntimeStateMap.set');
     expect(createRestFn).not.toContain('rotateProviderConnection');
 
     // 3. handleStreamProviderReconnect performs rotation in a single atomic call without trailing transitionProviderRuntime
-    const handleReconnectFn = streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] || '';
+    const handleReconnectFn =
+      streamerContent.match(/handleStreamProviderReconnect\([\s\S]*?this\.logger\.log/)?.[0] || '';
     expect(handleReconnectFn).toContain('rotateProviderRuntime');
     expect(handleReconnectFn).not.toContain('transitionProviderRuntime');
 
     // 4. rotateProviderRuntime is the single rotation authority and performs single Map.set
     expect(streamerContent).toContain('private rotateProviderRuntime(');
-    const rotateFn = streamerContent.match(/rotateProviderRuntime\([\s\S]*?return nextRuntime;/)?.[0] || '';
+    const rotateFn =
+      streamerContent.match(/rotateProviderRuntime\([\s\S]*?return nextRuntime;/)?.[0] || '';
     expect(rotateFn).toContain('map.set(normId, nextRuntime)');
     expect(rotateFn).toContain('purgeFreshnessForConnection');
   });
 });
-
-
-
-
-

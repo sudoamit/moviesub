@@ -69,9 +69,7 @@ describe('AlgoBotsService Execution State Machine', () => {
             const item = executionsDb.get(key);
             if (item.id === where.id) {
               if (where.state) {
-                const targetStates = Array.isArray(where.state.in)
-                  ? where.state.in
-                  : [where.state];
+                const targetStates = Array.isArray(where.state.in) ? where.state.in : [where.state];
                 if (!targetStates.includes(item.state)) continue;
               }
               executionsDb.set(key, { ...item, ...data, updatedAt: new Date() });

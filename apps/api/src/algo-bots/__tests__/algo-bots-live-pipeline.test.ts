@@ -1,11 +1,5 @@
 import { AlgoBotsService } from '../algo-bots.service';
-import {
-  Direction,
-  ICandle,
-  SignalGrade,
-  SignalState,
-  Timeframe,
-} from '@quant/shared';
+import { Direction, ICandle, SignalGrade, SignalState, Timeframe } from '@quant/shared';
 import { CanonicalMarketSnapshotBuilder, SignalGenerator } from '@quant/trading-engine';
 import { PrismaService } from '../../common/prisma/prisma.service';
 

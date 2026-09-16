@@ -75,9 +75,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const candles = snapshot?.closedCandles || [];
   const formingCandle = snapshot?.formingCandle || null;
   const dataProvenance = snapshot?.dataProvenance || 'LIVE';
-  const smcSnapshot = snapshot?.smcSnapshot && ChartSnapshotValidator.validateSMCSnapshot(snapshot.smcSnapshot, symbol, timeframe)
-    ? snapshot.smcSnapshot
-    : null;
+  const smcSnapshot =
+    snapshot?.smcSnapshot &&
+    ChartSnapshotValidator.validateSMCSnapshot(snapshot.smcSnapshot, symbol, timeframe)
+      ? snapshot.smcSnapshot
+      : null;
 
   const structures = smcSnapshot?.structures;
   const liquidity = smcSnapshot?.liquidity;
@@ -142,25 +144,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
   // Live Paper Trading Position Sync
   const [paperPosition, setPaperPosition] = useState<any | null>(null);
-  const [isLocallyCut, setIsLocallyCut] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const updateCutState = () => {
-        const isCut = signal?.id
-          ? localStorage.getItem(`quant_pos_cut_${signal.id}`) === 'true'
-          : localStorage.getItem(`quant_pos_cut_${symbol}`) === 'true';
-        setIsLocallyCut(isCut);
-      };
-      updateCutState();
-
-      const handleTradeClosed = () => {
-        setIsLocallyCut(true);
-      };
-      window.addEventListener('quant_trade_closed', handleTradeClosed);
-      return () => window.removeEventListener('quant_trade_closed', handleTradeClosed);
-    }
-  }, [signal?.id, symbol]);
 
   // Live AI ML Probability & Expectancy Telemetry
   const [aiPredictionInfo, setAiPredictionInfo] = useState<{
@@ -209,9 +192,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         if (isMounted && data && Array.isArray(data.openPositions)) {
           const found = data.openPositions.find((p: any) => p.symbol === symbol);
           setPaperPosition(found || null);
-          if (!found) {
-            setIsLocallyCut(false);
-          }
         }
       } catch (e) {}
     };
@@ -228,9 +208,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     const list: any[] = [...(candles || [])];
     if (formingCandle) {
       const formingTime = new Date(formingCandle.timestamp).getTime();
-      const existingIdx = list.findIndex(
-        (c) => new Date(c.timestamp).getTime() === formingTime,
-      );
+      const existingIdx = list.findIndex((c) => new Date(c.timestamp).getTime() === formingTime);
       if (existingIdx >= 0) {
         list[existingIdx] = formingCandle;
       } else {
@@ -240,7 +218,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     return list;
   }, [candles, formingCandle]);
 
-  const currentPrice = snapshot?.livePrice ?? (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
+  const currentPrice =
+    snapshot?.livePrice ?? (allCandles.length > 0 ? allCandles[allCandles.length - 1].close : 0);
   const timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
   // 1. Canonical SMC Structures (Server-provided when available, fallback to deterministic closed-candle analysis)
@@ -256,16 +235,20 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         liquiditySweeps: liquidity?.sweeps || [],
         fairValueGaps: fvgs || [],
         activeFVGs: (fvgs || []).filter(
-          (f: any) => !f.isFilled && !f.isInvalidated && f.status !== 'FILLED' && f.status !== 'INVALIDATED',
+          (f: any) =>
+            !f.isFilled && !f.isInvalidated && f.status !== 'FILLED' && f.status !== 'INVALIDATED',
         ),
         orderBlocks: orderBlocks || [],
         activeOrderBlocks: (orderBlocks || []).filter(
-          (ob: any) => ob.status === 'ACTIVE' || ob.status === 'TOUCHED' || ob.status === 'PARTIALLY_MITIGATED',
+          (ob: any) =>
+            ob.status === 'ACTIVE' ||
+            ob.status === 'TOUCHED' ||
+            ob.status === 'PARTIALLY_MITIGATED',
         ),
         currentTrend:
-          (structures.bos && structures.bos.length > 0)
+          structures.bos && structures.bos.length > 0
             ? structures.bos[structures.bos.length - 1].direction
-            : (structures.choch && structures.choch.length > 0)
+            : structures.choch && structures.choch.length > 0
               ? structures.choch[structures.choch.length - 1].direction
               : 'NEUTRAL',
         isCanonical: true,
@@ -284,7 +267,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     if (!allCandles || allCandles.length < 5) return null;
     try {
       const cleanCandles = allCandles.map((c, idx) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp.toISOString() : new Date(c.timestamp).toISOString(),
+        timestamp:
+          c.timestamp instanceof Date
+            ? c.timestamp.toISOString()
+            : new Date(c.timestamp).toISOString(),
         open: Number(c.open),
         high: Number(c.high),
         low: Number(c.low),
@@ -719,7 +705,11 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             prevShifted.getUTCDay() !== currShifted.getUTCDay() ||
             prevShifted.getUTCFullYear() !== currShifted.getUTCFullYear()
           );
-        } else if (symUpper === 'BTCUSDT' || symUpper.endsWith('USDT') || symUpper.endsWith('USD')) {
+        } else if (
+          symUpper === 'BTCUSDT' ||
+          symUpper.endsWith('USDT') ||
+          symUpper.endsWith('USD')
+        ) {
           return (
             prevDate.getUTCDay() !== currDate.getUTCDay() ||
             prevDate.getUTCFullYear() !== currDate.getUTCFullYear()
@@ -763,7 +753,17 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       if (vwapSeriesRef.current) vwapSeriesRef.current.setData(showVWAP ? calcSessionVWAP() : []);
       if (sma20SeriesRef.current) sma20SeriesRef.current.setData(showSMA20 ? calcSMA(20) : []);
     }
-  }, [allCandles, chartType, showVolume, showEMA20, showEMA50, showEMA200, showVWAP, showSMA20, symbol]);
+  }, [
+    allCandles,
+    chartType,
+    showVolume,
+    showEMA20,
+    showEMA50,
+    showEMA200,
+    showVWAP,
+    showSMA20,
+    symbol,
+  ]);
 
   // Fit content strictly when symbol or timeframe changes so manual pan/drag is never interrupted
   const prevSymbolTfRef = useRef<string>('');
@@ -782,7 +782,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const effSignal = isSignalForThisSymbol ? signal : null;
   const isActualTradeActive =
     isTradeActive !== false &&
-    !isLocallyCut &&
     !!effSignal &&
     effSignal.state !== 'SL_HIT' &&
     effSignal.state !== 'TP2_HIT' &&
@@ -946,11 +945,15 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       const timeSec = Math.floor(new Date(effSignal.timestamp).getTime() / 1000) as unknown as Time;
       entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
     } else if (clientSMC && clientSMC.orderBlocks && clientSMC.orderBlocks.length > 0) {
-      const timeSec = Math.floor(new Date(clientSMC.orderBlocks[0].timestamp).getTime() / 1000) as unknown as Time;
+      const timeSec = Math.floor(
+        new Date(clientSMC.orderBlocks[0].timestamp).getTime() / 1000,
+      ) as unknown as Time;
       entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
     } else if (allCandles && allCandles.length > 0) {
       const targetCandle = allCandles[Math.max(0, allCandles.length - 16)];
-      const timeSec = Math.floor(new Date(targetCandle.timestamp).getTime() / 1000) as unknown as Time;
+      const timeSec = Math.floor(
+        new Date(targetCandle.timestamp).getTime() / 1000,
+      ) as unknown as Time;
       entryCandleX = chart.timeScale().timeToCoordinate(timeSec);
     }
 
@@ -1222,7 +1225,14 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     }
 
     // F. ENTRY, STOP LOSS (SL) & TAKE PROFIT (TP) SHADED BOXES & ANCHORS
-    if (showLevels && isActualTradeActive && entryPrice && slPrice && tp2Price && entryCandleX !== null) {
+    if (
+      showLevels &&
+      isActualTradeActive &&
+      entryPrice &&
+      slPrice &&
+      tp2Price &&
+      entryCandleX !== null
+    ) {
       const rawEntryY = priceToY(entryPrice);
       const rawSlY = priceToY(slPrice);
       const rawTp1Y = tp1Price ? priceToY(tp1Price) : null;
@@ -1790,7 +1800,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {/* 2. Real-Time Dynamic Trade Status & Setup Level Pills Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 py-1.5 px-3 bg-slate-900/90 border border-slate-800 rounded-lg mb-2 text-xs font-mono shadow-md">
         <div className="flex flex-wrap items-center gap-2.5">
-          {paperPosition && !isLocallyCut ? (
+          {paperPosition && isTradeActive ? (
             <div className="flex flex-wrap items-center gap-2.5">
               <span className="relative flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
@@ -1819,18 +1829,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
                 })}
-              </span>
-            </div>
-          ) : isLocallyCut ? (
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
-              </span>
-              <span className="bg-amber-950/90 text-amber-300 border border-amber-500/50 px-2.5 py-0.5 rounded font-black flex items-center gap-1">
-                ⚡ POSITION EXITED (MANUAL MARKET EXIT)
-              </span>
-              <span className="text-slate-400 text-[11px]">
-                Status: <strong className="text-amber-300">Position Cut & Closed</strong>
               </span>
             </div>
           ) : effSignal?.state === 'SL_HIT' ? (
@@ -1924,7 +1922,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 bg-emerald-950/40 border border-emerald-500/40 px-2 py-1 rounded-lg">
-            <span className="text-[10px] text-emerald-300 font-bold uppercase">TP1 ({tp1RText}R):</span>
+            <span className="text-[10px] text-emerald-300 font-bold uppercase">
+              TP1 ({tp1RText}R):
+            </span>
             <span className="text-emerald-400 font-black">
               {currSymbol}
               {tp1Price.toFixed(2)}
@@ -1932,7 +1932,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 bg-teal-950/40 border border-teal-500/40 px-2 py-1 rounded-lg">
-            <span className="text-[10px] text-teal-300 font-bold uppercase">TP2 ({tp2RText}R):</span>
+            <span className="text-[10px] text-teal-300 font-bold uppercase">
+              TP2 ({tp2RText}R):
+            </span>
             <span className="text-teal-400 font-black">
               {currSymbol}
               {tp2Price.toFixed(2)}
@@ -1941,7 +1943,9 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
           {tp3Price > 0 && (
             <div className="hidden sm:flex items-center gap-1.5 bg-purple-950/40 border border-purple-500/40 px-2 py-1 rounded-lg">
-              <span className="text-[10px] text-purple-300 font-bold uppercase">TP3 ({tp3RText}R):</span>
+              <span className="text-[10px] text-purple-300 font-bold uppercase">
+                TP3 ({tp3RText}R):
+              </span>
               <span className="text-purple-300 font-black">
                 {currSymbol}
                 {tp3Price.toFixed(2)}
@@ -1981,7 +1985,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
           <span
             className={`px-3 py-1 rounded-lg font-black border text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-sm ${
-              (aiPredictionInfo?.recommendation) === 'HIGH_CONFIDENCE'
+              aiPredictionInfo?.recommendation === 'HIGH_CONFIDENCE'
                 ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50 shadow-emerald-500/10'
                 : aiPredictionInfo?.recommendation === 'MODERATE_CONFIDENCE'
                   ? 'bg-teal-950/80 text-teal-300 border-teal-500/50'
@@ -2175,16 +2179,22 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       {/* 6. Chart Viewport Container (Lightweight Charts + Canvas Overlay + SMC HUD + MTF Permission) */}
       <div className="relative flex-1 w-full min-h-[420px] h-full overflow-hidden">
         {(isDataUnavailable || !allCandles || allCandles.length === 0) && (
-          <div className="absolute inset-0 z-30 bg-[#0A0E17]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-3">
-            <Shield className="w-10 h-10 text-amber-400 animate-pulse" />
-            <h4 className="text-sm font-bold uppercase tracking-wider text-slate-200">
-              Market Data Unavailable
+          <div className="absolute inset-0 z-30 bg-[#080C14]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-3 font-mono">
+            <Shield className="w-10 h-10 text-amber-400" />
+            <h4 className="text-base font-bold uppercase tracking-wider text-white">
+              MARKET DATA UNAVAILABLE
             </h4>
-            <p className="text-xs text-slate-400 max-w-md font-mono">
-              Unable to load historical OHLC candles for <span className="text-cyan-400">{symbol}</span> [{timeframe}]. Data authority enforced: synthetic fallback candles disabled.
+            <div className="text-sm font-semibold text-cyan-400">
+              {symbol} · {timeframe}
+            </div>
+            <p className="text-xs text-slate-300 max-w-md">
+              Historical candles could not be validated.
             </p>
-            <span className="text-[10px] text-amber-400 bg-amber-950/50 border border-amber-800/60 px-2.5 py-1 rounded font-mono">
-              FAIL-CLOSED MARKET POLICY
+            <p className="text-xs text-slate-400 max-w-md">
+              Execution disabled until authoritative market data is restored.
+            </p>
+            <span className="text-[11px] font-bold text-amber-400 bg-amber-950/60 border border-amber-800/60 px-3 py-1 rounded">
+              DATA STATE: UNAVAILABLE
             </span>
           </div>
         )}

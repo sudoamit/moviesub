@@ -15,7 +15,8 @@ function normalizeExitReason(raw: string | undefined | null): SignalState {
   if (!raw) return SignalState.EXPIRED;
   const upper = raw.toUpperCase();
   if (upper === 'SL_HIT' || upper === 'STOP_LOSS' || upper === 'STOPPED') return SignalState.SL_HIT;
-  if (upper === 'TP1_HIT' || upper === 'TARGET_1' || upper === 'TARGET_HIT') return SignalState.TP1_HIT;
+  if (upper === 'TP1_HIT' || upper === 'TARGET_1' || upper === 'TARGET_HIT')
+    return SignalState.TP1_HIT;
   if (upper === 'TP2_HIT' || upper === 'TARGET_2') return SignalState.TP2_HIT;
   if (upper === 'TP3_HIT' || upper === 'TARGET_3') return SignalState.TP3_HIT;
   if (upper === 'CANCELLED' || upper === 'CANCEL') return SignalState.CANCELLED;

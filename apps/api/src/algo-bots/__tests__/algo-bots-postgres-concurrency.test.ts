@@ -1,7 +1,14 @@
 import { PrismaClient, AlgoBotExecutionState } from '@prisma/client';
 import { AlgoBotsService, IAlgoBot } from '../algo-bots.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { ISignalSetup, Direction, SignalGrade, SignalState, Timeframe, MarketDataUnavailableError } from '@quant/shared';
+import {
+  ISignalSetup,
+  Direction,
+  SignalGrade,
+  SignalState,
+  Timeframe,
+  MarketDataUnavailableError,
+} from '@quant/shared';
 import { InternalServerErrorException } from '@nestjs/common';
 
 describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine Integration Suite', () => {
@@ -351,7 +358,10 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       expect(res1.success).toBe(true);
       const execId = res1.executionId!;
 
-      await algoBotsServiceA.markExecutionFailed(execId, new MarketDataUnavailableError('BTCUSDT', 'Streamer network timeout'));
+      await algoBotsServiceA.markExecutionFailed(
+        execId,
+        new MarketDataUnavailableError('BTCUSDT', 'Streamer network timeout'),
+      );
       let dbRow = await prismaA.algoBotExecution.findUnique({ where: { id: execId } });
       expect(dbRow?.state).toBe(AlgoBotExecutionState.FAILED_RETRYABLE);
       expect(dbRow?.failureReasonCode).toBe('MARKET_DATA_UNAVAILABLE');
@@ -381,11 +391,7 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       },
     } as unknown as PrismaService;
 
-    const brokenService = new AlgoBotsService(
-      null as any,
-      null as any,
-      brokenPrisma,
-    );
+    const brokenService = new AlgoBotsService(null as any, null as any, brokenPrisma);
 
     await expect(brokenService.listBots()).rejects.toThrow(InternalServerErrorException);
   });
@@ -476,7 +482,10 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       const execId = res1.executionId!;
 
       // 2. Mark FAILED_RETRYABLE with structured transient error
-      await algoBotsServiceA.markExecutionFailed(execId, new MarketDataUnavailableError('BTCUSDT', 'Streamer timeout'));
+      await algoBotsServiceA.markExecutionFailed(
+        execId,
+        new MarketDataUnavailableError('BTCUSDT', 'Streamer timeout'),
+      );
 
       // 3. Concurrent retry attempt from two service instances
       const retryResults = await Promise.all([
@@ -503,11 +512,7 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       },
     } as unknown as PrismaService;
 
-    const brokenService = new AlgoBotsService(
-      null as any,
-      null as any,
-      brokenPrisma,
-    );
+    const brokenService = new AlgoBotsService(null as any, null as any, brokenPrisma);
 
     await expect(
       brokenService.markExecutionFailed('exec_123', new Error('Network error')),
@@ -640,9 +645,9 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
         InternalServerErrorException,
       );
 
-      await expect(algoBotsServiceA.markExecutionFailed(execId, new Error('Stale failure'))).rejects.toThrow(
-        InternalServerErrorException,
-      );
+      await expect(
+        algoBotsServiceA.markExecutionFailed(execId, new Error('Stale failure')),
+      ).rejects.toThrow(InternalServerErrorException);
     } finally {
       await prismaA.algoBotExecution.deleteMany({ where: { fingerprint } });
       await prismaA.algoBot.deleteMany({ where: { id: botId } });

@@ -1,4 +1,12 @@
-import { BadRequestException, Injectable, InternalServerErrorException, Logger, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { PaperTradingService } from '../paper-trading/paper-trading.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
@@ -487,7 +495,9 @@ export class AlgoBotsService implements OnModuleInit {
           },
         });
 
-        this.logger.log(`✓ [ALGO BOT CREATED] '${created.name}' (${created.symbol} ${created.direction})`);
+        this.logger.log(
+          `✓ [ALGO BOT CREATED] '${created.name}' (${created.symbol} ${created.direction})`,
+        );
         return {
           id: created.id,
           name: created.name,
@@ -642,14 +652,26 @@ export class AlgoBotsService implements OnModuleInit {
     signal: ISignalSetup,
     asOfTimestamp: Date = new Date(),
   ): IStrategyMatchResult {
-    const canonicalTimeRaw = (signal as any).canonicalCandleTime || (signal as any).candleTimestamp || signal.timestamp || signal.createdAt;
+    const canonicalTimeRaw =
+      (signal as any).canonicalCandleTime ||
+      (signal as any).candleTimestamp ||
+      signal.timestamp ||
+      signal.createdAt;
     if (!canonicalTimeRaw) {
-      return { matches: false, reasonCode: 'SIGNAL_MISSING_TIMESTAMP', details: 'Signal lacks valid timestamp' };
+      return {
+        matches: false,
+        reasonCode: 'SIGNAL_MISSING_TIMESTAMP',
+        details: 'Signal lacks valid timestamp',
+      };
     }
 
     const signalTime = new Date(canonicalTimeRaw).getTime();
     if (Number.isNaN(signalTime)) {
-      return { matches: false, reasonCode: 'SIGNAL_INVALID_TIMESTAMP', details: 'Signal timestamp is invalid/NaN' };
+      return {
+        matches: false,
+        reasonCode: 'SIGNAL_INVALID_TIMESTAMP',
+        details: 'Signal timestamp is invalid/NaN',
+      };
     }
 
     const asOfMs = asOfTimestamp.getTime();
@@ -690,7 +712,8 @@ export class AlgoBotsService implements OnModuleInit {
 
     const lotSize = Number(instrument.lotSize || 1);
     const minQty = Number(instrument.minimumQuantity || lotSize || 1);
-    const precision = typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 0;
+    const precision =
+      typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 0;
 
     const rawQuantity = bot.lots * lotSize;
     const clampedQty = Math.max(minQty, rawQuantity);
@@ -723,10 +746,10 @@ export class AlgoBotsService implements OnModuleInit {
 
     const signalTime = new Date(
       (signal as any).canonicalDecisionTime ||
-      (signal as any).canonicalCandleTime ||
-      signal.timestamp ||
-      signal.createdAt ||
-      Date.now(),
+        (signal as any).canonicalCandleTime ||
+        signal.timestamp ||
+        signal.createdAt ||
+        Date.now(),
     ).getTime();
     const maxStructureAgeMs = this.getMaxSignalAgeMs(signal.timeframe) * 50;
 
@@ -830,7 +853,11 @@ export class AlgoBotsService implements OnModuleInit {
    */
   public validateExecutionEligibility(bot: IAlgoBot, signal: ISignalSetup): IStrategyMatchResult {
     if (!bot.isActive) {
-      return { matches: false, reasonCode: 'BOT_INACTIVE', details: `Bot '${bot.id}' is inactive/paused` };
+      return {
+        matches: false,
+        reasonCode: 'BOT_INACTIVE',
+        details: `Bot '${bot.id}' is inactive/paused`,
+      };
     }
 
     // P0 #5: Require valid canonicalCandleTime for auto-execution
@@ -863,7 +890,11 @@ export class AlgoBotsService implements OnModuleInit {
       signal.direction === ('NEUTRAL' as any) ||
       signal.direction === ('NO_TRADE' as any)
     ) {
-      return { matches: false, reasonCode: 'INVALID_SIGNAL', details: `Signal direction '${signal.direction}' is NEUTRAL or NO_TRADE` };
+      return {
+        matches: false,
+        reasonCode: 'INVALID_SIGNAL',
+        details: `Signal direction '${signal.direction}' is NEUTRAL or NO_TRADE`,
+      };
     }
 
     if (signal.grade === ('NO_TRADE' as any)) {
@@ -884,22 +915,44 @@ export class AlgoBotsService implements OnModuleInit {
     const tp3 = signal.takeProfits?.tp3;
 
     if (typeof signal.score !== 'number' || !Number.isFinite(signal.score) || signal.score <= 0) {
-      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Signal score must be a positive finite number' };
+      return {
+        matches: false,
+        reasonCode: 'INVALID_LEVELS',
+        details: 'Signal score must be a positive finite number',
+      };
     }
 
     if (
-      typeof optimalEntry !== 'number' || !Number.isFinite(optimalEntry) || optimalEntry <= 0 ||
-      typeof stopLoss !== 'number' || !Number.isFinite(stopLoss) || stopLoss <= 0 ||
-      typeof tp1 !== 'number' || !Number.isFinite(tp1) || tp1 <= 0 ||
-      typeof tp2 !== 'number' || !Number.isFinite(tp2) || tp2 <= 0 ||
-      typeof tp3 !== 'number' || !Number.isFinite(tp3) || tp3 <= 0
+      typeof optimalEntry !== 'number' ||
+      !Number.isFinite(optimalEntry) ||
+      optimalEntry <= 0 ||
+      typeof stopLoss !== 'number' ||
+      !Number.isFinite(stopLoss) ||
+      stopLoss <= 0 ||
+      typeof tp1 !== 'number' ||
+      !Number.isFinite(tp1) ||
+      tp1 <= 0 ||
+      typeof tp2 !== 'number' ||
+      !Number.isFinite(tp2) ||
+      tp2 <= 0 ||
+      typeof tp3 !== 'number' ||
+      !Number.isFinite(tp3) ||
+      tp3 <= 0
     ) {
-      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Incomplete or non-finite entry/SL/TP levels' };
+      return {
+        matches: false,
+        reasonCode: 'INVALID_LEVELS',
+        details: 'Incomplete or non-finite entry/SL/TP levels',
+      };
     }
 
     const riskDistance = Math.abs(optimalEntry - stopLoss);
     if (!Number.isFinite(riskDistance) || riskDistance <= 0) {
-      return { matches: false, reasonCode: 'INVALID_LEVELS', details: 'Invalid risk distance between entry and SL' };
+      return {
+        matches: false,
+        reasonCode: 'INVALID_LEVELS',
+        details: 'Invalid risk distance between entry and SL',
+      };
     }
 
     if (signal.direction === 'BULLISH') {
@@ -927,7 +980,8 @@ export class AlgoBotsService implements OnModuleInit {
    * P0 #8 & P1 #8: Canonical Decision Fingerprint Generator with Bot Configuration Versioning
    */
   public getSignalFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
-    const canonicalTimeRaw = signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
+    const canonicalTimeRaw =
+      signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
     const signalTimeMs = new Date(canonicalTimeRaw).getTime();
     const normTf = this.normalizeTimeframe(signal.timeframe);
     const normSymbol = bot.symbol.toUpperCase();
@@ -935,12 +989,15 @@ export class AlgoBotsService implements OnModuleInit {
 
     const tfMs = this.getMaxSignalAgeMs(normTf);
     // Use canonical candle timestamp if present; otherwise fall back to timeframe floor boundary
-    const canonicalCandleBoundaryMs = signal.canonicalCandleTime || (Math.floor(signalTimeMs / tfMs) * tfMs);
+    const canonicalCandleBoundaryMs =
+      signal.canonicalCandleTime || Math.floor(signalTimeMs / tfMs) * tfMs;
 
     // Strategy configuration hash to uniquely represent bot parameters
     const configHash = crypto
       .createHash('sha256')
-      .update(`${bot.symbol}:${bot.timeframe}:${bot.direction}:${bot.minScore}:${bot.smcCondition}:${bot.lots}`)
+      .update(
+        `${bot.symbol}:${bot.timeframe}:${bot.direction}:${bot.minScore}:${bot.smcCondition}:${bot.lots}`,
+      )
       .digest('hex')
       .substring(0, 8);
 
@@ -959,7 +1016,13 @@ export class AlgoBotsService implements OnModuleInit {
    */
   public async transitionExecutionState(
     executionId: string,
-    expectedStates: 'RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL' | ('RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL')[],
+    expectedStates:
+      | 'RESERVED'
+      | 'EXECUTING'
+      | 'EXECUTED'
+      | 'FAILED_RETRYABLE'
+      | 'FAILED_FINAL'
+      | ('RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL')[],
     targetState: 'RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL',
     updateData?: {
       orderPositionId?: string | null;
@@ -1046,7 +1109,9 @@ export class AlgoBotsService implements OnModuleInit {
       if (err instanceof InternalServerErrorException) {
         throw err;
       }
-      this.logger.error(`Database error during state transition for ${executionId}: ${err.message}`);
+      this.logger.error(
+        `Database error during state transition for ${executionId}: ${err.message}`,
+      );
       throw new InternalServerErrorException(
         `Execution state transition to ${targetState} failed: ${err.message}`,
       );
@@ -1065,7 +1130,8 @@ export class AlgoBotsService implements OnModuleInit {
       return { success: false, reason: 'LOCAL_LOCK_ACTIVE' };
     }
 
-    const signalTimestamp = signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
+    const signalTimestamp =
+      signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
 
     if (this.prisma) {
       try {
@@ -1095,7 +1161,11 @@ export class AlgoBotsService implements OnModuleInit {
           // Atomic retry state transition via updateMany (prevents retry race conditions & restores clean RESERVED state)
           if (existing && existing.state === 'FAILED_RETRYABLE') {
             try {
-              const res = await this.transitionExecutionState(existing.id, 'FAILED_RETRYABLE', 'RESERVED');
+              const res = await this.transitionExecutionState(
+                existing.id,
+                'FAILED_RETRYABLE',
+                'RESERVED',
+              );
               if (res.count === 1) {
                 this.inMemoryLocks.add(fingerprint);
                 return { success: true, executionId: existing.id };
@@ -1103,7 +1173,8 @@ export class AlgoBotsService implements OnModuleInit {
             } catch (retryErr: any) {
               if (
                 retryErr instanceof InternalServerErrorException &&
-                (retryErr.message.includes('STATE_TRANSITION_REJECTED') || retryErr.message.includes('INVALID_STATE_TRANSITION_EDGE'))
+                (retryErr.message.includes('STATE_TRANSITION_REJECTED') ||
+                  retryErr.message.includes('INVALID_STATE_TRANSITION_EDGE'))
               ) {
                 const rechecked = await this.prisma.algoBotExecution.findUnique({
                   where: { id: existing.id },
@@ -1115,7 +1186,9 @@ export class AlgoBotsService implements OnModuleInit {
                 return { success: false, reason: 'STATE_TRANSITION_CONFLICT' };
               }
               // Real DB exception during retry transition -> report DATABASE_UNAVAILABLE / fail closed
-              this.logger.error(`Database error during retry transition for ${fingerprint}: ${retryErr.message}`);
+              this.logger.error(
+                `Database error during retry transition for ${fingerprint}: ${retryErr.message}`,
+              );
               return { success: false, reason: 'DATABASE_UNAVAILABLE' };
             }
             this.inMemoryLocks.add(fingerprint);
@@ -1168,15 +1241,10 @@ export class AlgoBotsService implements OnModuleInit {
     const classification = classificationParam || classifyExecutionFailure(err);
     const targetState = classification.retryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
 
-    await this.transitionExecutionState(
-      executionId,
-      ['EXECUTING', 'RESERVED'],
-      targetState,
-      {
-        failureReason: classification.message,
-        failureReasonCode: classification.reasonCode,
-      },
-    );
+    await this.transitionExecutionState(executionId, ['EXECUTING', 'RESERVED'], targetState, {
+      failureReason: classification.message,
+      failureReasonCode: classification.reasonCode,
+    });
   }
 
   private async recordBotTrigger(botId: string, signal: ISignalSetup): Promise<void> {
@@ -1192,7 +1260,9 @@ export class AlgoBotsService implements OnModuleInit {
           },
         });
       } catch (err: any) {
-        this.logger.warn(`[TELEMETRY_WARNING] Failed to increment bot trigger count for ${botId}: ${err.message}`);
+        this.logger.warn(
+          `[TELEMETRY_WARNING] Failed to increment bot trigger count for ${botId}: ${err.message}`,
+        );
       }
     }
   }
@@ -1301,17 +1371,33 @@ export class AlgoBotsService implements OnModuleInit {
     const tp2 = signal.takeProfits?.tp2;
     const tp3 = signal.takeProfits?.tp3;
     if (
-      typeof optEntry !== 'number' || !Number.isFinite(optEntry) || optEntry <= 0 ||
-      typeof sl !== 'number' || !Number.isFinite(sl) || sl <= 0 ||
-      typeof tp1 !== 'number' || !Number.isFinite(tp1) || tp1 <= 0 ||
-      typeof tp2 !== 'number' || !Number.isFinite(tp2) || tp2 <= 0 ||
-      typeof tp3 !== 'number' || !Number.isFinite(tp3) || tp3 <= 0
+      typeof optEntry !== 'number' ||
+      !Number.isFinite(optEntry) ||
+      optEntry <= 0 ||
+      typeof sl !== 'number' ||
+      !Number.isFinite(sl) ||
+      sl <= 0 ||
+      typeof tp1 !== 'number' ||
+      !Number.isFinite(tp1) ||
+      tp1 <= 0 ||
+      typeof tp2 !== 'number' ||
+      !Number.isFinite(tp2) ||
+      tp2 <= 0 ||
+      typeof tp3 !== 'number' ||
+      !Number.isFinite(tp3) ||
+      tp3 <= 0
     ) {
       reasons.push('INVALID_LEVELS');
     } else {
-      if (signal.direction === 'BULLISH' && !(sl < optEntry && optEntry < tp1 && tp1 <= tp2 && tp2 <= tp3)) {
+      if (
+        signal.direction === 'BULLISH' &&
+        !(sl < optEntry && optEntry < tp1 && tp1 <= tp2 && tp2 <= tp3)
+      ) {
         reasons.push('INVALID_LEVELS');
-      } else if (signal.direction === 'BEARISH' && !(sl > optEntry && optEntry > tp1 && tp1 >= tp2 && tp2 >= tp3)) {
+      } else if (
+        signal.direction === 'BEARISH' &&
+        !(sl > optEntry && optEntry > tp1 && tp1 >= tp2 && tp2 >= tp3)
+      ) {
         reasons.push('INVALID_LEVELS');
       }
     }
@@ -1352,7 +1438,8 @@ export class AlgoBotsService implements OnModuleInit {
       reasons.push('READY_TO_EXECUTE');
     }
 
-    const matches = reasons.length === 1 && (reasons[0] === 'READY_TO_EXECUTE' || reasons[0] === 'EXECUTED');
+    const matches =
+      reasons.length === 1 && (reasons[0] === 'READY_TO_EXECUTE' || reasons[0] === 'EXECUTED');
 
     // Log per-bot evaluation details against real signal
     this.logger.log(
@@ -1472,13 +1559,13 @@ export class AlgoBotsService implements OnModuleInit {
         this.lastExecutionRejectionReason = primaryReason;
         this.logger.warn(
           `[ALGO EXECUTION DECISION]\n` +
-          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
-          `signal=${signal.state}\n` +
-          `score=${signal.score}\n` +
-          `canonicalCandle=${canonicalCandleFormatted}\n` +
-          `bot=${bot.id}\n` +
-          `result=REJECTED\n` +
-          `reason=${primaryReason}`,
+            `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+            `signal=${signal.state}\n` +
+            `score=${signal.score}\n` +
+            `canonicalCandle=${canonicalCandleFormatted}\n` +
+            `bot=${bot.id}\n` +
+            `result=REJECTED\n` +
+            `reason=${primaryReason}`,
         );
         results.push({
           botId: bot.id,
@@ -1493,13 +1580,13 @@ export class AlgoBotsService implements OnModuleInit {
       // Log candidate status prior to order placement
       this.logger.warn(
         `[ALGO EXECUTION DECISION]\n` +
-        `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
-        `signal=${signal.state}\n` +
-        `score=${signal.score}\n` +
-        `canonicalCandle=${canonicalCandleFormatted}\n` +
-        `bot=${bot.id}\n` +
-        `result=READY_TO_EXECUTE\n` +
-        `reason=DIAGNOSTICS_PASSED`,
+          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+          `signal=${signal.state}\n` +
+          `score=${signal.score}\n` +
+          `canonicalCandle=${canonicalCandleFormatted}\n` +
+          `bot=${bot.id}\n` +
+          `result=READY_TO_EXECUTE\n` +
+          `reason=DIAGNOSTICS_PASSED`,
       );
 
       // 1. Validate Bot Active & Signal Eligibility (ACTIVE state, trade levels, freshness)
@@ -1507,7 +1594,9 @@ export class AlgoBotsService implements OnModuleInit {
       if (!eligibility.matches) {
         const reason = eligibility.reasonCode || 'ELIGIBILITY_FAILED';
         this.lastExecutionRejectionReason = reason;
-        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' eligibility failed for ${signal.symbol}: ${reason}`);
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' eligibility failed for ${signal.symbol}: ${reason}`,
+        );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1523,7 +1612,9 @@ export class AlgoBotsService implements OnModuleInit {
       if (!match.matches) {
         const reason = match.reasonCode || 'STRATEGY_MISMATCH';
         this.lastExecutionRejectionReason = reason;
-        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' strategy mismatch for ${signal.symbol}: ${reason}`);
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' strategy mismatch for ${signal.symbol}: ${reason}`,
+        );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1555,7 +1646,9 @@ export class AlgoBotsService implements OnModuleInit {
         const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
         if (alreadyOpen) {
           this.lastExecutionRejectionReason = 'POSITION_ALREADY_OPEN';
-          this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' already has an open position for ${bot.symbol}`);
+          this.logger.warn(
+            `[ALGO EXECUTION REJECTED] Bot '${bot.id}' already has an open position for ${bot.symbol}`,
+          );
           results.push({
             botId: bot.id,
             symbol: bot.symbol,
@@ -1568,7 +1661,9 @@ export class AlgoBotsService implements OnModuleInit {
       } catch (err: any) {
         const reason = `PORTFOLIO_CHECK_FAILED: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
-        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' portfolio check failed for ${bot.symbol}: ${reason}`);
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' portfolio check failed for ${bot.symbol}: ${reason}`,
+        );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1585,7 +1680,9 @@ export class AlgoBotsService implements OnModuleInit {
       } catch (err: any) {
         const reason = `MARKET_PRICE_UNAVAILABLE: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
-        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' market price check failed for ${bot.symbol}: ${reason}`);
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' market price check failed for ${bot.symbol}: ${reason}`,
+        );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1604,7 +1701,9 @@ export class AlgoBotsService implements OnModuleInit {
       } catch (err: any) {
         const reason = `QUANTITY_RESOLUTION_FAILED: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
-        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' quantity resolution failed for ${bot.symbol}: ${reason}`);
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Bot '${bot.id}' quantity resolution failed for ${bot.symbol}: ${reason}`,
+        );
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
@@ -1677,13 +1776,13 @@ export class AlgoBotsService implements OnModuleInit {
 
         this.logger.warn(
           `[ALGO EXECUTION DECISION]\n` +
-          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
-          `signal=${signal.state}\n` +
-          `score=${signal.score}\n` +
-          `canonicalCandle=${canonicalCandleFormatted}\n` +
-          `bot=${bot.id}\n` +
-          `result=EXECUTED\n` +
-          `reason=ORDER_PLACED_SUCCESSFULLY`,
+            `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+            `signal=${signal.state}\n` +
+            `score=${signal.score}\n` +
+            `canonicalCandle=${canonicalCandleFormatted}\n` +
+            `bot=${bot.id}\n` +
+            `result=EXECUTED\n` +
+            `reason=ORDER_PLACED_SUCCESSFULLY`,
         );
 
         this.logger.log(
@@ -1705,7 +1804,10 @@ export class AlgoBotsService implements OnModuleInit {
       } catch (e: any) {
         const classification = classifyExecutionFailure(e);
         this.lastExecutionRejectionReason = classification.reasonCode;
-        this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
+        this.logger.error(
+          `[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`,
+          e.stack,
+        );
         await this.markExecutionFailed(executionId, e, classification);
         results.push({
           botId: bot.id,

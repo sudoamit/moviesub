@@ -1,125 +1,65 @@
 'use client';
 
-import React, { useEffect, useState, useMemo, useRef } from 'react';
-import dynamic from 'next/dynamic';
-import { ICandle, ISignalSetup, Timeframe, WS_EVENTS, ChartMarketSnapshot, TimeframeRegistry, ChartCandle, ChartFormingCandle, CanonicalCandleAggregator, NormalizedTick } from '@quant/shared';
-import { ChartSnapshotValidator } from '@quant/trading-engine';
+import React, { useEffect, useState, useMemo } from 'react';
+import { ISignalSetup } from '@quant/shared';
 import { MarketStreamProvider, useMarketStream } from '../context/MarketStreamContext';
 import { Header, NavTab, StrategyMode } from '../components/Header';
-import { LiveTickerBar, ITickerInfo } from '../components/LiveTickerBar';
-import { ScoreGauge } from '../components/ScoreGauge';
-import { ReasoningCard } from '../components/ReasoningCard';
-import { RiskWidget } from '../components/RiskWidget';
-import { TradeJournal } from '../components/TradeJournal';
-import { LivePositionTracker } from '../components/LivePositionTracker';
-import { MTFHeatmap } from '../components/MTFHeatmap';
-import { ScannerTable } from '../components/ScannerTable';
-import { BacktestDashboard } from '../components/BacktestDashboard';
-import { SmartStrikeCard } from '../components/SmartStrikeCard';
+import { MarketContextBar } from '../components/MarketContextBar';
 import { OptionChainModal } from '../components/OptionChainModal';
-import { OptionsSuiteView } from '../components/OptionsSuiteView';
-import { PaperTradingWidget } from '../components/PaperTradingWidget';
-import { MultiChartGrid } from '../components/MultiChartGrid';
-import { CorrelationMatrix } from '../components/CorrelationMatrix';
 import { AlertsManagerModal } from '../components/AlertsManagerModal';
 import { AICopilotModal } from '../components/AICopilotModal';
-import { AlgoStrategyBuilder } from '../components/AlgoStrategyBuilder';
-import { MacroCalendarWidget } from '../components/MacroCalendarWidget';
-import { SMTDivergenceWidget } from '../components/SMTDivergenceWidget';
-import { MTFFlowRadarWidget } from '../components/MTFFlowRadarWidget';
-import { AITradeLearningWidget } from '../components/AITradeLearningWidget';
-import { QuantIntelligencePanel } from '../components/QuantIntelligencePanel';
-import { LearningEngineDashboard } from '../components/LearningEngineDashboard';
-import { ResearchStudio } from '../components/ResearchStudio';
-import {
-  Bell,
-  Zap,
-  ShieldAlert,
-  CheckCircle2,
-  Target,
-  Layers,
-  Sliders,
-  Sparkles,
-} from 'lucide-react';
-
-const TradingChart = dynamic(
-  () => import('../components/TradingChart').then((mod) => mod.TradingChart),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="w-full h-[520px] bg-[#0c121e] rounded-xl flex flex-col items-center justify-center text-slate-500 border border-slate-800 animate-pulse">
-        <div className="w-8 h-8 border-2 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mb-3"></div>
-        <p className="text-xs font-mono text-slate-400">
-          Loading High-Performance Trading Chart...
-        </p>
-      </div>
-    ),
-  },
-);
+import { TerminalWorkspace } from '../workspaces/TerminalWorkspace';
+import { AnalyzeWorkspace } from '../workspaces/AnalyzeWorkspace';
+import { TradeWorkspace } from '../workspaces/TradeWorkspace';
+import { ResearchWorkspace } from '../workspaces/ResearchWorkspace';
+import { AutomationWorkspace } from '../workspaces/AutomationWorkspace';
+import { HistoryWorkspace } from '../workspaces/HistoryWorkspace';
+import { useMarketContext } from '../hooks/useMarketContext';
+import { useSignals } from '../hooks/useSignals';
+import { usePaperTrading } from '../hooks/usePaperTrading';
+import { ShieldAlert, CheckCircle2, Zap, Info, AlertTriangle, X } from 'lucide-react';
 
 function DashboardContent() {
-  const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState<NavTab>('terminal');
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('NIFTY');
-  const [selectedTimeframe, setSelectedTimeframe] = useState<string>('15m');
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyMode>('SMC');
-  const [chartSnapshot, setChartSnapshot] = useState<ChartMarketSnapshot | null>(null);
-  const [isDataUnavailable, setIsDataUnavailable] = useState<boolean>(false);
-  const [signals, setSignals] = useState<ISignalSetup[]>([]);
-  const [selectedSignal, setSelectedSignal] = useState<ISignalSetup | null>(null);
   const [isOptionChainModalOpen, setIsOptionChainModalOpen] = useState<boolean>(false);
   const [isAlertsModalOpen, setIsAlertsModalOpen] = useState<boolean>(false);
   const [isAICopilotModalOpen, setIsAICopilotModalOpen] = useState<boolean>(false);
-  const [activeToast, setActiveToast] = useState<{
-    title: string;
-    message: string;
-    type?: string;
-  } | null>(null);
 
-  const fetchAbortRef = useRef<AbortController | null>(null);
-
+  // Central Market Data & Chart Snapshot Hook
   const {
-    isConnected,
-    tickers,
-    signals: streamSignals,
-    isScanning,
-    activeToast: streamToast,
-    subscribeToSymbol,
-    triggerScan,
-    showToast,
-  } = useMarketStream();
+    selectedSymbol,
+    selectedTimeframe,
+    chartSnapshot,
+    isDataUnavailable,
+    currentTicker,
+    marketDataState,
+    setSelectedSymbol,
+    setSelectedTimeframe,
+  } = useMarketContext('NIFTY', '15m');
 
+  // Central Signals & Scanner Hook
+  const { signals, selectedSignal, isScanning, triggerScan, fetchSignals, setSelectedSignal } =
+    useSignals(selectedSymbol, selectedTimeframe, selectedStrategy);
+
+  // Central Backend-Authoritative Paper Trading & Execution Hook
+  const {
+    portfolio,
+    activePositionForSymbol,
+    activeExecutionForSymbol,
+    isPlacingOrder,
+    closePosition,
+  } = usePaperTrading(selectedSymbol);
+
+  const { activeToast, dismissToast, tickers, isConnected } = useMarketStream();
+
+  // Load / Persist User Preferences
   useEffect(() => {
-    setMounted(true);
     if (typeof window !== 'undefined') {
       const savedTab = localStorage.getItem('quant_active_tab') as NavTab | null;
-      const validTabs: NavTab[] = [
-        'terminal',
-        'quant',
-        'learning',
-        'research',
-        'options',
-        'multichart',
-        'radar',
-        'smt',
-        'correlation',
-        'paper',
-        'algo',
-        'macro',
-        'scanner',
-        'backtest',
-        'journal',
-        'risk',
-      ];
-      if (savedTab && validTabs.includes(savedTab)) {
+      if (savedTab) {
         setActiveTab(savedTab);
       }
-
-      const savedSymbol = localStorage.getItem('quant_selected_symbol');
-      if (savedSymbol) {
-        setSelectedSymbol(savedSymbol);
-      }
-
       const savedStrat = localStorage.getItem('quant_selected_strategy') as StrategyMode | null;
       if (savedStrat === 'SAIYAN_OCC' || savedStrat === 'HYBRID' || savedStrat === 'SMC') {
         setSelectedStrategy(savedStrat);
@@ -127,42 +67,11 @@ function DashboardContent() {
     }
   }, []);
 
-  // 1. Initial Data Fetching
-  const fetchSignals = async (
-    tf: string = selectedTimeframe,
-    strat: StrategyMode = selectedStrategy,
-  ) => {
-    try {
-      const res = await fetch(
-        `http://localhost:3001/api/signals?timeframe=${tf}&strategy=${strat}`,
-      );
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setSignals(data);
-        const current = data.find((s) => s.symbol === selectedSymbol);
-        if (current) setSelectedSignal(current);
-      }
-    } catch (e) {
-      console.error('Failed to fetch signals:', e);
-    }
-  };
-
   const handleSelectStrategy = (strat: StrategyMode) => {
     setSelectedStrategy(strat);
     if (typeof window !== 'undefined') {
       localStorage.setItem('quant_selected_strategy', strat);
     }
-    const label =
-      strat === 'SMC'
-        ? 'Institutional Smart Money Concepts (SMC)'
-        : strat === 'SAIYAN_OCC'
-          ? 'Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
-          : 'Hybrid Confluence (SMC + Saiyan OCC)';
-    showToast({
-      title: '⚡ Strategy Mode Switched',
-      message: `Active Engine: ${label}`,
-      type: 'info',
-    });
     fetchSignals(selectedTimeframe, strat);
   };
 
@@ -174,193 +83,30 @@ function DashboardContent() {
     }
   };
 
-  const fetchCandles = async (sym: string, tf: string) => {
-    if (fetchAbortRef.current) {
-      fetchAbortRef.current.abort();
-    }
-    const controller = new AbortController();
-    fetchAbortRef.current = controller;
-
-    setIsDataUnavailable(false);
-    try {
-      const res = await fetch(
-        `http://localhost:3001/api/candles/chart-data?symbol=${sym}&timeframe=${tf}&limit=200`,
-        { signal: controller.signal },
-      );
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      if (data && (Array.isArray(data.closedCandles) || Array.isArray(data.candles))) {
-        const closed = Array.isArray(data.closedCandles)
-          ? data.closedCandles
-          : data.candles.map((c: any) => ({
-              timestamp: new Date(c.time ? c.time * 1000 : c.timestamp),
-              open: c.open,
-              high: c.high,
-              low: c.low,
-              close: c.close,
-              volume: c.volume ?? 0,
-              isClosed: true as const,
-              provenance: data.dataProvenance || 'LIVE',
-            }));
-
-        const snapshotObj: ChartMarketSnapshot = {
-          symbol: data.symbol || sym,
-          timeframe: data.timeframe || tf,
-          closedCandles: closed,
-          formingCandle: data.formingCandle || null,
-          livePrice: data.livePrice ?? (closed.length > 0 ? closed[closed.length - 1].close : null),
-          closedThrough: data.closedThrough || (closed.length > 0 ? closed[closed.length - 1].timestamp : undefined),
-          asOfTimestamp: data.asOfTimestamp || new Date().toISOString(),
-          marketAsOf: data.marketAsOf,
-          observedAt: data.observedAt || data.asOfTimestamp || new Date().toISOString(),
-          sessionKey: data.sessionKey,
-          sessionVolumeWatermark: data.sessionVolumeWatermark,
-          streamState: data.streamState,
-          dataProvenance: data.dataProvenance || 'LIVE',
-          sourceIdentity: data.sourceIdentity || 'UNKNOWN_SOURCE',
-          isDegraded: data.isDegraded ?? (data.marketAsOf === undefined),
-          smcSnapshot: data.smcSnapshot || null,
-        };
-
-        const validation = ChartSnapshotValidator.validateSnapshot(snapshotObj);
-
-        if (!validation.isValid) {
-          console.warn(`Chart snapshot validation rejected: ${validation.error}`);
-          setChartSnapshot(null);
-          setIsDataUnavailable(true);
-          return;
-        }
-
-        // Synchronize live aggregator watermarks with fresh server snapshot
-        aggregatorRef.current.syncFromSnapshot(snapshotObj);
-
-        setChartSnapshot(snapshotObj);
-      } else {
-        setChartSnapshot(null);
-        setIsDataUnavailable(true);
-      }
-    } catch (e: any) {
-      if (e.name === 'AbortError') return;
-      console.error('Failed to fetch chart data:', e);
-      setChartSnapshot(null);
-      setIsDataUnavailable(true);
-    }
-  };
-
-  useEffect(() => {
-    fetchSignals(selectedTimeframe, selectedStrategy);
-    fetchCandles(selectedSymbol, selectedTimeframe);
-    subscribeToSymbol(selectedSymbol);
-  }, [selectedSymbol, selectedTimeframe, selectedStrategy, subscribeToSymbol]);
-
-  const aggregatorRef = useRef(new CanonicalCandleAggregator());
-
-  useEffect(() => {
-    aggregatorRef.current.reset();
-  }, [selectedSymbol, selectedTimeframe]);
-
-  // Single Authoritative Live Tick Update Pipeline (Delegated to instance-scoped CanonicalCandleAggregator)
-  useEffect(() => {
-    const rawTick = tickers[selectedSymbol];
-    if (rawTick && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
-      setChartSnapshot((prev) => {
-        if (!prev || prev.symbol !== selectedSymbol) return prev;
-        return aggregatorRef.current.processTick(prev, rawTick);
-      });
-    }
-  }, [tickers, selectedSymbol]);
-
-  const handleSelectSymbol = (rawSym: string) => {
-    const s = (rawSym || '').toUpperCase();
-    const sym =
-      s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN'
-        ? 'BTCUSDT'
-        : s === 'GOLD' || s === 'XAU' || s === 'XAU/USD' || s === 'SPOTGOLD'
-          ? 'XAUUSD'
-          : s;
-    setSelectedSymbol(sym);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('quant_selected_symbol', sym);
-    }
-    const signalForSymbol = signals.find((item) => item.symbol === sym);
-    setSelectedSignal(signalForSymbol || null);
-    fetchCandles(sym, selectedTimeframe);
-  };
-
-  const handleTriggerScan = async () => {
-    await triggerScan();
-    await fetchSignals(selectedTimeframe, selectedStrategy);
-  };
-
-  const handleTradeClosedAlert = (trade: any) => {
-    const isTP = trade.state === 'TP2_HIT' || trade.state === 'TP1_HIT';
-    setActiveToast({
-      title: isTP ? `🎯 Target Hit: ${trade.symbol}` : `🛑 Stop Loss Hit: ${trade.symbol}`,
-      message: `Exit @ ₹${Number(trade.exitPrice).toFixed(2)} | Realized PnL: ${trade.pnlAmount >= 0 ? '+' : ''}₹${Number(trade.pnlAmount).toFixed(2)} (${trade.pnlRMultiple}R)`,
-      type: isTP ? 'success' : 'danger',
-    });
-    setTimeout(() => setActiveToast(null), 8000);
-    fetchSignals(selectedTimeframe);
-  };
-
-  const currentTicker = tickers[selectedSymbol] || {
-    symbol: selectedSymbol,
-    price: chartSnapshot?.livePrice ?? undefined,
-    changePercent: 0,
-    changeAmount: 0,
-    high: 0,
-    low: 0,
-    volume: 0,
-    isRealTime: isConnected,
-  };
-
-  const isPositionActive = useMemo(() => {
-    if (!selectedSignal) return false;
-    const direction = selectedSignal.direction || 'BEARISH';
-    if (
-      typeof window !== 'undefined' &&
-      localStorage.getItem(`quant_pos_cut_${selectedSymbol}_${direction}`) === 'true'
-    ) {
-      return false;
-    }
-    if (
-      selectedSignal.state === 'SL_HIT' ||
-      selectedSignal.state === 'TP2_HIT' ||
-      selectedSignal.state === 'TP1_HIT' ||
-      selectedSignal.state === 'TP3_HIT'
-    ) {
-      return false;
-    }
-    const closedCandles = chartSnapshot?.closedCandles || [];
-    const currentCMP =
-      currentTicker.price ||
-      (closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : selectedSignal.entryZone.optimal);
-    if (!currentCMP || !selectedSignal.stopLoss) return true;
-    const isBull = selectedSignal.direction === 'BULLISH';
-    const isSLReached = isBull
-      ? currentCMP <= selectedSignal.stopLoss
-      : currentCMP >= selectedSignal.stopLoss;
-    if (isSLReached) return false;
-
-    const tp2 = selectedSignal.takeProfits?.tp2;
-    const tp3 = selectedSignal.takeProfits?.tp3;
-    const isTPReached = isBull
-      ? (tp3 && currentCMP >= tp3) || (tp2 && currentCMP >= tp2)
-      : (tp3 && currentCMP <= tp3) || (tp2 && currentCMP <= tp2);
-    if (isTPReached) return false;
-
-    return true;
-  }, [selectedSignal, currentTicker.price, chartSnapshot, selectedSymbol]);
+  // Determine which workspace to render based on activeTab
+  const isTerminal = activeTab === 'terminal';
+  const isAnalyze =
+    activeTab === 'quant' ||
+    activeTab === 'scanner' ||
+    activeTab === 'multichart' ||
+    activeTab === 'radar' ||
+    activeTab === 'smt' ||
+    activeTab === 'correlation' ||
+    activeTab === 'macro';
+  const isTrade = activeTab === 'options' || activeTab === 'paper' || activeTab === 'risk';
+  const isResearch =
+    activeTab === 'learning' || activeTab === 'research' || activeTab === 'backtest';
+  const isAutomation = activeTab === 'algo';
+  const isHistory = activeTab === 'journal';
 
   return (
-    <div className="min-h-screen bg-[#0A0E17] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
+    <div className="min-h-screen bg-background text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
+      {/* 1. Global Grouped Header Navigation */}
       <Header
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
-        isConnected={isConnected}
-        onTriggerScan={handleTriggerScan}
+        marketDataState={marketDataState}
+        onTriggerScan={triggerScan}
         isScanning={isScanning}
         selectedStrategy={selectedStrategy}
         onSelectStrategy={handleSelectStrategy}
@@ -368,320 +114,125 @@ function DashboardContent() {
         onOpenAICopilotModal={() => setIsAICopilotModalOpen(true)}
       />
 
-      {/* Real-time Tickers Bar with Live Market Quotes */}
-      <LiveTickerBar
-        tickers={tickers}
+      {/* 2. Authoritative Market Context Bar */}
+      <MarketContextBar
         selectedSymbol={selectedSymbol}
-        onSelectSymbol={handleSelectSymbol}
+        selectedTimeframe={selectedTimeframe}
+        currentTicker={currentTicker}
+        marketDataState={marketDataState}
+        onSelectSymbol={setSelectedSymbol}
+        onSelectTimeframe={setSelectedTimeframe}
       />
 
-      {/* Global Toast Notification */}
+      {/* 3. Main Product Workspace */}
+      <main className="flex-1 p-3 sm:p-5 max-w-[1720px] mx-auto w-full">
+        {isTerminal && (
+          <TerminalWorkspace
+            selectedSymbol={selectedSymbol}
+            selectedTimeframe={selectedTimeframe}
+            chartSnapshot={chartSnapshot}
+            isDataUnavailable={isDataUnavailable}
+            signals={signals}
+            selectedSignal={selectedSignal}
+            currentTicker={currentTicker}
+            activePosition={activePositionForSymbol}
+            activeExecution={activeExecutionForSymbol}
+            onSelectSymbol={setSelectedSymbol}
+            onSelectTimeframe={setSelectedTimeframe}
+            onOpenOptionChain={() => setIsOptionChainModalOpen(true)}
+            onClosePosition={closePosition}
+          />
+        )}
+
+        {isAnalyze && (
+          <AnalyzeWorkspace
+            activeTab={activeTab}
+            selectedSymbol={selectedSymbol}
+            selectedSignal={selectedSignal}
+            signals={signals}
+            tickers={tickers}
+            currentTicker={currentTicker}
+            isScanning={isScanning}
+            onSelectSymbol={setSelectedSymbol}
+            onSelectSignal={(s) => {
+              setSelectedSymbol(s.symbol);
+              setSelectedSignal(s);
+            }}
+            onRefreshScan={triggerScan}
+            onNavigateToTerminal={() => handleSelectTab('terminal')}
+          />
+        )}
+
+        {isTrade && (
+          <TradeWorkspace
+            activeTab={activeTab}
+            selectedSymbol={selectedSymbol}
+            selectedSignal={selectedSignal}
+            tickers={tickers}
+            currentTicker={currentTicker}
+          />
+        )}
+
+        {isResearch && <ResearchWorkspace activeTab={activeTab} selectedSymbol={selectedSymbol} />}
+
+        {isAutomation && <AutomationWorkspace />}
+
+        {isHistory && (
+          <HistoryWorkspace
+            selectedSymbol={selectedSymbol}
+            selectedSignal={selectedSignal}
+            livePrice={currentTicker.price}
+          />
+        )}
+      </main>
+
+      {/* 4. Unified Consolidated Toast Notification Surface (Requirement 18) */}
       {activeToast && (
-        <div className="fixed top-20 right-6 z-50 animate-in fade-in slide-in-from-top-4 duration-300 max-w-md">
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 right-5 z-50 max-w-sm w-full animate-in slide-in-from-bottom-5 font-mono duration-200"
+        >
           <div
-            className={`p-4 rounded-xl border shadow-2xl backdrop-blur-md font-mono ${
-              activeToast.type === 'danger'
-                ? 'bg-rose-950/90 border-rose-500/80 text-rose-200'
+            className={`p-4 rounded-xl border shadow-2xl backdrop-blur-md flex items-start justify-between gap-3 ${
+              activeToast.type === 'error'
+                ? 'bg-rose-950/95 border-rose-500/70 text-rose-200'
                 : activeToast.type === 'success'
-                  ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
-                  : 'bg-slate-900/90 border-cyan-500/80 text-cyan-200'
+                  ? 'bg-emerald-950/95 border-emerald-500/70 text-emerald-200'
+                  : activeToast.type === 'warning'
+                    ? 'bg-amber-950/95 border-amber-500/70 text-amber-200'
+                    : 'bg-surface-elevated/95 border-cyan-500/70 text-cyan-200'
             }`}
           >
-            <div className="flex items-start gap-3">
-              {activeToast.type === 'danger' ? (
+            <div className="flex items-start gap-2.5">
+              {activeToast.type === 'error' ? (
                 <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
               ) : activeToast.type === 'success' ? (
                 <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+              ) : activeToast.type === 'warning' ? (
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               ) : (
-                <Zap className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+                <Info className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
               )}
               <div>
                 <h4 className="font-bold text-xs uppercase tracking-wide">{activeToast.title}</h4>
-                <p className="text-xs mt-1 text-slate-300">{activeToast.message}</p>
+                <p className="text-xs mt-1 text-slate-300 leading-snug">{activeToast.message}</p>
               </div>
             </div>
+
+            <button
+              type="button"
+              onClick={dismissToast}
+              aria-label="Dismiss Notification"
+              className="text-slate-400 hover:text-white transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         </div>
       )}
 
-      {/* Main Content Workspace */}
-      <main className="flex-1 p-3 sm:p-5 max-w-[1720px] mx-auto w-full space-y-5">
-        {/* TAB 1: LIVE TERMINAL */}
-        {activeTab === 'terminal' && (
-          <div className="space-y-5">
-            {/* Active Strategy Selector Bar */}
-            <div className="bg-[#111827]/80 backdrop-blur-md border border-slate-800 rounded-xl p-3 shadow-lg flex flex-wrap items-center justify-between gap-3 font-mono">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                  Trading Strategy Engine:
-                </span>
-                <span className="text-xs font-black text-white px-2 py-0.5 rounded bg-slate-900 border border-slate-700">
-                  {selectedStrategy === 'SMC'
-                    ? '🏛️ Institutional Smart Money Concepts (SMC)'
-                    : selectedStrategy === 'SAIYAN_OCC'
-                      ? '⚡ Saiyan OCC (ALMA Open-Close Cross + Supply/Demand)'
-                      : '🛡️ Hybrid Confluence (SMC + Saiyan OCC Momentum)'}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
-                <button
-                  onClick={() => handleSelectStrategy('SMC')}
-                  className={`px-3 py-1 rounded-md font-bold transition-all flex items-center gap-1.5 ${
-                    selectedStrategy === 'SMC'
-                      ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20 scale-[1.02]'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Sparkles className="w-3.5 h-3.5" /> Institutional SMC
-                </button>
-                <button
-                  onClick={() => handleSelectStrategy('SAIYAN_OCC')}
-                  className={`px-3 py-1 rounded-md font-bold transition-all flex items-center gap-1.5 ${
-                    selectedStrategy === 'SAIYAN_OCC'
-                      ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20 scale-[1.02]'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Zap className="w-3.5 h-3.5 text-amber-950" /> Saiyan OCC + S/D
-                </button>
-                <button
-                  onClick={() => handleSelectStrategy('HYBRID')}
-                  className={`px-3 py-1 rounded-md font-bold transition-all flex items-center gap-1.5 ${
-                    selectedStrategy === 'HYBRID'
-                      ? 'bg-emerald-400 text-slate-950 shadow-md shadow-emerald-400/20 scale-[1.02]'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <ShieldAlert className="w-3.5 h-3.5" /> Hybrid Confluence
-                </button>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-              <div className="lg:col-span-2 space-y-4">
-                <TradingChart
-                  symbol={selectedSymbol}
-                  timeframe={selectedTimeframe}
-                  snapshot={chartSnapshot}
-                  isDataUnavailable={isDataUnavailable}
-                  signal={selectedSignal}
-                  liveChangePercent={currentTicker.changePercent}
-                  isTradeActive={isPositionActive}
-                  onTimeframeChange={setSelectedTimeframe}
-                  onSymbolChange={handleSelectSymbol}
-                />
-                {(selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY') && (
-                  <SmartStrikeCard
-                    symbol={selectedSymbol}
-                    direction={selectedSignal?.direction === 'BEARISH' ? 'BEARISH' : 'BULLISH'}
-                    spotPrice={currentTicker.price}
-                    onOpenChain={() => setIsOptionChainModalOpen(true)}
-                  />
-                )}
-              </div>
-              <div className="space-y-5">
-                <ScoreGauge
-                  score={selectedSignal?.score || 0}
-                  grade={(selectedSignal?.grade as any) || 'NO_TRADE'}
-                  breakdown={selectedSignal?.scoreBreakdown}
-                />
-                <MTFHeatmap
-                  selectedSymbol={selectedSymbol}
-                  onSelectSymbol={handleSelectSymbol}
-                  signals={signals}
-                />
-              </div>
-            </div>
-
-            {/* Live Active Position Tracker (Running PnL, Trailing SL, 50% Scale-Out) */}
-            <LivePositionTracker
-              symbol={selectedSymbol}
-              signal={selectedSignal}
-              livePrice={currentTicker.price}
-              onClosePosition={(exitP, pnl, r, reason) => {
-                handleTradeClosedAlert({
-                  symbol: selectedSymbol,
-                  direction: selectedSignal?.direction || 'BULLISH',
-                  state: r >= 2.5 ? 'TP2_HIT' : r >= 1.5 ? 'TP1_HIT' : 'SL_HIT',
-                  exitPrice: exitP,
-                  pnlAmount: pnl,
-                  pnlRMultiple: r,
-                });
-              }}
-            />
-
-            {/* Quant Intelligence Engine Panel */}
-            <QuantIntelligencePanel
-              currentSymbol={selectedSymbol}
-              activeSignal={selectedSignal}
-              livePrice={currentTicker.price}
-            />
-
-            {/* Middle Row: Reasoning Card & Risk Management Widget */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <ReasoningCard signal={selectedSignal} />
-              <RiskWidget selectedSignal={selectedSignal} />
-            </div>
-
-            {/* Bottom Row: Completed Trades History & Journal */}
-            <div>
-              <TradeJournal
-                currentSymbol={selectedSymbol}
-                activeSignal={selectedSignal}
-                livePrice={currentTicker.price}
-                onTradeClosedNotification={handleTradeClosedAlert}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* TAB: QUANT INTELLIGENCE FULL COMMAND CENTER */}
-        {activeTab === 'quant' && (
-          <div className="space-y-5">
-            <QuantIntelligencePanel
-              currentSymbol={selectedSymbol}
-              activeSignal={selectedSignal}
-              livePrice={currentTicker.price}
-            />
-          </div>
-        )}
-
-        {/* TAB: AI TRADE LEARNING & SELF-IMPROVING ENGINE COMMAND CENTER */}
-        {activeTab === 'learning' && (
-          <div className="space-y-6">
-            <LearningEngineDashboard />
-            <AITradeLearningWidget initialSymbol={selectedSymbol} />
-          </div>
-        )}
-
-        {/* TAB: QUANT RESEARCH LAB & SELF-IMPROVEMENT SUITE */}
-        {activeTab === 'research' && (
-          <div className="space-y-6">
-            <ResearchStudio />
-          </div>
-        )}
-
-        {/* TAB 2: OPTIONS SUITE & DERIVATIVES MATRIX */}
-        {activeTab === 'options' && (
-          <div className="space-y-5">
-            <OptionsSuiteView
-              initialSymbol={
-                selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY'
-                  ? selectedSymbol
-                  : 'NIFTY'
-              }
-              liveSpotPrice={
-                tickers[
-                  selectedSymbol === 'NIFTY' || selectedSymbol === 'BANKNIFTY'
-                    ? selectedSymbol
-                    : 'NIFTY'
-                ]?.price || currentTicker.price
-              }
-            />
-          </div>
-        )}
-
-        {/* TAB 3: MULTI-CHART GRID (Dual & Quad Views) */}
-        {activeTab === 'multichart' && (
-          <div className="space-y-5">
-            <MultiChartGrid signals={signals} tickers={tickers} />
-          </div>
-        )}
-
-        {/* TAB: 4-TIER MULTI-TIMEFRAME ORDER FLOW RADAR */}
-        {activeTab === 'radar' && (
-          <div className="space-y-5">
-            <MTFFlowRadarWidget symbol={selectedSymbol} />
-          </div>
-        )}
-
-        {/* TAB: SMT CORRELATION DIVERGENCE RADAR */}
-        {activeTab === 'smt' && (
-          <div className="space-y-5">
-            <SMTDivergenceWidget />
-          </div>
-        )}
-
-        {/* TAB 4: HEAVYWEIGHT CORRELATION MATRIX */}
-        {activeTab === 'correlation' && (
-          <div className="space-y-5">
-            <CorrelationMatrix tickers={tickers} />
-          </div>
-        )}
-
-        {/* TAB 5: PAPER TRADING SIMULATOR */}
-        {activeTab === 'paper' && (
-          <div className="space-y-5">
-            <PaperTradingWidget
-              currentSymbol={selectedSymbol}
-              activeSignal={selectedSignal}
-              livePrice={currentTicker.price}
-            />
-          </div>
-        )}
-
-        {/* TAB 6: NO-CODE ALGO STRATEGY STUDIO */}
-        {activeTab === 'algo' && (
-          <div className="space-y-5">
-            <AlgoStrategyBuilder />
-          </div>
-        )}
-
-        {/* TAB 7: MACRO CALENDAR & INDIA VIX VOLATILITY GUARD */}
-        {activeTab === 'macro' && (
-          <div className="space-y-5">
-            <MacroCalendarWidget />
-          </div>
-        )}
-
-        {/* TAB 8: TRADE JOURNAL */}
-        {activeTab === 'journal' && (
-          <div className="space-y-5">
-            <TradeJournal
-              currentSymbol={selectedSymbol}
-              activeSignal={selectedSignal}
-              livePrice={currentTicker.price}
-              onTradeClosedNotification={handleTradeClosedAlert}
-            />
-          </div>
-        )}
-
-        {/* TAB 7: SCANNER MATRIX */}
-        {activeTab === 'scanner' && (
-          <div className="space-y-5">
-            <ScannerTable
-              signals={signals}
-              selectedSymbol={selectedSymbol}
-              onSelectSignal={(s) => {
-                setSelectedSymbol(s.symbol);
-                setSelectedSignal(s);
-                handleSelectTab('terminal');
-              }}
-              onRefreshScan={handleTriggerScan}
-              isScanning={isScanning}
-            />
-            <MTFHeatmap selectedSymbol={selectedSymbol} onSelectSymbol={handleSelectSymbol} />
-          </div>
-        )}
-
-        {/* TAB 8: STRATEGY BACKTEST */}
-        {activeTab === 'backtest' && (
-          <div className="space-y-5">
-            <BacktestDashboard initialSymbol={selectedSymbol} />
-          </div>
-        )}
-
-        {/* TAB 9: RISK ENGINE */}
-        {activeTab === 'risk' && (
-          <div className="space-y-5 max-w-3xl mx-auto">
-            <RiskWidget selectedSignal={selectedSignal} />
-            <ReasoningCard signal={selectedSignal} />
-          </div>
-        )}
-      </main>
-
-      {/* Option Chain Modal */}
+      {/* Modals */}
       <OptionChainModal
         isOpen={isOptionChainModalOpen}
         onClose={() => setIsOptionChainModalOpen(false)}
@@ -695,24 +246,11 @@ function DashboardContent() {
         }
       />
 
-      {/* Multi-Channel Alerts Manager Modal */}
       <AlertsManagerModal isOpen={isAlertsModalOpen} onClose={() => setIsAlertsModalOpen(false)} />
 
-      {/* Toast Notification */}
-      {(streamToast || activeToast) && (
-        <div className="fixed bottom-5 right-5 z-50 max-w-sm w-full bg-[#111827]/95 backdrop-blur-md border border-cyan-500/50 rounded-xl p-4 shadow-2xl flex items-start gap-3 animate-in slide-in-from-bottom-5 font-mono">
-          <Zap className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <h4 className="text-xs font-bold text-white uppercase">
-              {(streamToast || activeToast)?.title}
-            </h4>
-            <p className="text-xs text-slate-300 mt-0.5">{(streamToast || activeToast)?.message}</p>
-          </div>
-        </div>
-      )}
-
-      <footer className="border-t border-slate-800/80 bg-[#0B0F19] px-5 py-3 text-center text-xs text-slate-500 font-mono">
-        QUANT INTELLIGENCE PLATFORM • REAL-TIME MARKET STRUCTURE & SMC ENGINE • NOT FINANCIAL ADVICE
+      {/* Footer */}
+      <footer className="border-t border-surface-border bg-surface-subtle px-5 py-3 text-center text-xs text-slate-500 font-mono">
+        QUANT INTELLIGENCE TRADING PLATFORM • REAL-TIME CANONICAL SMC EXECUTION ENGINE
       </footer>
     </div>
   );

@@ -7,7 +7,11 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
-import { SignalGenerator, SaiyanOCCEngine, CanonicalMarketSnapshotBuilder } from '@quant/trading-engine';
+import {
+  SignalGenerator,
+  SaiyanOCCEngine,
+  CanonicalMarketSnapshotBuilder,
+} from '@quant/trading-engine';
 import { PositionSizer, TradeLifecycleManager, TradeAccountingEngine } from '@quant/risk-engine';
 import {
   ISignalSetup,
@@ -513,12 +517,7 @@ export class SignalsService implements OnModuleInit {
     };
 
     const legacyWhere = {
-      OR: [
-        { entryPrice: null },
-        { entryTime: null },
-        { realizedPnL: null },
-        { realizedR: null },
-      ],
+      OR: [{ entryPrice: null }, { entryTime: null }, { realizedPnL: null }, { realizedR: null }],
     };
 
     const [totalVerifiedTrades, legacyTradeCount] = await Promise.all([
@@ -556,7 +555,10 @@ export class SignalsService implements OnModuleInit {
             inst = null;
           }
           const quoteCurrency =
-            outcome.accountingSnapshot?.quoteCurrency || inst?.quoteCurrency || inst?.currency || null;
+            outcome.accountingSnapshot?.quoteCurrency ||
+            inst?.quoteCurrency ||
+            inst?.currency ||
+            null;
           const accountCurrency =
             outcome.accountingSnapshot?.accountCurrency || inst?.accountingCurrency || null;
           const hasAuthoritativeCurrency = quoteCurrency !== null && accountCurrency !== null;
@@ -600,10 +602,8 @@ export class SignalsService implements OnModuleInit {
       } catch {
         inst = null;
       }
-      const quoteCurrency =
-        snapshot.quoteCurrency || inst?.quoteCurrency || inst?.currency || null;
-      const accountCurrency =
-        snapshot.accountCurrency || inst?.accountingCurrency || null;
+      const quoteCurrency = snapshot.quoteCurrency || inst?.quoteCurrency || inst?.currency || null;
+      const accountCurrency = snapshot.accountCurrency || inst?.accountingCurrency || null;
       const hasAuthoritativeCurrency = quoteCurrency !== null && accountCurrency !== null;
 
       const isOption = t.instrumentType === 'OPTION';
@@ -634,7 +634,7 @@ export class SignalsService implements OnModuleInit {
         t.realizedR === null ||
         outcome.executionDataComplete === false;
 
-      const executionDataComplete = !isLegacy && (outcome.executionDataComplete !== false);
+      const executionDataComplete = !isLegacy && outcome.executionDataComplete !== false;
 
       const requestedEntryPrice =
         outcome.requestedEntryPrice !== undefined && outcome.requestedEntryPrice !== null
@@ -642,34 +642,43 @@ export class SignalsService implements OnModuleInit {
           : null;
 
       const actualEntryPrice =
-        executionDataComplete && outcome.actualEntryPrice !== undefined && outcome.actualEntryPrice !== null
+        executionDataComplete &&
+        outcome.actualEntryPrice !== undefined &&
+        outcome.actualEntryPrice !== null
           ? Number(outcome.actualEntryPrice)
           : null;
       const actualEntryPriceCurrency =
         executionDataComplete && actualEntryPrice !== null
-          ? (outcome.actualEntryPriceCurrency || quoteCurrency)
+          ? outcome.actualEntryPriceCurrency || quoteCurrency
           : null;
-      const entryTimeUtc =
-        executionDataComplete
-          ? (outcome.entryTimeUtc || (t.entryTime ? new Date(t.entryTime).toISOString() : null))
-          : null;
+      const entryTimeUtc = executionDataComplete
+        ? outcome.entryTimeUtc || (t.entryTime ? new Date(t.entryTime).toISOString() : null)
+        : null;
 
       const actualExitPrice =
         outcome.actualExitPrice !== undefined && outcome.actualExitPrice !== null
           ? Number(outcome.actualExitPrice)
-          : (t.exitPrice !== null ? Number(t.exitPrice) : null);
+          : t.exitPrice !== null
+            ? Number(t.exitPrice)
+            : null;
       const actualExitPriceCurrency = outcome.actualExitPriceCurrency || quoteCurrency;
-      const exitTimeUtc = outcome.exitTimeUtc || (t.exitTime ? new Date(t.exitTime).toISOString() : null);
+      const exitTimeUtc =
+        outcome.exitTimeUtc || (t.exitTime ? new Date(t.exitTime).toISOString() : null);
 
       const holdingDurationMs = executionDataComplete
-        ? (outcome.durationMs ?? (t.exitTime && t.entryTime ? Math.max(0, new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime()) : null))
+        ? (outcome.durationMs ??
+          (t.exitTime && t.entryTime
+            ? Math.max(0, new Date(t.exitTime).getTime() - new Date(t.entryTime).getTime())
+            : null))
         : null;
-      const holdingDurationSeconds = executionDataComplete && holdingDurationMs !== null
-        ? Math.floor(holdingDurationMs / 1000)
-        : null;
-      const durationMinutes = executionDataComplete && holdingDurationMs !== null
-        ? Math.max(0, Math.round(holdingDurationMs / 60000))
-        : null;
+      const holdingDurationSeconds =
+        executionDataComplete && holdingDurationMs !== null
+          ? Math.floor(holdingDurationMs / 1000)
+          : null;
+      const durationMinutes =
+        executionDataComplete && holdingDurationMs !== null
+          ? Math.max(0, Math.round(holdingDurationMs / 60000))
+          : null;
 
       return {
         id: t.id,
@@ -702,13 +711,17 @@ export class SignalsService implements OnModuleInit {
         exitPrice: t.exitPrice !== null ? Number(t.exitPrice) : null,
         exitPriceCurrency: quoteCurrency,
         exitTimeUtc,
-        stopLoss: null,   // PaperTrade does not store SL; no fabricated reconstruction
-        target1: null,    // PaperTrade does not store TP levels; no fabricated reconstruction
-        target2: null,    // PaperTrade does not store TP levels; no fabricated reconstruction
+        stopLoss: null, // PaperTrade does not store SL; no fabricated reconstruction
+        target1: null, // PaperTrade does not store TP levels; no fabricated reconstruction
+        target2: null, // PaperTrade does not store TP levels; no fabricated reconstruction
         pnlAmount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
-        netPnlAccount: executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
-        accountCurrency: executionDataComplete ? (accountCurrency || 'INR') : null,
-        quotePnl: executionDataComplete && outcome.quotePnl !== undefined && outcome.quotePnl !== null ? Number(outcome.quotePnl) : null,
+        netPnlAccount:
+          executionDataComplete && t.realizedPnL !== null ? Number(t.realizedPnL) : null,
+        accountCurrency: executionDataComplete ? accountCurrency || 'INR' : null,
+        quotePnl:
+          executionDataComplete && outcome.quotePnl !== undefined && outcome.quotePnl !== null
+            ? Number(outcome.quotePnl)
+            : null,
         quoteCurrency: executionDataComplete ? quoteCurrency : null,
         chargesAccount: Number(charges.totalCharges || 0),
         totalChargesAccount: Number(charges.totalCharges || 0),
@@ -730,7 +743,8 @@ export class SignalsService implements OnModuleInit {
         executionSource: outcome.executionPriceSource || 'PAPER_FILL',
         entryFillCount: outcome.entryFillCount || (executionDataComplete ? 1 : 0),
         exitFillCount: outcome.exitFillCount || 1,
-        accountingSnapshotHash: outcome.accountingSnapshotHash || snapshot.snapshotHash || undefined,
+        accountingSnapshotHash:
+          outcome.accountingSnapshotHash || snapshot.snapshotHash || undefined,
         isLegacyExecutionData: isLegacy,
         executionDataComplete,
       };
@@ -770,7 +784,8 @@ export class SignalsService implements OnModuleInit {
         } catch {
           inst = null;
         }
-        const quoteCurrency = s.instrument.currency || inst?.quoteCurrency || inst?.currency || null;
+        const quoteCurrency =
+          s.instrument.currency || inst?.quoteCurrency || inst?.currency || null;
         const accountCurrency = inst?.accountingCurrency || null;
         const isOption =
           reasons.instrumentType === 'OPTION' ||
@@ -848,12 +863,19 @@ export class SignalsService implements OnModuleInit {
     }
 
     const totalTrades = finalTrades.length;
-    const wins = finalTrades.filter((t) => t.state !== 'SL_HIT' && t.pnlAmount !== null && Number(t.pnlAmount) > 0);
-    const losses = finalTrades.filter((t) => t.pnlAmount !== null && (t.state === 'SL_HIT' || Number(t.pnlAmount) <= 0));
+    const wins = finalTrades.filter(
+      (t) => t.state !== 'SL_HIT' && t.pnlAmount !== null && Number(t.pnlAmount) > 0,
+    );
+    const losses = finalTrades.filter(
+      (t) => t.pnlAmount !== null && (t.state === 'SL_HIT' || Number(t.pnlAmount) <= 0),
+    );
     const scoredTrades = wins.length + losses.length;
     const winRate = scoredTrades > 0 ? Number(((wins.length / scoredTrades) * 100).toFixed(1)) : 0;
 
-    const totalPnl = finalTrades.reduce((acc, curr) => acc + (curr.pnlAmount !== null ? Number(curr.pnlAmount) : 0), 0);
+    const totalPnl = finalTrades.reduce(
+      (acc, curr) => acc + (curr.pnlAmount !== null ? Number(curr.pnlAmount) : 0),
+      0,
+    );
     const totalWinsPnl = wins.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0);
     const totalLossesPnl = Math.abs(
       losses.reduce((acc, curr) => acc + Number(curr.pnlAmount || 0), 0),
@@ -868,8 +890,10 @@ export class SignalsService implements OnModuleInit {
       scoredTrades > 0
         ? Number(
             (
-              finalTrades.reduce((acc, curr) => acc + (curr.pnlRMultiple !== null ? Number(curr.pnlRMultiple) : 0), 0) /
-              scoredTrades
+              finalTrades.reduce(
+                (acc, curr) => acc + (curr.pnlRMultiple !== null ? Number(curr.pnlRMultiple) : 0),
+                0,
+              ) / scoredTrades
             ).toFixed(2),
           )
         : 0;
@@ -968,14 +992,19 @@ export class SignalsService implements OnModuleInit {
       // Canonical transaction charges
       const totalCharges = isCanonical
         ? Number(Number(t.totalChargesAccount).toFixed(2))
-        : t.chargesAccount !== undefined && t.chargesAccount !== null && Number(t.chargesAccount) > 0
+        : t.chargesAccount !== undefined &&
+            t.chargesAccount !== null &&
+            Number(t.chargesAccount) > 0
           ? Number(Number(t.chargesAccount).toFixed(2))
-          : (isCrypto || isGold ? Number((turnover * 0.0005).toFixed(2)) : 40.0);
+          : isCrypto || isGold
+            ? Number((turnover * 0.0005).toFixed(2))
+            : 40.0;
 
       const brokerage = isCrypto || isGold ? totalCharges : 40.0;
       const stt = isCrypto || isGold ? 0 : Number((turnover * 0.000125).toFixed(2));
       const exchangeTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.0000345).toFixed(2));
-      const gst = isCrypto || isGold ? 0 : Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
+      const gst =
+        isCrypto || isGold ? 0 : Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
       const sebiTurnover = isCrypto || isGold ? 0 : Number((turnover * 0.000001).toFixed(2));
 
       const isBull = t.direction === 'BULLISH';
@@ -987,11 +1016,12 @@ export class SignalsService implements OnModuleInit {
         fees: totalCharges,
       });
       const grossPnL = pnlCalc.grossPnlAccount;
-      const netPnL = t.netPnlAccount !== null && t.netPnlAccount !== undefined
-        ? Number(t.netPnlAccount)
-        : t.pnlAmount !== null && t.pnlAmount !== undefined
-          ? Number(t.pnlAmount)
-          : pnlCalc.netPnlAccount;
+      const netPnL =
+        t.netPnlAccount !== null && t.netPnlAccount !== undefined
+          ? Number(t.netPnlAccount)
+          : t.pnlAmount !== null && t.pnlAmount !== undefined
+            ? Number(t.pnlAmount)
+            : pnlCalc.netPnlAccount;
 
       return [
         escapeCsv(t.id),
@@ -1064,8 +1094,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 24115.0,
         tp2: 24085.0, // Candle @ 11:45 AM [Low 24077.00, High 24109.65]
         exit: 24085.0,
-        qty: 65,        // 1 lot (current NSE lot size as of 2024 revision)
-        pnl: 4875.0,   // 75 pts * 65 qty = ₹4,875
+        qty: 65, // 1 lot (current NSE lot size as of 2024 revision)
+        pnl: 4875.0, // 75 pts * 65 qty = ₹4,875
         r: 3.0,
         reason: 'Target 2 Completed (3.0R Structural Breakdown)',
         actIST: [11, 15], // 11:15 AM IST
@@ -1080,8 +1110,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 57450.0,
         tp2: 57350.0, // Candle @ 12:00 PM [Low 57333.05, High 57391.75]
         exit: 57350.0,
-        qty: 15,        // 1 lot (current NSE BankNifty lot size)
-        pnl: 3000.0,   // 200 pts * 15 qty = ₹3,000
+        qty: 15, // 1 lot (current NSE BankNifty lot size)
+        pnl: 3000.0, // 200 pts * 15 qty = ₹3,000
         r: 2.5,
         reason: 'Target 2 Completed (2.5R Order Block Rejection)',
         actIST: [10, 45], // 10:45 AM IST
@@ -1096,7 +1126,7 @@ export class SignalsService implements OnModuleInit {
         tp1: 78268.84,
         tp2: 78448.84, // Binance 15m Candle @ 02:00 PM [High 78680.00]
         exit: 78448.84,
-        qty: 0.20,
+        qty: 0.2,
         // (78448.84 - 77998.84) = 450 USDT * 0.20 BTC = 90 USDT * 92 USDT/INR = ₹8,280
         pnl: 8280.0,
         r: 2.5,
@@ -1114,7 +1144,7 @@ export class SignalsService implements OnModuleInit {
         tp2: 78030.08,
         tp3: 77760.08, // Binance 15m Candle @ 06:00 PM [Low 77750.00]
         exit: 77760.08,
-        qty: 0.20,
+        qty: 0.2,
         // (78480.08 - 77760.08) = 720 USDT * 0.20 BTC = 144 USDT * 92 USDT/INR = ₹13,248
         pnl: 13248.0,
         r: 4.0,
@@ -1176,8 +1206,8 @@ export class SignalsService implements OnModuleInit {
         tp1: 2882.0,
         tp2: 2891.0,
         exit: 2891.0,
-        qty: 10,        // 10 troy oz (explicit; XAUUSD is USD-quoted so USD/INR=87 applies)
-        pnl: 16095.0,  // (2891.0 - 2872.5 = 18.5 USD/oz) * 10 oz * 87 USD/INR = ₹16,095
+        qty: 10, // 10 troy oz (explicit; XAUUSD is USD-quoted so USD/INR=87 applies)
+        pnl: 16095.0, // (2891.0 - 2872.5 = 18.5 USD/oz) * 10 oz * 87 USD/INR = ₹16,095
         r: 2.47,
         reason: 'Target 2 Completed (2.47R NY Open Expansion)',
         actIST: [17, 30], // 05:30 PM IST (NY Open)
@@ -1332,7 +1362,11 @@ export class SignalsService implements OnModuleInit {
 
               if (closedState) {
                 const isLong = activeTrade.dir === 'BULLISH';
-                const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+                const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate(
+                  'USDT',
+                  'INR',
+                  Date.now(),
+                ).fxRate;
                 const pnlCalc = TradeAccountingEngine.calculateTradePnl({
                   entryPrice: activeTrade.entry,
                   exitPrice: exitP,
@@ -1420,8 +1454,20 @@ export class SignalsService implements OnModuleInit {
                 if (entryTime && entryPrice > 0) {
                   const isLong = activeSignal.direction === 'BULLISH';
                   const exitPrice = update.currentPrice;
-                  const quoteCurr = sym === 'XAUUSD' || sym === 'GOLD' ? 'USD' : sym === 'BTCUSDT' || sym?.includes('BTC') ? 'USDT' : 'INR';
-                  const goldFxRate = quoteCurr === 'INR' ? 1.0 : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurr, 'INR', Date.now()).fxRate;
+                  const quoteCurr =
+                    sym === 'XAUUSD' || sym === 'GOLD'
+                      ? 'USD'
+                      : sym === 'BTCUSDT' || sym?.includes('BTC')
+                        ? 'USDT'
+                        : 'INR';
+                  const goldFxRate =
+                    quoteCurr === 'INR'
+                      ? 1.0
+                      : PointInTimeCurrencyConverter.getInstance().getRate(
+                          quoteCurr,
+                          'INR',
+                          Date.now(),
+                        ).fxRate;
                   const baseContractSize =
                     sym === 'NIFTY'
                       ? 65

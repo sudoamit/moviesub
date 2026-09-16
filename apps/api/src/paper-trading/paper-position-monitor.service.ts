@@ -2,7 +2,11 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Optional } from '@ne
 import { PrismaService } from '../common/prisma/prisma.service';
 import { PaperTradingService } from './paper-trading.service';
 import { ExecutionMode } from './execution-provider.interface';
-import { RealMarketStreamerService, QuoteProvenance, ILiveRealTicker } from '../market-data/real-market-streamer.service';
+import {
+  RealMarketStreamerService,
+  QuoteProvenance,
+  ILiveRealTicker,
+} from '../market-data/real-market-streamer.service';
 import { RedisService } from '../common/redis/redis.service';
 import {
   Direction,
@@ -90,7 +94,13 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       if (isOption) {
         // Options: fetch option contract quote for exact instrument contractSymbol
         const optionQuote = await this.getOptionContractQuote(pos);
-        if (!optionQuote || optionQuote.provenance !== 'LIVE_PROVIDER' || optionQuote.price <= 0 || !optionQuote.marketEventTime || optionQuote.marketEventTime <= 0) {
+        if (
+          !optionQuote ||
+          optionQuote.provenance !== 'LIVE_PROVIDER' ||
+          optionQuote.price <= 0 ||
+          !optionQuote.marketEventTime ||
+          optionQuote.marketEventTime <= 0
+        ) {
           // If exact option LTP is unavailable or missing marketEventTime, do NOT fall back. Fail closed.
           return;
         }
@@ -100,7 +110,13 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       } else {
         // Spot or Crypto: fetch validated ticker
         const ticker = this.realMarketStreamer.getValidatedTicker(symbol, 5);
-        if (!ticker || ticker.provenance !== 'LIVE_PROVIDER' || ticker.price <= 0 || !ticker.marketEventTime || ticker.marketEventTime <= 0) {
+        if (
+          !ticker ||
+          ticker.provenance !== 'LIVE_PROVIDER' ||
+          ticker.price <= 0 ||
+          !ticker.marketEventTime ||
+          ticker.marketEventTime <= 0
+        ) {
           return;
         }
         livePrice = ticker.price;
@@ -171,24 +187,21 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     }
 
     if (isTPHit) {
-      const exitReason = target3 && livePrice >= target3 ? 'Target 3 Completed' : 'Target 2 Completed';
+      const exitReason =
+        target3 && livePrice >= target3 ? 'Target 3 Completed' : 'Target 2 Completed';
       this.logger.log(
         `🎯 [AUTO TP/SL MONITOR] TP Threshold Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target ${activeFullTarget}. Triggering backend auto-close...`,
       );
       try {
-        const completedTrade = await this.paperTradingService.closePosition(
-          pos.id,
-          exitReason,
-          {
-            triggerPrice: activeFullTarget!,
-            triggerMarketEventTime: marketEventTime,
-            exitPriceOverride: livePrice,
-            allowPriceOverride: true,
-            isInternalCall: true,
-            executionMode: ExecutionMode.PAPER_MARKET,
-            correlationId: pos.correlationId,
-          },
-        );
+        const completedTrade = await this.paperTradingService.closePosition(pos.id, exitReason, {
+          triggerPrice: activeFullTarget!,
+          triggerMarketEventTime: marketEventTime,
+          exitPriceOverride: livePrice,
+          allowPriceOverride: true,
+          isInternalCall: true,
+          executionMode: ExecutionMode.PAPER_MARKET,
+          correlationId: pos.correlationId,
+        });
 
         await this.publishTradeClosedEvent(completedTrade);
         return;
@@ -240,11 +253,14 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           let activeConn: any = null;
           try {
             if (providerId && providerTransport) {
-              activeConn = this.realMarketStreamer?.getCurrentProviderConnection(providerId, providerTransport);
+              activeConn = this.realMarketStreamer?.getCurrentProviderConnection(
+                providerId,
+                providerTransport,
+              );
             }
           } catch {}
           const isStreamerHealthy =
-            (providerId && providerTransport && this.realMarketStreamer)
+            providerId && providerTransport && this.realMarketStreamer
               ? this.realMarketStreamer.isExecutionDataHealthy(providerTransport, providerId)
               : false;
 
@@ -277,7 +293,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               prevClose: parsed.prevClose,
               changePercent: parsed.changePercent,
               changeAmount: parsed.changeAmount,
-              tickSize: (getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined),
+              tickSize: getAuthoritativeInstrument(pos.symbol)?.tickSize ?? undefined,
               volatility: parsed.volatility,
               lastUpdated: parsed.timestamp || Date.now(),
               provenance: 'DEGRADED',
@@ -312,7 +328,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       where: { idempotencyKey },
     });
     if (existingOrder) {
-      this.logger.log(`[TP1 IDEMPOTENCY] Partial scale-out already executed for position '${pos.id}'.`);
+      this.logger.log(
+        `[TP1 IDEMPOTENCY] Partial scale-out already executed for position '${pos.id}'.`,
+      );
       return;
     }
 
@@ -338,7 +356,11 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     }
     const fxRate = openingSnapshot.fxRate;
 
-    const initialSL = pos.initialStopLoss ? Number(pos.initialStopLoss) : (pos.stopLoss ? Number(pos.stopLoss) : undefined);
+    const initialSL = pos.initialStopLoss
+      ? Number(pos.initialStopLoss)
+      : pos.stopLoss
+        ? Number(pos.stopLoss)
+        : undefined;
 
     const legSettlement = TradeAccountingEngine.settleExecutionLeg({
       role: 'TP1_PARTIAL',
@@ -407,7 +429,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             executionEventsJson: {
               ...existingEvents,
               accountingSnapshot: openingSnapshot ?? existingEvents.accountingSnapshot,
-              accountingSnapshotHash: openingSnapshot?.snapshotHash ?? existingEvents.accountingSnapshotHash,
+              accountingSnapshotHash:
+                openingSnapshot?.snapshotHash ?? existingEvents.accountingSnapshotHash,
               partialLegs,
             } as any,
           },
@@ -462,7 +485,11 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         });
       });
     } catch (err: any) {
-      if (err?.code === 'P2002' || err?.message?.includes('P2002') || err?.message?.includes('idempotencyKey')) {
+      if (
+        err?.code === 'P2002' ||
+        err?.message?.includes('P2002') ||
+        err?.message?.includes('idempotencyKey')
+      ) {
         this.logger.log(
           `[TP1 IDEMPOTENCY P2002] Concurrent race caught for position '${pos.id}'. Order idempotently created by another process.`,
         );

@@ -178,7 +178,9 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       paperTrade: {
         findMany: jest.fn().mockImplementation(() => Promise.resolve(dbTrades)),
         findFirst: jest.fn().mockImplementation((args) => {
-          const trade = dbTrades.find((t) => !args?.where?.positionId || t.positionId === args.where.positionId);
+          const trade = dbTrades.find(
+            (t) => !args?.where?.positionId || t.positionId === args.where.positionId,
+          );
           return Promise.resolve(trade || null);
         }),
         create: jest.fn().mockImplementation((args) => {
@@ -195,7 +197,10 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
           return Promise.resolve(audit);
         }),
         createMany: jest.fn().mockImplementation((args) => {
-          const audits = args.data.map((d: any) => ({ id: `audit_${Date.now()}_${entitySeq++}`, ...d }));
+          const audits = args.data.map((d: any) => ({
+            id: `audit_${Date.now()}_${entitySeq++}`,
+            ...d,
+          }));
           dbAudits.push(...audits);
           return Promise.resolve({ count: audits.length });
         }),
@@ -405,7 +410,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 25,
         orderType: 'MARKET',
         price: 24100.0,
-      allowPriceOverride: true,
+        allowPriceOverride: true,
         stopLoss: 24050.0,
         target1: 24200.0,
       }),
@@ -621,7 +626,7 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
         quantity: 50,
         orderType: 'MARKET',
         price: 24100.0,
-      allowPriceOverride: true,
+        allowPriceOverride: true,
         stopLoss: 24050.0,
         target1: 24200.0,
       }),
@@ -731,7 +736,9 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
 
     // Verify R multiple is calculated from initialStopLoss risk anchor
     const expectedRiskDistance = Math.abs(pos.entryPrice - 24050.0);
-    const expectedR = Number(((trade.exitPrice - Number(trade.entryPrice!)) / expectedRiskDistance).toFixed(2));
+    const expectedR = Number(
+      ((trade.exitPrice - Number(trade.entryPrice!)) / expectedRiskDistance).toFixed(2),
+    );
     expect(trade.realizedR!).toBeCloseTo(expectedR, 1);
   });
 

@@ -121,11 +121,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       for (const sig of signals) {
         let botResultSummary = 'N/A';
 
-        const isH1Missing = sig.reasoning?.htfStructure?.includes('H1') && sig.reasoning?.htfStructure?.includes('unavailable');
+        const isH1Missing =
+          sig.reasoning?.htfStructure?.includes('H1') &&
+          sig.reasoning?.htfStructure?.includes('unavailable');
         if (!isH1Missing) {
           h1AvailableCount++;
         }
-        const isH4Missing = sig.reasoning?.htfStructure?.includes('H4') && sig.reasoning?.htfStructure?.includes('unavailable');
+        const isH4Missing =
+          sig.reasoning?.htfStructure?.includes('H4') &&
+          sig.reasoning?.htfStructure?.includes('unavailable');
         if (!isH4Missing) {
           h4AvailableCount++;
         }
@@ -149,7 +153,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
               // Authoritative Single Pass: execute & retrieve per-bot machine-readable execution results
               const executionResults = await this.algoBotsService.evaluateSignalForBots(sig);
 
-              if (executionResults.length > 0 && executionResults[0].botId !== 'NONE' && executionResults[0].botId !== 'N/A') {
+              if (
+                executionResults.length > 0 &&
+                executionResults[0].botId !== 'NONE' &&
+                executionResults[0].botId !== 'N/A'
+              ) {
                 botMatchedCount += executionResults.length;
               }
 

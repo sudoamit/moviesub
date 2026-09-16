@@ -38,10 +38,7 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        RealMarketStreamerService,
-        { provide: RedisService, useValue: mockRedisService },
-      ],
+      providers: [RealMarketStreamerService, { provide: RedisService, useValue: mockRedisService }],
     }).compile();
 
     streamerService = module.get<RealMarketStreamerService>(RealMarketStreamerService);
@@ -55,20 +52,28 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
 
   describe('1. Service-Level Failure Injection & Old State Preservation', () => {
     test('A. Connection creation failure during stream reconnect leaves old ProviderRuntimeState reference and identity 100% intact', () => {
-      const initialRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const initialRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       const initialConn = initialRuntime.currentConnection;
 
       // Disconnect stream first
       streamerService.handleStreamProviderDisconnect('NSE_STREAM_GATEWAY');
-      const disconnectedRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const disconnectedRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       expect(disconnectedRuntime.connectionState).toBe('DISCONNECTED');
       expect(disconnectedRuntime.providerConnected).toBe(false);
       expect(disconnectedRuntime.currentConnection).toEqual(initialConn);
 
       // Failure Injection: Mock createStreamProviderConnection to throw when minting new connection
-      jest.spyOn(streamerService as any, 'createStreamProviderConnection').mockImplementationOnce(() => {
-        throw new Error('[ADAPTER_SIMULATION_FAILURE] WebSocket socket connection failed');
-      });
+      jest
+        .spyOn(streamerService as any, 'createStreamProviderConnection')
+        .mockImplementationOnce(() => {
+          throw new Error('[ADAPTER_SIMULATION_FAILURE] WebSocket socket connection failed');
+        });
 
       // Attempt reconnect -> must throw adapter error
       expect(() => {
@@ -76,16 +81,23 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       }).toThrow('[ADAPTER_SIMULATION_FAILURE]');
 
       // Verify old runtime state is 100% intact (same reference, same connection identity, state preserved)
-      const afterFailureRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const afterFailureRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       expect(afterFailureRuntime).toBe(disconnectedRuntime);
       expect(afterFailureRuntime.currentConnection).toBe(initialConn);
-      expect(afterFailureRuntime.currentConnection.connectionEpoch).toBe(initialConn.connectionEpoch);
-      expect(afterFailureRuntime.currentConnection.providerConnectionId).toBe(initialConn.providerConnectionId);
+      expect(afterFailureRuntime.currentConnection.connectionEpoch).toBe(
+        initialConn.connectionEpoch,
+      );
+      expect(afterFailureRuntime.currentConnection.providerConnectionId).toBe(
+        initialConn.providerConnectionId,
+      );
     });
 
     test('B. Connection creation failure during rotateProviderRuntime leaves old freshness store 100% intact', () => {
       const initialConn = streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
-      
+
       // Ingest a spot tick to establish freshness under initial connection
       const spotTick = NSE_STREAM_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
         providerSymbol: 'NIFTY',
@@ -104,9 +116,11 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       expect(isFreshBefore).toBe(true);
 
       // Inject failure during connection creation
-      jest.spyOn(streamerService as any, 'createStreamProviderConnection').mockImplementationOnce(() => {
-        throw new Error('[ADAPTER_SIMULATION_FAILURE] Dynamic DNS lookup failed');
-      });
+      jest
+        .spyOn(streamerService as any, 'createStreamProviderConnection')
+        .mockImplementationOnce(() => {
+          throw new Error('[ADAPTER_SIMULATION_FAILURE] Dynamic DNS lookup failed');
+        });
 
       expect(() => {
         (streamerService as any).rotateProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
@@ -123,18 +137,26 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
     });
 
     test('C. Connection creation failure during REST health recovery leaves old REST ProviderRuntimeState 100% intact', () => {
-      const initialRestRuntime = streamerService.resolveCurrentProviderRuntime('NSE_REST_OPTION_PROVIDER', 'REST_POLLING');
+      const initialRestRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_REST_OPTION_PROVIDER',
+        'REST_POLLING',
+      );
       const initialConn = initialRestRuntime.currentConnection;
 
       // Mark REST provider unavailable
       streamerService.handleRestProviderUnavailable('NSE_REST_OPTION_PROVIDER');
-      const unavailableRuntime = streamerService.resolveCurrentProviderRuntime('NSE_REST_OPTION_PROVIDER', 'REST_POLLING');
+      const unavailableRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_REST_OPTION_PROVIDER',
+        'REST_POLLING',
+      );
       expect(unavailableRuntime.connectionState).toBe('DISCONNECTED');
 
       // Inject failure into REST connection creation
-      jest.spyOn(streamerService as any, 'createRestProviderConnection').mockImplementationOnce(() => {
-        throw new Error('[ADAPTER_REST_FAILURE] HTTP 503 Service Unavailable');
-      });
+      jest
+        .spyOn(streamerService as any, 'createRestProviderConnection')
+        .mockImplementationOnce(() => {
+          throw new Error('[ADAPTER_REST_FAILURE] HTTP 503 Service Unavailable');
+        });
 
       // Attempt recovery to HEALTHY -> must throw
       expect(() => {
@@ -142,34 +164,48 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       }).toThrow('[ADAPTER_REST_FAILURE]');
 
       // Unavailable runtime must remain unchanged
-      const afterFailureRestRuntime = streamerService.resolveCurrentProviderRuntime('NSE_REST_OPTION_PROVIDER', 'REST_POLLING');
+      const afterFailureRestRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_REST_OPTION_PROVIDER',
+        'REST_POLLING',
+      );
       expect(afterFailureRestRuntime).toBe(unavailableRuntime);
       expect(afterFailureRestRuntime.currentConnection).toBe(initialConn);
     });
 
     test('D. Bad connection identity returned by adapter (non-incrementing epoch) is rejected and leaves runtime intact', () => {
-      const initialRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const initialRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
 
       // Disconnect stream first so reconnect attempts rotation
       streamerService.handleStreamProviderDisconnect('NSE_STREAM_GATEWAY');
 
       // Inject invalid connection return (same epoch as initial)
-      jest.spyOn(streamerService as any, 'createStreamProviderConnection').mockImplementationOnce(() => {
-        return initialRuntime.currentConnection; // Duplicate non-incrementing connection identity
-      });
+      jest
+        .spyOn(streamerService as any, 'createStreamProviderConnection')
+        .mockImplementationOnce(() => {
+          return initialRuntime.currentConnection; // Duplicate non-incrementing connection identity
+        });
 
       expect(() => {
         streamerService.handleStreamProviderReconnect('NSE_STREAM_GATEWAY');
       }).toThrow('[INVALID_CONNECTION_ROTATION]');
 
-      const afterRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const afterRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       expect(afterRuntime.currentConnection).toBe(initialRuntime.currentConnection);
     });
   });
 
   describe('2. Single-Step Atomic Rotation & Snapshot Integrity', () => {
     test('A. Successful stream reconnect replaces runtime state exactly once in Map with atomic RECONNECTED snapshot', () => {
-      const initialRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const initialRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       const mapSetSpy = jest.spyOn((streamerService as any).streamRuntimeStateMap, 'set');
 
       // Disconnect then reconnect
@@ -181,12 +217,19 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       // Map.set must be called exactly once during reconnect
       expect(mapSetSpy).toHaveBeenCalledTimes(1);
 
-      const nextRuntime = streamerService.resolveCurrentProviderRuntime('NSE_STREAM_GATEWAY', 'WEBSOCKET_STREAM');
+      const nextRuntime = streamerService.resolveCurrentProviderRuntime(
+        'NSE_STREAM_GATEWAY',
+        'WEBSOCKET_STREAM',
+      );
       expect(nextRuntime.connectionState).toBe('RECONNECTED');
       expect(nextRuntime.providerConnected).toBe(true);
       expect(nextRuntime.reconnectedAt).toBeGreaterThan(0);
-      expect(nextRuntime.currentConnection.connectionEpoch).toBe(initialRuntime.currentConnection.connectionEpoch + 1);
-      expect(nextRuntime.currentConnection.providerConnectionId).not.toBe(initialRuntime.currentConnection.providerConnectionId);
+      expect(nextRuntime.currentConnection.connectionEpoch).toBe(
+        initialRuntime.currentConnection.connectionEpoch + 1,
+      );
+      expect(nextRuntime.currentConnection.providerConnectionId).not.toBe(
+        initialRuntime.currentConnection.providerConnectionId,
+      );
 
       // Verify health check returns true immediately
       expect(streamerService.isStreamExecutionHealthy('NSE_STREAM_GATEWAY')).toBe(true);
@@ -194,7 +237,8 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
 
     test('B. Shared Option and Spot provider connection identity remains 100% synchronized post-reconnect', () => {
       // 1. Initial parity check
-      const streamerConn1 = streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
+      const streamerConn1 =
+        streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
       const optConn1 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
       const spotConn1 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
 
@@ -207,7 +251,8 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       streamerService.handleStreamProviderDisconnect('NSE_STREAM_GATEWAY');
       streamerService.handleStreamProviderReconnect('NSE_STREAM_GATEWAY');
 
-      const streamerConn2 = streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
+      const streamerConn2 =
+        streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
       const optConn2 = NSE_STREAM_OPTION_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
       const spotConn2 = NSE_STREAM_SPOT_PROVIDER_ADAPTER.getCurrentProviderConnection()!;
 
@@ -230,12 +275,14 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       });
       streamerService.ingestCanonicalSpotTick(spotTick);
 
-      expect((streamerService as any).isFreshSymbolPresent(
-        'WEBSOCKET_STREAM',
-        'NSE_STREAM_GATEWAY',
-        initialConn.providerConnectionId,
-        'NIFTY',
-      )).toBe(true);
+      expect(
+        (streamerService as any).isFreshSymbolPresent(
+          'WEBSOCKET_STREAM',
+          'NSE_STREAM_GATEWAY',
+          initialConn.providerConnectionId,
+          'NIFTY',
+        ),
+      ).toBe(true);
 
       // Perform reconnect
       streamerService.handleStreamProviderDisconnect('NSE_STREAM_GATEWAY');
@@ -244,12 +291,14 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       const newConn = streamerService.getCurrentStreamProviderConnection('NSE_STREAM_GATEWAY');
 
       // Old freshness is now purged
-      expect((streamerService as any).isFreshSymbolPresent(
-        'WEBSOCKET_STREAM',
-        'NSE_STREAM_GATEWAY',
-        initialConn.providerConnectionId,
-        'NIFTY',
-      )).toBe(false);
+      expect(
+        (streamerService as any).isFreshSymbolPresent(
+          'WEBSOCKET_STREAM',
+          'NSE_STREAM_GATEWAY',
+          initialConn.providerConnectionId,
+          'NIFTY',
+        ),
+      ).toBe(false);
 
       // Record tick under new connection
       const newSpotTick = NSE_STREAM_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
@@ -259,12 +308,14 @@ describe('RealMarketStreamerService — Provider-Runtime Lifecycle Atomicity & S
       });
       streamerService.ingestCanonicalSpotTick(newSpotTick);
 
-      expect((streamerService as any).isFreshSymbolPresent(
-        'WEBSOCKET_STREAM',
-        'NSE_STREAM_GATEWAY',
-        newConn.providerConnectionId,
-        'NIFTY',
-      )).toBe(true);
+      expect(
+        (streamerService as any).isFreshSymbolPresent(
+          'WEBSOCKET_STREAM',
+          'NSE_STREAM_GATEWAY',
+          newConn.providerConnectionId,
+          'NIFTY',
+        ),
+      ).toBe(true);
     });
 
     test('D. Binance Direct WebSocket reconnect replaces runtime state and syncs option & spot adapters atomically', () => {

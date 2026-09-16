@@ -388,7 +388,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     canonicalTick: ValidatedCanonicalSpotProviderTick,
   ): ILiveRealTicker | null {
     if (!isValidatedCanonicalSpotProviderTick(canonicalTick)) {
-      throw new Error('[UNBRANDED_SPOT_TICK_REJECTED] Spot tick ingestion requires a sealed canonical spot tick');
+      throw new Error(
+        '[UNBRANDED_SPOT_TICK_REJECTED] Spot tick ingestion requires a sealed canonical spot tick',
+      );
     }
     const params = canonicalTick.toRecordInput();
     const sym = (params.symbol || (params as any).contractSymbol || '').toUpperCase();
@@ -396,10 +398,18 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const now = Date.now();
 
     if (existing) {
-      if (params.sequence !== undefined && existing.sequence !== undefined && params.sequence < existing.sequence) {
+      if (
+        params.sequence !== undefined &&
+        existing.sequence !== undefined &&
+        params.sequence < existing.sequence
+      ) {
         return existing; // Sequence out of order rejection: keep higher sequence price
       }
-      if (existing.marketEventTime && params.marketEventTime < existing.marketEventTime && (params.sequence === undefined || existing.sequence === undefined)) {
+      if (
+        existing.marketEventTime &&
+        params.marketEventTime < existing.marketEventTime &&
+        (params.sequence === undefined || existing.sequence === undefined)
+      ) {
         return null; // Out of order rejection
       }
     }
@@ -439,10 +449,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
 
     this.tickers.set(sym, updated);
-    this.recordFreshSymbol(params.providerTransport, params.providerId, params.providerConnectionId, sym);
+    this.recordFreshSymbol(
+      params.providerTransport,
+      params.providerId,
+      params.providerConnectionId,
+      sym,
+    );
     return updated;
   }
-
 
   /**
    * Helper to manually push/update a ticker for UI / test / non-authoritative state only.
@@ -513,8 +527,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private restRuntimeStateMap: Map<string, Readonly<ProviderRuntimeState>> = new Map();
 
   private readonly providerInstanceId: string =
-    process.env.CANONICAL_PROVIDER_INSTANCE_ID ||
-    `api-${process.pid}-${crypto.randomUUID()}`;
+    process.env.CANONICAL_PROVIDER_INSTANCE_ID || `api-${process.pid}-${crypto.randomUUID()}`;
 
   constructor(private readonly redis: RedisService) {
     this.initProviderConnections();
@@ -544,13 +557,17 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const yahooRestConn = NSE_YAHOO_REST_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
-    NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: yahooRestConn });
+    NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+      existingConnection: yahooRestConn,
+    });
     this.installInitialProviderConnection('NSE_YAHOO_REST', 'REST_POLLING', yahooRestConn);
 
     const binanceRestConn = BINANCE_REST_PROVIDER_ADAPTER.beginProviderConnection({
       providerInstanceId: this.providerInstanceId,
     });
-    BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({ existingConnection: binanceRestConn });
+    BINANCE_REST_SPOT_PROVIDER_ADAPTER.beginProviderConnection({
+      existingConnection: binanceRestConn,
+    });
     this.installInitialProviderConnection('BINANCE_REST', 'REST_POLLING', binanceRestConn);
   }
 
@@ -595,9 +612,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     symbol: string,
   ): boolean {
     if (!providerTransport || !providerId || !connectionId || !symbol) return false;
-    if (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING') return false;
+    if (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING')
+      return false;
     const normId = normalizeCanonicalProviderId(providerId);
-    return this.freshnessStore.get(providerTransport)?.get(normId)?.get(connectionId)?.has(symbol.toUpperCase()) ?? false;
+    return (
+      this.freshnessStore
+        .get(providerTransport)
+        ?.get(normId)
+        ?.get(connectionId)
+        ?.has(symbol.toUpperCase()) ?? false
+    );
   }
 
   private purgeFreshnessForConnection(
@@ -628,7 +652,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
     const normId = normalizeCanonicalProviderId(providerId);
 
-    if (!providerTransport || (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING')) {
+    if (
+      !providerTransport ||
+      (providerTransport !== 'WEBSOCKET_STREAM' && providerTransport !== 'REST_POLLING')
+    ) {
       throw new Error(
         `[PROVIDER_TRANSPORT_MISMATCH] providerTransport is required and must be WEBSOCKET_STREAM or REST_POLLING`,
       );
@@ -677,7 +704,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     },
   ): Readonly<ProviderRuntimeState> {
     const existing = this.resolveCurrentProviderRuntime(providerId, providerTransport);
-    const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
+    const map =
+      providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap
+        : this.restRuntimeStateMap;
     const normId = normalizeCanonicalProviderId(providerId);
 
     const frozenState: Readonly<ProviderRuntimeState> = Object.freeze({
@@ -686,7 +716,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       connectionState: updates.connectionState ?? existing.connectionState,
       providerConnected: updates.providerConnected ?? existing.providerConnected,
       currentConnection: existing.currentConnection,
-      reconnectedAt: updates.reconnectedAt !== undefined ? updates.reconnectedAt : existing.reconnectedAt,
+      reconnectedAt:
+        updates.reconnectedAt !== undefined ? updates.reconnectedAt : existing.reconnectedAt,
     });
 
     map.set(normId, frozenState);
@@ -699,7 +730,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     connection: ProviderConnectionIdentity,
   ): Readonly<ProviderRuntimeState> {
     if (!isProviderConnectionIdentity(connection)) {
-      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] connection must be a branded ProviderConnectionIdentity');
+      throw new Error(
+        '[INVALID_SHARED_CONNECTION_IDENTITY] connection must be a branded ProviderConnectionIdentity',
+      );
     }
     const normId = normalizeCanonicalProviderId(providerId);
     const connNormId = normalizeCanonicalProviderId(connection.providerId);
@@ -719,7 +752,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
+    const map =
+      providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap
+        : this.restRuntimeStateMap;
     if (map.has(normId)) {
       throw new Error(
         `[INITIAL_PROVIDER_RUNTIME_ALREADY_EXISTS] Cannot install initial connection: provider runtime for '${normId}' (${providerTransport}) already exists`,
@@ -745,16 +781,24 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (!providerId) throw new Error('[UNKNOWN_PROVIDER_ID_REJECTED] providerId is required');
     const normId = normalizeCanonicalProviderId(providerId);
     if (normId !== 'NSE_STREAM_GATEWAY' && normId !== 'BINANCE_DIRECT') {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin stream connection for unknown provider '${providerId}'`);
+      throw new Error(
+        `[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin stream connection for unknown provider '${providerId}'`,
+      );
     }
 
     if (options?.existingConnection) {
       const existing = options.existingConnection;
       if (!isProviderConnectionIdentity(existing)) {
-        throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity');
+        throw new Error(
+          '[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity',
+        );
       }
       const existingNormId = normalizeCanonicalProviderId(existing.providerId);
-      if (existingNormId !== normId || existing.providerTransport !== 'WEBSOCKET_STREAM' || existing.providerInstanceId !== this.providerInstanceId) {
+      if (
+        existingNormId !== normId ||
+        existing.providerTransport !== 'WEBSOCKET_STREAM' ||
+        existing.providerInstanceId !== this.providerInstanceId
+      ) {
         throw new Error(
           `[INVALID_SHARED_CONNECTION_IDENTITY] Existing connection providerId '${existing.providerId}' or transport '${existing.providerTransport}' does not match target stream provider '${normId}'`,
         );
@@ -788,10 +832,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (options?.existingConnection) {
       const existing = options.existingConnection;
       if (!isProviderConnectionIdentity(existing)) {
-        throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity');
+        throw new Error(
+          '[INVALID_SHARED_CONNECTION_IDENTITY] existingConnection must be a branded ProviderConnectionIdentity',
+        );
       }
       const existingNormId = normalizeCanonicalProviderId(existing.providerId);
-      if (existingNormId !== normId || existing.providerTransport !== 'REST_POLLING' || existing.providerInstanceId !== this.providerInstanceId) {
+      if (
+        existingNormId !== normId ||
+        existing.providerTransport !== 'REST_POLLING' ||
+        existing.providerInstanceId !== this.providerInstanceId
+      ) {
         throw new Error(
           `[INVALID_SHARED_CONNECTION_IDENTITY] Existing connection providerId '${existing.providerId}' or transport '${existing.providerTransport}' does not match target REST provider '${normId}'`,
         );
@@ -818,7 +868,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         existingConnection: options?.existingConnection,
       });
     } else {
-      throw new Error(`[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin REST connection for unknown provider '${providerId}'`);
+      throw new Error(
+        `[UNKNOWN_PROVIDER_ID_REJECTED] Cannot begin REST connection for unknown provider '${providerId}'`,
+      );
     }
   }
 
@@ -845,7 +897,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     // 2. Validate new connection identity
     if (!isProviderConnectionIdentity(newConnection)) {
-      throw new Error('[INVALID_SHARED_CONNECTION_IDENTITY] newConnection must be a branded ProviderConnectionIdentity');
+      throw new Error(
+        '[INVALID_SHARED_CONNECTION_IDENTITY] newConnection must be a branded ProviderConnectionIdentity',
+      );
     }
     const connNormId = normalizeCanonicalProviderId(newConnection.providerId);
     if (normId !== connNormId) {
@@ -887,7 +941,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     });
 
     // 5. Replace runtime Map entry exactly once
-    const map = providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap : this.restRuntimeStateMap;
+    const map =
+      providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap
+        : this.restRuntimeStateMap;
     map.set(normId, nextRuntime);
 
     // 6. Purge freshness strictly for the old connection ID AFTER successful runtime replacement
@@ -932,7 +989,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
   public getRestHealthState(providerId: string): 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' {
     const runtime = this.resolveCurrentProviderRuntime(providerId, 'REST_POLLING');
-    if (runtime.providerConnected && (runtime.connectionState === 'CONNECTED' || runtime.connectionState === 'RECONNECTED')) {
+    if (
+      runtime.providerConnected &&
+      (runtime.connectionState === 'CONNECTED' || runtime.connectionState === 'RECONNECTED')
+    ) {
       return 'HEALTHY';
     }
     return runtime.connectionState === 'RECONNECTING' ? 'DEGRADED' : 'UNAVAILABLE';
@@ -1000,7 +1060,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     providerId: string,
   ): boolean {
     if (!providerTransport || !providerId) {
-      throw new Error('[PROVIDER_TRANSPORT_MISMATCH] BOTH providerTransport AND providerId are required for isExecutionDataHealthy');
+      throw new Error(
+        '[PROVIDER_TRANSPORT_MISMATCH] BOTH providerTransport AND providerId are required for isExecutionDataHealthy',
+      );
     }
     const runtime = this.resolveCurrentProviderRuntime(providerId, providerTransport);
     return (
@@ -1040,7 +1102,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const normId = normalizeCanonicalProviderId(providerId);
     const state = this.resolveCurrentProviderRuntime(normId, 'WEBSOCKET_STREAM');
     if (state.providerConnected || state.connectionState !== 'DISCONNECTED') {
-      this.logger.warn(`Market data stream provider '${normId}' disconnected: ${reason || 'Connection lost'}`);
+      this.logger.warn(
+        `Market data stream provider '${normId}' disconnected: ${reason || 'Connection lost'}`,
+      );
     }
     this.transitionProviderRuntime(normId, 'WEBSOCKET_STREAM', {
       connectionState: 'DISCONNECTED',
@@ -1074,7 +1138,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         providerConnected: true,
         reconnectedAt: Date.now(),
       });
-      this.logger.log(`Market data stream provider '${normId}' reconnected. New stream connection epoch assigned.`);
+      this.logger.log(
+        `Market data stream provider '${normId}' reconnected. New stream connection epoch assigned.`,
+      );
     }
   }
 
@@ -1190,9 +1256,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const rawVol = data.volume ?? data.v;
     const volume = rawVol !== undefined && rawVol !== null ? parseFloat(rawVol) : NaN;
     const rawChangePct = data.priceChangePercent ?? data.P;
-    const changePercent = rawChangePct !== undefined && rawChangePct !== null ? parseFloat(rawChangePct) : NaN;
+    const changePercent =
+      rawChangePct !== undefined && rawChangePct !== null ? parseFloat(rawChangePct) : NaN;
     const rawChangeAmt = data.priceChange ?? data.p;
-    const changeAmount = rawChangeAmt !== undefined && rawChangeAmt !== null ? parseFloat(rawChangeAmt) : NaN;
+    const changeAmount =
+      rawChangeAmt !== undefined && rawChangeAmt !== null ? parseFloat(rawChangeAmt) : NaN;
 
     let tickSize: number | undefined = undefined;
     try {
@@ -1288,9 +1356,10 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return null;
     }
 
-    const isHealthy = ticker.providerTransport === 'WEBSOCKET_STREAM'
-      ? this.isStreamExecutionHealthy(ticker.providerId)
-      : this.isRestExecutionHealthy(ticker.providerId);
+    const isHealthy =
+      ticker.providerTransport === 'WEBSOCKET_STREAM'
+        ? this.isStreamExecutionHealthy(ticker.providerId)
+        : this.isRestExecutionHealthy(ticker.providerId);
 
     if (!isHealthy) return null;
 
@@ -1305,12 +1374,20 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const normProviderId = normalizeCanonicalProviderId(ticker.providerId);
-    const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
+    const streamState =
+      ticker.providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap.get(normProviderId)
+        : null;
     const reconnectedAt = streamState?.reconnectedAt ?? null;
 
     if (
       reconnectedAt !== null &&
-      !this.isFreshSymbolPresent(ticker.providerTransport, ticker.providerId, ticker.providerConnectionId, key)
+      !this.isFreshSymbolPresent(
+        ticker.providerTransport,
+        ticker.providerId,
+        ticker.providerConnectionId,
+        key,
+      )
     ) {
       return null;
     }
@@ -1318,10 +1395,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return ticker;
   }
 
-  public getValidatedTicker(
-    symbol: string,
-    maxAgeSeconds = 5,
-  ): ILiveRealTicker {
+  public getValidatedTicker(symbol: string, maxAgeSeconds = 5): ILiveRealTicker {
     const sym = symbol.toUpperCase();
     const ticker = this.tickers.get(sym);
 
@@ -1348,14 +1422,17 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
 
-    const isHealthy = ticker.providerTransport === 'WEBSOCKET_STREAM'
-      ? this.isStreamExecutionHealthy(ticker.providerId)
-      : this.isRestExecutionHealthy(ticker.providerId);
+    const isHealthy =
+      ticker.providerTransport === 'WEBSOCKET_STREAM'
+        ? this.isStreamExecutionHealthy(ticker.providerId)
+        : this.isRestExecutionHealthy(ticker.providerId);
 
     if (!isHealthy) {
-      const stateStr = ticker.providerTransport === 'WEBSOCKET_STREAM'
-        ? this.streamRuntimeStateMap.get(normalizeCanonicalProviderId(ticker.providerId))?.connectionState || 'DISCONNECTED'
-        : this.getRestHealthState(ticker.providerId);
+      const stateStr =
+        ticker.providerTransport === 'WEBSOCKET_STREAM'
+          ? this.streamRuntimeStateMap.get(normalizeCanonicalProviderId(ticker.providerId))
+              ?.connectionState || 'DISCONNECTED'
+          : this.getRestHealthState(ticker.providerId);
       throw new MarketDataUnavailableError(
         sym,
         `Market data stream provider is in '${stateStr}' state. Trade execution blocked.`,
@@ -1387,12 +1464,20 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     const normProviderId = normalizeCanonicalProviderId(ticker.providerId);
-    const streamState = ticker.providerTransport === 'WEBSOCKET_STREAM' ? this.streamRuntimeStateMap.get(normProviderId) : null;
+    const streamState =
+      ticker.providerTransport === 'WEBSOCKET_STREAM'
+        ? this.streamRuntimeStateMap.get(normProviderId)
+        : null;
     const reconnectedAt = streamState?.reconnectedAt ?? null;
 
     if (
       reconnectedAt !== null &&
-      !this.isFreshSymbolPresent(ticker.providerTransport, ticker.providerId, ticker.providerConnectionId, sym)
+      !this.isFreshSymbolPresent(
+        ticker.providerTransport,
+        ticker.providerId,
+        ticker.providerConnectionId,
+        sym,
+      )
     ) {
       throw new MarketDataUnavailableError(
         sym,
@@ -1493,7 +1578,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): Promise<ICanonicalOptionQuoteRecord | null> {
-    return this.publishCanonicalOptionQuote(this.createValidatedOptionProviderTickFromNseStream(params));
+    return this.publishCanonicalOptionQuote(
+      this.createValidatedOptionProviderTickFromNseStream(params),
+    );
   }
 
   public async publishNseRestCanonicalOptionQuote(params: {
@@ -1512,19 +1599,25 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     tickSize?: number;
     sequence?: number;
   }): Promise<ICanonicalOptionQuoteRecord | null> {
-    return this.publishCanonicalOptionQuote(this.createValidatedOptionProviderTickFromNseRest(params));
+    return this.publishCanonicalOptionQuote(
+      this.createValidatedOptionProviderTickFromNseRest(params),
+    );
   }
 
   private async publishCanonicalOptionQuote(
     providerTick: ValidatedCanonicalOptionProviderTick,
   ): Promise<ICanonicalOptionQuoteRecord | null> {
     if (!isValidatedCanonicalOptionProviderTick(providerTick)) {
-      throw new Error('Canonical option quote publication requires a validated provider-origin tick');
+      throw new Error(
+        'Canonical option quote publication requires a validated provider-origin tick',
+      );
     }
 
     const params = providerTick.toRecordInput();
     if (!this.isExecutionDataHealthy(params.providerTransport, params.providerId)) {
-      this.logger.warn(`Cannot publish canonical option quote for ${params?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState(params.providerId, params.providerTransport)}' state`);
+      this.logger.warn(
+        `Cannot publish canonical option quote for ${params?.contractSymbol || 'unknown'}: provider is in '${this.getProviderState(params.providerId, params.providerTransport)}' state`,
+      );
       return null;
     }
 
@@ -1532,14 +1625,16 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const redisClient = this.redis.getClient();
     if (!redisClient || redisClient.status !== 'ready') return null;
 
+    // prettier-ignore
     const activeConnection = this.getCurrentOptionProviderConnection(params.providerId, params.providerTransport);
-    // getCurrentOptionProviderConnection(params.providerId)
     if (
       params.connectionEpoch !== activeConnection.connectionEpoch ||
       params.providerInstanceId !== activeConnection.providerInstanceId ||
       params.providerConnectionId !== activeConnection.providerConnectionId
     ) {
-      this.logger.warn(`Cannot publish canonical option quote for ${params.contractSymbol}: provider connection identity is not current`);
+      this.logger.warn(
+        `Cannot publish canonical option quote for ${params.contractSymbol}: provider connection identity is not current`,
+      );
       return null;
     }
 

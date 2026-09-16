@@ -154,7 +154,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     fetch('http://localhost:3001/api/paper-trading/portfolio')
       .then((res) => res.json())
       .then((data) => {
-        const matchingPos = data?.openPositions?.find((p: any) => p.symbol === selectedSignal?.symbol);
+        const matchingPos = data?.openPositions?.find(
+          (p: any) => p.symbol === selectedSignal?.symbol,
+        );
         if (matchingPos?.fxRateUsed) {
           setCryptoInrRate(matchingPos.fxRateUsed);
         }
@@ -321,10 +323,13 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
             {/* 3. Entry Price */}
             <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl space-y-1.5">
               <label className="text-[10px] uppercase text-slate-400 font-bold block">
-                Entry Price ({currencySymbol}{isCrypto ? ' · USDT→INR' : isGold ? ' · USD→INR' : ''})
+                Entry Price ({currencySymbol}
+                {isCrypto ? ' · USDT→INR' : isGold ? ' · USD→INR' : ''})
               </label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cyan-400 text-xs font-black">{currencySymbol}</span>
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cyan-400 text-xs font-black">
+                  {currencySymbol}
+                </span>
                 <input
                   type="number"
                   step="any"
@@ -352,7 +357,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
                 </span>
               </div>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-rose-400 text-xs font-black">{currencySymbol}</span>
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-rose-400 text-xs font-black">
+                  {currencySymbol}
+                </span>
                 <input
                   type="number"
                   step="any"

@@ -107,7 +107,8 @@ export class MarketDataService {
     } else {
       for (const candle of validCandles) {
         const openTimeMs = new Date(candle.timestamp).getTime();
-        const isClosed = candle.isClosed !== undefined ? candle.isClosed : serverNow >= openTimeMs + durationMs;
+        const isClosed =
+          candle.isClosed !== undefined ? candle.isClosed : serverNow >= openTimeMs + durationMs;
         await this.prisma.candle.upsert({
           where: {
             instrumentId_timeframe_timestamp: {
@@ -143,7 +144,8 @@ export class MarketDataService {
     if (validCandles.length > 0) {
       const latest = validCandles[validCandles.length - 1];
       const openTimeMs = new Date(latest.timestamp).getTime();
-      const isClosed = latest.isClosed !== undefined ? latest.isClosed : serverNow >= openTimeMs + durationMs;
+      const isClosed =
+        latest.isClosed !== undefined ? latest.isClosed : serverNow >= openTimeMs + durationMs;
       await this.prisma.candle.upsert({
         where: {
           instrumentId_timeframe_timestamp: {
@@ -275,7 +277,9 @@ export class MarketDataService {
     });
 
     if (!inst) {
-      throw new NotFoundException(`[SNAPSHOT FAIL-CLOSED] Instrument '${sym}' not registered in database.`);
+      throw new NotFoundException(
+        `[SNAPSHOT FAIL-CLOSED] Instrument '${sym}' not registered in database.`,
+      );
     }
 
     if (inst.isActive === false) {

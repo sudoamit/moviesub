@@ -126,7 +126,17 @@ export class CandlesService {
 
       // Binance Crypto routing
       if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
-        const binanceInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '1h' : is4h ? '4h' : '1d';
+        const binanceInterval = is1m
+          ? '1m'
+          : is5m
+            ? '5m'
+            : is15m
+              ? '15m'
+              : is1h
+                ? '1h'
+                : is4h
+                  ? '4h'
+                  : '1d';
         const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym;
         let res: Response | null = null;
         for (let attempt = 0; attempt <= 2; attempt++) {
@@ -135,9 +145,13 @@ export class CandlesService {
               `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
             );
             if (res.ok) break;
-            this.logger.warn(`Binance fetch failed with status ${res.status} for ${binanceSym} (attempt ${attempt + 1}/3)`);
+            this.logger.warn(
+              `Binance fetch failed with status ${res.status} for ${binanceSym} (attempt ${attempt + 1}/3)`,
+            );
           } catch (err) {
-            this.logger.warn(`Binance fetch exception for ${binanceSym} (attempt ${attempt + 1}/3): ${(err as Error).message}`);
+            this.logger.warn(
+              `Binance fetch exception for ${binanceSym} (attempt ${attempt + 1}/3): ${(err as Error).message}`,
+            );
           }
         }
 
@@ -146,7 +160,7 @@ export class CandlesService {
           if (Array.isArray(raw) && raw.length > 0) {
             const candles: ICandle[] = raw.map((k: any) => {
               const openTimeMs = Number(k[0]);
-              const closeTimeMs = Number(k[6]) || (openTimeMs + durationMs - 1);
+              const closeTimeMs = Number(k[6]) || openTimeMs + durationMs - 1;
               const isClosed = serverNow >= openTimeMs + durationMs || serverNow > closeTimeMs;
               return {
                 timestamp: new Date(openTimeMs),
@@ -186,8 +200,28 @@ export class CandlesService {
                 : isHdfc
                   ? 'HDFCBANK.NS'
                   : 'INFY.NS';
-        const yInterval = is1m ? '1m' : is5m ? '5m' : is15m ? '15m' : is1h ? '60m' : is4h ? '60m' : '1d';
-        const yRange = is1m ? '1d' : is5m ? '5d' : is15m ? '1mo' : is1h ? '3mo' : is4h ? '3mo' : '1y';
+        const yInterval = is1m
+          ? '1m'
+          : is5m
+            ? '5m'
+            : is15m
+              ? '15m'
+              : is1h
+                ? '60m'
+                : is4h
+                  ? '60m'
+                  : '1d';
+        const yRange = is1m
+          ? '1d'
+          : is5m
+            ? '5d'
+            : is15m
+              ? '1mo'
+              : is1h
+                ? '3mo'
+                : is4h
+                  ? '3mo'
+                  : '1y';
         const res = await fetch(
           `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySymbol)}?interval=${yInterval}&range=${yRange}`,
           { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } },
@@ -248,7 +282,8 @@ export class CandlesService {
     // 1. Live Exchange Fetch: Executed when appropriate according to MarketDataSourcePolicy
     let liveCandles: ICandle[] = [];
     if (
-      (sourceMode === MarketDataSourceMode.LIVE_DECISION || sourceMode === MarketDataSourceMode.CHART) &&
+      (sourceMode === MarketDataSourceMode.LIVE_DECISION ||
+        sourceMode === MarketDataSourceMode.CHART) &&
       !isRangeQuery
     ) {
       liveCandles = await this.fetchRealExchangeCandles(symbol, timeframe as string, limit);
@@ -384,7 +419,9 @@ export class CandlesService {
       }));
 
     if (closedCandles.length === 0) {
-      throw new NotFoundException(`No closed candles found for symbol '${sym}' on timeframe '${timeframe}'`);
+      throw new NotFoundException(
+        `No closed candles found for symbol '${sym}' on timeframe '${timeframe}'`,
+      );
     }
 
     // 2. Pure SMC Analysis from trading-engine consuming ONLY closed candles via fail-closed adapter
@@ -393,7 +430,18 @@ export class CandlesService {
 
     const convResult = chartCandlesToICandlesResult(closedCandles);
     const smcAnalysis = convResult.isDegraded
-      ? { swingPoints: [], breaksOfStructure: [], changesOfCharacter: [], marketRegime: undefined, dealingRange: null, liquidityPools: [], liquiditySweeps: [], fairValueGaps: [], orderBlocks: [], isDegraded: true }
+      ? {
+          swingPoints: [],
+          breaksOfStructure: [],
+          changesOfCharacter: [],
+          marketRegime: undefined,
+          dealingRange: null,
+          liquidityPools: [],
+          liquiditySweeps: [],
+          fairValueGaps: [],
+          orderBlocks: [],
+          isDegraded: true,
+        }
       : SMCAnalyzer.analyze(convResult.candles, {
           asOfTimestamp: new Date(latestClosedTimestamp),
           timeframe,
@@ -426,7 +474,8 @@ export class CandlesService {
     }
 
     const sourceIdentity = candlesResp.sourceIdentity;
-    const lastCandleClose = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
+    const lastCandleClose =
+      closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
     const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
 

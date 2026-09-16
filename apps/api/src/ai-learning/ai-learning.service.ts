@@ -371,7 +371,9 @@ export class AILearningService implements OnModuleInit {
     try {
       if (this.retrainQueue) {
         await this.retrainQueue.add('RETRAIN_MODEL', { jobId, triggerReason: 'MANUAL' });
-        this.logger.log(`Enqueued retrain job ${jobId} to BullMQ queue '${BULLMQ_QUEUES.LEARNING_TASKS}'`);
+        this.logger.log(
+          `Enqueued retrain job ${jobId} to BullMQ queue '${BULLMQ_QUEUES.LEARNING_TASKS}'`,
+        );
       }
     } catch (e: any) {
       this.logger.error(`Failed to push job to BullMQ queue: ${e.message}`);
@@ -399,7 +401,12 @@ export class AILearningService implements OnModuleInit {
           jobId: dbJob.id,
           status: dbJob.status as any,
           progressPercent: dbJob.status === 'COMPLETED' ? 100 : dbJob.status === 'FAILED' ? 0 : 50,
-          stage: dbJob.status === 'COMPLETED' ? 'Completed' : dbJob.status === 'RUNNING' ? 'Running in Worker' : dbJob.status,
+          stage:
+            dbJob.status === 'COMPLETED'
+              ? 'Completed'
+              : dbJob.status === 'RUNNING'
+                ? 'Running in Worker'
+                : dbJob.status,
           isPromoted: dbJob.promoted,
           metrics: (dbJob.validationMetricsJson as any) || null,
           error: dbJob.errorMessage || undefined,
@@ -726,7 +733,8 @@ export class AILearningService implements OnModuleInit {
         realizedRMultiple: realizedR,
         mfeR,
         maeR,
-        timeToResolutionMinutes: t.holdingDurationSeconds !== null ? Math.floor(t.holdingDurationSeconds / 60) : 0,
+        timeToResolutionMinutes:
+          t.holdingDurationSeconds !== null ? Math.floor(t.holdingDurationSeconds / 60) : 0,
         exitTimestamp: t.exitTime,
         classification: t.outcomeClassification || (realizedR > 0 ? 'TARGET_ACHIEVED' : 'STOP_HIT'),
         classificationRationale: t.exitReason,
@@ -784,7 +792,8 @@ export class AILearningService implements OnModuleInit {
     let skippedReason: string | undefined = undefined;
 
     const isWin =
-      trade.outcomeSnapshotJson?.realizedPnL !== undefined && trade.outcomeSnapshotJson?.realizedPnL !== null
+      trade.outcomeSnapshotJson?.realizedPnL !== undefined &&
+      trade.outcomeSnapshotJson?.realizedPnL !== null
         ? trade.outcomeSnapshotJson.realizedPnL > 0
         : trade.realizedR! > 0;
 
@@ -838,7 +847,9 @@ export class AILearningService implements OnModuleInit {
   /**
    * Loads a PaperTrade by ID and directly learns from its persisted snapshots without querying candles.
    */
-  public async learnFromPersistedTrade(tradeId: string): Promise<{ updateResult: any; postMortem: any; skippedReason?: string }> {
+  public async learnFromPersistedTrade(
+    tradeId: string,
+  ): Promise<{ updateResult: any; postMortem: any; skippedReason?: string }> {
     const trade = await this.prisma.paperTrade.findUnique({
       where: { id: tradeId },
     });

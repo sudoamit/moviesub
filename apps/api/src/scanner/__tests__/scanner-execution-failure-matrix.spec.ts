@@ -31,7 +31,11 @@ class MatrixLiveMarketDataProvider implements IMarketDataProvider {
     this.candleStream = candleStream;
   }
 
-  async getHistoricalCandles(symbol: string, timeframe: Timeframe | string, limit = 200): Promise<ICandle[]> {
+  async getHistoricalCandles(
+    symbol: string,
+    timeframe: Timeframe | string,
+    limit = 200,
+  ): Promise<ICandle[]> {
     const sym = symbol.toUpperCase();
     if (sym !== 'BTCUSDT') return [];
 
@@ -58,7 +62,11 @@ class MatrixLiveMarketDataProvider implements IMarketDataProvider {
     return candles[0];
   }
 
-  async subscribeToMarketData(symbol: string, timeframe: Timeframe | string, onCandle: (candle: ICandle) => void): Promise<void> {}
+  async subscribeToMarketData(
+    symbol: string,
+    timeframe: Timeframe | string,
+    onCandle: (candle: ICandle) => void,
+  ): Promise<void> {}
 
   async unsubscribeFromMarketData(symbol: string, timeframe: Timeframe | string): Promise<void> {}
 
@@ -112,7 +120,9 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
 
   let decisionTime: Date;
 
-  const buildLiveCandleStream = (asOfTime: Date): { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] } => {
+  const buildLiveCandleStream = (
+    asOfTime: Date,
+  ): { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] } => {
     const m15: ICandle[] = [];
     const baseM15 = new Date(asOfTime.getTime() - 49 * 15 * 60 * 1000);
     let price = 65000;
@@ -241,7 +251,9 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
 
     mockPrisma = {
       instrument: {
-        findUnique: jest.fn().mockImplementation(async ({ where }) => instrumentsDb.get(where.symbol) || null),
+        findUnique: jest
+          .fn()
+          .mockImplementation(async ({ where }) => instrumentsDb.get(where.symbol) || null),
         findMany: jest.fn().mockResolvedValue(Array.from(instrumentsDb.values())),
       },
       algoBot: {
@@ -589,7 +601,12 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     });
 
     it('L. stale live quote -> MARKET_DATA_UNAVAILABLE error classified', async () => {
-      liveProvider.throwQuoteError = new StaleMarketDataError('BTCUSDT', 30, 5, new Date(Date.now() - 30000));
+      liveProvider.throwQuoteError = new StaleMarketDataError(
+        'BTCUSDT',
+        30,
+        5,
+        new Date(Date.now() - 30000),
+      );
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
       const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
@@ -625,7 +642,9 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     });
 
     it('P. placeOrder failure -> status FAILED, execution state updated', async () => {
-      jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new Error('Exchange network timeout'));
+      jest
+        .spyOn(paperTradingService, 'placeOrder')
+        .mockRejectedValue(new Error('Exchange network timeout'));
 
       const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
@@ -667,20 +686,32 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
 
     it('Retryable failure (MarketDataUnavailableError) transitions execution state to FAILED_RETRYABLE', async () => {
       const markSpy = jest.spyOn(algoBotsService, 'markExecutionFailed');
-      jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new MarketDataUnavailableError('BTCUSDT'));
+      jest
+        .spyOn(paperTradingService, 'placeOrder')
+        .mockRejectedValue(new MarketDataUnavailableError('BTCUSDT'));
 
       await scannerService.triggerScan(Timeframe.M15, scanOptions);
 
-      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(MarketDataUnavailableError), expect.anything());
+      expect(markSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(MarketDataUnavailableError),
+        expect.anything(),
+      );
     });
 
     it('Non-retryable failure transitions execution state to FAILED_FINAL', async () => {
       const markSpy = jest.spyOn(algoBotsService, 'markExecutionFailed');
-      jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new Error('ORDER_REJECTED: Margin insufficient'));
+      jest
+        .spyOn(paperTradingService, 'placeOrder')
+        .mockRejectedValue(new Error('ORDER_REJECTED: Margin insufficient'));
 
       await scannerService.triggerScan(Timeframe.M15, scanOptions);
 
-      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(Error), expect.anything());
+      expect(markSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Error),
+        expect.anything(),
+      );
     });
   });
 
@@ -691,7 +722,15 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       decisionTimestamp: new Date(),
       closedThroughTimestamp: new Date(),
       candles: [
-        { timestamp: new Date(), open: 100, high: 105, low: 95, close: 102, volume: 1000, isClosed: true },
+        {
+          timestamp: new Date(),
+          open: 100,
+          high: 105,
+          low: 95,
+          close: 102,
+          volume: 1000,
+          isClosed: true,
+        },
       ],
     };
 
@@ -752,8 +791,16 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
         publish: jest.fn().mockResolvedValue(1),
       };
 
-      const redis1 = { getClient: () => redisClientInstance1, set: jest.fn(), get: jest.fn() } as any;
-      const redis2 = { getClient: () => redisClientInstance2, set: jest.fn(), get: jest.fn() } as any;
+      const redis1 = {
+        getClient: () => redisClientInstance1,
+        set: jest.fn(),
+        get: jest.fn(),
+      } as any;
+      const redis2 = {
+        getClient: () => redisClientInstance2,
+        set: jest.fn(),
+        get: jest.fn(),
+      } as any;
 
       const scanner1 = new ScannerService(redis1, signalsService, algoBotsService);
       const scanner2 = new ScannerService(redis2, signalsService, algoBotsService);

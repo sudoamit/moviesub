@@ -78,7 +78,9 @@ function getMarketAwareTimestamps(symbol: string, signalTimestamp?: Date | strin
 
   const isNSE = !isCrypto && !isGold;
   const isMarketOpen =
-    isCrypto || isGold || (isWeekday && currentMinInDay >= marketOpenMin && currentMinInDay <= marketCloseMin);
+    isCrypto ||
+    isGold ||
+    (isWeekday && currentMinInDay >= marketOpenMin && currentMinInDay <= marketCloseMin);
 
   const entryDate = signalTimestamp ? new Date(signalTimestamp) : null;
   const estCloseDate = entryDate ? new Date(entryDate.getTime() + 45 * 60000) : null;
@@ -563,7 +565,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   );
 
   const rawMaxRisk = numericQty * Math.abs(effectiveEntryPrice - originalSL);
-  const maxRiskAmount = Number((isCrypto || isGold ? rawMaxRisk * cryptoFxRate : rawMaxRisk).toFixed(2));
+  const maxRiskAmount = Number(
+    (isCrypto || isGold ? rawMaxRisk * cryptoFxRate : rawMaxRisk).toFixed(2),
+  );
 
   // Display price helper: converts USD/USDT prices to INR for BTC and Gold display.
   // Internal computation values (spotEntryPrice, currentSL, tp1, etc.) remain in native quote currency.
@@ -602,20 +606,27 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const tp3 = isOptionMode && !isCrypto ? optionTP3 : validTP3;
 
   // Presentation-only Running P&L: consume backend authoritative unrealized P&L
-  const runningPnL = (paperPosition as any)?.unrealizedPnL !== undefined
-    ? Number((paperPosition as any).unrealizedPnL)
-    : 0;
+  const runningPnL =
+    (paperPosition as any)?.unrealizedPnL !== undefined
+      ? Number((paperPosition as any).unrealizedPnL)
+      : 0;
 
   // Margin used: consume backend authoritative usedMargin
-  const totalMarginUsed = (paperPosition as any)?.usedMargin !== undefined
-    ? Number((paperPosition as any).usedMargin)
-    : 0;
+  const totalMarginUsed =
+    (paperPosition as any)?.usedMargin !== undefined
+      ? Number((paperPosition as any).usedMargin)
+      : 0;
 
-  const priceDifference = isBull ? effectiveCurrentPrice - effectiveEntryPrice : effectiveEntryPrice - effectiveCurrentPrice;
+  const priceDifference = isBull
+    ? effectiveCurrentPrice - effectiveEntryPrice
+    : effectiveEntryPrice - effectiveCurrentPrice;
 
-  const runningRMultiple = (paperPosition as any)?.unrealizedR !== undefined
-    ? Number((paperPosition as any).unrealizedR)
-    : (riskPerUnit > 0 ? Number((priceDifference / riskPerUnit).toFixed(2)) : 0);
+  const runningRMultiple =
+    (paperPosition as any)?.unrealizedR !== undefined
+      ? Number((paperPosition as any).unrealizedR)
+      : riskPerUnit > 0
+        ? Number((priceDifference / riskPerUnit).toFixed(2))
+        : 0;
   const returnPercentage =
     totalMarginUsed > 0
       ? Number(((runningPnL / totalMarginUsed) * 100).toFixed(2))
@@ -716,7 +727,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         localStorage.setItem(cutStorageKey, 'true');
         localStorage.setItem(symbolCutKey, 'true');
         localStorage.setItem(cutSummaryStorageKey, JSON.stringify(summary));
-        window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { ...summary, symbol } }));
+        window.dispatchEvent(
+          new CustomEvent('quant_trade_closed', { detail: { ...summary, symbol } }),
+        );
       }
 
       if (onClosePosition) {
@@ -1059,8 +1072,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 {isClosed ? (
                   <span className="text-slate-400 block mt-0.5">
                     Exited @ {currencySymbol}
-                    {dp(closedTradeSummary.exitPrice).toFixed(2)} ({closedTradeSummary.reason}) • Logged
-                    to Institutional Trade Journal
+                    {dp(closedTradeSummary.exitPrice).toFixed(2)} ({closedTradeSummary.reason}) •
+                    Logged to Institutional Trade Journal
                   </span>
                 ) : isOptionMode && !isCrypto ? (
                   <>
@@ -1073,7 +1086,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
                       Spot CMP: {currencySymbol}
-                      {dp(currentCMP).toFixed(2)} ({isBull ? 'Long' : 'Short'} Entry: {currencySymbol}
+                      {dp(currentCMP).toFixed(2)} ({isBull ? 'Long' : 'Short'} Entry:{' '}
+                      {currencySymbol}
                       {dp(spotEntryPrice).toFixed(2)})
                     </span>
                   </>

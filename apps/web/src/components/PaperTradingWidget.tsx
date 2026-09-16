@@ -97,7 +97,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const notionalTurnover = cmp * totalQuantity;
   const notionalTurnoverINR = notionalTurnover;
   const estimatedCharges = isCrypto
-    ? Number((notionalTurnover * 0.001).toFixed(2))   // 0.1% Binance flat rate (matches API)
+    ? Number((notionalTurnover * 0.001).toFixed(2)) // 0.1% Binance flat rate (matches API)
     : Number((20.0 + notionalTurnover * 0.00016).toFixed(2));
   const estimatedMargin = Number((notionalTurnoverINR / leverage + estimatedCharges).toFixed(2));
 
@@ -390,7 +390,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             <strong className="text-white">
               {currencySymbol}
               {cmpINR.toFixed(2)}
-              {(isCrypto || isGold) && <span className="text-slate-500 text-[9px] ml-1">(native: {cmp.toFixed(2)})</span>}
+              {(isCrypto || isGold) && (
+                <span className="text-slate-500 text-[9px] ml-1">(native: {cmp.toFixed(2)})</span>
+              )}
             </strong>
           </div>
           <div>
@@ -615,7 +617,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                         trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
                       const isGoldTrade = trade.symbol === 'XAUUSD' || trade.symbol === 'GOLD';
                       const tradeFx = trade.fxRateUsed ?? 1.0;
-                      const dpTrade = (p: number) => (isCryptoTrade || isGoldTrade ? p * tradeFx : p);
+                      const dpTrade = (p: number) =>
+                        isCryptoTrade || isGoldTrade ? p * tradeFx : p;
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">
                           <td className="p-3 font-black text-white">

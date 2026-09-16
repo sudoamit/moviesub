@@ -79,9 +79,7 @@ export const MultiChartGrid: React.FC<MultiChartGridProps> = ({ signals, tickers
         return;
       }
       const data = await res.json();
-      const candleList = Array.isArray(data)
-        ? data
-        : data?.closedCandles || data?.candles || [];
+      const candleList = Array.isArray(data) ? data : data?.closedCandles || data?.candles || [];
       const parsedCandles = candleList.map((c: any) => ({
         timestamp: c.timestamp ? new Date(c.timestamp) : new Date((c.time || 0) * 1000),
         open: Number(c.open),
