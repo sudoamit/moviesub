@@ -273,9 +273,7 @@ export const AlgoStrategyBuilder: React.FC = () => {
 
           {bots.length === 0 ? (
             <EmptyState
-              preset="no-research-runs"
-              title="No Deployed Strategy Bots"
-              description="Configure rule parameters above to deploy your first automated execution bot."
+              preset="no-algo-bots"
               className="my-3"
             />
           ) : (

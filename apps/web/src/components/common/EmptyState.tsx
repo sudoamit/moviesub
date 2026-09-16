@@ -13,6 +13,7 @@ import {
   Wallet,
   Brain,
   Layers,
+  Bot,
 } from 'lucide-react';
 
 export type EmptyStateVariant = 'empty' | 'stale' | 'unavailable' | 'error' | 'loading';
@@ -23,7 +24,8 @@ export type EmptyStatePreset =
   | 'no-trades'
   | 'no-market-data'
   | 'no-scan-results'
-  | 'no-research-runs';
+  | 'no-research-runs'
+  | 'no-algo-bots';
 
 interface EmptyStateProps {
   preset?: EmptyStatePreset;
@@ -74,6 +76,12 @@ const PRESET_CONFIGS: Record<
     description: 'Launch a parameter sweep or walk-forward test to evaluate quantitative strategies.',
     variant: 'empty',
     defaultIcon: <Brain className="w-6 h-6 text-purple-400" />,
+  },
+  'no-algo-bots': {
+    title: 'No Deployed Strategy Bots',
+    description: 'Configure rule parameters above to deploy your first automated SMC execution bot.',
+    variant: 'empty',
+    defaultIcon: <Bot className="w-6 h-6 text-cyan-400" />,
   },
 };
 

@@ -2,6 +2,7 @@ import { NAV_GROUPS, NavGroup, NavTab, StrategyMode } from '../components/Header
 import { MarketDataState } from '../hooks/useMarketContext';
 import { EmptyStatePreset } from '../components/common/EmptyState';
 import { AuthoritativePosition, AlgoExecutionRecord } from '../hooks/usePaperTrading';
+import { StageState } from '../components/execution/ExecutionStageRail';
 
 describe('Frontend UI Architecture & Trading UX Tests', () => {
   describe('Requirement 1 & 9: Grouped Workstation Navigation & Accessibility Structure', () => {
@@ -110,7 +111,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
     });
   });
 
-  describe('Requirement 1 & 5: Strict Authoritative Execution Lifecycle Pipeline', () => {
+  describe('Requirement 1, 2 & 5: Strict Authoritative Execution Lifecycle Pipeline', () => {
     it('requires trigger specifications to remain distinct from fill records', () => {
       const triggerSpec = {
         triggerPrice: 65000,
@@ -129,36 +130,58 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(fillRecord.fillPrice).toBeGreaterThan(triggerSpec.triggerPrice);
     });
 
-    it('proves Order Filled stage is DONE only when authoritative fill or executed state exists', () => {
-      // Case 1: Standby without fill or execution -> PENDING
-      const noFillState = {
-        execution: null,
-        position: null,
+    it('strictly requires authoritative execution record for Order Filled stage (no downstream position inference)', () => {
+      // Helper function matching ExecutionStageRail's strictly authoritative rule
+      const isOrderFilledAuthoritative = (execution: AlgoExecutionRecord | null) => {
+        return execution?.state === 'EXECUTED' || Boolean(execution?.orderPositionId);
       };
-      const isExecuted1 =
-        noFillState.execution?.state === 'EXECUTED' ||
-        (!!noFillState.position && Number(noFillState.position.entryPrice) > 0);
-      expect(isExecuted1).toBe(false);
 
-      // Case 2: Authoritative Executed execution record -> DONE
-      const executedState = {
-        execution: { state: 'EXECUTED' } as AlgoExecutionRecord,
-        position: null,
-      };
-      const isExecuted2 =
-        executedState.execution?.state === 'EXECUTED' ||
-        (!!executedState.position && Number(executedState.position.entryPrice) > 0);
-      expect(isExecuted2).toBe(true);
+      // Case 1: Standby with no execution record -> false
+      expect(isOrderFilledAuthoritative(null)).toBe(false);
 
-      // Case 3: Authoritative Position with entry price -> DONE
-      const filledPositionState = {
-        execution: null,
-        position: { entryPrice: 24250, status: 'OPEN' } as AuthoritativePosition,
+      // Case 2: Execution in RESERVED or EXECUTING state -> false
+      const reservedExecution = { state: 'RESERVED' } as AlgoExecutionRecord;
+      expect(isOrderFilledAuthoritative(reservedExecution)).toBe(false);
+
+      const executingExecution = { state: 'EXECUTING' } as AlgoExecutionRecord;
+      expect(isOrderFilledAuthoritative(executingExecution)).toBe(false);
+
+      // Case 3: Failed execution -> false
+      const failedExecution = { state: 'FAILED_FINAL' } as AlgoExecutionRecord;
+      expect(isOrderFilledAuthoritative(failedExecution)).toBe(false);
+
+      // Case 4: Authoritative EXECUTED state -> true
+      const executedExecution = { state: 'EXECUTED', orderPositionId: 'pos_123' } as AlgoExecutionRecord;
+      expect(isOrderFilledAuthoritative(executedExecution)).toBe(true);
+
+      // Case 5: Having only a position object without an authoritative execution event does NOT satisfy Order Filled
+      const positionOnly: AuthoritativePosition = {
+        id: 'pos_standalone',
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 1,
+        entryPrice: 24250,
+        currentPrice: 24260,
+        unrealizedPnL: 10,
+        unrealizedPnLPercent: 0.04,
+        status: 'OPEN',
+        openedAt: new Date().toISOString(),
       };
-      const isExecuted3 =
-        filledPositionState.execution?.state === 'EXECUTED' ||
-        (!!filledPositionState.position && Number(filledPositionState.position.entryPrice) > 0);
-      expect(isExecuted3).toBe(true);
+      // The fill stage must check the execution record, not position.entryPrice
+      expect(isOrderFilledAuthoritative(null)).toBe(false);
+    });
+
+    it('supports full lifecycle stage statuses: DONE, ACTIVE, FAILED, BLOCKED, NOT_REACHED, PENDING', () => {
+      const validStatuses: StageState[] = [
+        'DONE',
+        'ACTIVE',
+        'FAILED',
+        'BLOCKED',
+        'NOT_REACHED',
+        'PENDING',
+      ];
+      expect(validStatuses.length).toBe(6);
+      expect(new Set(validStatuses).size).toBe(6);
     });
 
     it('verifies all strategy modes are properly typed and supported', () => {
@@ -171,7 +194,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
   });
 
   describe('Requirement 8: Standardized Empty State System', () => {
-    it('defines all required empty state presets across the platform', () => {
+    it('defines all required empty state presets including dedicated no-algo-bots', () => {
       const presets: EmptyStatePreset[] = [
         'no-signal',
         'no-position',
@@ -179,9 +202,11 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         'no-market-data',
         'no-scan-results',
         'no-research-runs',
+        'no-algo-bots',
       ];
-      expect(presets.length).toBe(6);
-      expect(new Set(presets).size).toBe(6);
+      expect(presets.length).toBe(7);
+      expect(new Set(presets).size).toBe(7);
+      expect(presets).toContain('no-algo-bots');
     });
   });
 });

@@ -5,9 +5,9 @@ import { Activity, AlertTriangle, XCircle } from 'lucide-react';
 import { AuthoritativePosition, AlgoExecutionRecord } from '../hooks/usePaperTrading';
 import { ISignalSetup } from '@quant/shared';
 import { ExecutionStageRail } from './execution/ExecutionStageRail';
-import { TriggerCard } from './execution/TriggerCard';
 import { FillCard } from './execution/FillCard';
 import { PositionStateCard } from './execution/PositionStateCard';
+import { TriggerCard } from './execution/TriggerCard';
 
 interface ExecutionTimelineProps {
   symbol: string;
@@ -74,16 +74,21 @@ export const ExecutionTimeline: React.FC<ExecutionTimelineProps> = ({
         </div>
       </div>
 
-      {/* 2. Structured Position Cards: Trigger, Fill & Live P&L */}
+      {/* 2. Structured Execution Workflow Hierarchy: Fill -> Position State -> Trigger Specs */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <TriggerCard signal={signal} currPrefix={currPrefix} />
+        {/* Priority 1: Fill / Execution Status */}
         <FillCard position={position} execution={execution} currPrefix={currPrefix} />
+
+        {/* Priority 2: Position State & Live P&L */}
         <PositionStateCard
           position={position}
           currPrefix={currPrefix}
           onClosePosition={onClosePosition}
           isClosing={isClosing}
         />
+
+        {/* Priority 3: Historical Trigger Details */}
+        <TriggerCard signal={signal} currPrefix={currPrefix} />
       </div>
 
       {/* 3. Strict Authoritative Execution Lifecycle Pipeline Stepper */}

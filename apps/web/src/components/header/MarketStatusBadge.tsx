@@ -56,22 +56,22 @@ export const MarketStatusBadge: React.FC<MarketStatusBadgeProps> = ({
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-panel border border-amber-500/30 text-xs font-mono ${className}`}
       >
         <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />
-        <span className="text-[11px] font-bold text-amber-400">CONNECTING</span>
+        <span className="text-[11px] font-bold text-amber-400">RECONNECTING</span>
       </div>
     );
   }
 
   if (isStale || status === 'STALE') {
-    const ageStr = latencyMs ? `${(latencyMs / 1000).toFixed(1)}s old` : 'Stale Feed';
+    const ageStr = latencyMs ? `${(latencyMs / 1000).toFixed(1)}s` : 'Stale';
     return (
       <div
         role="status"
-        aria-label="Market Data Connected Stale"
-        title={`Provider: ${provider} | Provenance: ${provenance} | Data is ${ageStr}`}
+        aria-label="Market Data Stale"
+        title={`Provider: ${provider} | Provenance: ${provenance} | Data age: ${ageStr}`}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-panel border border-amber-500/40 text-xs font-mono ${className}`}
       >
-        <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-        <span className="text-[11px] font-bold text-amber-400">STALE · {ageStr}</span>
+        <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+        <span className="text-[11px] font-bold text-amber-400">DATA STALE ({ageStr})</span>
       </div>
     );
   }
@@ -79,15 +79,15 @@ export const MarketStatusBadge: React.FC<MarketStatusBadgeProps> = ({
   return (
     <div
       role="status"
-      aria-label="Market Data Connected Fresh"
-      title={`Provider: ${provider} | Provenance: ${provenance} | Status: Live Fresh Feed`}
+      aria-label="Market Data Fresh"
+      title={`Provider: ${provider} | Provenance: ${provenance} | Status: Fresh Feed`}
       className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-panel border border-surface-border text-xs font-mono ${className}`}
     >
       <span className="relative flex h-2 w-2 shrink-0">
         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
         <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
       </span>
-      <span className="text-[11px] font-bold text-emerald-400">CONNECTED · FRESH</span>
+      <span className="text-[11px] font-bold text-emerald-400">DATA FRESH</span>
     </div>
   );
 };
