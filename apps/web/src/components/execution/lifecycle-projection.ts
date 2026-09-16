@@ -24,9 +24,9 @@ export function calculateExecutionLifecycle({
   const isPositionOpen = position?.status === 'OPEN';
   const isPositionClosed = position?.status === 'CLOSED';
 
-  // 1. Stage 1: Signal Detection (Authoritative Signal Identity)
+  // 1. Stage 1: Signal Detection (Authoritative Signal Identity & Canonical Event Evidence)
   const isSignalDetected = Boolean(
-    signal && (signal.id || signal.canonicalCandleTime || (signal.symbol && signal.timeframe))
+    signal && (signal.id || (signal.canonicalCandleTime && signal.canonicalDecisionTime))
   );
   const signalStatus: StageState = isSignalDetected ? 'DONE' : 'PENDING';
   const signalReason =
@@ -59,15 +59,23 @@ export function calculateExecutionLifecycle({
       case 'PENDING':
       default:
         eligibilityStatus = 'PENDING';
+        eligibilityReason = 'Awaiting backend eligibility evaluation';
         break;
     }
   } else if (
     execution?.failureReasonCode === 'INELIGIBLE_FOR_EXECUTION' ||
     execution?.failureReasonCode === 'SCORE_BELOW_MIN' ||
-    execution?.failureReasonCode === 'AUTO_EXECUTE_DISABLED'
+    execution?.failureReasonCode === 'AUTO_EXECUTE_DISABLED' ||
+    execution?.failureReasonCode === 'BOT_INACTIVE' ||
+    execution?.failureReasonCode === 'SMC_CONDITION_MISMATCH' ||
+    execution?.failureReasonCode === 'SYMBOL_MISMATCH' ||
+    execution?.failureReasonCode === 'DIRECTION_MISMATCH'
   ) {
     eligibilityStatus = 'BLOCKED';
     eligibilityReason = execution.failureReason || execution.failureReasonCode;
+  } else if ((signal as any).eligibility?.state === 'ELIGIBLE') {
+    eligibilityStatus = 'DONE';
+    eligibilityReason = (signal as any).eligibility?.reason || 'Eligible for execution';
   } else if (
     (signal as any).eligibility?.state === 'BLOCKED' ||
     (signal as any).eligibility?.state === 'REJECTED'
@@ -81,15 +89,15 @@ export function calculateExecutionLifecycle({
     eligibilityStatus = 'BLOCKED';
     eligibilityReason = (signal as any).rejectionReasons[0];
   } else if (
-    signal.score < 70 ||
-    (signal.grade as string) === 'NO_TRADE' ||
-    (signal.direction as string) === 'NEUTRAL'
+    execution?.state === 'RESERVED' ||
+    execution?.state === 'EXECUTING' ||
+    execution?.state === 'EXECUTED'
   ) {
-    eligibilityStatus = 'BLOCKED';
-    eligibilityReason = `Score ${signal.score}/100 below gate threshold`;
-  } else {
     eligibilityStatus = 'DONE';
-    eligibilityReason = `Score ${signal.score}/100 • Grade ${signal.grade}`;
+    eligibilityReason = 'Verified by execution engine';
+  } else {
+    // Strictest contract: Without authoritative backend execution/signal eligibility evidence, stage is PENDING
+    eligibilityStatus = 'PENDING';
   }
 
   // 3. Stage 3: DB Reservation (Requires Explicit Authoritative Reservation Evidence)
@@ -98,14 +106,15 @@ export function calculateExecutionLifecycle({
 
   const hasExplicitReservation = Boolean(
     execution &&
-      (execution.reservationFingerprint || execution.id) &&
-      (execution.state === 'RESERVED' ||
-        execution.state === 'EXECUTING' ||
-        execution.state === 'EXECUTED')
+      (execution.reservationFingerprint ||
+        execution.reservationId ||
+        execution.reservationState === 'RESERVED' ||
+        execution.state === 'RESERVED')
   );
 
   const isReservationLockedOrFailed =
     execution?.failureReasonCode === 'EXECUTION_LOCKED' ||
+    execution?.reservationState === 'FAILED' ||
     (execution?.state === 'FAILED_FINAL' && !execution.orderPositionId);
 
   if (eligibilityStatus === 'BLOCKED' || eligibilityStatus === 'FAILED') {
@@ -166,10 +175,11 @@ export function calculateExecutionLifecycle({
     orderFilledStatus = 'NOT_REACHED';
   } else if (isAuthoritativelyFilled) {
     orderFilledStatus = 'DONE';
-    const fillPrice =
-      execution?.fillPrice ??
-      (execution?.orderPositionId && position?.entryPrice ? Number(position.entryPrice) : undefined);
-    orderFilledReason = fillPrice ? `Filled @ ₹${fillPrice.toFixed(2)}` : 'Filled';
+    const fillPrice = execution?.fillPrice;
+    orderFilledReason =
+      fillPrice !== undefined && fillPrice !== null
+        ? `Filled @ ₹${Number(fillPrice).toFixed(2)}`
+        : 'Filled';
   } else if (execution?.state?.startsWith('FAILED')) {
     orderFilledStatus = 'FAILED';
     orderFilledReason = 'Execution failed';

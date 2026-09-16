@@ -145,8 +145,51 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(stages.every((s) => s.status === 'PENDING')).toBe(true);
     });
 
-    it('evaluates Eligibility Gate as a first-class authoritative state consuming backend evidence', () => {
-      // Case 1: Backend execution record states trade is INELIGIBLE
+    it('strictly requires canonical signal identity/event evidence for Signal Detected stage', () => {
+      // Standby signal with only symbol and timeframe (no id, no canonical timestamps)
+      const nonCanonicalSignal = {
+        symbol: 'NIFTY',
+        timeframe: '15m',
+      } as any;
+
+      const stagesIncomplete = calculateExecutionLifecycle({
+        signal: nonCanonicalSignal,
+        execution: null,
+        position: null,
+      });
+
+      expect(stagesIncomplete.find((s) => s.id === 'signal')?.status).toBe('PENDING');
+
+      // Authoritative signal with canonical event timestamps
+      const canonicalSignal: ISignalSetup = {
+        id: 'sig_canonical_1',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        state: SignalState.ACTIVE,
+        grade: SignalGrade.A,
+        score: 80,
+        canonicalCandleTime: 1789559700000,
+        canonicalDecisionTime: new Date(1789559700000),
+        entryZone: { min: 24200, max: 24220, optimal: 24210 },
+        stopLoss: 24150,
+        takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
+        riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        scoreBreakdown: {} as any,
+      };
+
+      const stagesCanonical = calculateExecutionLifecycle({
+        signal: canonicalSignal,
+        execution: null,
+        position: null,
+      });
+
+      expect(stagesCanonical.find((s) => s.id === 'signal')?.status).toBe('DONE');
+      expect(stagesCanonical.find((s) => s.id === 'signal')?.reason).toBe('NIFTY 15m • BULLISH');
+    });
+
+    it('evaluates Eligibility Gate strictly from backend evidence and remains PENDING without browser policy recalculation', () => {
       const signal: ISignalSetup = {
         id: 'sig_1',
         symbol: 'NIFTY',
@@ -163,6 +206,16 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         scoreBreakdown: {} as any,
       };
 
+      // Case 1: No backend eligibility evidence -> Must remain PENDING (No browser policy recalculation)
+      const stagesNoEvidence = calculateExecutionLifecycle({
+        signal,
+        execution: null,
+        position: null,
+      });
+
+      expect(stagesNoEvidence.find((s) => s.id === 'eligibility')?.status).toBe('PENDING');
+
+      // Case 2: Backend execution record states trade is INELIGIBLE
       const ineligibleExecution: AlgoExecutionRecord = {
         id: 'exec_ineligible',
         botId: 'bot_1',
@@ -177,20 +230,20 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         updatedAt: new Date().toISOString(),
       };
 
-      const stages = calculateExecutionLifecycle({
+      const stagesIneligible = calculateExecutionLifecycle({
         signal,
         execution: ineligibleExecution,
         position: null,
       });
 
-      const eligibilityStage = stages.find((s) => s.id === 'eligibility');
+      const eligibilityStage = stagesIneligible.find((s) => s.id === 'eligibility');
       expect(eligibilityStage?.status).toBe('BLOCKED');
       expect(eligibilityStage?.reason).toBe('Daily risk budget exceeded');
 
       // Subsequent stages must be NOT_REACHED
-      expect(stages.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
-      expect(stages.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
-      expect(stages.find((s) => s.id === 'placed')?.status).toBe('NOT_REACHED');
+      expect(stagesIneligible.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
+      expect(stagesIneligible.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
+      expect(stagesIneligible.find((s) => s.id === 'placed')?.status).toBe('NOT_REACHED');
     });
 
     it('strictly requires explicit reservation evidence for DB Reservation stage', () => {
@@ -210,7 +263,28 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         scoreBreakdown: {} as any,
       };
 
-      // Case 1: Active explicit reservation
+      // Case 1: Generic execution ID without reservation fingerprint/state does NOT produce DONE
+      const genericExec: AlgoExecutionRecord = {
+        id: 'exec_generic_1',
+        botId: 'bot_nifty_smc',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'FAILED_RETRYABLE',
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const stagesGeneric = calculateExecutionLifecycle({
+        signal,
+        execution: genericExec,
+        position: null,
+      });
+
+      expect(stagesGeneric.find((s) => s.id === 'reserved')?.status).toBe('PENDING');
+
+      // Case 2: Active explicit reservation
       const reservedExec: AlgoExecutionRecord = {
         id: 'exec_reserved_1',
         botId: 'bot_nifty_smc',
@@ -233,7 +307,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(stagesReserved.find((s) => s.id === 'reserved')?.status).toBe('DONE');
       expect(stagesReserved.find((s) => s.id === 'reserved')?.reason).toContain('bot_nifty_smc');
 
-      // Case 2: Execution lock failure
+      // Case 3: Execution lock failure
       const lockedExec: AlgoExecutionRecord = {
         id: 'exec_locked_1',
         botId: 'bot_nifty_smc',
@@ -258,7 +332,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(stagesLocked.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
     });
 
-    it('strictly requires authoritative execution record for Order Filled stage and uses execution fill price', () => {
+    it('strictly requires authoritative execution record for Order Filled stage and never substitutes position entryPrice', () => {
       const signal: ISignalSetup = {
         id: 'sig_1',
         symbol: 'NIFTY',
@@ -325,6 +399,29 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       const positionStage = stagesExecuted.find((s) => s.id === 'open');
       expect(positionStage?.status).toBe('ACTIVE');
       expect(positionStage?.reason).toBe('BUY Active');
+
+      // Case 3: Authoritative EXECUTED record without fillPrice does NOT fabricate position.entryPrice
+      const executedNoFillPrice: AlgoExecutionRecord = {
+        id: 'exec_executed_2',
+        botId: 'bot_nifty_smc',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'EXECUTED',
+        orderPositionId: 'pos_1',
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const stagesNoFillPrice = calculateExecutionLifecycle({
+        signal,
+        execution: executedNoFillPrice,
+        position: positionOnly,
+      });
+
+      expect(stagesNoFillPrice.find((s) => s.id === 'placed')?.status).toBe('DONE');
+      expect(stagesNoFillPrice.find((s) => s.id === 'placed')?.reason).toBe('Filled');
     });
 
     it('renders ExecutionStageRail component markup correctly without crashing', () => {

@@ -41,6 +41,9 @@ export interface AlgoExecutionRecord {
   failureReason?: string;
   orderPositionId?: string;
   reservationFingerprint?: string;
+  reservationId?: string;
+  reservedAt?: string;
+  reservationState?: 'RESERVED' | 'RELEASED' | 'FAILED';
   fillPrice?: number;
   fillTime?: string;
   eligibilityState?: 'ELIGIBLE' | 'BLOCKED' | 'FAILED' | 'PENDING';
@@ -51,6 +54,8 @@ export interface AlgoExecutionRecord {
   updatedAt: string;
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
 export function usePaperTrading(selectedSymbol: string) {
   const [portfolio, setPortfolio] = useState<AuthoritativePortfolio | null>(null);
   const [executions, setExecutions] = useState<AlgoExecutionRecord[]>([]);
@@ -58,7 +63,7 @@ export function usePaperTrading(selectedSymbol: string) {
 
   const fetchPortfolio = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:3001/api/paper-trading/portfolio');
+      const res = await fetch(`${API_BASE}/api/paper-trading/portfolio`);
       if (res.ok) {
         const data = await res.json();
         setPortfolio({
@@ -77,7 +82,7 @@ export function usePaperTrading(selectedSymbol: string) {
 
   const fetchExecutions = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:3001/api/algo-bots/executions?limit=20');
+      const res = await fetch(`${API_BASE}/api/algo-bots/executions?limit=20`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -117,7 +122,7 @@ export function usePaperTrading(selectedSymbol: string) {
       setIsPlacingOrder(true);
       try {
         const res = await fetch(
-          `http://localhost:3001/api/paper-trading/positions/${positionId}/close`,
+          `${API_BASE}/api/paper-trading/positions/${positionId}/close`,
           {
             method: 'POST',
           },
