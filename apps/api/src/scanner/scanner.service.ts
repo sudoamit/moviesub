@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { RedisService } from '../common/redis/redis.service';
 import { SignalsService } from '../signals/signals.service';
 import { AlgoBotsService } from '../algo-bots/algo-bots.service';
-import { Timeframe, WS_EVENTS } from '@quant/shared';
+import { SignalGrade, SignalState, Timeframe, WS_EVENTS } from '@quant/shared';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -73,9 +73,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       for (const sig of signals) {
         let botResultSummary = 'N/A';
 
-        if (sig.grade === ('NO_TRADE' as any)) {
+        if (sig.grade === SignalGrade.NO_TRADE || sig.state === SignalState.INVALIDATED) {
           noTradeCount++;
-          botResultSummary = 'NO_TRADE';
+          botResultSummary = `NO_TRADE (${sig.reasons?.[0] || 'market non-qualification'})`;
         } else if (sig.direction === 'NEUTRAL') {
           neutralCount++;
           botResultSummary = 'NEUTRAL';
@@ -87,28 +87,20 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
           } else {
             validSignals.push(sig);
             try {
-              const bots = await this.algoBotsService.listBots();
-              const relevantBot = bots.find((b) => b.symbol.toUpperCase() === sig.symbol.toUpperCase());
+              // Authoritative Single Pass: execute & retrieve per-bot machine-readable execution results
+              const executionResults = await this.algoBotsService.evaluateSignalForBots(sig);
 
-              if (relevantBot) {
-                const diag = await this.algoBotsService.evaluateBotForSignalDiagnostics(relevantBot, sig);
-                if (diag.matches) {
-                  botResultSummary = 'ready_to_execute';
-                } else {
-                  botResultSummary = `rejected by bot (${diag.reasons.join(', ')})`;
-                  rejectedByBotCount++;
-                }
+              const executed = executionResults.filter((r) => r.status === 'EXECUTED');
+              const rejected = executionResults.filter((r) => r.status === 'REJECTED');
+
+              if (executed.length > 0) {
+                executedCount += executed.length;
+                botResultSummary = `EXECUTED (${executed.map((e) => `bot:${e.botId} pos:${e.orderPositionId}`).join(', ')})`;
+              } else if (rejected.length > 0) {
+                rejectedByBotCount += rejected.length;
+                botResultSummary = `REJECTED (${rejected.map((r) => `${r.botId}:${r.reasonCode}`).join(', ')})`;
               } else {
-                botResultSummary = 'no bot configured';
-              }
-
-              await this.algoBotsService.evaluateSignalForBots(sig);
-              if (relevantBot && botResultSummary === 'ready_to_execute') {
-                const health = await this.algoBotsService.getAlgoExecutionHealth();
-                if (health.lastExecutionSuccess && Date.now() - new Date(health.lastExecutionSuccess).getTime() < 5000) {
-                  botResultSummary = 'executed';
-                  executedCount++;
-                }
+                botResultSummary = `SKIPPED (${executionResults.map((r) => `${r.botId}:${r.reasonCode}`).join(', ')})`;
               }
             } catch (err) {
               botResultSummary = `error (${(err as Error).message})`;

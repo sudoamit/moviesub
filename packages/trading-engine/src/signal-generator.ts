@@ -77,7 +77,51 @@ export class SignalGenerator {
       );
     }
 
-    // 2. Strict Point-in-Time HTF Alignment Invariants
+    // 2. Fail-Closed Invariant: HTF1 Confirmation is Required for Production Signal Generation
+    if (!options.htf1Snapshot || !options.htf1Snapshot.candles || options.htf1Snapshot.candles.length === 0) {
+      const execCandles = execSnap.candles as ICandle[];
+      const lastCandle = execCandles && execCandles.length > 0 ? execCandles[execCandles.length - 1] : null;
+      const currentPrice = lastCandle ? lastCandle.close : 0;
+
+      return {
+        id: `sig_${symbol}_${execSnap.executionTimeframe}_${decisionTimeMs}`,
+        symbol,
+        timeframe: execSnap.executionTimeframe as any,
+        direction: Direction.NEUTRAL,
+        state: SignalState.INVALIDATED,
+        grade: SignalGrade.NO_TRADE,
+        score: 0,
+        canonicalCandleTime: decisionTimeMs,
+        canonicalDecisionTime: decisionTimestamp,
+        timestamp: decisionTimestamp,
+        entryZone: { min: currentPrice, max: currentPrice, optimal: currentPrice },
+        stopLoss: currentPrice,
+        takeProfits: { tp1: currentPrice, tp2: currentPrice, tp3: currentPrice },
+        riskRewardRatios: { rr1: 0, rr2: 0, rr3: 0 },
+        reasoning: {
+          htfStructure: 'NO_TRADE: Required H1 HTF snapshot was unavailable or empty',
+          execStructure: 'NO_TRADE: Missing HTF alignment context',
+          orderBlock: 'None',
+          fvg: 'None',
+          liquidity: 'None',
+          confluenceSummary: 'Fail-closed: Missing HTF market snapshot',
+        } as any,
+        reasons: ['HTF_DATA_UNAVAILABLE: Required H1 market data was unavailable or empty'],
+        scoreBreakdown: {
+          htfTrend: 0,
+          structureBreak: 0,
+          liquiditySweep: 0,
+          fvg: 0,
+          orderBlock: 0,
+          rsiAlignment: 0,
+          volumeDisplacement: 0,
+          riskRewardRatio: 0,
+        } as any,
+        triggerEvidence: {},
+      };
+    }
+
+    // 3. Strict Point-in-Time HTF Alignment Invariants
     if (options.htf1Snapshot) {
       const htf1ClosedMs = options.htf1Snapshot.closedThroughTimestamp.getTime();
       if (htf1ClosedMs > decisionTimeMs) {

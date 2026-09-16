@@ -36,6 +36,16 @@ export interface IExecutionFailureClassification {
   message: string;
 }
 
+export interface IAlgoBotExecutionResult {
+  botId: string;
+  symbol: string;
+  status: 'EXECUTED' | 'REJECTED' | 'SKIPPED';
+  reasonCode: string;
+  details?: string;
+  executionId?: string;
+  orderPositionId?: string;
+}
+
 export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
   if (
     err instanceof MarketDataUnavailableError ||
@@ -1317,6 +1327,7 @@ export class AlgoBotsService implements OnModuleInit {
    */
   public async getAlgoExecutionHealth(): Promise<{
     paperExecutionEnabled: boolean;
+    hasEnabledExecutionBot: boolean;
     activeBotCount: number;
     enabledBotCount: number;
     lastSignalTime?: Date;
@@ -1328,8 +1339,11 @@ export class AlgoBotsService implements OnModuleInit {
     const activeBotCount = bots.filter((b) => b.isActive).length;
     const enabledBotCount = bots.filter((b) => b.isActive && b.autoExecutePaper).length;
 
+    const paperExecutionEnabled = process.env.PAPER_TRADING_ENABLED !== 'false';
+
     return {
-      paperExecutionEnabled: enabledBotCount > 0,
+      paperExecutionEnabled,
+      hasEnabledExecutionBot: enabledBotCount > 0,
       activeBotCount,
       enabledBotCount,
       lastSignalTime: this.lastSignalTime,
@@ -1340,11 +1354,12 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * Evaluates incoming signal against all active bot strategies
+   * Evaluates incoming signal against all active bot strategies in a single authoritative pass
    */
-  async evaluateSignalForBots(signal: ISignalSetup) {
+  async evaluateSignalForBots(signal: ISignalSetup): Promise<IAlgoBotExecutionResult[]> {
     this.lastSignalTime = new Date();
     const bots = await this.listBots();
+    const results: IAlgoBotExecutionResult[] = [];
     const canonicalCandleFormatted = signal.canonicalCandleTime
       ? new Date(signal.canonicalCandleTime).toISOString()
       : signal.timestamp
@@ -1352,6 +1367,10 @@ export class AlgoBotsService implements OnModuleInit {
         : 'UNKNOWN';
 
     for (const bot of bots) {
+      if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+        continue;
+      }
+
       this.logger.log(
         `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
       );
@@ -1372,6 +1391,13 @@ export class AlgoBotsService implements OnModuleInit {
           `result=REJECTED\n` +
           `reason=${primaryReason}`,
         );
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: primaryReason,
+          details: `Diagnostic check failed: ${diag.reasons.join(', ')}`,
+        });
         continue;
       }
 
@@ -1393,6 +1419,13 @@ export class AlgoBotsService implements OnModuleInit {
         const reason = eligibility.reasonCode || 'ELIGIBILITY_FAILED';
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' eligibility failed for ${signal.symbol}: ${reason}`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          details: eligibility.details,
+        });
         continue;
       }
 
@@ -1402,6 +1435,13 @@ export class AlgoBotsService implements OnModuleInit {
         const reason = match.reasonCode || 'STRATEGY_MISMATCH';
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' strategy mismatch for ${signal.symbol}: ${reason}`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          details: match.details,
+        });
         continue;
       }
 
@@ -1410,6 +1450,13 @@ export class AlgoBotsService implements OnModuleInit {
         this.lastExecutionRejectionReason = 'AUTO_EXECUTE_PAPER_DISABLED';
         this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
         await this.recordBotTrigger(bot.id, signal);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'SKIPPED',
+          reasonCode: 'AUTO_EXECUTE_PAPER_DISABLED',
+          details: `Bot '${bot.id}' autoExecutePaper is false`,
+        });
         continue;
       }
 
@@ -1420,12 +1467,26 @@ export class AlgoBotsService implements OnModuleInit {
         if (alreadyOpen) {
           this.lastExecutionRejectionReason = 'POSITION_ALREADY_OPEN';
           this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' already has an open position for ${bot.symbol}`);
+          results.push({
+            botId: bot.id,
+            symbol: bot.symbol,
+            status: 'REJECTED',
+            reasonCode: 'POSITION_ALREADY_OPEN',
+            details: `Position for '${bot.symbol}' is already open in paper portfolio`,
+          });
           continue;
         }
       } catch (err: any) {
         const reason = `PORTFOLIO_CHECK_FAILED: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' portfolio check failed for ${bot.symbol}: ${reason}`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: 'PORTFOLIO_CHECK_FAILED',
+          details: String(err?.message || err),
+        });
         continue;
       }
 
@@ -1436,6 +1497,13 @@ export class AlgoBotsService implements OnModuleInit {
         const reason = `MARKET_PRICE_UNAVAILABLE: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' market price check failed for ${bot.symbol}: ${reason}`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: 'MARKET_PRICE_UNAVAILABLE',
+          details: String(err?.message || err),
+        });
         continue;
       }
 
@@ -1448,6 +1516,13 @@ export class AlgoBotsService implements OnModuleInit {
         const reason = `QUANTITY_RESOLUTION_FAILED: ${err?.message || err}`;
         this.lastExecutionRejectionReason = reason;
         this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' quantity resolution failed for ${bot.symbol}: ${reason}`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: 'QUANTITY_RESOLUTION_FAILED',
+          details: String(err?.message || err),
+        });
         continue;
       }
 
@@ -1466,6 +1541,13 @@ export class AlgoBotsService implements OnModuleInit {
         this.logger.warn(
           `[ALGO EXECUTION REJECTED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: ${reservation.reason})`,
         );
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: `EXECUTION_LOCKED_${reservation.reason}`,
+          details: reservation.reason,
+        });
         continue;
       }
 
@@ -1522,12 +1604,41 @@ export class AlgoBotsService implements OnModuleInit {
         this.logger.log(
           `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Qty: ${quantity} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
         );
+
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'EXECUTED',
+          reasonCode: 'ORDER_PLACED_SUCCESSFULLY',
+          executionId,
+          orderPositionId: orderResult.id,
+        });
       } catch (e: any) {
         const reason = `ORDER_PLACEMENT_FAILED: ${e?.message || e}`;
         this.lastExecutionRejectionReason = reason;
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
         await this.markExecutionFailed(executionId, e);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: 'ORDER_PLACEMENT_FAILED',
+          details: String(e?.message || e),
+          executionId,
+        });
       }
     }
+
+    if (results.length === 0) {
+      results.push({
+        botId: 'NONE',
+        symbol: signal.symbol,
+        status: 'SKIPPED',
+        reasonCode: 'NO_BOT_CONFIGURED_FOR_SYMBOL',
+        details: `No active algo bot is configured for symbol '${signal.symbol}'`,
+      });
+    }
+
+    return results;
   }
 }
