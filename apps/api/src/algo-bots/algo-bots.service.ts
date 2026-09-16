@@ -1633,16 +1633,16 @@ export class AlgoBotsService implements OnModuleInit {
           orderPositionId: orderResult.id,
         });
       } catch (e: any) {
-        const reason = `ORDER_PLACEMENT_FAILED: ${e?.message || e}`;
-        this.lastExecutionRejectionReason = reason;
+        const classification = classifyExecutionFailure(e);
+        this.lastExecutionRejectionReason = classification.reasonCode;
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
         await this.markExecutionFailed(executionId, e);
         results.push({
           botId: bot.id,
           symbol: bot.symbol,
           status: 'FAILED',
-          reasonCode: 'ORDER_PLACEMENT_FAILED',
-          details: String(e?.message || e),
+          reasonCode: classification.reasonCode,
+          details: classification.message,
           executionId,
         });
       }

@@ -137,7 +137,7 @@ describe('AlgoBotsService Execution State Machine', () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('FAILED');
-    expect(results[0].reasonCode).toBe('ORDER_PLACEMENT_FAILED');
+    expect(results[0].reasonCode).toBe('UNKNOWN_EXECUTION_ERROR');
     expect(results[0].details).toContain('Broker connection refused');
 
     // Inspect the stored record state in executionsDb

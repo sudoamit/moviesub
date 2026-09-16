@@ -9,6 +9,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ScannerService.name);
   private autoScanTimer: NodeJS.Timeout | null = null;
   private isScanning = false;
+  private isLeader = false;
+  private lastScanStartedAt?: Date;
+  private lastScanCompletedAt?: Date;
+  private lastScanDurationMs = 0;
 
   constructor(
     private readonly redis: RedisService,
@@ -57,8 +61,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    // Distributed Leader Election Lock for Multi-Instance API Deployments (8s TTL)
-    const lockKey = `scanner:master_lock:${timeframe}`;
+    // Distributed Leader Election Lease for Multi-Instance API Deployments (8s TTL)
+    const lockKey = 'scanner:leader';
     const lockId = `instance_${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
     const redisClient = this.redis.getClient();
 
@@ -66,6 +70,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       try {
         const setRes = await redisClient.set(lockKey, lockId, 'PX', 8000, 'NX');
         if (!setRes) {
+          this.isLeader = false;
           this.logger.debug(
             `[SCANNER_FOLLOWER_SKIPPED] Scanner leader lease held by another API instance. Skipping trigger.`,
           );
@@ -79,12 +84,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             status: 'SKIPPED_FOLLOWER_INSTANCE',
           };
         }
+        this.isLeader = true;
       } catch (err: any) {
-        this.logger.warn(`Failed acquiring Redis scanner master lock: ${err?.message || err}`);
+        this.logger.warn(`Failed acquiring Redis scanner leader lock: ${err?.message || err}`);
       }
+    } else {
+      this.isLeader = true;
     }
 
     this.isScanning = true;
+    this.lastScanStartedAt = new Date();
     this.algoBotsService.recordScanTime();
 
     try {
@@ -97,12 +106,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       let h1AvailableCount = 0;
       let h4AvailableCount = 0;
       let scoreThresholdMetCount = 0;
+      let scoreRejectedCount = 0;
+      let botEvaluatedCount = 0;
       let botMatchedCount = 0;
+      let botRejectedCount = 0;
       let botEligibleCount = 0;
       let executionAttemptedCount = 0;
-      let rejectedByScoreCount = 0;
-      let rejectedByBotCount = 0;
-      let failedCount = 0;
+      let executionFailedCount = 0;
       let skippedCount = 0;
       let executedCount = 0;
 
@@ -129,12 +139,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         } else {
           activeCount++;
           if (sig.score < 60) {
-            rejectedByScoreCount++;
+            scoreRejectedCount++;
             botResultSummary = 'rejected by score (<60)';
           } else {
             scoreThresholdMetCount++;
             validSignals.push(sig);
             try {
+              botEvaluatedCount++;
               // Authoritative Single Pass: execute & retrieve per-bot machine-readable execution results
               const executionResults = await this.algoBotsService.evaluateSignalForBots(sig);
 
@@ -154,11 +165,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 botResultSummary = `EXECUTED (${executed.map((e) => `bot:${e.botId} pos:${e.orderPositionId}`).join(', ')})`;
               } else if (failed.length > 0) {
                 executionAttemptedCount += failed.length;
-                failedCount += failed.length;
+                executionFailedCount += failed.length;
                 botEligibleCount += failed.length;
                 botResultSummary = `FAILED (${failed.map((f) => `${f.botId}:${f.reasonCode}`).join(', ')})`;
               } else if (rejected.length > 0) {
-                rejectedByBotCount += rejected.length;
+                botRejectedCount += rejected.length;
                 botResultSummary = `REJECTED (${rejected.map((r) => `${r.botId}:${r.reasonCode}`).join(', ')})`;
               } else if (skipped.length > 0) {
                 skippedCount += skipped.length;
@@ -190,8 +201,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       }
 
       const duration = Date.now() - startTime;
+      this.lastScanCompletedAt = new Date();
+      this.lastScanDurationMs = duration;
+
       const summary = {
-        timestamp: new Date().toISOString(),
+        timestamp: this.lastScanCompletedAt.toISOString(),
         timeframe,
         scannedCount: signals.length,
         instrumentsScanned: signals.length,
@@ -203,18 +217,24 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         h1AvailableCount,
         h4AvailableCount,
         scoreThresholdMetCount,
+        scoreRejectedCount,
+        botEvaluatedCount,
         botMatchedCount,
+        botRejectedCount,
         botEligibleCount,
-        executionAttemptedCount,
-        executionSucceededCount: executedCount,
-        executionFailedCount: failedCount,
-        rejectedByScoreCount,
-        rejectedByBotCount,
-        failedCount,
         skippedCount,
+        executionAttemptedCount,
+        executionFailedCount,
+        failedCount: executionFailedCount,
         executedCount,
         durationMs: duration,
         signals: validSignals,
+        scannerRunning: this.isScanning,
+        scannerLeader: this.isLeader,
+        paperExecutionEnabled: process.env.PAPER_TRADING_ENABLED === 'true',
+        lastScanStartedAt: this.lastScanStartedAt?.toISOString(),
+        lastScanCompletedAt: this.lastScanCompletedAt.toISOString(),
+        lastScanDurationMs: duration,
       };
 
       // Cache latest scan status in Redis
@@ -227,7 +247,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       }
 
       this.logger.log(
-        `[SCANNER SUMMARY] Scanned: ${signals.length} symbols | NO_TRADE: ${noTradeCount} | NEUTRAL: ${neutralCount} | ACTIVE: ${activeCount} | Score>=60: ${scoreThresholdMetCount} | BotMatched: ${botMatchedCount} | ExecAttempted: ${executionAttemptedCount} | Executed: ${executedCount} | Failed: ${failedCount} (Duration: ${duration}ms)`,
+        `[SCANNER SUMMARY] Scanned: ${signals.length} symbols | NO_TRADE: ${noTradeCount} | NEUTRAL: ${neutralCount} | ACTIVE: ${activeCount} | Score>=60: ${scoreThresholdMetCount} | BotMatched: ${botMatchedCount} | ExecAttempted: ${executionAttemptedCount} | Executed: ${executedCount} | Failed: ${executionFailedCount} (Duration: ${duration}ms)`,
       );
       return summary;
     } finally {
@@ -239,7 +259,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     const cached = await this.redis.get('scanner:status:latest');
     if (cached) {
       try {
-        return JSON.parse(cached);
+        const parsed = JSON.parse(cached);
+        return {
+          ...parsed,
+          scannerRunning: this.isScanning,
+          scannerLeader: this.isLeader,
+          paperExecutionEnabled: process.env.PAPER_TRADING_ENABLED === 'true',
+        };
       } catch (e) {
         // Fallback
       }
@@ -251,6 +277,23 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       message: 'Scanner initialized. No recent scan stored.',
       signalsFound: 0,
       scannedCount: 0,
+      instrumentsScanned: 0,
+      signalsGenerated: 0,
+      noTradeCount: 0,
+      neutralCount: 0,
+      scoreRejectedCount: 0,
+      botEvaluatedCount: 0,
+      botRejectedCount: 0,
+      skippedCount: 0,
+      executionAttemptedCount: 0,
+      executionFailedCount: 0,
+      executedCount: 0,
+      scannerRunning: this.isScanning,
+      scannerLeader: this.isLeader,
+      paperExecutionEnabled: process.env.PAPER_TRADING_ENABLED === 'true',
+      lastScanStartedAt: this.lastScanStartedAt?.toISOString(),
+      lastScanCompletedAt: this.lastScanCompletedAt?.toISOString(),
+      lastScanDurationMs: this.lastScanDurationMs,
       signals: [],
     };
   }
