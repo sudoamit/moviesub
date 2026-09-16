@@ -1259,8 +1259,8 @@ export class AlgoBotsService implements OnModuleInit {
     try {
       const instrument = getAuthoritativeInstrument(bot.symbol);
       this.resolveBotOrderQuantity(bot, instrument);
-    } catch {
-      reasons.push('INVALID_QUANTITY');
+    } catch (err: any) {
+      reasons.push(`INVALID_QUANTITY: ${err?.message || err}`);
     }
 
     // Gate 14: Portfolio Open Position Check
@@ -1270,15 +1270,15 @@ export class AlgoBotsService implements OnModuleInit {
       if (alreadyOpen) {
         reasons.push('POSITION_ALREADY_OPEN');
       }
-    } catch {
-      // Ignore in diagnostic evaluation
+    } catch (err: any) {
+      reasons.push(`PORTFOLIO_CHECK_FAILED: ${err?.message || err}`);
     }
 
     // Gate 15: Market Quote Stream Health
     try {
       await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
-    } catch {
-      reasons.push('MARKET_DATA_UNAVAILABLE');
+    } catch (err: any) {
+      reasons.push(`MARKET_DATA_UNAVAILABLE: ${err?.message || err}`);
     }
 
     // Gate 16: Local / DB Execution Lock Check
@@ -1318,22 +1318,23 @@ export class AlgoBotsService implements OnModuleInit {
   public async getAlgoExecutionHealth(): Promise<{
     paperExecutionEnabled: boolean;
     activeBotCount: number;
-    autoExecuteBotCount: number;
-    lastScanTime?: string;
-    lastSignalTime?: string;
-    lastExecutionAttempt?: string;
-    lastExecutionSuccess?: string;
+    enabledBotCount: number;
+    lastSignalTime?: Date;
+    lastExecutionAttempt?: Date;
+    lastExecutionSuccess?: Date;
     lastExecutionRejectionReason?: string;
   }> {
     const bots = await this.listBots();
+    const activeBotCount = bots.filter((b) => b.isActive).length;
+    const enabledBotCount = bots.filter((b) => b.isActive && b.autoExecutePaper).length;
+
     return {
-      paperExecutionEnabled: this.isPaperExecutionEnabled(),
-      activeBotCount: bots.filter((b) => b.isActive).length,
-      autoExecuteBotCount: bots.filter((b) => b.isActive && b.autoExecutePaper).length,
-      lastScanTime: this.lastScanTime ? this.lastScanTime.toISOString() : undefined,
-      lastSignalTime: this.lastSignalTime ? this.lastSignalTime.toISOString() : undefined,
-      lastExecutionAttempt: this.lastExecutionAttempt ? this.lastExecutionAttempt.toISOString() : undefined,
-      lastExecutionSuccess: this.lastExecutionSuccess ? this.lastExecutionSuccess.toISOString() : undefined,
+      paperExecutionEnabled: enabledBotCount > 0,
+      activeBotCount,
+      enabledBotCount,
+      lastSignalTime: this.lastSignalTime,
+      lastExecutionAttempt: this.lastExecutionAttempt,
+      lastExecutionSuccess: this.lastExecutionSuccess,
       lastExecutionRejectionReason: this.lastExecutionRejectionReason,
     };
   }
@@ -1361,9 +1362,20 @@ export class AlgoBotsService implements OnModuleInit {
 
       if (isRejected) {
         this.lastExecutionRejectionReason = primaryReason;
+        this.logger.warn(
+          `[ALGO EXECUTION DECISION]\n` +
+          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+          `signal=${signal.state}\n` +
+          `score=${signal.score}\n` +
+          `canonicalCandle=${canonicalCandleFormatted}\n` +
+          `bot=${bot.id}\n` +
+          `result=REJECTED\n` +
+          `reason=${primaryReason}`,
+        );
+        continue;
       }
 
-      // Requirement 6: Log structured execution decision for every bot evaluation
+      // Log candidate status prior to order placement
       this.logger.warn(
         `[ALGO EXECUTION DECISION]\n` +
         `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
@@ -1371,32 +1383,49 @@ export class AlgoBotsService implements OnModuleInit {
         `score=${signal.score}\n` +
         `canonicalCandle=${canonicalCandleFormatted}\n` +
         `bot=${bot.id}\n` +
-        `result=${isRejected ? 'REJECTED' : 'EXECUTED'}\n` +
-        `reason=${primaryReason}`,
+        `result=READY_TO_EXECUTE\n` +
+        `reason=DIAGNOSTICS_PASSED`,
       );
 
       // 1. Validate Bot Active & Signal Eligibility (ACTIVE state, trade levels, freshness)
       const eligibility = this.validateExecutionEligibility(bot, signal);
       if (!eligibility.matches) {
+        const reason = eligibility.reasonCode || 'ELIGIBILITY_FAILED';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' eligibility failed for ${signal.symbol}: ${reason}`);
         continue;
       }
 
       // 2. Authoritative Strategy Matching (Symbol, Timeframe, Direction, MinScore, Canonical SMC Evidence)
       const match = this.matchesBotStrategy(bot, signal);
       if (!match.matches) {
+        const reason = match.reasonCode || 'STRATEGY_MISMATCH';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' strategy mismatch for ${signal.symbol}: ${reason}`);
         continue;
       }
 
       // P0 #3: NEVER RESERVE BEFORE autoExecutePaper CHECK
       if (!bot.autoExecutePaper) {
+        this.lastExecutionRejectionReason = 'AUTO_EXECUTE_PAPER_DISABLED';
+        this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
         await this.recordBotTrigger(bot.id, signal);
         continue;
       }
 
       // 🔴 #9: Check Bot Position Scope Guard BEFORE DB Reservation to prevent consuming reservation rows
-      const portfolio = await this.paperTradingService.getPortfolio();
-      const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
-      if (alreadyOpen) {
+      try {
+        const portfolio = await this.paperTradingService.getPortfolio();
+        const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
+        if (alreadyOpen) {
+          this.lastExecutionRejectionReason = 'POSITION_ALREADY_OPEN';
+          this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' already has an open position for ${bot.symbol}`);
+          continue;
+        }
+      } catch (err: any) {
+        const reason = `PORTFOLIO_CHECK_FAILED: ${err?.message || err}`;
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' portfolio check failed for ${bot.symbol}: ${reason}`);
         continue;
       }
 
@@ -1404,6 +1433,9 @@ export class AlgoBotsService implements OnModuleInit {
       try {
         await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
       } catch (err: any) {
+        const reason = `MARKET_PRICE_UNAVAILABLE: ${err?.message || err}`;
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' market price check failed for ${bot.symbol}: ${reason}`);
         continue;
       }
 
@@ -1413,6 +1445,9 @@ export class AlgoBotsService implements OnModuleInit {
         const instrument = getAuthoritativeInstrument(bot.symbol);
         quantity = this.resolveBotOrderQuantity(bot, instrument);
       } catch (err: any) {
+        const reason = `QUANTITY_RESOLUTION_FAILED: ${err?.message || err}`;
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' quantity resolution failed for ${bot.symbol}: ${reason}`);
         continue;
       }
 
@@ -1426,8 +1461,10 @@ export class AlgoBotsService implements OnModuleInit {
       const reservation = await this.reserveExecutionLock(bot, signal, fingerprint);
 
       if (!reservation.success || !reservation.executionId) {
+        const reason = `EXECUTION_LOCKED: ${reservation.reason}`;
+        this.lastExecutionRejectionReason = reason;
         this.logger.warn(
-          `[REJECTED: EXECUTION_LOCKED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: ${reservation.reason})`,
+          `[ALGO EXECUTION REJECTED] Execution lock unavailable for fingerprint: ${fingerprint} (Reason: ${reservation.reason})`,
         );
         continue;
       }
@@ -1467,6 +1504,17 @@ export class AlgoBotsService implements OnModuleInit {
         await this.markExecutionExecuted(executionId, orderResult.id);
         this.lastExecutionSuccess = new Date();
 
+        this.logger.warn(
+          `[ALGO EXECUTION DECISION]\n` +
+          `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+          `signal=${signal.state}\n` +
+          `score=${signal.score}\n` +
+          `canonicalCandle=${canonicalCandleFormatted}\n` +
+          `bot=${bot.id}\n` +
+          `result=EXECUTED\n` +
+          `reason=ORDER_PLACED_SUCCESSFULLY`,
+        );
+
         this.logger.log(
           `[PIPELINE TRACE 6/6] Marked execution executed: executionId=${executionId}, orderPositionId=${orderResult.id}`,
         );
@@ -1475,7 +1523,8 @@ export class AlgoBotsService implements OnModuleInit {
           `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Qty: ${quantity} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
         );
       } catch (e: any) {
-        this.lastExecutionRejectionReason = String(e?.message || e);
+        const reason = `ORDER_PLACEMENT_FAILED: ${e?.message || e}`;
+        this.lastExecutionRejectionReason = reason;
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
         await this.markExecutionFailed(executionId, e);
       }

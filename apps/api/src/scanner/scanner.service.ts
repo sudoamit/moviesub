@@ -93,8 +93,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
               if (relevantBot) {
                 const diag = await this.algoBotsService.evaluateBotForSignalDiagnostics(relevantBot, sig);
                 if (diag.matches) {
-                  botResultSummary = 'executed';
-                  executedCount++;
+                  botResultSummary = 'ready_to_execute';
                 } else {
                   botResultSummary = `rejected by bot (${diag.reasons.join(', ')})`;
                   rejectedByBotCount++;
@@ -104,6 +103,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
               }
 
               await this.algoBotsService.evaluateSignalForBots(sig);
+              if (relevantBot && botResultSummary === 'ready_to_execute') {
+                const health = await this.algoBotsService.getAlgoExecutionHealth();
+                if (health.lastExecutionSuccess && Date.now() - new Date(health.lastExecutionSuccess).getTime() < 5000) {
+                  botResultSummary = 'executed';
+                  executedCount++;
+                }
+              }
             } catch (err) {
               botResultSummary = `error (${(err as Error).message})`;
               this.logger.warn(
