@@ -1104,21 +1104,23 @@ export class AlgoBotsService implements OnModuleInit {
   /**
    * P0 #1 & #3: Atomic Conditional Lifecycle Transition — Mark Failed ([EXECUTING, RESERVED] -> FAILED_RETRYABLE / FAILED_FINAL)
    */
-  public async markExecutionFailed(executionId: string, err: any, customReasonCode?: string): Promise<void> {
+  public async markExecutionFailed(
+    executionId: string,
+    err: any,
+    classificationParam?: IExecutionFailureClassification,
+  ): Promise<void> {
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
 
-    const classification = classifyExecutionFailure(err);
+    const classification = classificationParam || classifyExecutionFailure(err);
     const targetState = classification.retryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
-    const reasonCode = customReasonCode || classification.reasonCode;
-    const failureReason = classification.message;
 
     await this.transitionExecutionState(
       executionId,
       ['EXECUTING', 'RESERVED'],
       targetState,
       {
-        failureReason,
-        failureReasonCode: reasonCode,
+        failureReason: classification.message,
+        failureReasonCode: classification.reasonCode,
       },
     );
   }
@@ -1399,6 +1401,20 @@ export class AlgoBotsService implements OnModuleInit {
       const primaryReason = diag.reasons[0] || 'UNKNOWN';
 
       if (isRejected) {
+        if (diag.reasons.length === 1 && diag.reasons[0] === 'AUTO_EXECUTE_DISABLED') {
+          this.lastExecutionRejectionReason = 'AUTO_EXECUTE_PAPER_DISABLED';
+          await this.recordBotTrigger(bot.id, signal);
+          this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
+          results.push({
+            botId: bot.id,
+            symbol: bot.symbol,
+            status: 'SKIPPED',
+            reasonCode: 'AUTO_EXECUTE_PAPER_DISABLED',
+            details: `Bot '${bot.id}' autoExecutePaper is false`,
+          });
+          continue;
+        }
+
         this.lastExecutionRejectionReason = primaryReason;
         this.logger.warn(
           `[ALGO EXECUTION DECISION]\n` +
@@ -1636,7 +1652,7 @@ export class AlgoBotsService implements OnModuleInit {
         const classification = classifyExecutionFailure(e);
         this.lastExecutionRejectionReason = classification.reasonCode;
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
-        await this.markExecutionFailed(executionId, e);
+        await this.markExecutionFailed(executionId, e, classification);
         results.push({
           botId: bot.id,
           symbol: bot.symbol,

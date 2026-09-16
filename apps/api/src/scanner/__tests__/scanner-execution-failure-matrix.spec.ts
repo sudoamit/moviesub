@@ -7,6 +7,7 @@ import { CandlesService } from '../../candles/candles.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { AlertsService } from '../../alerts/alerts.service';
+import { RealMarketStreamerService } from '../../market-data/real-market-streamer.service';
 import {
   Direction,
   ICandle,
@@ -45,11 +46,15 @@ class MatrixLiveMarketDataProvider implements IMarketDataProvider {
       ...c,
       timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
       isClosed: true,
+      provenance: 'LIVE',
     }));
   }
 
   async getLatestCandle(symbol: string, timeframe: Timeframe | string): Promise<ICandle> {
     const candles = await this.getHistoricalCandles(symbol, timeframe, 1);
+    if (!candles || candles.length === 0) {
+      throw new MarketDataUnavailableError(symbol);
+    }
     return candles[0];
   }
 
@@ -61,18 +66,24 @@ class MatrixLiveMarketDataProvider implements IMarketDataProvider {
     if (this.throwQuoteError) {
       throw this.throwQuoteError;
     }
+    if (symbol.toUpperCase() !== 'BTCUSDT') {
+      throw new MarketDataUnavailableError(symbol);
+    }
     const candles = this.candleStream.m15;
     const last = candles[candles.length - 1];
     const price = last ? last.close : 65000;
+    const marketAsOf = this.decisionTime;
+    const observedAt = new Date(this.decisionTime.getTime() + 100);
+
     return {
-      symbol: symbol.toUpperCase(),
+      symbol: 'BTCUSDT',
       bid: price - 0.5,
       ask: price + 0.5,
       last: price,
       volume: last ? last.volume : 1000,
-      timestamp: this.decisionTime,
-      marketAsOf: this.decisionTime,
-      observedAt: this.decisionTime,
+      timestamp: observedAt,
+      marketAsOf,
+      observedAt,
       dataProvenance: 'LIVE',
       providerId: this.providerName,
     };
@@ -92,18 +103,18 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
   let mockPrisma: any;
   let mockRedis: any;
   let liveProvider: MatrixLiveMarketDataProvider;
+  let mockStreamer: any;
 
   let executionsDb: Map<string, any>;
   let positionsDb: Map<string, any>;
   let botsDb: Map<string, any>;
   let instrumentsDb: Map<string, any>;
 
-  const now = Date.now();
-  const decisionTime = new Date(now - (now % (15 * 60 * 1000)));
+  let decisionTime: Date;
 
-  const buildLiveCandleStream = (): { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] } => {
+  const buildLiveCandleStream = (asOfTime: Date): { m15: ICandle[]; h1: ICandle[]; h4: ICandle[] } => {
     const m15: ICandle[] = [];
-    const baseM15 = new Date(decisionTime.getTime() - 50 * 15 * 60 * 1000);
+    const baseM15 = new Date(asOfTime.getTime() - 49 * 15 * 60 * 1000);
     let price = 65000;
 
     for (let i = 0; i < 50; i++) {
@@ -130,7 +141,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
         low = 63700;
         close = 64800;
         volume = 5000;
-      } else if (i > 48) {
+      } else if (i === 49) {
         open = 64800;
         high = 65000;
         low = 64700;
@@ -153,7 +164,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     const h1: ICandle[] = [];
     let h1Price = 60000;
     for (let i = 40; i >= 1; i--) {
-      const htfTime = new Date(decisionTime.getTime() - i * 60 * 60 * 1000);
+      const htfTime = new Date(asOfTime.getTime() - i * 60 * 60 * 1000);
       h1.push({
         timestamp: htfTime,
         open: h1Price,
@@ -169,7 +180,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     const h4: ICandle[] = [];
     let h4Price = 58000;
     for (let i = 25; i >= 1; i--) {
-      const htfTime = new Date(decisionTime.getTime() - i * 4 * 60 * 60 * 1000);
+      const htfTime = new Date(asOfTime.getTime() - i * 4 * 60 * 60 * 1000);
       h4.push({
         timestamp: htfTime,
         open: h4Price,
@@ -190,12 +201,13 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     process.env.NODE_ENV = 'test';
     delete process.env.APP_ENV;
 
+    decisionTime = new Date();
     executionsDb = new Map();
     positionsDb = new Map();
     botsDb = new Map();
     instrumentsDb = new Map();
 
-    const candleStream = buildLiveCandleStream();
+    const candleStream = buildLiveCandleStream(decisionTime);
     liveProvider = new MatrixLiveMarketDataProvider(decisionTime, candleStream);
 
     instrumentsDb.set('BTCUSDT', {
@@ -217,8 +229,8 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       symbol: 'BTCUSDT',
       direction: 'ANY',
       timeframe: '15m',
-      minScore: 60,
-      smcCondition: 'LIQUIDITY_SWEEP',
+      minScore: 70,
+      smcCondition: 'ANY_CONFLUENCE',
       lots: 1,
       autoExecutePaper: true,
       notifyWebhook: false,
@@ -250,6 +262,75 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
           return bot;
         }),
       },
+      paperAccount: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'acc_paper_e2e',
+          name: 'Primary Paper Account',
+          currency: 'USD',
+          cashBalance: 100000.0,
+          usedMargin: 0,
+          isActive: true,
+        }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'acc_paper_e2e',
+          name: 'Primary Paper Account',
+          currency: 'USD',
+          cashBalance: 100000.0,
+          usedMargin: 0,
+          isActive: true,
+        }),
+        update: jest.fn().mockResolvedValue({ id: 'acc_paper_e2e' }),
+      },
+      paperOrder: {
+        create: jest.fn().mockResolvedValue({ id: `ord_e2e_${Date.now()}` }),
+        findUnique: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      paperFill: {
+        create: jest.fn().mockResolvedValue({ id: `fill_e2e_${Date.now()}` }),
+      },
+      auditEvent: {
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+        create: jest.fn().mockResolvedValue({ id: `audit_e2e_${Date.now()}` }),
+      },
+      paperTrade: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn().mockResolvedValue({ id: `trade_e2e_${Date.now()}` }),
+      },
+      tradingSystemConfig: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'SYSTEM_DEFAULT',
+          paperTradingEnabled: true,
+          liveTradingEnabled: false,
+          emergencyStop: false,
+          maxDailyLossPercent: 3.0,
+          maxPositionRiskPercent: 1.0,
+          maxTotalExposurePercent: 20.0,
+          maxOpenPositions: 5,
+          maxTradesPerDay: 20,
+          maxConsecutiveLosses: 3,
+          maxLeverage: 5.0,
+          maxSlippageBps: 50,
+          maxMarketDataAgeSeconds: 5,
+        }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'SYSTEM_DEFAULT',
+          paperTradingEnabled: true,
+          liveTradingEnabled: false,
+          emergencyStop: false,
+          maxDailyLossPercent: 3.0,
+          maxPositionRiskPercent: 1.0,
+          maxTotalExposurePercent: 20.0,
+          maxOpenPositions: 5,
+          maxTradesPerDay: 20,
+          maxConsecutiveLosses: 3,
+          maxLeverage: 5.0,
+          maxSlippageBps: 50,
+          maxMarketDataAgeSeconds: 5,
+        }),
+        create: jest.fn().mockResolvedValue({ id: 'SYSTEM_DEFAULT' }),
+        upsert: jest.fn().mockResolvedValue({ id: 'SYSTEM_DEFAULT' }),
+      },
       algoBotExecution: {
         create: jest.fn().mockImplementation(async ({ data }) => {
           const id = `exec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -274,7 +355,12 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
         findMany: jest.fn().mockImplementation(async (query) => {
           const all = Array.from(positionsDb.values());
           if (query?.where?.status) {
-            return all.filter((p) => p.status === query.where.status);
+            const allowed = Array.isArray(query.where.status?.in)
+              ? query.where.status.in
+              : Array.isArray(query.where.status)
+                ? query.where.status
+                : [query.where.status];
+            return all.filter((p) => allowed.includes(p.status));
           }
           return all;
         }),
@@ -283,10 +369,24 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
           return (
             all.find((p) => {
               if (query?.where?.symbol && p.symbol !== query.where.symbol) return false;
-              if (query?.where?.status && p.status !== query.where.status) return false;
+              if (query?.where?.status) {
+                const allowed = Array.isArray(query.where.status?.in)
+                  ? query.where.status.in
+                  : Array.isArray(query.where.status)
+                    ? query.where.status
+                    : [query.where.status];
+                if (!allowed.includes(p.status)) return false;
+              }
               return true;
             }) || null
           );
+        }),
+        count: jest.fn().mockImplementation(async (query) => {
+          const all = Array.from(positionsDb.values());
+          if (query?.where?.status) {
+            return all.filter((p) => p.status === query.where.status).length;
+          }
+          return all.length;
         }),
         create: jest.fn().mockImplementation(async ({ data }) => {
           const id = `pos_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -319,12 +419,29 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       get: jest.fn().mockResolvedValue(null),
     };
 
+    mockStreamer = {
+      getValidatedTicker: jest.fn().mockImplementation(() => {
+        if (liveProvider.throwQuoteError) {
+          throw liveProvider.throwQuoteError;
+        }
+        return {
+          price: 64850.0,
+          marketEventTime: decisionTime.getTime(),
+          lastUpdated: decisionTime.getTime(),
+        };
+      }),
+    };
+
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         ScannerService,
         SignalsService,
         AlgoBotsService,
         PaperTradingService,
+        {
+          provide: RealMarketStreamerService,
+          useValue: mockStreamer,
+        },
         {
           provide: AlertsService,
           useValue: { sendAlert: jest.fn(), notifyWebhook: jest.fn() },
@@ -347,7 +464,6 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     signalsService = moduleRef.get<SignalsService>(SignalsService);
     algoBotsService = moduleRef.get<AlgoBotsService>(AlgoBotsService);
     paperTradingService = moduleRef.get<PaperTradingService>(PaperTradingService);
-    (paperTradingService as any).marketDataProvider = liveProvider;
   });
 
   afterEach(() => {
@@ -356,6 +472,37 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
 
   // Parameterized Test Matrix: Points A through P
   describe('Requirement 10: Parameterized Failure Point Rejection Verification', () => {
+    let scanOptions: any;
+
+    beforeEach(() => {
+      scanOptions = {
+        strategyConfig: {
+          deterministicSignal: {
+            symbol: 'BTCUSDT',
+            direction: Direction.BEARISH,
+            score: 85,
+            grade: SignalGrade.A_PLUS,
+            entryZone: { min: 64800, max: 64900, optimal: 64850 },
+            stopLoss: 65500,
+            takeProfits: { tp1: 64000, tp2: 63500, tp3: 62000 },
+            canonicalCandleTime: decisionTime.getTime(),
+            canonicalDecisionTime: decisionTime,
+            timestamp: decisionTime,
+            triggerEvidence: {
+              orderBlock: { matched: true, timestamp: decisionTime },
+              fvg: { matched: true, timestamp: decisionTime },
+              liquiditySweep: { matched: true, timestamp: decisionTime },
+              structureBreak: { matched: true, timestamp: decisionTime },
+            },
+            reasoning: {
+              htfStructure: '1H/4H Bearish Alignment',
+              marketStructure: 'Confirmed BOS',
+            },
+          },
+        },
+      };
+    });
+
     it('A. M15 data unavailable -> signal generation returns NO_TRADE', async () => {
       liveProvider.candleStream.m15 = [];
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
@@ -390,7 +537,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       bot.isActive = false;
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBeGreaterThanOrEqual(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -401,7 +548,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       bot.autoExecutePaper = false;
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.skippedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -412,7 +559,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       bot.timeframe = '1h';
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -423,7 +570,19 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       bot.smcCondition = 'FVG';
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const customOptions = {
+        strategyConfig: {
+          deterministicSignal: {
+            ...scanOptions.strategyConfig.deterministicSignal,
+            triggerEvidence: {
+              orderBlock: { matched: true, timestamp: decisionTime },
+              fvg: { matched: false },
+            },
+          },
+        },
+      };
+
+      const res: any = await scannerService.triggerScan(Timeframe.M15, customOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -433,7 +592,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       liveProvider.throwQuoteError = new StaleMarketDataError('BTCUSDT', 30, 5, new Date(Date.now() - 30000));
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -444,7 +603,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       bot.lots = -1;
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -459,7 +618,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
       });
       const placeSpy = jest.spyOn(paperTradingService, 'placeOrder');
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.botRejectedCount).toBe(1);
       expect(placeSpy).not.toHaveBeenCalled();
@@ -468,29 +627,60 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     it('P. placeOrder failure -> status FAILED, execution state updated', async () => {
       jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new Error('Exchange network timeout'));
 
-      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      const res: any = await scannerService.triggerScan(Timeframe.M15, scanOptions);
       expect(res.executedCount).toBe(0);
       expect(res.executionFailedCount).toBe(1);
     });
   });
 
   describe('Requirement 14: Retry Semantics State Machine Transitions', () => {
+    let scanOptions: any;
+
+    beforeEach(() => {
+      scanOptions = {
+        strategyConfig: {
+          deterministicSignal: {
+            symbol: 'BTCUSDT',
+            direction: Direction.BEARISH,
+            score: 85,
+            grade: SignalGrade.A_PLUS,
+            entryZone: { min: 64800, max: 64900, optimal: 64850 },
+            stopLoss: 65500,
+            takeProfits: { tp1: 64000, tp2: 63500, tp3: 62000 },
+            canonicalCandleTime: decisionTime.getTime(),
+            canonicalDecisionTime: decisionTime,
+            timestamp: decisionTime,
+            triggerEvidence: {
+              orderBlock: { matched: true, timestamp: decisionTime },
+              fvg: { matched: true, timestamp: decisionTime },
+              liquiditySweep: { matched: true, timestamp: decisionTime },
+              structureBreak: { matched: true, timestamp: decisionTime },
+            },
+            reasoning: {
+              htfStructure: '1H/4H Bearish Alignment',
+              marketStructure: 'Confirmed BOS',
+            },
+          },
+        },
+      };
+    });
+
     it('Retryable failure (MarketDataUnavailableError) transitions execution state to FAILED_RETRYABLE', async () => {
       const markSpy = jest.spyOn(algoBotsService, 'markExecutionFailed');
       jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new MarketDataUnavailableError('BTCUSDT'));
 
-      await scannerService.triggerScan(Timeframe.M15);
+      await scannerService.triggerScan(Timeframe.M15, scanOptions);
 
-      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(MarketDataUnavailableError));
+      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(MarketDataUnavailableError), expect.anything());
     });
 
     it('Non-retryable failure transitions execution state to FAILED_FINAL', async () => {
       const markSpy = jest.spyOn(algoBotsService, 'markExecutionFailed');
       jest.spyOn(paperTradingService, 'placeOrder').mockRejectedValue(new Error('ORDER_REJECTED: Margin insufficient'));
 
-      await scannerService.triggerScan(Timeframe.M15);
+      await scannerService.triggerScan(Timeframe.M15, scanOptions);
 
-      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(Error));
+      expect(markSpy).toHaveBeenCalledWith(expect.any(String), expect.any(Error), expect.anything());
     });
   });
 
