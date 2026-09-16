@@ -251,6 +251,9 @@ export interface ITriggerEvidenceItem {
   id?: string;
   direction?: Direction | string;
   timestamp?: Date | string;
+  candleTime?: number;
+  timeframe?: string;
+  symbol?: string;
   details?: string;
 }
 
@@ -299,6 +302,7 @@ export interface ISignalSetup {
   pnlRMultiple?: number;
   timestamp?: Date;
   canonicalCandleTime?: number;
+  canonicalDecisionTime?: Date;
   createdAt?: Date;
   quantSnapshot?: any;
   quantScore?: any;

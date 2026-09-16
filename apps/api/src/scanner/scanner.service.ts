@@ -64,7 +64,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         try {
           await this.algoBotsService.evaluateSignalForBots(sig);
         } catch (err) {
-          this.logger.debug(`Algo bot evaluation note: ${(err as Error).message}`);
+          this.logger.warn(
+            `[ALGO BOT EXECUTION ERROR] Failed evaluating signal ${sig.symbol} (${sig.timeframe}): ${(err as Error).message}`,
+          );
         }
       }
 

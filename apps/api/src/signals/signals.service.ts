@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
-import { SignalGenerator, SaiyanOCCEngine } from '@quant/trading-engine';
+import { SignalGenerator, SaiyanOCCEngine, CanonicalMarketSnapshotBuilder } from '@quant/trading-engine';
 import { PositionSizer, TradeLifecycleManager, TradeAccountingEngine } from '@quant/risk-engine';
 import {
   ISignalSetup,
@@ -104,45 +104,39 @@ export class SignalsService implements OnModuleInit {
         .catch(() => ({ candles: [] })),
     ]);
 
-    const signal = SignalGenerator.generateSignal({
+    const execSnapshot = CanonicalMarketSnapshotBuilder.build({
       symbol: sym,
       executionCandles: execCandles.candles,
       executionTimeframe,
-      htf1Candles: htf1Candles.candles,
-      htf1Timeframe: Timeframe.H1,
-      htf2Candles: htf2Candles.candles,
-      htf2Timeframe: Timeframe.H4,
-      strategyMode: strategy,
+      allowSyntheticInProduction: process.env.NODE_ENV !== 'production',
     });
 
-    // Evaluate live state against current candle close
-    const lastCandle = execCandles.candles[execCandles.candles.length - 1];
-    if (lastCandle && signal.direction !== 'NEUTRAL') {
-      const cmp = lastCandle.close;
-      const isBull = signal.direction === 'BULLISH';
-      const tp3 =
-        signal.takeProfits?.tp3 || (signal.takeProfits?.tp2 ? signal.takeProfits.tp2 * 1.05 : 0);
-      const tp2 = signal.takeProfits?.tp2;
-      const sl = signal.stopLoss;
+    const htf1Snapshot =
+      htf1Candles.candles && htf1Candles.candles.length > 0
+        ? CanonicalMarketSnapshotBuilder.build({
+            symbol: sym,
+            executionCandles: htf1Candles.candles,
+            executionTimeframe: Timeframe.H1,
+            allowSyntheticInProduction: process.env.NODE_ENV !== 'production',
+          })
+        : undefined;
 
-      if (isBull) {
-        if (tp3 > 0 && cmp >= tp3) {
-          signal.state = 'TP3_HIT' as any;
-        } else if (tp2 > 0 && cmp >= tp2) {
-          signal.state = 'TP2_HIT' as any;
-        } else if (sl > 0 && cmp <= sl) {
-          signal.state = 'SL_HIT' as any;
-        }
-      } else {
-        if (tp3 > 0 && cmp <= tp3) {
-          signal.state = 'TP3_HIT' as any;
-        } else if (tp2 > 0 && cmp <= tp2) {
-          signal.state = 'TP2_HIT' as any;
-        } else if (sl > 0 && cmp >= sl) {
-          signal.state = 'SL_HIT' as any;
-        }
-      }
-    }
+    const htf2Snapshot =
+      htf2Candles.candles && htf2Candles.candles.length > 0
+        ? CanonicalMarketSnapshotBuilder.build({
+            symbol: sym,
+            executionCandles: htf2Candles.candles,
+            executionTimeframe: Timeframe.H4,
+            allowSyntheticInProduction: process.env.NODE_ENV !== 'production',
+          })
+        : undefined;
+
+    const signal = SignalGenerator.generateFromSnapshots({
+      executionSnapshot: execSnapshot,
+      htf1Snapshot,
+      htf2Snapshot,
+      strategyMode: strategy,
+    });
 
     signal.instrumentId = inst.id;
     return signal;

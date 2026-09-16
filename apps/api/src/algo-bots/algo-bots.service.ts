@@ -225,7 +225,18 @@ export class AlgoBotsService implements OnModuleInit {
     this.logger.log('Algo Strategy Studio Service Initialized.');
   }
 
+  public isPaperExecutionEnabled(): boolean {
+    return (
+      process.env.ENABLE_PAPER_ALGO_BOTS === 'true' ||
+      process.env.PAPER_TRADING_ENABLED === 'true' ||
+      process.env.NODE_ENV === 'development' ||
+      process.env.NODE_ENV === 'test'
+    );
+  }
+
   async onModuleInit() {
+    const paperEnabled = this.isPaperExecutionEnabled();
+
     if (this.prisma) {
       try {
         const count = await this.prisma.algoBot.count();
@@ -242,17 +253,45 @@ export class AlgoBotsService implements OnModuleInit {
                 minScore: bot.minScore,
                 smcCondition: bot.smcCondition as any,
                 lots: bot.lots,
-                autoExecutePaper: bot.autoExecutePaper,
+                autoExecutePaper: paperEnabled ? true : bot.autoExecutePaper,
                 notifyWebhook: bot.notifyWebhook,
-                isActive: bot.isActive,
+                isActive: paperEnabled ? true : bot.isActive,
                 triggerCount: bot.triggerCount,
               },
+            });
+          }
+        } else if (paperEnabled) {
+          for (const bot of this.presetBots) {
+            await this.prisma.algoBot.updateMany({
+              where: { id: bot.id, isActive: false },
+              data: { isActive: true, autoExecutePaper: true },
             });
           }
         }
       } catch (err: any) {
         this.logger.warn(`Failed to seed/sync preset AlgoBots in database: ${err?.message}`);
       }
+    } else if (paperEnabled) {
+      for (const bot of this.presetBots) {
+        bot.isActive = true;
+        bot.autoExecutePaper = true;
+      }
+    }
+
+    try {
+      const bots = await this.listBots();
+      for (const bot of bots) {
+        this.logger.log(
+          `[ALGO BOT CONFIG]\n` +
+          `botId: ${bot.id}\n` +
+          `symbol: ${bot.symbol}\n` +
+          `timeframe: ${bot.timeframe}\n` +
+          `isActive: ${bot.isActive}\n` +
+          `autoExecutePaper: ${bot.autoExecutePaper}`,
+        );
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to log startup Algo Bot configuration: ${err?.message}`);
     }
   }
 
@@ -1074,37 +1113,169 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
+   * Requirement 7: Add per-bot diagnostic evaluation method.
+   */
+  public async evaluateBotForSignalDiagnostics(
+    bot: IAlgoBot,
+    signal: ISignalSetup,
+  ): Promise<{
+    botId: string;
+    signalId?: string;
+    symbol: string;
+    matches: boolean;
+    reasons: string[];
+  }> {
+    const reasons: string[] = [];
+
+    if (!bot.isActive) {
+      reasons.push('BOT_INACTIVE');
+    }
+
+    if (!bot.autoExecutePaper) {
+      reasons.push('AUTO_EXECUTE_DISABLED');
+    }
+
+    if (!signal.state || signal.state !== SignalState.ACTIVE) {
+      reasons.push('SIGNAL_NOT_ACTIVE');
+    }
+
+    if (
+      !signal.canonicalCandleTime ||
+      typeof signal.canonicalCandleTime !== 'number' ||
+      !Number.isFinite(signal.canonicalCandleTime) ||
+      signal.canonicalCandleTime <= 0
+    ) {
+      reasons.push('SIGNAL_MISSING_CANONICAL_TIME');
+    }
+
+    const freshness = this.validateSignalFreshness(signal);
+    if (!freshness.matches) {
+      reasons.push('SIGNAL_STALE');
+    }
+
+    const botTf = this.normalizeTimeframe(bot.timeframe);
+    const signalTf = this.normalizeTimeframe(signal.timeframe);
+    if (botTf !== signalTf) {
+      reasons.push('TIMEFRAME_MISMATCH');
+    }
+
+    if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+      reasons.push('SYMBOL_MISMATCH');
+    }
+
+    if (bot.direction !== 'ANY' && bot.direction !== signal.direction) {
+      reasons.push('DIRECTION_MISMATCH');
+    }
+
+    if (typeof signal.score !== 'number' || signal.score < bot.minScore) {
+      reasons.push('SCORE_BELOW_THRESHOLD');
+    }
+
+    if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
+      reasons.push('SMC_CONDITION_MISMATCH');
+    }
+
+    const optEntry = signal.entryZone?.optimal;
+    const sl = signal.stopLoss;
+    const tp1 = signal.takeProfits?.tp1;
+    const tp2 = signal.takeProfits?.tp2;
+    const tp3 = signal.takeProfits?.tp3;
+    if (
+      typeof optEntry !== 'number' || !Number.isFinite(optEntry) || optEntry <= 0 ||
+      typeof sl !== 'number' || !Number.isFinite(sl) || sl <= 0 ||
+      typeof tp1 !== 'number' || !Number.isFinite(tp1) || tp1 <= 0 ||
+      typeof tp2 !== 'number' || !Number.isFinite(tp2) || tp2 <= 0 ||
+      typeof tp3 !== 'number' || !Number.isFinite(tp3) || tp3 <= 0
+    ) {
+      reasons.push('INVALID_LEVELS');
+    }
+
+    if (reasons.length > 0) {
+      return {
+        botId: bot.id,
+        signalId: signal.id,
+        symbol: bot.symbol,
+        matches: false,
+        reasons,
+      };
+    }
+
+    try {
+      const portfolio = await this.paperTradingService.getPortfolio();
+      const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
+      if (alreadyOpen) {
+        reasons.push('POSITION_ALREADY_OPEN');
+        return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
+      }
+    } catch (err) {
+      // Ignore in diagnostic
+    }
+
+    try {
+      await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+    } catch (err) {
+      reasons.push('MARKET_DATA_UNAVAILABLE');
+      return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
+    }
+
+    const fingerprint = this.getSignalFingerprint(bot, signal);
+    if (this.inMemoryLocks.has(fingerprint)) {
+      reasons.push('EXECUTION_RESERVED');
+      return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
+    }
+
+    reasons.push('ORDER_EXECUTED');
+    return {
+      botId: bot.id,
+      signalId: signal.id,
+      symbol: bot.symbol,
+      matches: true,
+      reasons,
+    };
+  }
+
+  /**
    * Evaluates incoming signal against all active bot strategies
    */
   async evaluateSignalForBots(signal: ISignalSetup) {
     const bots = await this.listBots();
+    const canonicalCandleFormatted = signal.canonicalCandleTime
+      ? new Date(signal.canonicalCandleTime).toISOString()
+      : signal.timestamp
+        ? new Date(signal.timestamp).toISOString()
+        : 'UNKNOWN';
 
     for (const bot of bots) {
+      const diag = await this.evaluateBotForSignalDiagnostics(bot, signal);
+      const isRejected = !diag.matches;
+      const primaryReason = diag.reasons[0] || 'UNKNOWN';
+
+      // Requirement 6: Log structured execution decision for every bot evaluation
+      this.logger.warn(
+        `[ALGO EXECUTION DECISION]\n` +
+        `${signal.symbol} ${this.normalizeTimeframe(signal.timeframe).toUpperCase()}\n` +
+        `signal=${signal.state}\n` +
+        `score=${signal.score}\n` +
+        `canonicalCandle=${canonicalCandleFormatted}\n` +
+        `bot=${bot.id}\n` +
+        `result=${isRejected ? 'REJECTED' : 'EXECUTED'}\n` +
+        `reason=${primaryReason}`,
+      );
+
       // 1. Validate Bot Active & Signal Eligibility (ACTIVE state, trade levels, freshness)
       const eligibility = this.validateExecutionEligibility(bot, signal);
       if (!eligibility.matches) {
-        if (!bot.isActive) {
-          this.logger.debug(`[REJECTED: BOT_INACTIVE] Bot '${bot.id}' is inactive/paused`);
-        } else {
-          this.logger.warn(
-            `[REJECTED: ${eligibility.reasonCode}] Bot '${bot.id}' rejected signal ${signal.symbol}: ${eligibility.details}`,
-          );
-        }
         continue;
       }
 
       // 2. Authoritative Strategy Matching (Symbol, Timeframe, Direction, MinScore, Canonical SMC Evidence)
       const match = this.matchesBotStrategy(bot, signal);
       if (!match.matches) {
-        this.logger.debug(
-          `[REJECTED: ${match.reasonCode}] Bot '${bot.id}' rejected signal ${signal.symbol} ${signal.direction}: ${match.details}`,
-        );
         continue;
       }
 
       // P0 #3: NEVER RESERVE BEFORE autoExecutePaper CHECK
       if (!bot.autoExecutePaper) {
-        this.logger.debug(`[AUTO_EXECUTE_DISABLED] Bot '${bot.id}' has autoExecutePaper=false`);
         await this.recordBotTrigger(bot.id, signal);
         continue;
       }
@@ -1113,9 +1284,6 @@ export class AlgoBotsService implements OnModuleInit {
       const portfolio = await this.paperTradingService.getPortfolio();
       const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
       if (alreadyOpen) {
-        this.logger.warn(
-          `[REJECTED: POSITION_ALREADY_OPEN] Open position already exists for symbol '${bot.symbol}'`,
-        );
         continue;
       }
 
@@ -1123,9 +1291,6 @@ export class AlgoBotsService implements OnModuleInit {
       try {
         await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
       } catch (err: any) {
-        this.logger.error(
-          `[REJECTED: MARKET_DATA_UNAVAILABLE] Live market data unavailable for symbol '${bot.symbol}': ${err.message}`,
-        );
         continue;
       }
 
@@ -1135,9 +1300,6 @@ export class AlgoBotsService implements OnModuleInit {
         const instrument = getAuthoritativeInstrument(bot.symbol);
         quantity = this.resolveBotOrderQuantity(bot, instrument);
       } catch (err: any) {
-        this.logger.error(
-          `[REJECTED: INVALID_QUANTITY] Failed to resolve order quantity for bot '${bot.id}': ${err.message}`,
-        );
         continue;
       }
 
@@ -1181,7 +1343,7 @@ export class AlgoBotsService implements OnModuleInit {
           `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Qty: ${quantity} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
         );
       } catch (e: any) {
-        this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`);
+        this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
         await this.markExecutionFailed(executionId, e);
       }
     }
