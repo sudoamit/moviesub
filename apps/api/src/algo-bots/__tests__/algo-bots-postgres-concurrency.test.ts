@@ -4,7 +4,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { ISignalSetup, Direction, SignalGrade, SignalState, Timeframe } from '@quant/shared';
 import { InternalServerErrorException } from '@nestjs/common';
 
-describe('Fix 174 — PostgreSQL Concurrency & State Machine Integration Suite', () => {
+describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine Integration Suite', () => {
   let prismaA: PrismaClient;
   let prismaB: PrismaClient;
   let algoBotsServiceA: AlgoBotsService;
@@ -381,5 +381,163 @@ describe('Fix 174 — PostgreSQL Concurrency & State Machine Integration Suite',
     );
 
     await expect(brokenService.listBots()).rejects.toThrow(InternalServerErrorException);
+  });
+
+  it('6. Atomic Retry Race Condition — concurrent reserveExecutionLock calls on FAILED_RETRYABLE result in exactly 1 retry winner', async () => {
+    if (!DB_URL) return;
+
+    const botId = `bot_retry_race_${Date.now()}`;
+    await prismaA.algoBot.create({
+      data: {
+        id: botId,
+        name: 'Retry Race Bot',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        timeframe: '15m',
+        isActive: true,
+        autoExecutePaper: true,
+        minScore: 70,
+        lots: 1,
+        smcCondition: 'ANY_CONFLUENCE',
+      },
+    });
+
+    const bot: IAlgoBot = {
+      id: botId,
+      name: 'Retry Race Bot',
+      symbol: 'BTCUSDT',
+      direction: 'BULLISH',
+      timeframe: '15m',
+      isActive: true,
+      autoExecutePaper: true,
+      minScore: 70,
+      lots: 1,
+      smcCondition: 'ANY_CONFLUENCE',
+      configVersion: 'v1.0.0',
+      notifyWebhook: false,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    };
+
+    const now = Date.now();
+    const signal: ISignalSetup = {
+      id: `sig_retry_race_${Date.now()}`,
+      symbol: 'BTCUSDT',
+      direction: Direction.BULLISH,
+      grade: SignalGrade.A_PLUS,
+      score: 85,
+      entryZone: { min: 49900, max: 50100, optimal: 50000 },
+      stopLoss: 49500,
+      takeProfits: { tp1: 51000, tp2: 52000, tp3: 53000 },
+      riskRewardRatios: { rr1: 2.0, rr2: 4.0, rr3: 6.0 },
+      timeframe: Timeframe.M15,
+      timestamp: now as any,
+      state: SignalState.ACTIVE,
+      triggerEvidence: {
+        fvg: { matched: true, timestamp: new Date(now) },
+      },
+      reasoning: {
+        htfStructure: 'Bullish',
+        liquidityReason: 'Swept',
+        triggerReason: 'FVG',
+        invalidationReason: 'SL',
+        confirmedChecklist: ['FVG'],
+        summary: 'Bullish FVG',
+      },
+      scoreBreakdown: {
+        htfBias: 20,
+        liquiditySweep: 15,
+        bos: 15,
+        fvg: 20,
+        orderBlock: 0,
+        displacement: 10,
+        volumeConfirmation: 5,
+        premiumDiscount: 0,
+        riskReward: 0,
+        indicatorAlignment: 0,
+        totalScore: 85,
+        grade: SignalGrade.A_PLUS,
+      },
+    };
+
+    const fingerprint = algoBotsServiceA.getSignalFingerprint(bot, signal);
+
+    try {
+      // 1. Initial reservation
+      const res1 = await algoBotsServiceA.reserveExecutionLock(bot, signal, fingerprint);
+      expect(res1.success).toBe(true);
+      const execId = res1.executionId!;
+
+      // 2. Mark FAILED_RETRYABLE
+      await algoBotsServiceA.markExecutionFailed(execId, new Error('Streamer timeout'));
+
+      // 3. Concurrent retry attempt from two service instances
+      const retryResults = await Promise.all([
+        algoBotsServiceA.reserveExecutionLock(bot, signal, fingerprint),
+        algoBotsServiceB.reserveExecutionLock(bot, signal, fingerprint),
+      ]);
+
+      const retryWins = retryResults.filter((r) => r.success);
+      const retryFails = retryResults.filter((r) => !r.success);
+
+      expect(retryWins).toHaveLength(1);
+      expect(retryFails).toHaveLength(1);
+      expect(retryFails[0].reason).toBe('RETRY_RACE_CONCURRENTLY_CLAIMED');
+    } finally {
+      await prismaA.algoBotExecution.deleteMany({ where: { fingerprint } });
+      await prismaA.algoBot.deleteMany({ where: { id: botId } });
+    }
+  });
+
+  it('7. markExecutionFailed Throws Exception — DB failure during failure transition throws InternalServerErrorException', async () => {
+    const brokenPrisma = {
+      algoBotExecution: {
+        update: jest.fn().mockRejectedValue(new Error('DB Connection Lost')),
+      },
+    } as unknown as PrismaService;
+
+    const brokenService = new AlgoBotsService(
+      null as any,
+      null as any,
+      brokenPrisma,
+    );
+
+    await expect(
+      brokenService.markExecutionFailed('exec_123', new Error('Network error')),
+    ).rejects.toThrow(InternalServerErrorException);
+  });
+
+  it('8. Canonical Candle Timestamp Fingerprint — uses canonicalCandleTime when present', () => {
+    const bot: IAlgoBot = {
+      id: 'bot_canon_tf',
+      name: 'Canonical TF Bot',
+      symbol: 'BTCUSDT',
+      direction: 'BULLISH',
+      timeframe: '15m',
+      isActive: true,
+      autoExecutePaper: true,
+      minScore: 70,
+      lots: 1,
+      smcCondition: 'ANY_CONFLUENCE',
+      notifyWebhook: false,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    };
+
+    const canonicalCandleTime = 1700000000000;
+    const signal: any = {
+      id: 'sig_canon_1',
+      symbol: 'BTCUSDT',
+      direction: Direction.BULLISH,
+      grade: SignalGrade.A_PLUS,
+      score: 85,
+      timeframe: Timeframe.M15,
+      timestamp: canonicalCandleTime + 60000,
+      canonicalCandleTime,
+      state: SignalState.ACTIVE,
+    };
+
+    const fingerprint = algoBotsServiceA.getSignalFingerprint(bot, signal);
+    expect(fingerprint).toContain(`:1700000000000`);
   });
 });

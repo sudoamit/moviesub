@@ -408,12 +408,12 @@ export class AlgoBotsService implements OnModuleInit {
     signal: ISignalSetup,
     asOfTimestamp: Date = new Date(),
   ): IStrategyMatchResult {
-    const timestampRaw = signal.timestamp || signal.createdAt;
-    if (!timestampRaw) {
+    const canonicalTimeRaw = (signal as any).canonicalCandleTime || (signal as any).candleTimestamp || signal.timestamp || signal.createdAt;
+    if (!canonicalTimeRaw) {
       return { matches: false, reasonCode: 'SIGNAL_MISSING_TIMESTAMP', details: 'Signal lacks valid timestamp' };
     }
 
-    const signalTime = new Date(timestampRaw).getTime();
+    const signalTime = new Date(canonicalTimeRaw).getTime();
     if (Number.isNaN(signalTime)) {
       return { matches: false, reasonCode: 'SIGNAL_INVALID_TIMESTAMP', details: 'Signal timestamp is invalid/NaN' };
     }
@@ -671,14 +671,15 @@ export class AlgoBotsService implements OnModuleInit {
    * P0 #8 & P1 #8: Canonical Decision Fingerprint Generator with Bot Configuration Versioning
    */
   public getSignalFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
-    const timestampRaw = signal.timestamp || signal.createdAt || new Date();
-    const signalTimeMs = new Date(timestampRaw).getTime();
+    const canonicalTimeRaw = (signal as any).canonicalCandleTime || (signal as any).candleTimestamp || signal.timestamp || signal.createdAt || new Date();
+    const signalTimeMs = new Date(canonicalTimeRaw).getTime();
     const normTf = this.normalizeTimeframe(signal.timeframe);
     const normSymbol = bot.symbol.toUpperCase();
     const normDir = signal.direction;
 
     const tfMs = this.getMaxSignalAgeMs(normTf);
-    const canonicalCandleBoundaryMs = Math.floor(signalTimeMs / tfMs) * tfMs;
+    // Use canonical candle timestamp if present; otherwise fall back to timeframe floor boundary
+    const canonicalCandleBoundaryMs = (signal as any).canonicalCandleTime || (Math.floor(signalTimeMs / tfMs) * tfMs);
 
     // Strategy configuration hash to uniquely represent bot parameters
     const configHash = crypto
@@ -702,7 +703,7 @@ export class AlgoBotsService implements OnModuleInit {
       return { success: false, reason: 'LOCAL_LOCK_ACTIVE' };
     }
 
-    const signalTimestamp = signal.timestamp || signal.createdAt || new Date();
+    const signalTimestamp = (signal as any).canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
 
     if (this.prisma) {
       try {
@@ -729,9 +730,13 @@ export class AlgoBotsService implements OnModuleInit {
             where: { fingerprint },
           });
 
+          // Atomic retry state transition via updateMany (prevents retry race conditions)
           if (existing && existing.state === 'FAILED_RETRYABLE') {
-            const updated = await this.prisma.algoBotExecution.update({
-              where: { id: existing.id },
+            const updateResult = await this.prisma.algoBotExecution.updateMany({
+              where: {
+                id: existing.id,
+                state: 'FAILED_RETRYABLE',
+              },
               data: {
                 state: 'RESERVED',
                 failureReason: null,
@@ -739,8 +744,15 @@ export class AlgoBotsService implements OnModuleInit {
                 updatedAt: new Date(),
               },
             });
+
+            if (updateResult.count === 1) {
+              this.inMemoryLocks.add(fingerprint);
+              return { success: true, executionId: existing.id };
+            }
+
+            // Another concurrent worker/process claimed the retry transition first
             this.inMemoryLocks.add(fingerprint);
-            return { success: true, executionId: updated.id };
+            return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
           }
 
           this.inMemoryLocks.add(fingerprint);
@@ -808,9 +820,9 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #2 & 🔴 #4: Failure-Safe Lifecycle State Transition — Mark Failed (Retryable vs Final)
+   * P0 #2 & 🔴 #1: Failure-Safe Lifecycle State Transition — Mark Failed (Must throw on DB error)
    */
-  public async markExecutionFailed(executionId: string, err: any): Promise<void> {
+  public async markExecutionFailed(executionId: string, err: any, reasonCode?: string): Promise<void> {
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
 
     let isRetryable = false;
@@ -829,7 +841,8 @@ export class AlgoBotsService implements OnModuleInit {
     }
 
     const state = isRetryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
-    const failureReason = err?.message || String(err);
+    const codePrefix = reasonCode ? `[${reasonCode}] ` : '';
+    const failureReason = `${codePrefix}${err?.message || String(err)}`;
 
     try {
       const updated = await this.prisma.algoBotExecution.update({
@@ -846,6 +859,9 @@ export class AlgoBotsService implements OnModuleInit {
       }
     } catch (dbErr: any) {
       this.logger.error(`Failed to record execution failure state (${executionId}): ${dbErr.message}`);
+      throw new InternalServerErrorException(
+        `Execution state transition to FAILED failed: ${dbErr.message}`,
+      );
     }
   }
 
