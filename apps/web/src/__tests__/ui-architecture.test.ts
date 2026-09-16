@@ -3,6 +3,7 @@ import { MarketDataState } from '../hooks/useMarketContext';
 import { EmptyStatePreset } from '../components/common/EmptyState';
 import { AuthoritativePosition, AlgoExecutionRecord } from '../hooks/usePaperTrading';
 import { StageState } from '../components/execution/ExecutionStageRail';
+import { ISignalSetup, Direction, SignalGrade, SignalState } from '@quant/shared';
 
 describe('Frontend UI Architecture & Trading UX Tests', () => {
   describe('Requirement 1 & 9: Grouped Workstation Navigation & Accessibility Structure', () => {
@@ -130,45 +131,83 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(fillRecord.fillPrice).toBeGreaterThan(triggerSpec.triggerPrice);
     });
 
+    it('evaluates Eligibility Gate as a first-class authoritative state with reasons', () => {
+      // Helper matching ExecutionStageRail's first-class eligibility gate
+      const evaluateEligibility = (signal: Partial<ISignalSetup> | null): { status: StageState; reason?: string } => {
+        if (!signal) return { status: 'PENDING' };
+        if (
+          (signal.score ?? 0) < 70 ||
+          (signal.grade as string) === 'NO_TRADE' ||
+          (signal.direction as string) === 'NEUTRAL'
+        ) {
+          return { status: 'BLOCKED', reason: `Score ${signal.score}/100 below gate threshold` };
+        }
+        return { status: 'DONE', reason: `Score ${signal.score}/100 • Grade ${signal.grade}` };
+      };
+
+      // Case 1: No signal -> PENDING
+      expect(evaluateEligibility(null).status).toBe('PENDING');
+
+      // Case 2: Score 45 -> BLOCKED
+      const lowScoreSignal = { score: 45, grade: SignalGrade.B, direction: Direction.BULLISH };
+      const lowScoreResult = evaluateEligibility(lowScoreSignal);
+      expect(lowScoreResult.status).toBe('BLOCKED');
+      expect(lowScoreResult.reason).toContain('below gate threshold');
+
+      // Case 3: Score 85 Grade A+ -> DONE (Eligible)
+      const highScoreSignal = { score: 85, grade: SignalGrade.A_PLUS, direction: Direction.BULLISH };
+      const highScoreResult = evaluateEligibility(highScoreSignal);
+      expect(highScoreResult.status).toBe('DONE');
+      expect(highScoreResult.reason).toContain('Score 85/100');
+    });
+
+    it('strictly requires authoritative reservation evidence for DB Reservation stage', () => {
+      const evaluateReservation = (
+        execution: AlgoExecutionRecord | null,
+        eligibilityStatus: StageState
+      ): StageState => {
+        const hasExplicitReservation =
+          !!execution?.id &&
+          (execution.state === 'RESERVED' ||
+            execution.state === 'EXECUTING' ||
+            execution.state === 'EXECUTED');
+
+        if (hasExplicitReservation) return 'DONE';
+        if (execution?.failureReasonCode === 'EXECUTION_LOCKED') return 'FAILED';
+        if (eligibilityStatus === 'BLOCKED' || eligibilityStatus === 'FAILED') return 'NOT_REACHED';
+        return 'PENDING';
+      };
+
+      // Case 1: Eligibility blocked -> NOT_REACHED
+      expect(evaluateReservation(null, 'BLOCKED')).toBe('NOT_REACHED');
+
+      // Case 2: Execution lock conflict -> FAILED
+      const lockedExec = { failureReasonCode: 'EXECUTION_LOCKED' } as AlgoExecutionRecord;
+      expect(evaluateReservation(lockedExec, 'DONE')).toBe('FAILED');
+
+      // Case 3: Authoritative reservation record -> DONE
+      const reservedExec = { id: 'exec_123', state: 'RESERVED' } as AlgoExecutionRecord;
+      expect(evaluateReservation(reservedExec, 'DONE')).toBe('DONE');
+    });
+
     it('strictly requires authoritative execution record for Order Filled stage (no downstream position inference)', () => {
-      // Helper function matching ExecutionStageRail's strictly authoritative rule
       const isOrderFilledAuthoritative = (execution: AlgoExecutionRecord | null) => {
         return execution?.state === 'EXECUTED' || Boolean(execution?.orderPositionId);
       };
 
-      // Case 1: Standby with no execution record -> false
       expect(isOrderFilledAuthoritative(null)).toBe(false);
 
-      // Case 2: Execution in RESERVED or EXECUTING state -> false
       const reservedExecution = { state: 'RESERVED' } as AlgoExecutionRecord;
       expect(isOrderFilledAuthoritative(reservedExecution)).toBe(false);
 
       const executingExecution = { state: 'EXECUTING' } as AlgoExecutionRecord;
       expect(isOrderFilledAuthoritative(executingExecution)).toBe(false);
 
-      // Case 3: Failed execution -> false
       const failedExecution = { state: 'FAILED_FINAL' } as AlgoExecutionRecord;
       expect(isOrderFilledAuthoritative(failedExecution)).toBe(false);
 
-      // Case 4: Authoritative EXECUTED state -> true
       const executedExecution = { state: 'EXECUTED', orderPositionId: 'pos_123' } as AlgoExecutionRecord;
       expect(isOrderFilledAuthoritative(executedExecution)).toBe(true);
-
-      // Case 5: Having only a position object without an authoritative execution event does NOT satisfy Order Filled
-      const positionOnly: AuthoritativePosition = {
-        id: 'pos_standalone',
-        symbol: 'NIFTY',
-        direction: 'BUY',
-        quantity: 1,
-        entryPrice: 24250,
-        currentPrice: 24260,
-        unrealizedPnL: 10,
-        unrealizedPnLPercent: 0.04,
-        status: 'OPEN',
-        openedAt: new Date().toISOString(),
-      };
-      // The fill stage must check the execution record, not position.entryPrice
-      expect(isOrderFilledAuthoritative(null)).toBe(false);
     });
 
     it('supports full lifecycle stage statuses: DONE, ACTIVE, FAILED, BLOCKED, NOT_REACHED, PENDING', () => {
