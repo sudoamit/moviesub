@@ -40,7 +40,9 @@ export class ScannerProcessor extends WorkerHost {
   }
 
   async process(job: Job<any, any, string>): Promise<any> {
-    this.logger.log(`Starting canonical market scanner execution for job ${job.id}: ${job.name}`);
+    this.logger.log(
+      `[READ-ONLY ANALYTICS SCANNER] Starting background signal persistence & analytics scan for job ${job.id}: ${job.name} (does NOT place paper orders)`,
+    );
     const startTime = Date.now();
 
     const instruments = await this.prisma.instrument.findMany({

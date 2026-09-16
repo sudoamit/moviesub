@@ -131,6 +131,10 @@ export class SignalsService implements OnModuleInit {
           })
         : undefined;
 
+    this.logger.log(
+      `[PIPELINE TRACE 1/6] Ingested ${execCandles.candles.length} candles for ${sym} ${executionTimeframe} -> Built CanonicalMarketSnapshot (asOf: ${execSnapshot.decisionTimestamp.toISOString()})`,
+    );
+
     const signal = SignalGenerator.generateFromSnapshots({
       executionSnapshot: execSnapshot,
       htf1Snapshot,
@@ -139,6 +143,18 @@ export class SignalsService implements OnModuleInit {
     });
 
     signal.instrumentId = inst.id;
+
+    this.logger.log(
+      `[PIPELINE TRACE 2/6] SignalsService.generateSignalForSymbol() produced signal setup:\n` +
+        `  symbol: ${signal.symbol}\n` +
+        `  timeframe: ${signal.timeframe}\n` +
+        `  direction: ${signal.direction}\n` +
+        `  state: ${signal.state}\n` +
+        `  score: ${signal.score} (${signal.grade})\n` +
+        `  canonicalCandleTime: ${signal.canonicalCandleTime ? new Date(signal.canonicalCandleTime).toISOString() : 'N/A'}\n` +
+        `  triggerEvidence: ${JSON.stringify(signal.triggerEvidence || {})}`,
+    );
+
     return signal;
   }
 

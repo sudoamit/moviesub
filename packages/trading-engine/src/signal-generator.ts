@@ -679,6 +679,8 @@ export class SignalGenerator {
       reasons: ['NO_VALID_SETUP'],
       state: SignalState.CANCELLED,
       timestamp,
+      canonicalCandleTime: timestamp.getTime(),
+      canonicalDecisionTime: timestamp,
     };
   }
 }

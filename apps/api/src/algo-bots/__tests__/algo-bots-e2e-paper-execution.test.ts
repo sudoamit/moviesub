@@ -5,8 +5,6 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import {
   Direction,
   ICandle,
-  ISignalSetup,
-  SignalGrade,
   SignalState,
   Timeframe,
 } from '@quant/shared';
@@ -15,7 +13,7 @@ import {
   CanonicalMarketSnapshotBuilder,
 } from '@quant/trading-engine';
 
-describe('Fix 177 — Real End-to-End Paper Execution Integration Test', () => {
+describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
   let prismaClient: any = null;
   let algoBotsService: AlgoBotsService;
   let mockPaperTradingService: any;
@@ -69,7 +67,108 @@ describe('Fix 177 — Real End-to-End Paper Execution Integration Test', () => {
     };
   });
 
-  it('Requirement 10: E2E Pipeline — Canonical Candle -> ACTIVE signal -> Bot match -> Reservation -> EXECUTING -> placeOrder() -> EXECUTED', async () => {
+  function buildNaturalSMCCandles() {
+    const now = Date.now();
+    const candles: ICandle[] = [];
+    const baseTime = now - 49 * 15 * 60 * 1000;
+    let price = 65000;
+
+    for (let i = 0; i < 50; i++) {
+      const time = new Date(baseTime + i * 15 * 60 * 1000);
+      let open = price;
+      let high = price + 100;
+      let low = price - 100;
+      let close = price + 50;
+      let volume = 1000;
+
+      if (i === 5) {
+        // High dealing range anchor at 67000
+        open = 66500;
+        high = 67000;
+        low = 66400;
+        close = 66800;
+      } else if (i === 15) {
+        // Confirmed swing low anchor at 63900
+        open = 64500;
+        high = 64600;
+        low = 63900;
+        close = 64400;
+      } else if (i === 30) {
+        // Confirmed swing high anchor at 65000
+        open = 64800;
+        high = 65000;
+        low = 64700;
+        close = 64850;
+      } else if (i === 47) {
+        open = 64500;
+        high = 64600;
+        low = 64200;
+        close = 64300;
+      } else if (i === 48) {
+        // Sell-side liquidity sweep & bullish expansion candle: wicks down to 63700 below 63900, expands and closes at 64800
+        open = 64300;
+        high = 64900;
+        low = 63700;
+        close = 64800;
+        volume = 5000;
+      } else if (i > 48) {
+        open = 64800;
+        high = 65000;
+        low = 64700;
+        close = 64850;
+        volume = 3000;
+      }
+
+      price = close;
+      candles.push({
+        timestamp: time,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        isClosed: true,
+      });
+    }
+
+    const decisionTime = candles[candles.length - 1].timestamp as Date;
+
+    const htf1Candles: ICandle[] = [];
+    let htfPrice = 60000;
+    for (let i = 40; i >= 1; i--) {
+      const htfTime = new Date(decisionTime.getTime() - i * 60 * 60 * 1000);
+      let open = htfPrice;
+      let high = htfPrice + 200;
+      let low = htfPrice - 100;
+      let close = htfPrice + 150;
+
+      if (i === 30) {
+        high = htfPrice + 800;
+        close = htfPrice + 600;
+      } else if (i === 25) {
+        low = htfPrice - 400;
+        close = htfPrice - 100;
+      } else if (i === 20) {
+        high = htfPrice + 1200;
+        close = htfPrice + 1000;
+      }
+
+      htf1Candles.push({
+        timestamp: htfTime,
+        open,
+        high,
+        low,
+        close,
+        volume: 3000,
+        isClosed: true,
+      });
+      htfPrice += 100;
+    }
+
+    return { candles, htf1Candles, decisionTime };
+  }
+
+  it('Requirement 10: E2E Pipeline — Canonical Candle -> NATURAL ACTIVE signal -> Bot match -> Reservation -> EXECUTING -> placeOrder() -> EXECUTED', async () => {
     algoBotsService = new AlgoBotsService(
       mockPaperTradingService,
       mockAlertsService,
@@ -79,32 +178,7 @@ describe('Fix 177 — Real End-to-End Paper Execution Integration Test', () => {
 
     await algoBotsService.onModuleInit();
 
-    // Create a 15m candle series for BTCUSDT ending with a valid closed candle
-    const now = Date.now();
-    const candles: ICandle[] = [];
-    let price = 64000;
-
-    for (let i = 50; i >= 0; i--) {
-      const time = new Date(now - i * 15 * 60 * 1000);
-      const isBull = i % 2 === 0;
-      const open = price;
-      const close = isBull ? price + 100 : price - 50;
-      const high = Math.max(open, close) + 30;
-      const low = Math.min(open, close) - 30;
-      price = close;
-
-      candles.push({
-        timestamp: time,
-        open,
-        high,
-        low,
-        close,
-        volume: 1500,
-        isClosed: true,
-      });
-    }
-
-    const decisionTime = candles[candles.length - 1].timestamp as Date;
+    const { candles, htf1Candles, decisionTime } = buildNaturalSMCCandles();
 
     const execSnapshot = CanonicalMarketSnapshotBuilder.build({
       symbol: 'BTCUSDT',
@@ -114,30 +188,31 @@ describe('Fix 177 — Real End-to-End Paper Execution Integration Test', () => {
       allowSyntheticInProduction: true,
     });
 
-    const signal = SignalGenerator.generateFromSnapshots({
-      executionSnapshot: execSnapshot,
+    const htf1Snapshot = CanonicalMarketSnapshotBuilder.build({
+      symbol: 'BTCUSDT',
+      executionCandles: htf1Candles,
+      executionTimeframe: Timeframe.H1,
+      asOfTimestamp: decisionTime,
+      allowSyntheticInProduction: true,
     });
 
-    // Enforce active signal state for paper execution pipeline validation
-    signal.state = SignalState.ACTIVE;
-    signal.direction = Direction.BULLISH;
-    signal.grade = SignalGrade.A_PLUS;
-    signal.score = 85;
-    signal.canonicalCandleTime = decisionTime.getTime();
-    signal.entryZone = { min: 64900, max: 65100, optimal: 65000 };
-    signal.stopLoss = 64000;
-    signal.takeProfits = { tp1: 66000, tp2: 67000, tp3: 68000 };
-    signal.riskRewardRatios = { rr1: 1.5, rr2: 2.5, rr3: 4.0 };
-    signal.triggerEvidence = {
-      liquiditySweep: {
-        matched: true,
-        timestamp: decisionTime,
-        candleTime: decisionTime.getTime(),
-        timeframe: '15m',
-        symbol: 'BTCUSDT',
-        details: 'Sell-side liquidity swept',
-      },
-    };
+    // Pure production signal generation from canonical snapshots - ZERO signal property mutation
+    const signal = SignalGenerator.generateFromSnapshots({
+      executionSnapshot: execSnapshot,
+      htf1Snapshot,
+    });
+
+    // Assert that SignalGenerator naturally produces an executable signal setup
+    expect(signal.symbol).toBe('BTCUSDT');
+    expect(signal.state).toBe(SignalState.ACTIVE);
+    expect(signal.direction).toBe(Direction.BULLISH);
+    expect(signal.score).toBeGreaterThanOrEqual(75);
+    expect(signal.canonicalCandleTime).toBe(decisionTime.getTime());
+    expect(signal.triggerEvidence?.liquiditySweep?.matched).toBe(true);
+    expect(signal.entryZone.optimal).toBeGreaterThan(0);
+    expect(signal.stopLoss).toBeGreaterThan(0);
+    expect(signal.stopLoss).toBeLessThan(signal.entryZone.optimal);
+    expect(signal.takeProfits.tp1).toBeGreaterThan(signal.entryZone.optimal);
 
     const btcBot: IAlgoBot = {
       id: 'bot_btc_liquidity_sweep',

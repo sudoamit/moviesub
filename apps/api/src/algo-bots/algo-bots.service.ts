@@ -216,6 +216,12 @@ export class AlgoBotsService implements OnModuleInit {
     },
   ];
 
+  private lastScanTime?: Date;
+  private lastSignalTime?: Date;
+  private lastExecutionAttempt?: Date;
+  private lastExecutionSuccess?: Date;
+  private lastExecutionRejectionReason?: string;
+
   constructor(
     private readonly paperTradingService: PaperTradingService,
     private readonly alertsService: AlertsService,
@@ -223,6 +229,14 @@ export class AlgoBotsService implements OnModuleInit {
     @Optional() private readonly redis?: RedisService,
   ) {
     this.logger.log('Algo Strategy Studio Service Initialized.');
+  }
+
+  public recordScanTime(time: Date = new Date()) {
+    this.lastScanTime = time;
+  }
+
+  public recordSignalTime(time: Date = new Date()) {
+    this.lastSignalTime = time;
   }
 
   public isPaperExecutionEnabled(): boolean {
@@ -236,6 +250,14 @@ export class AlgoBotsService implements OnModuleInit {
 
   async onModuleInit() {
     const paperEnabled = this.isPaperExecutionEnabled();
+
+    this.logger.log(
+      `[ALGO PAPER EXECUTION STATUS]\n` +
+        `ENABLE_PAPER_ALGO_BOTS=${process.env.ENABLE_PAPER_ALGO_BOTS || 'false'}\n` +
+        `PAPER_TRADING_ENABLED=${process.env.PAPER_TRADING_ENABLED || 'false'}\n` +
+        `NODE_ENV=${process.env.NODE_ENV || 'development'}\n` +
+        `paperExecutionEnabled=${paperEnabled}`,
+    );
 
     if (this.prisma) {
       try {
@@ -283,11 +305,13 @@ export class AlgoBotsService implements OnModuleInit {
       for (const bot of bots) {
         this.logger.log(
           `[ALGO BOT CONFIG]\n` +
-          `botId: ${bot.id}\n` +
-          `symbol: ${bot.symbol}\n` +
-          `timeframe: ${bot.timeframe}\n` +
-          `isActive: ${bot.isActive}\n` +
-          `autoExecutePaper: ${bot.autoExecutePaper}`,
+            `id: ${bot.id}\n` +
+            `symbol: ${bot.symbol}\n` +
+            `isActive: ${bot.isActive}\n` +
+            `autoExecutePaper: ${bot.autoExecutePaper}\n` +
+            `timeframe: ${bot.timeframe}\n` +
+            `direction: ${bot.direction}\n` +
+            `smcCondition: ${bot.smcCondition}`,
         );
       }
     } catch (err: any) {
@@ -1113,7 +1137,8 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * Requirement 7: Add per-bot diagnostic evaluation method.
+   * Requirement 5: Complete diagnostic method in AlgoBotsService.
+   * Evaluates ALL gates sequentially without stopping early.
    */
   public async evaluateBotForSignalDiagnostics(
     bot: IAlgoBot,
@@ -1127,54 +1152,88 @@ export class AlgoBotsService implements OnModuleInit {
   }> {
     const reasons: string[] = [];
 
+    // Gate 1: Bot Activation
     if (!bot.isActive) {
       reasons.push('BOT_INACTIVE');
     }
 
+    // Gate 2: Auto Execute Setting
     if (!bot.autoExecutePaper) {
       reasons.push('AUTO_EXECUTE_DISABLED');
     }
 
-    if (!signal.state || signal.state !== SignalState.ACTIVE) {
-      reasons.push('SIGNAL_NOT_ACTIVE');
-    }
-
+    // Gate 3: Canonical Decision Timestamp
     if (
       !signal.canonicalCandleTime ||
       typeof signal.canonicalCandleTime !== 'number' ||
       !Number.isFinite(signal.canonicalCandleTime) ||
       signal.canonicalCandleTime <= 0
     ) {
-      reasons.push('SIGNAL_MISSING_CANONICAL_TIME');
+      reasons.push('CANONICAL_DECISION_TIMESTAMP_REQUIRED');
     }
 
-    const freshness = this.validateSignalFreshness(signal);
-    if (!freshness.matches) {
-      reasons.push('SIGNAL_STALE');
+    // Gate 4: Signal State
+    if (!signal.state || signal.state !== SignalState.ACTIVE) {
+      reasons.push('SIGNAL_NOT_ACTIVE');
     }
 
+    // Gate 5: Direction & Grade
+    if (
+      !signal.direction ||
+      signal.direction === ('NEUTRAL' as any) ||
+      signal.direction === ('NO_TRADE' as any) ||
+      signal.grade === ('NO_TRADE' as any)
+    ) {
+      reasons.push('INVALID_SIGNAL');
+    }
+
+    // Gate 6: Signal Freshness (Future vs Stale)
+    if (signal.canonicalCandleTime) {
+      const nowMs = Date.now();
+      if (signal.canonicalCandleTime > nowMs + 5000) {
+        reasons.push('SIGNAL_FUTURE');
+      } else {
+        const maxAgeMs = this.getMaxSignalAgeMs(signal.timeframe);
+        if (nowMs - signal.canonicalCandleTime > maxAgeMs) {
+          reasons.push('SIGNAL_STALE');
+        }
+      }
+    } else {
+      const freshness = this.validateSignalFreshness(signal);
+      if (!freshness.matches) {
+        if (freshness.reasonCode === 'SIGNAL_FUTURE') reasons.push('SIGNAL_FUTURE');
+        else if (freshness.reasonCode === 'SIGNAL_STALE') reasons.push('SIGNAL_STALE');
+      }
+    }
+
+    // Gate 7: Symbol Parity
+    if (!signal.symbol || bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+      reasons.push('SYMBOL_MISMATCH');
+    }
+
+    // Gate 8: Timeframe Parity
     const botTf = this.normalizeTimeframe(bot.timeframe);
     const signalTf = this.normalizeTimeframe(signal.timeframe);
     if (botTf !== signalTf) {
       reasons.push('TIMEFRAME_MISMATCH');
     }
 
-    if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
-      reasons.push('SYMBOL_MISMATCH');
-    }
-
+    // Gate 9: Direction Parity
     if (bot.direction !== 'ANY' && bot.direction !== signal.direction) {
       reasons.push('DIRECTION_MISMATCH');
     }
 
+    // Gate 10: Score Threshold
     if (typeof signal.score !== 'number' || signal.score < bot.minScore) {
       reasons.push('SCORE_BELOW_THRESHOLD');
     }
 
+    // Gate 11: SMC Evidence Condition Match
     if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
       reasons.push('SMC_CONDITION_MISMATCH');
     }
 
+    // Gate 12: Invalidation / Target Levels Geometry
     const optEntry = signal.entryZone?.optimal;
     const sl = signal.stopLoss;
     const tp1 = signal.takeProfits?.tp1;
@@ -1188,49 +1247,94 @@ export class AlgoBotsService implements OnModuleInit {
       typeof tp3 !== 'number' || !Number.isFinite(tp3) || tp3 <= 0
     ) {
       reasons.push('INVALID_LEVELS');
+    } else {
+      if (signal.direction === 'BULLISH' && !(sl < optEntry && optEntry < tp1 && tp1 <= tp2 && tp2 <= tp3)) {
+        reasons.push('INVALID_LEVELS');
+      } else if (signal.direction === 'BEARISH' && !(sl > optEntry && optEntry > tp1 && tp1 >= tp2 && tp2 >= tp3)) {
+        reasons.push('INVALID_LEVELS');
+      }
     }
 
-    if (reasons.length > 0) {
-      return {
-        botId: bot.id,
-        signalId: signal.id,
-        symbol: bot.symbol,
-        matches: false,
-        reasons,
-      };
+    // Gate 13: Order Quantity Resolution
+    try {
+      const instrument = getAuthoritativeInstrument(bot.symbol);
+      this.resolveBotOrderQuantity(bot, instrument);
+    } catch {
+      reasons.push('INVALID_QUANTITY');
     }
 
+    // Gate 14: Portfolio Open Position Check
     try {
       const portfolio = await this.paperTradingService.getPortfolio();
       const alreadyOpen = portfolio.openPositions.some((p) => p.symbol === bot.symbol);
       if (alreadyOpen) {
         reasons.push('POSITION_ALREADY_OPEN');
-        return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
       }
-    } catch (err) {
-      // Ignore in diagnostic
+    } catch {
+      // Ignore in diagnostic evaluation
     }
 
+    // Gate 15: Market Quote Stream Health
     try {
       await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
-    } catch (err) {
+    } catch {
       reasons.push('MARKET_DATA_UNAVAILABLE');
-      return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
     }
 
+    // Gate 16: Local / DB Execution Lock Check
     const fingerprint = this.getSignalFingerprint(bot, signal);
     if (this.inMemoryLocks.has(fingerprint)) {
-      reasons.push('EXECUTION_RESERVED');
-      return { botId: bot.id, signalId: signal.id, symbol: bot.symbol, matches: false, reasons };
+      reasons.push('EXECUTION_LOCKED');
     }
 
-    reasons.push('ORDER_EXECUTED');
+    if (reasons.length === 0) {
+      reasons.push('READY_TO_EXECUTE');
+    }
+
+    const matches = reasons.length === 1 && (reasons[0] === 'READY_TO_EXECUTE' || reasons[0] === 'EXECUTED');
+
+    // Log per-bot evaluation details against real signal
+    this.logger.log(
+      `[ALGO BOT DIAGNOSTIC VERIFICATION]\n` +
+        `botId: ${bot.id}\n` +
+        `strategy condition: ${bot.smcCondition}\n` +
+        `signal evidence: ${JSON.stringify(signal.triggerEvidence || {})}\n` +
+        `match result: ${matches}\n` +
+        `rejection reasons: ${reasons.join(', ')}`,
+    );
+
     return {
       botId: bot.id,
       signalId: signal.id,
       symbol: bot.symbol,
-      matches: true,
+      matches,
       reasons,
+    };
+  }
+
+  /**
+   * Requirement 11: Health endpoint telemetry provider
+   */
+  public async getAlgoExecutionHealth(): Promise<{
+    paperExecutionEnabled: boolean;
+    activeBotCount: number;
+    autoExecuteBotCount: number;
+    lastScanTime?: string;
+    lastSignalTime?: string;
+    lastExecutionAttempt?: string;
+    lastExecutionSuccess?: string;
+    lastExecutionRejectionReason?: string;
+  }> {
+    const bots = await this.listBots();
+    return {
+      paperExecutionEnabled: this.isPaperExecutionEnabled(),
+      activeBotCount: bots.filter((b) => b.isActive).length,
+      autoExecuteBotCount: bots.filter((b) => b.isActive && b.autoExecutePaper).length,
+      lastScanTime: this.lastScanTime ? this.lastScanTime.toISOString() : undefined,
+      lastSignalTime: this.lastSignalTime ? this.lastSignalTime.toISOString() : undefined,
+      lastExecutionAttempt: this.lastExecutionAttempt ? this.lastExecutionAttempt.toISOString() : undefined,
+      lastExecutionSuccess: this.lastExecutionSuccess ? this.lastExecutionSuccess.toISOString() : undefined,
+      lastExecutionRejectionReason: this.lastExecutionRejectionReason,
     };
   }
 
@@ -1238,6 +1342,7 @@ export class AlgoBotsService implements OnModuleInit {
    * Evaluates incoming signal against all active bot strategies
    */
   async evaluateSignalForBots(signal: ISignalSetup) {
+    this.lastSignalTime = new Date();
     const bots = await this.listBots();
     const canonicalCandleFormatted = signal.canonicalCandleTime
       ? new Date(signal.canonicalCandleTime).toISOString()
@@ -1246,9 +1351,17 @@ export class AlgoBotsService implements OnModuleInit {
         : 'UNKNOWN';
 
     for (const bot of bots) {
+      this.logger.log(
+        `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
+      );
+
       const diag = await this.evaluateBotForSignalDiagnostics(bot, signal);
       const isRejected = !diag.matches;
       const primaryReason = diag.reasons[0] || 'UNKNOWN';
+
+      if (isRejected) {
+        this.lastExecutionRejectionReason = primaryReason;
+      }
 
       // Requirement 6: Log structured execution decision for every bot evaluation
       this.logger.warn(
@@ -1305,6 +1418,11 @@ export class AlgoBotsService implements OnModuleInit {
 
       // 5. P0 #1: Compute Versioned Fingerprint & Reserve Execution Lock via Database `@unique` constraint
       const fingerprint = this.getSignalFingerprint(bot, signal);
+
+      this.logger.log(
+        `[PIPELINE TRACE 5/6] Reserving execution lock: bot=${bot.id}, fingerprint=${fingerprint}`,
+      );
+
       const reservation = await this.reserveExecutionLock(bot, signal, fingerprint);
 
       if (!reservation.success || !reservation.executionId) {
@@ -1319,7 +1437,16 @@ export class AlgoBotsService implements OnModuleInit {
 
       // 6. P0 #2: Execution State Machine Lifecycle Management
       try {
+        this.lastExecutionAttempt = new Date();
         await this.markExecutionStarted(executionId);
+
+        this.logger.log(
+          `[PIPELINE TRACE 5.1/6] Marked execution started: executionId=${executionId}`,
+        );
+
+        this.logger.log(
+          `[PIPELINE TRACE 5.2/6] Calling PaperTradingService.placeOrder(): symbol=${bot.symbol}, direction=${signal.direction}, qty=${quantity}`,
+        );
 
         // Place Order via Authoritative PaperTradingService (Obtains Authoritative Execution Quote)
         const orderResult = await this.paperTradingService.placeOrder({
@@ -1338,11 +1465,17 @@ export class AlgoBotsService implements OnModuleInit {
         });
 
         await this.markExecutionExecuted(executionId, orderResult.id);
+        this.lastExecutionSuccess = new Date();
+
+        this.logger.log(
+          `[PIPELINE TRACE 6/6] Marked execution executed: executionId=${executionId}, orderPositionId=${orderResult.id}`,
+        );
 
         this.logger.log(
           `✓ [BOT ORDER EXECUTED] Bot '${bot.id}' placed order for ${bot.symbol} ${signal.direction} | Qty: ${quantity} | Fingerprint: ${fingerprint} | Fill Price: ₹${orderResult.entryPrice} (Planned Entry: ₹${signal.entryZone.optimal}) | PositionID: ${orderResult.id}`,
         );
       } catch (e: any) {
+        this.lastExecutionRejectionReason = String(e?.message || e);
         this.logger.error(`[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`, e.stack);
         await this.markExecutionFailed(executionId, e);
       }

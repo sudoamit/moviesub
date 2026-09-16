@@ -203,6 +203,6 @@ describe('Fix 177 — Diagnostic Rejection Gate Suite (NIFTY, BANKNIFTY, BTCUSDT
     const btcDiag = await algoBotsService.evaluateBotForSignalDiagnostics(btcBot, btcValidSignal);
     console.log(`[DIAGNOSTIC BTCUSDT] matches=${btcDiag.matches}, reasons=${btcDiag.reasons.join(', ')}`);
     expect(btcDiag.matches).toBe(true);
-    expect(btcDiag.reasons).toContain('ORDER_EXECUTED');
+    expect(btcDiag.reasons).toContain('READY_TO_EXECUTE');
   });
 });

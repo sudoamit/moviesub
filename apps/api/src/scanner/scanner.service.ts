@@ -17,7 +17,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    this.logger.log('Starting Automatic Multi-Asset Market Scanner (10s interval)...');
+    this.logger.log(
+      '[AUTHORITATIVE SCANNER] API ScannerService is the authoritative execution trigger for algo paper execution (10s interval)...',
+    );
     this.triggerScan(Timeframe.M15).catch((err) => {
       this.logger.warn(`Initial market scan failed: ${err.message}`);
     });
@@ -53,21 +55,78 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.isScanning = true;
+    this.algoBotsService.recordScanTime();
+
     try {
       const startTime = Date.now();
       const signals = await this.signalsService.getAllSignals(timeframe);
 
-      const validSignals = signals.filter((s) => s.direction !== 'NEUTRAL' && s.score >= 60);
+      let noTradeCount = 0;
+      let neutralCount = 0;
+      let activeCount = 0;
+      let rejectedByScoreCount = 0;
+      let rejectedByBotCount = 0;
+      let executedCount = 0;
 
-      // Evaluate active algo bots against valid high-conviction signals
-      for (const sig of validSignals) {
-        try {
-          await this.algoBotsService.evaluateSignalForBots(sig);
-        } catch (err) {
-          this.logger.warn(
-            `[ALGO BOT EXECUTION ERROR] Failed evaluating signal ${sig.symbol} (${sig.timeframe}): ${(err as Error).message}`,
-          );
+      const validSignals: typeof signals = [];
+
+      for (const sig of signals) {
+        let botResultSummary = 'N/A';
+
+        if (sig.grade === ('NO_TRADE' as any)) {
+          noTradeCount++;
+          botResultSummary = 'NO_TRADE';
+        } else if (sig.direction === 'NEUTRAL') {
+          neutralCount++;
+          botResultSummary = 'NEUTRAL';
+        } else {
+          activeCount++;
+          if (sig.score < 60) {
+            rejectedByScoreCount++;
+            botResultSummary = 'rejected by score (<60)';
+          } else {
+            validSignals.push(sig);
+            try {
+              const bots = await this.algoBotsService.listBots();
+              const relevantBot = bots.find((b) => b.symbol.toUpperCase() === sig.symbol.toUpperCase());
+
+              if (relevantBot) {
+                const diag = await this.algoBotsService.evaluateBotForSignalDiagnostics(relevantBot, sig);
+                if (diag.matches) {
+                  botResultSummary = 'executed';
+                  executedCount++;
+                } else {
+                  botResultSummary = `rejected by bot (${diag.reasons.join(', ')})`;
+                  rejectedByBotCount++;
+                }
+              } else {
+                botResultSummary = 'no bot configured';
+              }
+
+              await this.algoBotsService.evaluateSignalForBots(sig);
+            } catch (err) {
+              botResultSummary = `error (${(err as Error).message})`;
+              this.logger.warn(
+                `[ALGO BOT EXECUTION ERROR] Failed evaluating signal ${sig.symbol} (${sig.timeframe}): ${(err as Error).message}`,
+              );
+            }
+          }
         }
+
+        const canonicalFormatted = sig.canonicalCandleTime
+          ? new Date(sig.canonicalCandleTime).toISOString()
+          : 'N/A';
+
+        this.logger.log(
+          `[SCANNER CANDIDATE REPORT]\n` +
+            `symbol: ${sig.symbol}\n` +
+            `direction: ${sig.direction}\n` +
+            `score: ${sig.score}\n` +
+            `state: ${sig.state}\n` +
+            `canonicalCandleTime: ${canonicalFormatted}\n` +
+            `SMC evidence: ${JSON.stringify(sig.triggerEvidence || {})}\n` +
+            `bot result: ${botResultSummary}`,
+        );
       }
 
       const duration = Date.now() - startTime;
@@ -76,6 +135,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         timeframe,
         scannedCount: signals.length,
         signalsFound: validSignals.length,
+        noTradeCount,
+        neutralCount,
+        activeCount,
+        rejectedByScoreCount,
+        rejectedByBotCount,
+        executedCount,
         durationMs: duration,
         signals: validSignals,
       };
@@ -90,7 +155,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       }
 
       this.logger.log(
-        `Multi-asset scan completed in ${duration}ms. Signals found: ${validSignals.length}`,
+        `[SCANNER SUMMARY] Scanned: ${signals.length} symbols | NO_TRADE: ${noTradeCount} | NEUTRAL: ${neutralCount} | ACTIVE: ${activeCount} | RejectedByScore: ${rejectedByScoreCount} | RejectedByBot: ${rejectedByBotCount} | Executed: ${executedCount} (Duration: ${duration}ms)`,
       );
       return summary;
     } finally {

@@ -10,6 +10,11 @@ export class AlgoBotsController {
     return this.algoBotsService.listBots();
   }
 
+  @Get('health')
+  async getHealth() {
+    return this.algoBotsService.getAlgoExecutionHealth();
+  }
+
   @Post()
   async createBot(@Body() body: Partial<IAlgoBot>) {
     return this.algoBotsService.createBot(body);
