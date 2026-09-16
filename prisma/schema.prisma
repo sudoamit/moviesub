@@ -1178,9 +1178,10 @@ model AlgoBotExecution {
   reservedAt      DateTime              @default(now())
   startedAt       DateTime?
   completedAt     DateTime?
-  failedAt        DateTime?
-  failureReason   String?
-  orderPositionId String?
+  failedAt          DateTime?
+  failureReason     String?
+  failureReasonCode String?
+  orderPositionId   String?
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
 

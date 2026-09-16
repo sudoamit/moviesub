@@ -17,6 +17,124 @@ import {
 } from '@quant/shared';
 import * as crypto from 'crypto';
 
+export enum ExecutionFailureReason {
+  MARKET_DATA_UNAVAILABLE = 'MARKET_DATA_UNAVAILABLE',
+  STALE_MARKET_DATA = 'STALE_MARKET_DATA',
+  ORDER_REJECTED = 'ORDER_REJECTED',
+  ORDER_PLACEMENT_FAILED = 'ORDER_PLACEMENT_FAILED',
+  INVALID_QUANTITY = 'INVALID_QUANTITY',
+  INVALID_LEVELS = 'INVALID_LEVELS',
+  POSITION_ALREADY_OPEN = 'POSITION_ALREADY_OPEN',
+  DATABASE_UNAVAILABLE = 'DATABASE_UNAVAILABLE',
+  STATE_TRANSITION_FAILED = 'STATE_TRANSITION_FAILED',
+  UNKNOWN_EXECUTION_ERROR = 'UNKNOWN_EXECUTION_ERROR',
+}
+
+export interface IExecutionFailureClassification {
+  retryable: boolean;
+  reasonCode: ExecutionFailureReason;
+  message: string;
+}
+
+export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
+  if (
+    err instanceof MarketDataUnavailableError ||
+    err?.code === 'MARKET_DATA_UNAVAILABLE' ||
+    err?.reasonCode === 'MARKET_DATA_UNAVAILABLE' ||
+    err?.name === 'MarketDataUnavailableError'
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.MARKET_DATA_UNAVAILABLE,
+      message: err?.message || 'Market data stream provider unavailable',
+    };
+  }
+
+  if (
+    err instanceof StaleMarketDataError ||
+    err?.code === 'STALE_MARKET_DATA' ||
+    err?.reasonCode === 'STALE_MARKET_DATA' ||
+    err?.name === 'StaleMarketDataError'
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.STALE_MARKET_DATA,
+      message: err?.message || 'Market quote is stale',
+    };
+  }
+
+  if (err?.code === 'POSITION_ALREADY_OPEN' || err?.reasonCode === 'POSITION_ALREADY_OPEN') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.POSITION_ALREADY_OPEN,
+      message: err?.message || 'Open position already exists for symbol',
+    };
+  }
+
+  if (err?.code === 'INVALID_QUANTITY' || err?.reasonCode === 'INVALID_QUANTITY') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.INVALID_QUANTITY,
+      message: err?.message || 'Invalid order quantity resolved',
+    };
+  }
+
+  if (err?.code === 'INVALID_LEVELS' || err?.reasonCode === 'INVALID_LEVELS') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.INVALID_LEVELS,
+      message: err?.message || 'Invalid trade levels',
+    };
+  }
+
+  if (err?.code === 'ORDER_REJECTED' || err?.reasonCode === 'ORDER_REJECTED') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.ORDER_REJECTED,
+      message: err?.message || 'Broker/Exchange rejected order',
+    };
+  }
+
+  if (err?.code === 'ORDER_PLACEMENT_FAILED' || err?.reasonCode === 'ORDER_PLACEMENT_FAILED') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.ORDER_PLACEMENT_FAILED,
+      message: err?.message || 'Order placement failed',
+    };
+  }
+
+  if (err?.code === 'DATABASE_UNAVAILABLE' || err?.reasonCode === 'DATABASE_UNAVAILABLE') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.DATABASE_UNAVAILABLE,
+      message: err?.message || 'Database unavailable',
+    };
+  }
+
+  if (err?.code === 'STATE_TRANSITION_FAILED' || err?.reasonCode === 'STATE_TRANSITION_FAILED') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.STATE_TRANSITION_FAILED,
+      message: err?.message || 'State transition failed',
+    };
+  }
+
+  return {
+    retryable: false,
+    reasonCode: ExecutionFailureReason.UNKNOWN_EXECUTION_ERROR,
+    message: err?.message || String(err),
+  };
+}
+
+const ALLOWED_STATE_TRANSITIONS: Record<string, string[]> = {
+  RESERVED: ['EXECUTING', 'FAILED_RETRYABLE', 'FAILED_FINAL', 'CANCELLED'],
+  EXECUTING: ['EXECUTED', 'FAILED_RETRYABLE', 'FAILED_FINAL'],
+  FAILED_RETRYABLE: ['RESERVED'],
+  EXECUTED: [],
+  FAILED_FINAL: [],
+  CANCELLED: [],
+};
+
 export interface IAlgoBot {
   id: string;
   name: string;
@@ -593,6 +711,22 @@ export class AlgoBotsService implements OnModuleInit {
       return { matches: false, reasonCode: 'BOT_INACTIVE', details: `Bot '${bot.id}' is inactive/paused` };
     }
 
+    // P0 #5: Require valid canonicalCandleTime for auto-execution
+    if (bot.autoExecutePaper) {
+      if (
+        !signal.canonicalCandleTime ||
+        typeof signal.canonicalCandleTime !== 'number' ||
+        !Number.isFinite(signal.canonicalCandleTime) ||
+        signal.canonicalCandleTime <= 0
+      ) {
+        return {
+          matches: false,
+          reasonCode: 'CANONICAL_DECISION_TIMESTAMP_REQUIRED',
+          details: `Auto-execution requires valid canonicalCandleTime on signal setup`,
+        };
+      }
+    }
+
     // P0 #6: Require signal.state === SignalState.ACTIVE
     if (!signal.state || signal.state !== SignalState.ACTIVE) {
       return {
@@ -694,13 +828,12 @@ export class AlgoBotsService implements OnModuleInit {
   /**
    * P0 #1, #2, #3: Single-Authority Atomic Conditional Execution State Transition Helper
    *
-   * Enforces strict state machine flow:
-   *   RESERVED  -> EXECUTING
-   *   EXECUTING -> EXECUTED
-   *   EXECUTING (or RESERVED) -> FAILED_RETRYABLE / FAILED_FINAL
-   *   FAILED_RETRYABLE        -> RESERVED (Clean Retry Reset)
+   * Enforces strict finite state machine graph edges:
+   *   RESERVED  -> EXECUTING / FAILED_RETRYABLE / FAILED_FINAL / CANCELLED
+   *   EXECUTING -> EXECUTED / FAILED_RETRYABLE / FAILED_FINAL
+   *   FAILED_RETRYABLE -> RESERVED (Clean Retry Reset)
    *
-   * Rejects any transition if current state does not match expectedState(s).
+   * Rejects any transition edge that does not belong to the allowed state graph.
    */
   public async transitionExecutionState(
     executionId: string,
@@ -709,13 +842,27 @@ export class AlgoBotsService implements OnModuleInit {
     updateData?: {
       orderPositionId?: string | null;
       failureReason?: string | null;
+      failureReasonCode?: string | null;
     },
   ): Promise<{ success: boolean; count: number }> {
+    const expectedArray = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
+
+    // 1. Validate finite state machine edge BEFORE database query or unit test mock check
+    for (const exp of expectedArray) {
+      const allowedTargets = ALLOWED_STATE_TRANSITIONS[exp] || [];
+      if (!allowedTargets.includes(targetState)) {
+        this.logger.error(
+          `Invalid state transition edge requested for execution '${executionId}': edge '${exp}' -> '${targetState}' is prohibited by state machine graph`,
+        );
+        throw new InternalServerErrorException(
+          `INVALID_STATE_TRANSITION_EDGE: Transition '${exp}' -> '${targetState}' is prohibited by finite state machine graph`,
+        );
+      }
+    }
+
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) {
       return { success: true, count: 1 };
     }
-
-    const expectedArray = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
 
     const data: any = {
       state: targetState,
@@ -732,9 +879,11 @@ export class AlgoBotsService implements OnModuleInit {
     } else if (targetState === 'FAILED_RETRYABLE' || targetState === 'FAILED_FINAL') {
       data.failedAt = new Date();
       data.failureReason = updateData?.failureReason || null;
+      data.failureReasonCode = updateData?.failureReasonCode || null;
     } else if (targetState === 'RESERVED') {
       // P0 #4: Clean retry reset invariant — clear all transient failure & execution data
       data.failureReason = null;
+      data.failureReasonCode = null;
       data.failedAt = null;
       data.startedAt = null;
       data.completedAt = null;
@@ -752,7 +901,7 @@ export class AlgoBotsService implements OnModuleInit {
 
       if (result.count === 0) {
         this.logger.error(
-          `Invalid state transition for execution '${executionId}': expected state [${expectedArray.join(', ')}], target '${targetState}'`,
+          `State transition conflict for execution '${executionId}': expected state [${expectedArray.join(', ')}], target '${targetState}'`,
         );
         throw new InternalServerErrorException(
           `STATE_TRANSITION_REJECTED: Execution '${executionId}' is not in expected state [${expectedArray.join(', ')}] for transition to ${targetState}`,
@@ -829,8 +978,23 @@ export class AlgoBotsService implements OnModuleInit {
                 this.inMemoryLocks.add(fingerprint);
                 return { success: true, executionId: existing.id };
               }
-            } catch {
-              // Retry race lost (another worker already claimed or transitioned state)
+            } catch (retryErr: any) {
+              if (
+                retryErr instanceof InternalServerErrorException &&
+                (retryErr.message.includes('STATE_TRANSITION_REJECTED') || retryErr.message.includes('INVALID_STATE_TRANSITION_EDGE'))
+              ) {
+                const rechecked = await this.prisma.algoBotExecution.findUnique({
+                  where: { id: existing.id },
+                });
+                if (rechecked && rechecked.state !== 'FAILED_RETRYABLE') {
+                  this.inMemoryLocks.add(fingerprint);
+                  return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
+                }
+                return { success: false, reason: 'STATE_TRANSITION_CONFLICT' };
+              }
+              // Real DB exception during retry transition -> report DATABASE_UNAVAILABLE / fail closed
+              this.logger.error(`Database error during retry transition for ${fingerprint}: ${retryErr.message}`);
+              return { success: false, reason: 'DATABASE_UNAVAILABLE' };
             }
             this.inMemoryLocks.add(fingerprint);
             return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
@@ -872,35 +1036,22 @@ export class AlgoBotsService implements OnModuleInit {
   /**
    * P0 #1 & #3: Atomic Conditional Lifecycle Transition — Mark Failed ([EXECUTING, RESERVED] -> FAILED_RETRYABLE / FAILED_FINAL)
    */
-  public async markExecutionFailed(executionId: string, err: any, reasonCode?: string): Promise<void> {
+  public async markExecutionFailed(executionId: string, err: any, customReasonCode?: string): Promise<void> {
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
 
-    let isRetryable = false;
-    if (
-      err instanceof MarketDataUnavailableError ||
-      err instanceof StaleMarketDataError ||
-      err?.name === 'MarketDataUnavailableError' ||
-      err?.name === 'StaleMarketDataError' ||
-      err?.code === 'MARKET_DATA_UNAVAILABLE' ||
-      err?.code === 'STALE_MARKET_DATA' ||
-      err?.message?.includes('MarketDataUnavailableError') ||
-      err?.message?.includes('StaleMarketDataError') ||
-      err?.message?.includes('streamer') ||
-      err?.message?.includes('timeout') ||
-      err?.message?.includes('network')
-    ) {
-      isRetryable = true;
-    }
-
-    const targetState = isRetryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
-    const codePrefix = reasonCode ? `[${reasonCode}] ` : '';
-    const failureReason = `${codePrefix}${err?.message || String(err)}`;
+    const classification = classifyExecutionFailure(err);
+    const targetState = classification.retryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
+    const reasonCode = customReasonCode || classification.reasonCode;
+    const failureReason = classification.message;
 
     await this.transitionExecutionState(
       executionId,
       ['EXECUTING', 'RESERVED'],
       targetState,
-      { failureReason },
+      {
+        failureReason,
+        failureReasonCode: reasonCode,
+      },
     );
   }
 

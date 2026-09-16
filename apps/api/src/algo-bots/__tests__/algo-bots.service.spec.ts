@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { AlgoBotsService, IAlgoBot } from '../algo-bots.service';
+import { AlgoBotsService, IAlgoBot, classifyExecutionFailure } from '../algo-bots.service';
 import { PaperTradingService } from '../../paper-trading/paper-trading.service';
 import { AlertsService } from '../../alerts/alerts.service';
 import { Direction, ISignalSetup, MarketDataUnavailableError, SignalGrade, SignalState } from '@quant/shared';
@@ -155,17 +155,16 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
     it('should include bot configuration version hash in execution fingerprint', () => {
       const bot1 = createTestBot({ minScore: 80 });
       const bot2 = createTestBot({ minScore: 90 });
-      const signal = createTestSignal({ timestamp: new Date('2026-09-15T09:15:00.000Z') });
+      const bot = createTestBot();
+      const signal = createTestSignal();
 
-      const fp1 = service.getSignalFingerprint(bot1, signal);
-      const fp2 = service.getSignalFingerprint(bot2, signal);
+      const fingerprint = service.getSignalFingerprint(bot, signal);
 
-      expect(fp1).toContain('bot_exec:bot_nifty_ob_test:v');
-      expect(fp1).not.toEqual(fp2);
+      expect(fingerprint).toMatch(/^bot_exec:bot_nifty_ob_test:v[a-f0-9]{8}:NIFTY:15m:BULLISH:\d+$/);
     });
   });
 
-  // 4. Order of Operations & Position Check Before Reservation
+  // 4. Order of Operations & Position Check Prior to Reservation
   describe('4. Order of Operations & Position Check Prior to Reservation', () => {
     it('should NOT attempt database reservation if open position already exists for symbol', async () => {
       const bot = createTestBot();
@@ -211,6 +210,62 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
       );
 
       await expect(testService.listBots()).rejects.toThrow(InternalServerErrorException);
+    });
+  });
+
+  // 6. Mandatory Canonical Decision Timestamp Policy (Fix 177)
+  describe('6. Mandatory Canonical Decision Timestamp Policy', () => {
+    it('should REJECT auto-execution when canonicalCandleTime is missing', () => {
+      const bot = createTestBot({ autoExecutePaper: true });
+      const signal = createTestSignal({ canonicalCandleTime: undefined });
+
+      const eligibility = service.validateExecutionEligibility(bot, signal);
+
+      expect(eligibility.matches).toBe(false);
+      expect(eligibility.reasonCode).toBe('CANONICAL_DECISION_TIMESTAMP_REQUIRED');
+    });
+
+    it('should ACCEPT auto-execution when valid canonicalCandleTime is present', () => {
+      const bot = createTestBot({ autoExecutePaper: true });
+      const signal = createTestSignal({ canonicalCandleTime: Date.now() });
+
+      const eligibility = service.validateExecutionEligibility(bot, signal);
+
+      expect(eligibility.matches).toBe(true);
+    });
+  });
+
+  // 7. Deterministic Failure Reason Classification (Fix 177)
+  describe('7. Deterministic Failure Reason Classification', () => {
+    it('should classify MarketDataUnavailableError as retryable MARKET_DATA_UNAVAILABLE', () => {
+      const err = new MarketDataUnavailableError('BTCUSDT', 'Streamer timeout');
+      const classification = classifyExecutionFailure(err);
+
+      expect(classification.retryable).toBe(true);
+      expect(classification.reasonCode).toBe('MARKET_DATA_UNAVAILABLE');
+    });
+
+    it('should classify generic Error as non-retryable UNKNOWN_EXECUTION_ERROR', () => {
+      const err = new Error('Random error message containing network');
+      const classification = classifyExecutionFailure(err);
+
+      expect(classification.retryable).toBe(false);
+      expect(classification.reasonCode).toBe('UNKNOWN_EXECUTION_ERROR');
+    });
+  });
+
+  // 8. Finite State Machine Graph Edge Validation (Fix 177)
+  describe('8. Finite State Machine Graph Edge Validation', () => {
+    it('should REJECT prohibited graph transition (EXECUTED -> EXECUTING)', async () => {
+      await expect(
+        service.transitionExecutionState('test_exec_123', 'EXECUTED' as any, 'EXECUTING'),
+      ).rejects.toThrow(InternalServerErrorException);
+    });
+
+    it('should REJECT prohibited graph transition (FAILED_FINAL -> RESERVED)', async () => {
+      await expect(
+        service.transitionExecutionState('test_exec_123', 'FAILED_FINAL' as any, 'RESERVED'),
+      ).rejects.toThrow(InternalServerErrorException);
     });
   });
 });

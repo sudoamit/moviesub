@@ -1,7 +1,7 @@
 import { PrismaClient, AlgoBotExecutionState } from '@prisma/client';
 import { AlgoBotsService, IAlgoBot } from '../algo-bots.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { ISignalSetup, Direction, SignalGrade, SignalState, Timeframe } from '@quant/shared';
+import { ISignalSetup, Direction, SignalGrade, SignalState, Timeframe, MarketDataUnavailableError } from '@quant/shared';
 import { InternalServerErrorException } from '@nestjs/common';
 
 describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine Integration Suite', () => {
@@ -351,9 +351,10 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       expect(res1.success).toBe(true);
       const execId = res1.executionId!;
 
-      await algoBotsServiceA.markExecutionFailed(execId, new Error('Temporary network timeout'));
+      await algoBotsServiceA.markExecutionFailed(execId, new MarketDataUnavailableError('BTCUSDT', 'Streamer network timeout'));
       let dbRow = await prismaA.algoBotExecution.findUnique({ where: { id: execId } });
       expect(dbRow?.state).toBe(AlgoBotExecutionState.FAILED_RETRYABLE);
+      expect(dbRow?.failureReasonCode).toBe('MARKET_DATA_UNAVAILABLE');
 
       const res2 = await algoBotsServiceB.reserveExecutionLock(bot, signal, fingerprint);
       expect(res2.success).toBe(true);
@@ -361,6 +362,12 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
 
       dbRow = await prismaA.algoBotExecution.findUnique({ where: { id: execId } });
       expect(dbRow?.state).toBe(AlgoBotExecutionState.RESERVED);
+      expect(dbRow?.failureReason).toBeNull();
+      expect(dbRow?.failureReasonCode).toBeNull();
+      expect(dbRow?.failedAt).toBeNull();
+      expect(dbRow?.startedAt).toBeNull();
+      expect(dbRow?.completedAt).toBeNull();
+      expect(dbRow?.orderPositionId).toBeNull();
     } finally {
       await prismaA.algoBotExecution.deleteMany({ where: { fingerprint } });
       await prismaA.algoBot.deleteMany({ where: { id: botId } });
@@ -468,8 +475,8 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       expect(res1.success).toBe(true);
       const execId = res1.executionId!;
 
-      // 2. Mark FAILED_RETRYABLE
-      await algoBotsServiceA.markExecutionFailed(execId, new Error('Streamer timeout'));
+      // 2. Mark FAILED_RETRYABLE with structured transient error
+      await algoBotsServiceA.markExecutionFailed(execId, new MarketDataUnavailableError('BTCUSDT', 'Streamer timeout'));
 
       // 3. Concurrent retry attempt from two service instances
       const retryResults = await Promise.all([
