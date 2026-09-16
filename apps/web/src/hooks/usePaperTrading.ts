@@ -40,6 +40,12 @@ export interface AlgoExecutionRecord {
   failureReasonCode?: string;
   failureReason?: string;
   orderPositionId?: string;
+  reservationFingerprint?: string;
+  fillPrice?: number;
+  fillTime?: string;
+  eligibilityState?: 'ELIGIBLE' | 'BLOCKED' | 'FAILED' | 'PENDING';
+  eligibilityReasonCode?: string;
+  eligibilityReason?: string;
   signalTimestamp: string;
   createdAt: string;
   updatedAt: string;

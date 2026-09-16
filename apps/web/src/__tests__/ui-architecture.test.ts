@@ -2,7 +2,10 @@ import { NAV_GROUPS, NavGroup, NavTab, StrategyMode } from '../components/Header
 import { MarketDataState } from '../hooks/useMarketContext';
 import { EmptyStatePreset } from '../components/common/EmptyState';
 import { AuthoritativePosition, AlgoExecutionRecord } from '../hooks/usePaperTrading';
-import { StageState } from '../components/execution/ExecutionStageRail';
+import {
+  calculateExecutionLifecycle,
+  StageState,
+} from '../components/execution/lifecycle-projection';
 import { ISignalSetup, Direction, SignalGrade, SignalState } from '@quant/shared';
 
 describe('Frontend UI Architecture & Trading UX Tests', () => {
@@ -112,7 +115,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
     });
   });
 
-  describe('Requirement 1, 2 & 5: Strict Authoritative Execution Lifecycle Pipeline', () => {
+  describe('Requirement 1, 2, 4 & 5: Authoritative Execution Lifecycle Projection (Direct Domain Testing)', () => {
     it('requires trigger specifications to remain distinct from fill records', () => {
       const triggerSpec = {
         triggerPrice: 65000,
@@ -131,96 +134,250 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
       expect(fillRecord.fillPrice).toBeGreaterThan(triggerSpec.triggerPrice);
     });
 
-    it('evaluates Eligibility Gate as a first-class authoritative state with reasons', () => {
-      // Helper matching ExecutionStageRail's first-class eligibility gate
-      const evaluateEligibility = (signal: Partial<ISignalSetup> | null): { status: StageState; reason?: string } => {
-        if (!signal) return { status: 'PENDING' };
-        if (
-          (signal.score ?? 0) < 70 ||
-          (signal.grade as string) === 'NO_TRADE' ||
-          (signal.direction as string) === 'NEUTRAL'
-        ) {
-          return { status: 'BLOCKED', reason: `Score ${signal.score}/100 below gate threshold` };
-        }
-        return { status: 'DONE', reason: `Score ${signal.score}/100 • Grade ${signal.grade}` };
-      };
+    it('tests calculateExecutionLifecycle projection in initial standby state', () => {
+      const stages = calculateExecutionLifecycle({
+        signal: null,
+        execution: null,
+        position: null,
+      });
 
-      // Case 1: No signal -> PENDING
-      expect(evaluateEligibility(null).status).toBe('PENDING');
-
-      // Case 2: Score 45 -> BLOCKED
-      const lowScoreSignal = { score: 45, grade: SignalGrade.B, direction: Direction.BULLISH };
-      const lowScoreResult = evaluateEligibility(lowScoreSignal);
-      expect(lowScoreResult.status).toBe('BLOCKED');
-      expect(lowScoreResult.reason).toContain('below gate threshold');
-
-      // Case 3: Score 85 Grade A+ -> DONE (Eligible)
-      const highScoreSignal = { score: 85, grade: SignalGrade.A_PLUS, direction: Direction.BULLISH };
-      const highScoreResult = evaluateEligibility(highScoreSignal);
-      expect(highScoreResult.status).toBe('DONE');
-      expect(highScoreResult.reason).toContain('Score 85/100');
+      expect(stages).toHaveLength(6);
+      expect(stages.every((s) => s.status === 'PENDING')).toBe(true);
     });
 
-    it('strictly requires authoritative reservation evidence for DB Reservation stage', () => {
-      const evaluateReservation = (
-        execution: AlgoExecutionRecord | null,
-        eligibilityStatus: StageState
-      ): StageState => {
-        const hasExplicitReservation =
-          !!execution?.id &&
-          (execution.state === 'RESERVED' ||
-            execution.state === 'EXECUTING' ||
-            execution.state === 'EXECUTED');
-
-        if (hasExplicitReservation) return 'DONE';
-        if (execution?.failureReasonCode === 'EXECUTION_LOCKED') return 'FAILED';
-        if (eligibilityStatus === 'BLOCKED' || eligibilityStatus === 'FAILED') return 'NOT_REACHED';
-        return 'PENDING';
+    it('evaluates Eligibility Gate as a first-class authoritative state consuming backend evidence', () => {
+      // Case 1: Backend execution record states trade is INELIGIBLE
+      const signal: ISignalSetup = {
+        id: 'sig_1',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        state: SignalState.ACTIVE,
+        grade: SignalGrade.A,
+        score: 80,
+        entryZone: { min: 24200, max: 24220, optimal: 24210 },
+        stopLoss: 24150,
+        takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
+        riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        scoreBreakdown: {} as any,
       };
 
-      // Case 1: Eligibility blocked -> NOT_REACHED
-      expect(evaluateReservation(null, 'BLOCKED')).toBe('NOT_REACHED');
-
-      // Case 2: Execution lock conflict -> FAILED
-      const lockedExec = { failureReasonCode: 'EXECUTION_LOCKED' } as AlgoExecutionRecord;
-      expect(evaluateReservation(lockedExec, 'DONE')).toBe('FAILED');
-
-      // Case 3: Authoritative reservation record -> DONE
-      const reservedExec = { id: 'exec_123', state: 'RESERVED' } as AlgoExecutionRecord;
-      expect(evaluateReservation(reservedExec, 'DONE')).toBe('DONE');
-    });
-
-    it('strictly requires authoritative execution record for Order Filled stage (no downstream position inference)', () => {
-      const isOrderFilledAuthoritative = (execution: AlgoExecutionRecord | null) => {
-        return execution?.state === 'EXECUTED' || Boolean(execution?.orderPositionId);
+      const ineligibleExecution: AlgoExecutionRecord = {
+        id: 'exec_ineligible',
+        botId: 'bot_1',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'FAILED_FINAL',
+        failureReasonCode: 'INELIGIBLE_FOR_EXECUTION',
+        failureReason: 'Daily risk budget exceeded',
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
-      expect(isOrderFilledAuthoritative(null)).toBe(false);
+      const stages = calculateExecutionLifecycle({
+        signal,
+        execution: ineligibleExecution,
+        position: null,
+      });
 
-      const reservedExecution = { state: 'RESERVED' } as AlgoExecutionRecord;
-      expect(isOrderFilledAuthoritative(reservedExecution)).toBe(false);
+      const eligibilityStage = stages.find((s) => s.id === 'eligibility');
+      expect(eligibilityStage?.status).toBe('BLOCKED');
+      expect(eligibilityStage?.reason).toBe('Daily risk budget exceeded');
 
-      const executingExecution = { state: 'EXECUTING' } as AlgoExecutionRecord;
-      expect(isOrderFilledAuthoritative(executingExecution)).toBe(false);
-
-      const failedExecution = { state: 'FAILED_FINAL' } as AlgoExecutionRecord;
-      expect(isOrderFilledAuthoritative(failedExecution)).toBe(false);
-
-      const executedExecution = { state: 'EXECUTED', orderPositionId: 'pos_123' } as AlgoExecutionRecord;
-      expect(isOrderFilledAuthoritative(executedExecution)).toBe(true);
+      // Subsequent stages must be NOT_REACHED
+      expect(stages.find((s) => s.id === 'reserved')?.status).toBe('NOT_REACHED');
+      expect(stages.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
+      expect(stages.find((s) => s.id === 'placed')?.status).toBe('NOT_REACHED');
     });
 
-    it('supports full lifecycle stage statuses: DONE, ACTIVE, FAILED, BLOCKED, NOT_REACHED, PENDING', () => {
-      const validStatuses: StageState[] = [
-        'DONE',
-        'ACTIVE',
-        'FAILED',
-        'BLOCKED',
-        'NOT_REACHED',
-        'PENDING',
-      ];
-      expect(validStatuses.length).toBe(6);
-      expect(new Set(validStatuses).size).toBe(6);
+    it('strictly requires explicit reservation evidence for DB Reservation stage', () => {
+      const signal: ISignalSetup = {
+        id: 'sig_1',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        state: SignalState.ACTIVE,
+        grade: SignalGrade.A_PLUS,
+        score: 85,
+        entryZone: { min: 24200, max: 24220, optimal: 24210 },
+        stopLoss: 24150,
+        takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
+        riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        scoreBreakdown: {} as any,
+      };
+
+      // Case 1: Active explicit reservation
+      const reservedExec: AlgoExecutionRecord = {
+        id: 'exec_reserved_1',
+        botId: 'bot_nifty_smc',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'RESERVED',
+        reservationFingerprint: 'bot_exec:bot_nifty_smc:v1:NIFTY:15m:1789559',
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const stagesReserved = calculateExecutionLifecycle({
+        signal,
+        execution: reservedExec,
+        position: null,
+      });
+
+      expect(stagesReserved.find((s) => s.id === 'reserved')?.status).toBe('DONE');
+      expect(stagesReserved.find((s) => s.id === 'reserved')?.reason).toContain('bot_nifty_smc');
+
+      // Case 2: Execution lock failure
+      const lockedExec: AlgoExecutionRecord = {
+        id: 'exec_locked_1',
+        botId: 'bot_nifty_smc',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'FAILED_FINAL',
+        failureReasonCode: 'EXECUTION_LOCKED',
+        failureReason: 'Execution lock already held by another bot worker',
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const stagesLocked = calculateExecutionLifecycle({
+        signal,
+        execution: lockedExec,
+        position: null,
+      });
+
+      expect(stagesLocked.find((s) => s.id === 'reserved')?.status).toBe('FAILED');
+      expect(stagesLocked.find((s) => s.id === 'executing')?.status).toBe('NOT_REACHED');
+    });
+
+    it('strictly requires authoritative execution record for Order Filled stage and uses execution fill price', () => {
+      const signal: ISignalSetup = {
+        id: 'sig_1',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        state: SignalState.ACTIVE,
+        grade: SignalGrade.A_PLUS,
+        score: 85,
+        entryZone: { min: 24200, max: 24220, optimal: 24210 },
+        stopLoss: 24150,
+        takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
+        riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        scoreBreakdown: {} as any,
+      };
+
+      // Case 1: Standby position alone does NOT produce Order Filled
+      const positionOnly: AuthoritativePosition = {
+        id: 'pos_1',
+        symbol: 'NIFTY',
+        direction: 'BUY',
+        quantity: 1,
+        entryPrice: 24250,
+        currentPrice: 24260,
+        unrealizedPnL: 10,
+        unrealizedPnLPercent: 0.04,
+        status: 'OPEN',
+        openedAt: new Date().toISOString(),
+      };
+
+      const stagesPositionOnly = calculateExecutionLifecycle({
+        signal,
+        execution: null,
+        position: positionOnly,
+      });
+
+      expect(stagesPositionOnly.find((s) => s.id === 'placed')?.status).toBe('PENDING');
+
+      // Case 2: Authoritative EXECUTED record with fill price
+      const executedRecord: AlgoExecutionRecord = {
+        id: 'exec_executed_1',
+        botId: 'bot_nifty_smc',
+        symbol: 'NIFTY',
+        timeframe: '15m',
+        direction: 'BULLISH',
+        state: 'EXECUTED',
+        orderPositionId: 'pos_1',
+        fillPrice: 24251.3,
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const stagesExecuted = calculateExecutionLifecycle({
+        signal,
+        execution: executedRecord,
+        position: positionOnly,
+      });
+
+      const filledStage = stagesExecuted.find((s) => s.id === 'placed');
+      expect(filledStage?.status).toBe('DONE');
+      expect(filledStage?.reason).toBe('Filled @ ₹24251.30');
+
+      const positionStage = stagesExecuted.find((s) => s.id === 'open');
+      expect(positionStage?.status).toBe('ACTIVE');
+      expect(positionStage?.reason).toBe('BUY Active');
+    });
+
+    it('renders ExecutionStageRail component markup correctly without crashing', () => {
+      // Dynamic require or import to test component rendering
+      const React = require('react');
+      const ReactDOMServer = require('react-dom/server');
+      const { ExecutionStageRail } = require('../components/execution/ExecutionStageRail');
+
+      const signal: ISignalSetup = {
+        id: 'sig_render_1',
+        symbol: 'BANKNIFTY',
+        timeframe: '5m',
+        direction: Direction.BULLISH,
+        state: SignalState.ACTIVE,
+        grade: SignalGrade.A,
+        score: 80,
+        entryZone: { min: 51200, max: 51250, optimal: 51225 },
+        stopLoss: 51100,
+        takeProfits: { tp1: 51400, tp2: 51600, tp3: 51800 },
+        riskRewardRatios: { rr1: 1.5, rr2: 3.2, rr3: 4.8 },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        scoreBreakdown: {} as any,
+      };
+
+      const execution: AlgoExecutionRecord = {
+        id: 'exec_render_1',
+        botId: 'bot_bn_1',
+        symbol: 'BANKNIFTY',
+        timeframe: '5m',
+        direction: 'BULLISH',
+        state: 'EXECUTED',
+        orderPositionId: 'pos_bn_1',
+        fillPrice: 51225.5,
+        signalTimestamp: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const html = ReactDOMServer.renderToStaticMarkup(
+        React.createElement(ExecutionStageRail, {
+          signal,
+          position: null,
+          execution,
+        })
+      );
+
+      expect(html).toContain('Authoritative Execution Lifecycle Rail');
+      expect(html).toContain('Signal Detected');
+      expect(html).toContain('Eligibility Gate');
+      expect(html).toContain('DB Reservation');
+      expect(html).toContain('Execution Lock');
+      expect(html).toContain('Order Filled');
+      expect(html).toContain('Filled @ ₹51225.50');
     });
 
     it('verifies all strategy modes are properly typed and supported', () => {
