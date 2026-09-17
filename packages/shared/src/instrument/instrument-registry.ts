@@ -1,5 +1,6 @@
 import { AssetType } from '../enums';
 import {
+  CurrencyCode,
   IInstrument,
   IResolvedMarginModel,
   IVenueProfile,
@@ -14,6 +15,94 @@ export const FORBIDDEN_DERIVATIVE_INSTRUMENTS = new Set([
   'BANKNIFTY_OPTION',
   'BTCUSDT_PERP',
 ]);
+
+export const SUPPORTED_SPOT_SYMBOLS = ['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT'] as const;
+export type SupportedSpotSymbol = (typeof SUPPORTED_SPOT_SYMBOLS)[number];
+export const SUPPORTED_SPOT_SYMBOLS_SET = new Set<string>(SUPPORTED_SPOT_SYMBOLS);
+
+export interface ISpotInstrument {
+  id: string;
+  symbol: SupportedSpotSymbol;
+  name: string;
+  exchange: 'NSE' | 'BINANCE';
+  assetType: AssetType;
+  baseCurrency: string;
+  quoteCurrency: CurrencyCode;
+  accountingCurrency: CurrencyCode;
+  tickSize: number;
+  lotSize: number;
+  contractMultiplier: 1;
+  minimumQuantity: number;
+  quantityPrecision: number;
+  pricePrecision: number;
+  tradingHoursJson?: Record<string, any> | null;
+  isActive: boolean;
+  isSpot: true;
+}
+
+export function isSupportedSpotSymbol(symbol: string): symbol is SupportedSpotSymbol {
+  return SUPPORTED_SPOT_SYMBOLS_SET.has((symbol || '').toUpperCase());
+}
+
+export const LEGACY_SPOT_ALIASES: Record<string, SupportedSpotSymbol> = {
+  NIFTY: 'NIFTY_SPOT',
+  BANKNIFTY: 'BANKNIFTY_SPOT',
+  BTCUSDT: 'BTCUSDT_SPOT',
+};
+
+export function canonicalizeSpotSymbol(
+  symbol: string,
+  options?: { allowLegacyAliases?: boolean },
+): SupportedSpotSymbol {
+  if (!symbol || typeof symbol !== 'string') {
+    throw new Error(`INVALID_SPOT_SYMBOL: Expected non-empty string, got ${symbol}`);
+  }
+  const sym = symbol.toUpperCase();
+  if (FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(sym)) {
+    throw new Error(
+      `FORBIDDEN_DERIVATIVE_INSTRUMENT: Derivative instrument '${symbol}' is strictly forbidden in the spot-only trading architecture.`,
+    );
+  }
+  if (sym === 'NIFTY_SPOT' || sym === 'BANKNIFTY_SPOT' || sym === 'BTCUSDT_SPOT') {
+    return sym;
+  }
+  if (sym in LEGACY_SPOT_ALIASES) {
+    if (options?.allowLegacyAliases === false) {
+      throw new Error(
+        `LEGACY_ALIAS_REJECTED: Symbol '${symbol}' is a legacy alias. The spot engine strictly requires canonical symbol '${LEGACY_SPOT_ALIASES[sym]}'.`,
+      );
+    }
+    return LEGACY_SPOT_ALIASES[sym];
+  }
+
+  throw new Error(
+    `UNSUPPORTED_SPOT_INSTRUMENT: Symbol '${symbol}' is not in the supported spot universe: ${SUPPORTED_SPOT_SYMBOLS.join(', ')}`,
+  );
+}
+
+export function getAuthoritativeSpotInstrument(symbol: string): ISpotInstrument {
+  const canonicalSym = canonicalizeSpotSymbol(symbol);
+  const inst = AUTHORITATIVE_INSTRUMENTS[canonicalSym];
+  return {
+    id: inst.id,
+    symbol: canonicalSym,
+    name: inst.name,
+    exchange: inst.exchange as 'NSE' | 'BINANCE',
+    assetType: inst.assetType,
+    baseCurrency: inst.baseCurrency || inst.symbol,
+    quoteCurrency: (inst.quoteCurrency || 'INR') as CurrencyCode,
+    accountingCurrency: (inst.accountingCurrency || 'INR') as CurrencyCode,
+    tickSize: inst.tickSize,
+    lotSize: inst.lotSize,
+    contractMultiplier: 1,
+    minimumQuantity: inst.minimumQuantity || inst.lotSize,
+    quantityPrecision: inst.quantityPrecision || 0,
+    pricePrecision: inst.pricePrecision || 2,
+    tradingHoursJson: inst.tradingHoursJson,
+    isActive: inst.isActive,
+    isSpot: true,
+  };
+}
 
 export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   NIFTY_SPOT: {
@@ -30,20 +119,6 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     quoteCurrency: 'INR',
     accountingCurrency: 'INR',
     marginMode: 'SPOT',
-    defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
-    venueProfile: {
-      venueId: 'NSE_SPOT',
-      defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
-    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -64,20 +139,6 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     quoteCurrency: 'INR',
     accountingCurrency: 'INR',
     marginMode: 'SPOT',
-    defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
-    venueProfile: {
-      venueId: 'NSE_SPOT',
-      defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
-    },
     minimumQuantity: 1,
     quantityPrecision: 0,
     pricePrecision: 2,
@@ -98,20 +159,6 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     quoteCurrency: 'USDT',
     accountingCurrency: 'INR',
     marginMode: 'SPOT',
-    defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
-    venueProfile: {
-      venueId: 'BINANCE_SPOT',
-      defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
-    },
     minimumQuantity: 0.0001,
     quantityPrecision: 4,
     pricePrecision: 2,
@@ -121,32 +168,32 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   NIFTY: {
     id: 'inst_nifty_50',
     symbol: 'NIFTY',
-    name: 'NIFTY 50 Index (Spot)',
+    name: 'NIFTY 50 Index (Legacy Derivative)',
     exchange: 'NSE',
     assetType: AssetType.INDEX,
     tickSize: 0.05,
-    lotSize: 1,
+    lotSize: 65,
     contractSize: 1,
     currency: 'INR',
     baseCurrency: 'NIFTY',
     quoteCurrency: 'INR',
     accountingCurrency: 'INR',
-    marginMode: 'SPOT',
-    defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
+    marginMode: 'ISOLATED',
+    defaultLeverage: 5,
+    maxLeverage: 5,
+    initialMarginRate: 0.2,
+    maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
     venueProfile: {
-      venueId: 'NSE_SPOT',
-      defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
+      venueId: 'NSE_DERIVATIVES',
+      defaultLeverage: 5,
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
     },
-    minimumQuantity: 1,
+    minimumQuantity: 65,
     quantityPrecision: 0,
     pricePrecision: 2,
     tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
@@ -155,32 +202,32 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   BANKNIFTY: {
     id: 'inst_banknifty',
     symbol: 'BANKNIFTY',
-    name: 'NIFTY Bank Index (Spot)',
+    name: 'NIFTY Bank Index (Legacy Derivative)',
     exchange: 'NSE',
     assetType: AssetType.INDEX,
     tickSize: 0.05,
-    lotSize: 1,
+    lotSize: 15,
     contractSize: 1,
     currency: 'INR',
     baseCurrency: 'BANKNIFTY',
     quoteCurrency: 'INR',
     accountingCurrency: 'INR',
-    marginMode: 'SPOT',
+    marginMode: 'ISOLATED',
     defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
+    maxLeverage: 5,
+    initialMarginRate: 0.2,
+    maintenanceMarginRate: 0.1,
+    liquidationModel: 'ISOLATED_LINEAR',
     venueProfile: {
-      venueId: 'NSE_SPOT',
+      venueId: 'NSE_INDEX_FUTURES',
       defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
+      maxLeverage: 5,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.2,
+      maintenanceMarginRate: 0.1,
+      liquidationModel: 'ISOLATED_LINEAR',
     },
-    minimumQuantity: 1,
+    minimumQuantity: 15,
     quantityPrecision: 0,
     pricePrecision: 2,
     tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
@@ -291,32 +338,32 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   BTCUSDT: {
     id: 'inst_btcusdt_binance',
     symbol: 'BTCUSDT',
-    name: 'Bitcoin / Tether USD (Spot)',
+    name: 'Bitcoin / Tether USD (Legacy Derivative / Perpetual)',
     exchange: 'BINANCE',
     assetType: AssetType.CRYPTO,
     tickSize: 0.01,
-    lotSize: 0.0001,
+    lotSize: 0.001,
     contractSize: 1,
     currency: 'USDT',
     baseCurrency: 'BTC',
     quoteCurrency: 'USDT',
     accountingCurrency: 'INR',
-    marginMode: 'SPOT',
-    defaultLeverage: 1,
-    maxLeverage: 1,
-    initialMarginRate: 1.0,
-    maintenanceMarginRate: 0.0,
-    liquidationModel: 'SPOT_NONE',
+    marginMode: 'ISOLATED',
+    defaultLeverage: 5,
+    maxLeverage: 20,
+    initialMarginRate: 0.05,
+    maintenanceMarginRate: 0.025,
+    liquidationModel: 'ISOLATED_LINEAR',
     venueProfile: {
-      venueId: 'BINANCE_SPOT',
-      defaultLeverage: 1,
-      maxLeverage: 1,
-      marginMode: 'SPOT',
-      initialMarginRate: 1.0,
-      maintenanceMarginRate: 0.0,
-      liquidationModel: 'SPOT_NONE',
+      venueId: 'BINANCE_FUTURES_USDT',
+      defaultLeverage: 5,
+      maxLeverage: 20,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.05,
+      maintenanceMarginRate: 0.025,
+      liquidationModel: 'ISOLATED_LINEAR',
     },
-    minimumQuantity: 0.0001,
+    minimumQuantity: 0.001,
     quantityPrecision: 4,
     pricePrecision: 2,
     tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
@@ -539,6 +586,11 @@ export function resolveMarginModel(
     options?.venueOverride?.marginMode ?? instrument.marginMode ?? venue?.marginMode ?? 'SPOT';
 
   if (marginMode === 'SPOT') {
+    if (options?.requestedLeverage !== undefined && options.requestedLeverage > 1) {
+      throw new Error(
+        `LEVERAGE_EXCEEDS_MAX: Requested leverage ${options.requestedLeverage}x exceeds maximum allowable leverage of 1x for spot instrument ${instrument.symbol}`,
+      );
+    }
     return {
       marginMode: 'SPOT',
       effectiveLeverage: 1,

@@ -210,6 +210,19 @@ export class ExecutionSimulator {
       );
     }
 
+    // Spot-Only Invariant: Prohibit naked short selling entry orders for spot instruments
+    const isSpotSym =
+      params.symbol &&
+      (params.symbol === 'NIFTY_SPOT' ||
+        params.symbol === 'BANKNIFTY_SPOT' ||
+        params.symbol === 'BTCUSDT_SPOT' ||
+        params.symbol.endsWith('_SPOT'));
+    if (isSpotSym && params.exitTarget === 'ENTRY' && (params.side === 'SELL' || params.positionSide === 'SHORT')) {
+      throw new Error(
+        `SPOT_SHORT_SELLING_FORBIDDEN: Naked short selling entry orders are strictly prohibited for spot instrument '${params.symbol}'`,
+      );
+    }
+
     // P1-5: Prevent duplicate active orders per exit target (TP1, TP2, TP3, SL) for a trade
     if (params.exitTarget && ['TP1', 'TP2', 'TP3', 'SL', 'TRAILING_STOP'].includes(params.exitTarget)) {
       for (const existingOrder of this.orders.values()) {

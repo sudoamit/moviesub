@@ -11,6 +11,12 @@ import {
   hasInstrument,
   getAuthoritativeInstrument,
   PointInTimeCurrencyConverter,
+  canonicalizeSpotSymbol,
+  getAuthoritativeSpotInstrument,
+  isSupportedSpotSymbol,
+  SUPPORTED_SPOT_SYMBOLS,
+  LEGACY_SPOT_ALIASES,
+  FORBIDDEN_DERIVATIVE_INSTRUMENTS,
 } from '@quant/shared';
 import {
   SignalGenerator,
@@ -146,22 +152,35 @@ export class BacktestSimulator {
   }
 
   /**
-   * Simulates strategy historical execution candle-by-candle with zero look-ahead bias,
+   * Simulates spot strategy historical execution candle-by-candle with zero look-ahead bias,
    * authoritative ExecutionSimulator order/fill pipeline, resting exit orders, gap handling,
-   * fail-closed sizing, and bar-by-bar equity tracking.
+   * fail-closed sizing, cash accounting, and bar-by-bar equity tracking.
    */
-  private static ensureDefaultFxRates(): void {
-    const converter = PointInTimeCurrencyConverter.getInstance();
-    converter.seedFixtureRates([
-      { pair: 'USDT/INR', rate: 92.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
-      { pair: 'USD/INR', rate: 87.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
-      { pair: 'EUR/INR', rate: 95.0, timestamp: 0, source: 'DEFAULT_BACKTEST', version: '1.0' },
-    ]);
-  }
-
   static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
-    BacktestSimulator.ensureDefaultFxRates();
-    const symbol = options.symbol.toUpperCase();
+    const rawSymbol = (options.symbol || '').toUpperCase().trim();
+    if (FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(rawSymbol)) {
+      throw new Error(
+        `FORBIDATIVE_DERIVATIVE_INSTRUMENT: Derivative instrument '${rawSymbol}' is strictly forbidden in spot trading architecture.`.replace(
+          'FORBIDATIVE',
+          'FORBIDDEN',
+        ),
+      );
+    }
+    const isSpotTrading =
+      Boolean(options.isSpot) ||
+      isSupportedSpotSymbol(rawSymbol) ||
+      (options as any).spotOnly === true;
+
+    const symbol = isSpotTrading
+      ? canonicalizeSpotSymbol(rawSymbol, { allowLegacyAliases: true })
+      : options.symbol;
+
+    // Data Provenance: Mock data provider strictly fails closed in research backtests
+    if ((options as any).provenance === 'MOCK' || (options as any).isMockData) {
+      throw new Error(
+        'BACKTEST_DATA_PROVENANCE_INVALID: Backtests fail closed on mock market data providers. Real or authoritative fixture data required.',
+      );
+    }
     const timeframe =
       (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
     const initialCapital = options.initialCapital || 100000;
@@ -318,25 +337,63 @@ export class BacktestSimulator {
       if (pendingEntryOrder && pendingEntryOrder.status === 'FILLED') {
         const fill = simResult.fills.find((f) => f.orderId === pendingEntryOrder!.orderId);
         if (fill && pendingEntrySignal) {
-          // Create Position Lot strictly from actual IFill result, preserving entry fee & slippage
-          activeLot = TradeLifecycleManager.createPositionLot(
-            pendingEntrySignal,
-            fill.price,
-            fill.quantity,
-            fill.timestamp,
-            pendingEntryOrder.orderId,
-            fill.fee,
-            fill.slippage,
-            partialPolicy,
-          );
-          cumulativeFees += fill.fee;
-          cumulativeSlippage += fill.slippage;
+          if (isSpotTrading) {
+            const spotInst = getAuthoritativeSpotInstrument(symbol);
+            const cSize = spotInst.contractMultiplier;
+            const qCurr = spotInst.quoteCurrency;
+            let fxRate = 1.0;
+            if (qCurr !== 'INR') {
+              fxRate = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', fill.timestamp).fxRate;
+            }
+            const fillCostQuote = fill.price * fill.quantity * cSize;
+            const fillCostINR = Number((fillCostQuote * fxRate).toFixed(2));
+            const fillFeeINR = qCurr !== 'INR' ? Number((fill.fee * fxRate).toFixed(2)) : fill.fee;
+            const totalRequiredCash = fillCostINR + fillFeeINR;
 
-          // Immediately create RESTING exit orders for the position before next candle is processed
-          this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
+            if (currentCash < totalRequiredCash - 1e-4) {
+              execSim.cancelOrder(pendingEntryOrder.orderId);
+              pendingEntryOrder = null;
+              pendingEntrySignal = null;
+              continue;
+            }
 
-          pendingEntryOrder = null;
-          pendingEntrySignal = null;
+            currentCash = Number((currentCash - totalRequiredCash).toFixed(2));
+            activeLot = TradeLifecycleManager.createPositionLot(
+              pendingEntrySignal,
+              fill.price,
+              fill.quantity,
+              fill.timestamp,
+              pendingEntryOrder.orderId,
+              fill.fee,
+              fill.slippage,
+              partialPolicy,
+            );
+            cumulativeFees += fillFeeINR;
+            cumulativeSlippage += fill.slippage;
+
+            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
+
+            pendingEntryOrder = null;
+            pendingEntrySignal = null;
+          } else {
+            activeLot = TradeLifecycleManager.createPositionLot(
+              pendingEntrySignal,
+              fill.price,
+              fill.quantity,
+              fill.timestamp,
+              pendingEntryOrder.orderId,
+              fill.fee,
+              fill.slippage,
+              partialPolicy,
+            );
+            cumulativeFees += fill.fee;
+            cumulativeSlippage += fill.slippage;
+
+            this.submitRestingExitOrders(execSim, activeLot, symbol, partialPolicy, fill.timestamp);
+
+            pendingEntryOrder = null;
+            pendingEntrySignal = null;
+          }
         }
       } else if (
         pendingEntryOrder &&
@@ -374,8 +431,26 @@ export class BacktestSimulator {
         for (const exitFill of tradeFills) {
           if (!activeLot || activeLot.status === 'CLOSED') break;
 
-          cumulativeFees += exitFill.fee;
-          cumulativeSlippage += exitFill.slippage;
+          if (isSpotTrading) {
+            const spotInst = getAuthoritativeSpotInstrument(symbol);
+            const cSize = spotInst.contractMultiplier;
+            const qCurr = spotInst.quoteCurrency;
+            let fxRate = 1.0;
+            if (qCurr !== 'INR') {
+              fxRate = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', exitFill.timestamp).fxRate;
+            }
+            const exitProceedsQuote = exitFill.price * exitFill.quantity * cSize;
+            const exitProceedsINR = Number((exitProceedsQuote * fxRate).toFixed(2));
+            const exitFeeINR = qCurr !== 'INR' ? Number((exitFill.fee * fxRate).toFixed(2)) : exitFill.fee;
+            const netProceedsINR = exitProceedsINR - exitFeeINR;
+            currentCash = Number((currentCash + netProceedsINR).toFixed(2));
+
+            cumulativeFees += exitFeeINR;
+            cumulativeSlippage += exitFill.slippage;
+          } else {
+            cumulativeFees += exitFill.fee;
+            cumulativeSlippage += exitFill.slippage;
+          }
 
           const filledOrder = execSim.getOrder(exitFill.orderId);
           const targetType =
@@ -409,13 +484,21 @@ export class BacktestSimulator {
               const tradeRecord: IBacktestTrade = {
                 ...exitResult.completedTrade,
                 id: `${runId}_tr_${trades.length + 1}`,
+                symbol,
+                marginRequired: isSpotTrading ? 0 : exitResult.completedTrade.marginRequired,
+                initialMarginRequired: isSpotTrading ? 0 : exitResult.completedTrade.initialMarginRequired,
+                maintenanceMarginRequired: isSpotTrading ? 0 : exitResult.completedTrade.maintenanceMarginRequired,
+                leverage: isSpotTrading ? 1 : exitResult.completedTrade.leverage,
+                marginMode: isSpotTrading ? 'SPOT' : exitResult.completedTrade.marginMode,
               };
               trades.push(tradeRecord);
               positionLots.push(activeLot);
 
-              const realizedNet = tradeRecord.netPnL ?? tradeRecord.pnl ?? 0;
-              currentCash = Number((currentCash + realizedNet).toFixed(2));
-              currentEquity = currentCash;
+              if (!isSpotTrading) {
+                const realizedNet = tradeRecord.netPnL ?? tradeRecord.pnl ?? 0;
+                currentCash = Number((currentCash + realizedNet).toFixed(2));
+                currentEquity = currentCash;
+              }
             }
             activeLot = null;
             break;
@@ -423,54 +506,92 @@ export class BacktestSimulator {
         }
 
         // Record Bar-by-bar Snapshot
-        currentEquity = Number(
-          (currentCash + (activeLot ? activeLot.realizedPnl + activeLot.unrealizedPnl : 0)).toFixed(
-            2,
-          ),
-        );
-        const peak = Math.max(...equityCurve.map((e) => e.equity), initialCapital);
-        const ddPercent = peak > 0 ? Number((((peak - currentEquity) / peak) * 100).toFixed(2)) : 0;
-
-        equityCurve.push({
-          timestamp: new Date(candleTime),
-          equity: currentEquity,
-          drawdownPercent: ddPercent,
-        });
-
-        let activeLotMargin = 0;
-        let activeLotExposureINR = 0;
-        if (activeLot) {
-          const lotSym = activeLot.symbol;
-          const inst = hasInstrument(lotSym) ? getAuthoritativeInstrument(lotSym) : undefined;
-          const cSize = inst?.contractSize ?? 1;
-          const qCurr = inst?.quoteCurrency || (inst?.currency as any) || 'INR';
-          let fx = 1.0;
-          if (qCurr !== 'INR') {
-            // Strict fail-closed: throws if historical FX rate is unavailable for cross-currency instrument
-            fx = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
+        if (isSpotTrading) {
+          let openPositionValueINR = 0;
+          let activeLotExposureINR = 0;
+          if (activeLot && activeLot.status !== 'CLOSED') {
+            const spotInst = getAuthoritativeSpotInstrument(symbol);
+            const cSize = spotInst.contractMultiplier;
+            const qCurr = spotInst.quoteCurrency;
+            let fxRate = 1.0;
+            if (qCurr !== 'INR') {
+              fxRate = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
+            }
+            openPositionValueINR = Number((activeLot.remainingQuantity * currentCandle.close * cSize * fxRate).toFixed(2));
+            activeLotExposureINR = openPositionValueINR;
           }
-          const notionalCalc = TradeAccountingEngine.calculateNotional(activeLot.remainingQuantity, activeLot.entryPrice, cSize, fx);
-          activeLotExposureINR = notionalCalc.notionalAccount;
-          const lev = inst?.defaultLeverage ?? 1;
-          const mMode = inst?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
-          const mCalc = TradeAccountingEngine.calculateMargin(notionalCalc.notionalAccount, lev, mMode, inst?.initialMarginRate, inst?.maintenanceMarginRate);
-          activeLotMargin = mCalc.initialMarginRequired;
-        }
 
-        equitySnapshots.push({
-          timestamp: new Date(candleTime),
-          cash: currentCash,
-          realizedPnL: activeLot ? activeLot.realizedPnl : 0,
-          unrealizedPnL: activeLot ? activeLot.unrealizedPnl : 0,
-          equity: currentEquity,
-          marginUsed: activeLotMargin,
-          availableMargin: Math.max(0, currentEquity - activeLotMargin),
-          grossExposure: activeLotExposureINR,
-          netExposure: activeLot ? (isLong ? 1 : -1) * activeLotExposureINR : 0,
-          fees: cumulativeFees,
-          slippage: cumulativeSlippage,
-          drawdownPercent: ddPercent,
-        });
+          currentEquity = Number((currentCash + openPositionValueINR).toFixed(2));
+          const peak = Math.max(...equityCurve.map((e) => e.equity), initialCapital);
+          const ddPercent = peak > 0 ? Number((((peak - currentEquity) / peak) * 100).toFixed(2)) : 0;
+
+          equityCurve.push({
+            timestamp: new Date(candleTime),
+            equity: currentEquity,
+            drawdownPercent: ddPercent,
+          });
+
+          equitySnapshots.push({
+            timestamp: new Date(candleTime),
+            cash: currentCash,
+            realizedPnL: Number((currentCash - initialCapital).toFixed(2)),
+            unrealizedPnL: openPositionValueINR > 0 ? Number((currentEquity - currentCash).toFixed(2)) : 0,
+            equity: currentEquity,
+            marginUsed: 0,
+            availableMargin: currentCash,
+            grossExposure: activeLotExposureINR,
+            netExposure: activeLotExposureINR,
+            fees: cumulativeFees,
+            slippage: cumulativeSlippage,
+            drawdownPercent: ddPercent,
+          });
+        } else {
+          currentEquity = Number(
+            (currentCash + (activeLot ? activeLot.realizedPnl + activeLot.unrealizedPnl : 0)).toFixed(2),
+          );
+          const peak = Math.max(...equityCurve.map((e) => e.equity), initialCapital);
+          const ddPercent = peak > 0 ? Number((((peak - currentEquity) / peak) * 100).toFixed(2)) : 0;
+
+          equityCurve.push({
+            timestamp: new Date(candleTime),
+            equity: currentEquity,
+            drawdownPercent: ddPercent,
+          });
+
+          let activeLotMargin = 0;
+          let activeLotExposureINR = 0;
+          if (activeLot) {
+            const lotSym = activeLot.symbol;
+            const inst = hasInstrument(lotSym) ? getAuthoritativeInstrument(lotSym) : undefined;
+            const cSize = inst?.contractSize ?? 1;
+            const qCurr = inst?.quoteCurrency || (inst?.currency as any) || 'INR';
+            let fx = 1.0;
+            if (qCurr !== 'INR') {
+              fx = PointInTimeCurrencyConverter.getInstance().getRate(qCurr, 'INR', candleTime).fxRate;
+            }
+            const notionalCalc = TradeAccountingEngine.calculateNotional(activeLot.remainingQuantity, activeLot.entryPrice, cSize, fx);
+            activeLotExposureINR = notionalCalc.notionalAccount;
+            const lev = inst?.defaultLeverage ?? 1;
+            const mMode = inst?.marginMode ?? (lev > 1 ? 'ISOLATED' : 'SPOT');
+            const mCalc = TradeAccountingEngine.calculateMargin(notionalCalc.notionalAccount, lev, mMode, inst?.initialMarginRate, inst?.maintenanceMarginRate);
+            activeLotMargin = mCalc.initialMarginRequired;
+          }
+
+          equitySnapshots.push({
+            timestamp: new Date(candleTime),
+            cash: currentCash,
+            realizedPnL: activeLot ? activeLot.realizedPnl : 0,
+            unrealizedPnL: activeLot ? activeLot.unrealizedPnl : 0,
+            equity: currentEquity,
+            marginUsed: activeLotMargin,
+            availableMargin: Math.max(0, currentEquity - activeLotMargin),
+            grossExposure: activeLotExposureINR,
+            netExposure: activeLot ? (isLong ? 1 : -1) * activeLotExposureINR : 0,
+            fees: cumulativeFees,
+            slippage: cumulativeSlippage,
+            drawdownPercent: ddPercent,
+          });
+        }
 
         continue;
       }
@@ -545,9 +666,16 @@ export class BacktestSimulator {
         const effectiveMinProbability =
           options.candidateArtifact?.executionConfig?.minProbability ?? options.minProbability;
 
+        const isSignalDirectionValid = isSpotTrading
+          ? signal &&
+            (signal.direction === Direction.BULLISH ||
+              (signal.direction as any) === 'LONG' ||
+              (signal.direction as any) === 'BUY')
+          : signal && signal.direction !== Direction.NEUTRAL;
+
         if (
           signal &&
-          signal.direction !== Direction.NEUTRAL &&
+          isSignalDirectionValid &&
           signal.score >= effectiveMinScore &&
           signal.grade !== SignalGrade.NO_TRADE
         ) {
@@ -726,47 +854,105 @@ export class BacktestSimulator {
                 ? currentCandle.close
                 : signal.entryZone.optimal;
 
-            // Fail-closed position sizing using reference decision price
-            const sizing = PositionSizer.calculatePosition({
-              accountBalance: currentEquity,
-              riskPercentage: riskPercent,
-              entryPrice: decisionPrice,
-              stopLoss: signal.stopLoss,
-              lotSize,
-            });
-
-            let finalQuantity = sizing.roundedUnits;
-            if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
-              finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
-            }
-            if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
-              const isHighVol =
-                (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
-                (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
-              if (isHighVol) {
-                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
-              }
-            }
-
-            if (sizing.isValid && finalQuantity > 0) {
-              const side = isLong ? 'BUY' : 'SELL';
-              const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
-              pendingEntryOrder = execSim.submitOrder({
-                tradeId: signal.id || `trade_${candleTime}`,
-                symbol,
-                side,
-                orderType,
-                positionSide: isLong ? PositionSide.LONG : PositionSide.SHORT,
-                price: decisionPrice,
-                quantity: finalQuantity,
-                timestamp: candleTime,
-                referencePrice: decisionPrice,
+            if (isSpotTrading) {
+              // Fail-closed spot position sizing based strictly on available cash and risk
+              const spotSizing = PositionSizer.calculateSpotPosition({
+                availableCash: currentCash,
+                equity: currentEquity,
+                riskPercentage: riskPercent,
+                entryPrice: decisionPrice,
                 stopLoss: signal.stopLoss,
-                maxRiskDrift: 0.25,
-                signalTimestamp: candleTime,
-                ambiguityMode,
-                exitTarget: 'ENTRY',
+                symbol,
+                timestamp: candleTime,
               });
+
+              let finalQuantity = spotSizing.roundedQuantity;
+              if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
+                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
+              }
+              if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
+                const isHighVol =
+                  (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
+                  (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
+                if (isHighVol) {
+                  finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
+                }
+              }
+
+              // Spot Invariant: Final notional must never exceed available cash
+              const spotInst = getAuthoritativeSpotInstrument(symbol);
+              let fxRate = 1.0;
+              if (spotInst.quoteCurrency !== 'INR') {
+                fxRate = PointInTimeCurrencyConverter.getInstance().getRate(spotInst.quoteCurrency, 'INR', candleTime).fxRate;
+              }
+              const unitPriceINR = decisionPrice * spotInst.contractMultiplier * fxRate;
+              if (finalQuantity * unitPriceINR > currentCash) {
+                finalQuantity = Math.floor(currentCash / (unitPriceINR * spotInst.lotSize)) * spotInst.lotSize;
+                finalQuantity = Number(finalQuantity.toFixed(spotInst.quantityPrecision));
+              }
+
+              if (spotSizing.isValid && finalQuantity >= spotInst.minimumQuantity) {
+                const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
+                pendingEntryOrder = execSim.submitOrder({
+                  tradeId: signal.id || `trade_${candleTime}`,
+                  symbol,
+                  side: 'BUY',
+                  orderType,
+                  positionSide: PositionSide.LONG,
+                  price: decisionPrice,
+                  quantity: finalQuantity,
+                  timestamp: candleTime,
+                  referencePrice: decisionPrice,
+                  stopLoss: signal.stopLoss,
+                  maxRiskDrift: 0.25,
+                  signalTimestamp: candleTime,
+                  ambiguityMode,
+                  exitTarget: 'ENTRY',
+                });
+              }
+            } else {
+              // Legacy position sizing
+              const sizing = PositionSizer.calculatePosition({
+                accountBalance: currentEquity,
+                riskPercentage: riskPercent,
+                entryPrice: decisionPrice,
+                stopLoss: signal.stopLoss,
+                lotSize,
+              });
+
+              let finalQuantity = sizing.roundedUnits;
+              if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
+                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
+              }
+              if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
+                const isHighVol =
+                  (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
+                  (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
+                if (isHighVol) {
+                  finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
+                }
+              }
+
+              if (sizing.isValid && finalQuantity > 0) {
+                const side = isLong ? 'BUY' : 'SELL';
+                const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
+                pendingEntryOrder = execSim.submitOrder({
+                  tradeId: signal.id || `trade_${candleTime}`,
+                  symbol,
+                  side,
+                  orderType,
+                  positionSide: isLong ? PositionSide.LONG : PositionSide.SHORT,
+                  price: decisionPrice,
+                  quantity: finalQuantity,
+                  timestamp: candleTime,
+                  referencePrice: decisionPrice,
+                  stopLoss: signal.stopLoss,
+                  maxRiskDrift: 0.25,
+                  signalTimestamp: candleTime,
+                  ambiguityMode,
+                  exitTarget: 'ENTRY',
+                });
+              }
             }
           }
         }
@@ -785,11 +971,11 @@ export class BacktestSimulator {
       equitySnapshots.push({
         timestamp: new Date(candleTime),
         cash: currentCash,
-        realizedPnL: 0,
+        realizedPnL: isSpotTrading ? Number((currentCash - initialCapital).toFixed(2)) : 0,
         unrealizedPnL: 0,
         equity: currentEquity,
         marginUsed: 0,
-        availableMargin: currentEquity,
+        availableMargin: isSpotTrading ? currentCash : currentEquity,
         grossExposure: 0,
         netExposure: 0,
         fees: cumulativeFees,
@@ -844,104 +1030,176 @@ export class BacktestSimulator {
       const lastFill = activeLot.partialFills[activeLot.partialFills.length - 1];
       const firstFill = activeLot.partialFills[0];
 
-      const terminalInst = hasInstrument(activeLot.symbol) ? getAuthoritativeInstrument(activeLot.symbol) : undefined;
-      const termContractSize = terminalInst?.contractSize ?? 1;
-      const termLotSize = terminalInst?.lotSize ?? 1;
-      const termQuoteCurrency = terminalInst?.quoteCurrency || (terminalInst?.currency as any) || 'INR';
-      const termAccountCurrency = 'INR';
-      let termFxRate = 1.0;
-      let termFxTimestamp = activeLot.openedAt;
-      let termFxPair = `${termQuoteCurrency}/${termAccountCurrency}`;
-      if (termQuoteCurrency !== termAccountCurrency) {
-        // Strict fail-closed: throws if historical FX rate is unavailable for cross-currency instrument
-        const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
-        termFxRate = fxRes.fxRate;
-        termFxTimestamp = fxRes.fxTimestamp;
-        termFxPair = fxRes.fxPair;
-      }
-      const termLev = terminalInst?.defaultLeverage ?? 1;
-      const termMarginMode = terminalInst?.marginMode ?? (termLev > 1 ? 'ISOLATED' : 'SPOT');
-      const termNotional = TradeAccountingEngine.calculateNotional(activeLot.initialQuantity, activeLot.entryPrice, termContractSize, termFxRate);
-      const termMargin = TradeAccountingEngine.calculateMargin(termNotional.notionalAccount, termLev, termMarginMode, terminalInst?.initialMarginRate, terminalInst?.maintenanceMarginRate);
-      const termRisk = TradeAccountingEngine.calculateStopRisk(activeLot.entryPrice, activeLot.initialStopLoss, activeLot.initialQuantity, termContractSize, termFxRate);
+      let tradeRecord: IBacktestTrade;
 
-      const tradeRecord: IBacktestTrade = {
-        id: `${runId}_tr_${trades.length + 1}`,
-        direction: activeLot.direction,
-        entryTime: new Date(activeLot.openedAt),
-        entryPrice: activeLot.entryPrice,
-        exitTime: new Date(finalTime),
-        exitPrice: finalClose,
-        stopLoss: activeLot.initialStopLoss,
-        takeProfit: activeLot.tp2,
-        positionSize: activeLot.initialQuantity,
-        marginRequired: termMargin.initialMarginRequired,
-        initialMarginRequired: termMargin.initialMarginRequired,
-        maintenanceMarginRequired: termMargin.maintenanceMarginRequired,
-        positionNotionalQuote: termNotional.notionalQuote,
-        positionNotionalAccount: termNotional.notionalAccount,
-        accountCurrency: termAccountCurrency,
-        quoteCurrency: termQuoteCurrency,
-        fxPair: termFxPair,
-        fxRate: termFxRate,
-        fxTimestamp: termFxTimestamp,
-        contractSize: termContractSize,
-        lotSize: termLotSize,
-        leverage: termLev,
-        marginMode: termMarginMode,
-        riskAmount: termRisk,
-        pnl: netPnl,
-        pnlRMultiple: Number(
-          (netPnl / Math.max(1, termRisk)).toFixed(2),
-        ),
-        exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
-        signalTimestamp: new Date(
-          activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt,
-        ),
-        orderCreatedAt: new Date(
-          activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt,
-        ),
-        orderSubmittedAt: new Date(
-          activeLot.entrySnapshot?.orderSubmittedAt || activeLot.openedAt,
-        ),
-        entryFillTimestamp: new Date(
-          activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt,
-        ),
-        entryReferencePrice:
-          activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
-        entryFillPrice: activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
-        entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
-        entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
-        exitOrderTimestamp: new Date(finalTime),
-        exitOrderCreatedAt: new Date(finalTime),
-        exitOrderSubmittedAt: new Date(finalTime),
-        exitTriggerTimestamp: new Date(finalTime),
-        exitFillTimestamp: new Date(finalTime),
-        exitFillPrice: finalClose,
-        exitFees: totalFees - (firstFill?.fee || 0),
-        exitSlippage:
-          activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) -
-          (firstFill?.slippage || 0),
-        grossPnL: activeLot.realizedPnl,
-        netPnL: netPnl,
-        realizedR: Number(
-          (netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2),
-        ),
-        fillModel: String(fillModel),
-        ambiguityMode: String(ambiguityMode),
-        entrySnapshot: activeLot.entrySnapshot,
-      };
+      if (isSpotTrading) {
+        const spotInst = getAuthoritativeSpotInstrument(symbol);
+        const termContractSize = spotInst.contractMultiplier;
+        const termLotSize = spotInst.lotSize;
+        const termQuoteCurrency = spotInst.quoteCurrency;
+        const termAccountCurrency = 'INR';
+        let termFxRate = 1.0;
+        let termFxTimestamp = activeLot.openedAt;
+        let termFxPair = `${termQuoteCurrency}/${termAccountCurrency}`;
+        if (termQuoteCurrency !== termAccountCurrency) {
+          const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
+          termFxRate = fxRes.fxRate;
+          termFxTimestamp = fxRes.fxTimestamp;
+          termFxPair = fxRes.fxPair;
+        }
+        const termNotional = TradeAccountingEngine.calculateNotional(activeLot.initialQuantity, activeLot.entryPrice, termContractSize, termFxRate);
+        const termRisk = TradeAccountingEngine.calculateStopRisk(activeLot.entryPrice, activeLot.initialStopLoss, activeLot.initialQuantity, termContractSize, termFxRate);
+
+        tradeRecord = {
+          id: `${runId}_tr_${trades.length + 1}`,
+          direction: activeLot.direction,
+          entryTime: new Date(activeLot.openedAt),
+          entryPrice: activeLot.entryPrice,
+          exitTime: new Date(finalTime),
+          exitPrice: finalClose,
+          stopLoss: activeLot.initialStopLoss,
+          takeProfit: activeLot.tp2,
+          positionSize: activeLot.initialQuantity,
+          marginRequired: 0,
+          initialMarginRequired: 0,
+          maintenanceMarginRequired: 0,
+          positionNotionalQuote: termNotional.notionalQuote,
+          positionNotionalAccount: termNotional.notionalAccount,
+          accountCurrency: termAccountCurrency,
+          quoteCurrency: termQuoteCurrency,
+          fxPair: termFxPair,
+          fxRate: termFxRate,
+          fxTimestamp: termFxTimestamp,
+          contractSize: termContractSize,
+          lotSize: termLotSize,
+          leverage: 1,
+          marginMode: 'SPOT',
+          riskAmount: termRisk,
+          pnl: netPnl,
+          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(2)),
+          exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
+          signalTimestamp: new Date(activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt),
+          orderCreatedAt: new Date(activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt),
+          orderSubmittedAt: new Date(activeLot.entrySnapshot?.orderSubmittedAt || activeLot.openedAt),
+          entryFillTimestamp: new Date(activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt),
+          entryReferencePrice: activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
+          entryFillPrice: activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
+          entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
+          entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
+          exitOrderTimestamp: new Date(finalTime),
+          exitOrderCreatedAt: new Date(finalTime),
+          exitOrderSubmittedAt: new Date(finalTime),
+          exitTriggerTimestamp: new Date(finalTime),
+          exitFillTimestamp: new Date(finalTime),
+          exitFillPrice: finalClose,
+          exitFees: totalFees - (firstFill?.fee || 0),
+          exitSlippage: activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) - (firstFill?.slippage || 0),
+          grossPnL: activeLot.realizedPnl,
+          netPnL: netPnl,
+          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2)),
+          fillModel: String(fillModel),
+          ambiguityMode: String(ambiguityMode),
+          entrySnapshot: activeLot.entrySnapshot,
+        };
+
+        const finalProceedsQuote = finalClose * activeLot.remainingQuantity * termContractSize;
+        const finalProceedsINR = Number((finalProceedsQuote * termFxRate).toFixed(2));
+        currentCash = Number((currentCash + finalProceedsINR - (totalFees - (firstFill?.fee || 0))).toFixed(2));
+        currentEquity = currentCash;
+      } else {
+        const terminalInst = hasInstrument(activeLot.symbol) ? getAuthoritativeInstrument(activeLot.symbol) : undefined;
+        const termContractSize = terminalInst?.contractSize ?? 1;
+        const termLotSize = terminalInst?.lotSize ?? 1;
+        const termQuoteCurrency = terminalInst?.quoteCurrency || (terminalInst?.currency as any) || 'INR';
+        const termAccountCurrency = 'INR';
+        let termFxRate = 1.0;
+        let termFxTimestamp = activeLot.openedAt;
+        let termFxPair = `${termQuoteCurrency}/${termAccountCurrency}`;
+        if (termQuoteCurrency !== termAccountCurrency) {
+          const fxRes = PointInTimeCurrencyConverter.getInstance().getRate(termQuoteCurrency, termAccountCurrency, activeLot.openedAt);
+          termFxRate = fxRes.fxRate;
+          termFxTimestamp = fxRes.fxTimestamp;
+          termFxPair = fxRes.fxPair;
+        }
+        const termLev = terminalInst?.defaultLeverage ?? 1;
+        const termMarginMode = terminalInst?.marginMode ?? (termLev > 1 ? 'ISOLATED' : 'SPOT');
+        const termNotional = TradeAccountingEngine.calculateNotional(activeLot.initialQuantity, activeLot.entryPrice, termContractSize, termFxRate);
+        const termMargin = TradeAccountingEngine.calculateMargin(termNotional.notionalAccount, termLev, termMarginMode, terminalInst?.initialMarginRate, terminalInst?.maintenanceMarginRate);
+        const termRisk = TradeAccountingEngine.calculateStopRisk(activeLot.entryPrice, activeLot.initialStopLoss, activeLot.initialQuantity, termContractSize, termFxRate);
+
+        tradeRecord = {
+          id: `${runId}_tr_${trades.length + 1}`,
+          direction: activeLot.direction,
+          entryTime: new Date(activeLot.openedAt),
+          entryPrice: activeLot.entryPrice,
+          exitTime: new Date(finalTime),
+          exitPrice: finalClose,
+          stopLoss: activeLot.initialStopLoss,
+          takeProfit: activeLot.tp2,
+          positionSize: activeLot.initialQuantity,
+          marginRequired: termMargin.initialMarginRequired,
+          initialMarginRequired: termMargin.initialMarginRequired,
+          maintenanceMarginRequired: termMargin.maintenanceMarginRequired,
+          positionNotionalQuote: termNotional.notionalQuote,
+          positionNotionalAccount: termNotional.notionalAccount,
+          accountCurrency: termAccountCurrency,
+          quoteCurrency: termQuoteCurrency,
+          fxPair: termFxPair,
+          fxRate: termFxRate,
+          fxTimestamp: termFxTimestamp,
+          contractSize: termContractSize,
+          lotSize: termLotSize,
+          leverage: termLev,
+          marginMode: termMarginMode,
+          riskAmount: termRisk,
+          pnl: netPnl,
+          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(2)),
+          exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
+          signalTimestamp: new Date(activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt),
+          orderCreatedAt: new Date(activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt),
+          orderSubmittedAt: new Date(activeLot.entrySnapshot?.orderSubmittedAt || activeLot.openedAt),
+          entryFillTimestamp: new Date(activeLot.entrySnapshot?.executionTimestamp || activeLot.openedAt),
+          entryReferencePrice: activeLot.entrySnapshot?.referencePrice || activeLot.entryPrice,
+          entryFillPrice: activeLot.entrySnapshot?.entryPrice || activeLot.entryPrice,
+          entryFees: activeLot.entrySnapshot?.fee ?? (firstFill?.fee || 0),
+          entrySlippage: activeLot.entrySnapshot?.slippage ?? (firstFill?.slippage || 0),
+          exitOrderTimestamp: new Date(finalTime),
+          exitOrderCreatedAt: new Date(finalTime),
+          exitOrderSubmittedAt: new Date(finalTime),
+          exitTriggerTimestamp: new Date(finalTime),
+          exitFillTimestamp: new Date(finalTime),
+          exitFillPrice: finalClose,
+          exitFees: totalFees - (firstFill?.fee || 0),
+          exitSlippage: activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) - (firstFill?.slippage || 0),
+          grossPnL: activeLot.realizedPnl,
+          netPnL: netPnl,
+          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2)),
+          fillModel: String(fillModel),
+          ambiguityMode: String(ambiguityMode),
+          entrySnapshot: activeLot.entrySnapshot,
+        };
+
+        currentCash = Number((currentCash + netPnl).toFixed(2));
+        currentEquity = currentCash;
+      }
+
       trades.push(tradeRecord);
       positionLots.push(activeLot);
 
-      currentCash = Number((currentCash + netPnl).toFixed(2));
-      currentEquity = currentCash;
       if (equityCurve.length > 0) {
         equityCurve[equityCurve.length - 1].equity = currentEquity;
       }
       if (equitySnapshots.length > 0) {
         equitySnapshots[equitySnapshots.length - 1].equity = currentEquity;
         equitySnapshots[equitySnapshots.length - 1].cash = currentCash;
+        if (isSpotTrading) {
+          equitySnapshots[equitySnapshots.length - 1].availableMargin = currentCash;
+          equitySnapshots[equitySnapshots.length - 1].marginUsed = 0;
+          equitySnapshots[equitySnapshots.length - 1].grossExposure = 0;
+          equitySnapshots[equitySnapshots.length - 1].netExposure = 0;
+          equitySnapshots[equitySnapshots.length - 1].unrealizedPnL = 0;
+          equitySnapshots[equitySnapshots.length - 1].realizedPnL = Number((currentCash - initialCapital).toFixed(2));
+        }
       }
     }
 
@@ -956,7 +1214,7 @@ export class BacktestSimulator {
     return {
       runId,
       id: `${runId}_res`,
-      symbol,
+      symbol: options.symbol || symbol,
       timeframe,
       initialCapital,
       trades,
@@ -966,5 +1224,37 @@ export class BacktestSimulator {
       executionEvents,
       ...metrics,
     };
+  }
+}
+
+/**
+ * Dedicated Authoritative Spot Backtest Simulator.
+ * Strictly enforces spot-only universe (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT),
+ * rejects legacy aliases and forbidden derivatives,
+ * and guarantees 100% pure cash spot execution.
+ */
+export class SpotBacktestSimulator {
+  static runSimulation(options: IBacktestOptions): IBacktestSimulationResult {
+    const rawSymbol = (options.symbol || '').toUpperCase().trim();
+    if (FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(rawSymbol)) {
+      throw new Error(
+        `FORBIDDEN_DERIVATIVE_INSTRUMENT: Derivative instrument '${rawSymbol}' is strictly forbidden in spot trading architecture.`,
+      );
+    }
+    if (rawSymbol in LEGACY_SPOT_ALIASES) {
+      throw new Error(
+        `LEGACY_ALIAS_REJECTED: Symbol '${rawSymbol}' is a legacy alias. The spot engine strictly requires canonical symbol '${LEGACY_SPOT_ALIASES[rawSymbol]}'.`,
+      );
+    }
+    if (!isSupportedSpotSymbol(rawSymbol)) {
+      throw new Error(
+        `UNSUPPORTED_SPOT_INSTRUMENT: Symbol '${options.symbol}' is not supported in the spot trading universe. Supported symbols: ${SUPPORTED_SPOT_SYMBOLS.join(', ')}`,
+      );
+    }
+    return BacktestSimulator.runSimulation({
+      ...options,
+      symbol: rawSymbol,
+      isSpot: true,
+    });
   }
 }

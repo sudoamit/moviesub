@@ -70,8 +70,8 @@ export class FeeModel {
         fee += fee * effectiveConfig.gstRate;
       }
       baseFee = fee;
-    } else if (sym === 'BTCUSDT' || sym.endsWith('USDT')) {
-      // 1. Crypto Asset (BTCUSDT)
+    } else if (sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT' || sym.endsWith('USDT')) {
+      // 1. Crypto Asset (BTCUSDT_SPOT / BTCUSDT) - Quoted in USDT
       const rate = isMaker ? 0.0002 : 0.0005; // 2 bps maker / 5 bps taker
       baseFee = turnover * rate;
     } else if (sym === 'XAUUSD' || sym === 'GOLD') {
@@ -79,7 +79,7 @@ export class FeeModel {
       const rate = isMaker ? 0.00015 : 0.0003; // 1.5 bps maker / 3 bps taker
       baseFee = turnover * rate;
     } else {
-      // 3. Indian Index / Equity (NIFTY, BANKNIFTY, RELIANCE, etc.)
+      // 3. Indian Index / Equity (NIFTY_SPOT, BANKNIFTY_SPOT, NIFTY, BANKNIFTY, RELIANCE, etc.) - Quoted in INR
       const brokerage = Math.min(20, turnover * 0.0003); // Max ₹20 per executed order
       const stt = side === 'SELL' ? turnover * 0.000125 : 0; // 0.0125% STT on sell side
       const exchangeTurnoverFee = turnover * 0.000019; // NSE turnover charge
@@ -91,5 +91,13 @@ export class FeeModel {
 
     const totalFee = baseFee * multiplier;
     return Number(totalFee.toFixed(4));
+  }
+
+  static getFeeCurrency(symbol: string): 'USDT' | 'INR' {
+    const sym = (symbol || '').toUpperCase();
+    if (sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT' || sym.endsWith('USDT')) {
+      return 'USDT';
+    }
+    return 'INR';
   }
 }

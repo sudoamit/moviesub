@@ -132,6 +132,7 @@ export interface IBacktestOptions {
   scoringWeights?: any;
   strategyConfig?: any;
   failClosedOnMissingFeatures?: boolean;
+  isSpot?: boolean;
 }
 
 export type AblationVariant =

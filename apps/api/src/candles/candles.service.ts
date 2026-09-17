@@ -125,7 +125,7 @@ export class CandlesService {
       const serverNow = Date.now();
 
       // Binance Crypto routing
-      if (sym === 'BTCUSDT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
+      if (sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
         const binanceInterval = is1m
           ? '1m'
           : is5m
@@ -137,7 +137,7 @@ export class CandlesService {
                 : is4h
                   ? '4h'
                   : '1d';
-        const binanceSym = sym === 'BTCUSD' ? 'BTCUSDT' : sym;
+        const binanceSym = sym === 'BTCUSD' || sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : sym;
         let res: Response | null = null;
         for (let attempt = 0; attempt <= 2; attempt++) {
           try {
@@ -181,8 +181,8 @@ export class CandlesService {
       }
 
       // Yahoo Finance routing for NSE, COMEX Gold, MCX
-      const isNifty = sym === 'NIFTY' || sym === 'NIFTY50' || sym === '^NSEI';
-      const isBankNifty = sym === 'BANKNIFTY' || sym === '^NSEBANK';
+      const isNifty = sym === 'NIFTY' || sym === 'NIFTY_SPOT' || sym === 'NIFTY50' || sym === '^NSEI';
+      const isBankNifty = sym === 'BANKNIFTY' || sym === 'BANKNIFTY_SPOT' || sym === '^NSEBANK';
       const isGold = sym === 'XAUUSD' || sym === 'GOLD' || sym === 'GOLD_MCX';
       const isReliance = sym === 'RELIANCE';
       const isHdfc = sym === 'HDFCBANK';

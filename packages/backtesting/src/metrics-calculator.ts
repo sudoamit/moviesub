@@ -58,6 +58,24 @@ export class MetricsCalculator {
     let maxConsecutiveLosses = 0;
     let currentConsecutiveLosses = 0;
     let turnover = 0;
+    if (positionLots && positionLots.length > 0) {
+      for (const lot of positionLots) {
+        if (lot.partialFills && lot.partialFills.length > 0) {
+          for (const fill of lot.partialFills) {
+            turnover += Math.abs((fill.price || 0) * (fill.quantity || 0));
+          }
+        } else {
+          turnover += Math.abs((lot.entryPrice || 0) * (lot.initialQuantity || 0));
+        }
+      }
+    } else {
+      for (const trade of trades) {
+        const entryTurnover = Math.abs((trade.entryPrice || 0) * (trade.positionSize || 0));
+        const exitPrice = trade.exitPrice || trade.entryPrice || 0;
+        const exitTurnover = Math.abs(exitPrice * (trade.positionSize || 0));
+        turnover += entryTurnover + exitTurnover;
+      }
+    }
 
     for (const trade of trades) {
       const pnl = trade.pnl;
@@ -65,7 +83,6 @@ export class MetricsCalculator {
       totalR += r;
       rValues.push(r);
       pnlValues.push(pnl);
-      turnover += trade.entryPrice * trade.positionSize;
 
       if (pnl > 0) {
         winningTrades++;
@@ -141,13 +158,33 @@ export class MetricsCalculator {
       }
     }
 
-    // Daily sampled returns for Sharpe, Sortino, VaR
+    // Daily sampled returns for Sharpe, Sortino, VaR (Aggregating intraday to daily closing equity)
+    const dailyEquityMap = new Map<string, number>();
+    for (const pt of points) {
+      const dt = pt.timestamp instanceof Date ? pt.timestamp : new Date(pt.timestamp);
+      const dayKey = dt.toISOString().slice(0, 10);
+      dailyEquityMap.set(dayKey, pt.equity);
+    }
+
+    const dailyEquities = Array.from(dailyEquityMap.values());
     const returns: number[] = [];
-    for (let i = 1; i < points.length; i++) {
-      const prev = points[i - 1].equity;
-      const curr = points[i].equity;
-      if (prev > 0) {
-        returns.push((curr - prev) / prev);
+
+    if (dailyEquities.length > 1) {
+      for (let i = 1; i < dailyEquities.length; i++) {
+        const prev = dailyEquities[i - 1];
+        const curr = dailyEquities[i];
+        if (prev > 0) {
+          returns.push((curr - prev) / prev);
+        }
+      }
+    } else {
+      // Fallback if simulation has single day or synthetic timestamps
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1].equity;
+        const curr = points[i].equity;
+        if (prev > 0) {
+          returns.push((curr - prev) / prev);
+        }
       }
     }
 
@@ -195,9 +232,18 @@ export class MetricsCalculator {
     const totalReturnPercent = Number(
       (((finalEquity - initialCapital) / initialCapital) * 100).toFixed(2),
     );
-    const years = Math.max(0.08, points.length / 252);
+
+    // Institutional CAGR using elapsed calendar days
+    let elapsedDays = 1;
+    if (points.length >= 2) {
+      const t0 = new Date(points[0].timestamp).getTime();
+      const tEnd = new Date(points[points.length - 1].timestamp).getTime();
+      if (tEnd > t0) {
+        elapsedDays = Math.max(1, (tEnd - t0) / (24 * 3600 * 1000));
+      }
+    }
     const cagr = Number(
-      ((Math.pow(Math.max(0.01, finalEquity / initialCapital), 1 / years) - 1) * 100).toFixed(2),
+      ((Math.pow(Math.max(0.0001, finalEquity / initialCapital), 365.25 / elapsedDays) - 1) * 100).toFixed(2),
     );
     const calmarRatio =
       maxDDPercent > 0 ? Number((cagr / maxDDPercent).toFixed(2)) : cagr > 0 ? 99.99 : 0;

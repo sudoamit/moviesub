@@ -171,3 +171,39 @@ export interface ITradeStateUpdate {
   positionLot?: PositionLot;
   events?: IExecutionEvent[];
 }
+
+export interface ISpotPositionSizing {
+  symbol: string;
+  entryPrice: number;
+  stopLoss: number;
+  availableCash: number;
+  equity: number;
+  riskPercentage: number;
+  riskAmountINR: number;
+  riskPerUnitINR: number;
+  quantityByRisk: number;
+  quantityByCash: number;
+  calculatedQuantity: number;
+  roundedQuantity: number;
+  positionNotionalQuote: number;
+  positionNotionalINR: number;
+  fxRate: number;
+  isValid: boolean;
+  rejectionReason?: string;
+}
+
+export interface ICalculateSpotPositionOptions {
+  availableCash: number;
+  equity?: number;
+  riskPercentage?: number;
+  entryPrice: number;
+  stopLoss: number;
+  symbol: string;
+  orderSide?: 'BUY' | 'SELL';
+  sellQuantity?: number;
+  currentHeldQuantity?: number;
+  maxRiskPercentage?: number;
+  timestamp?: number;
+  currencyConverter?: import('@quant/shared').PointInTimeCurrencyConverter;
+}
+

@@ -14,6 +14,7 @@ import {
   IResolvedMarginModel,
   ITradeAccountingSnapshot,
   resolveMarginModel,
+  isSupportedSpotSymbol,
 } from '@quant/shared';
 import {
   IEntryExecutionSnapshot,
@@ -328,10 +329,13 @@ export class TradeLifecycleManager {
       lot.entryPrice,
       accountingSnapshot,
     );
-    const marginCalc = TradeAccountingEngine.calculateMargin(
-      notionalCalc.notionalAccount,
-      accountingSnapshot,
-    );
+    const isSpot = isSupportedSpotSymbol(lot.symbol);
+    const marginCalc = isSpot
+      ? { initialMarginRequired: 0, maintenanceMarginRequired: 0 }
+      : TradeAccountingEngine.calculateMargin(
+          notionalCalc.notionalAccount,
+          accountingSnapshot,
+        );
 
     const initialRisk = TradeAccountingEngine.calculateStopRisk(
       lot.entryPrice,

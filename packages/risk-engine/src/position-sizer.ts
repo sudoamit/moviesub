@@ -1,18 +1,24 @@
 import {
   buildAccountingSnapshot,
+  canonicalizeSpotSymbol,
   CurrencyCode,
   getAuthoritativeInstrument,
+  getAuthoritativeSpotInstrument,
   hasInstrument,
   IFxConversionResult,
   IInstrument,
   IPositionSizing,
   IResolvedMarginModel,
+  isSupportedSpotSymbol,
   ITradeAccountingSnapshot,
   MarginMode,
   PointInTimeCurrencyConverter,
   resolveMarginModel,
+  SUPPORTED_SPOT_SYMBOLS,
+  SupportedSpotSymbol,
 } from '@quant/shared';
 import { TradeAccountingEngine } from './trade-accounting-engine';
+import { ICalculateSpotPositionOptions, ISpotPositionSizing } from './types';
 
 export interface ICalculatePositionOptions {
   accountBalance: number;
@@ -129,6 +135,28 @@ export class PositionSizer {
     const effectiveLotSize = resolvedInstrument?.lotSize ?? lotSize ?? 1;
     const minQuantity = resolvedInstrument?.minimumQuantity ?? effectiveLotSize;
     const qtyPrecision = resolvedInstrument?.quantityPrecision ?? (effectiveLotSize < 1 ? 4 : 0);
+
+    // Spot-Only Invariant Enforcement
+    const isSpotInstrument =
+      resolvedInstrument?.marginMode === 'SPOT' ||
+      (symbol ? isSupportedSpotSymbol(symbol) : false) ||
+      (typeof instrumentInput === 'string' && isSupportedSpotSymbol(instrumentInput));
+
+    if (isSpotInstrument) {
+      const reqLev = requestedLeverage ?? customLeverage;
+      if (reqLev !== undefined && reqLev > 1) {
+        return this.createInvalid(
+          options,
+          `LEVERAGE_EXCEEDS_MAX: Requested leverage ${reqLev}x is strictly forbidden for spot instrument ${resolvedInstrument?.symbol || symbol}`,
+        );
+      }
+      if (direction === 'SHORT' || direction === 'SELL') {
+        return this.createInvalid(
+          options,
+          `SPOT_SHORT_SELLING_FORBIDDEN: Naked short selling is prohibited in spot architecture.`,
+        );
+      }
+    }
 
     // 2. Validate Account Currency & 3. Quote Currency
     const accountCurrency: CurrencyCode = 'INR';
@@ -431,4 +459,289 @@ export class PositionSizer {
       rejectionReason,
     };
   }
+
+  /**
+   * Pure spot position sizing based strictly on available cash and risk budget.
+   *
+   * Formula:
+   *   riskAmount = equity * riskPercent
+   *   riskPerUnit = abs(entryPrice - stopLoss) * fxRate
+   *   quantityByRisk = riskAmount / riskPerUnit
+   *   quantityByCash = availableCash / (entryPrice * fxRate)
+   *   quantity = min(quantityByRisk, quantityByCash)
+   *
+   * INVARIANTS:
+   * 1. No leverage multiplier exists anywhere.
+   * 2. Final notional never exceeds available cash.
+   * 3. Naked shorting is prohibited: SELL orders must have sellQuantity <= currentHeldQuantity.
+   * 4. Multi-currency (USDT for BTC, INR for NSE) converted strictly via point-in-time historical FX rate.
+   */
+  static calculateSpotPosition(options: ICalculateSpotPositionOptions): ISpotPositionSizing {
+    const {
+      availableCash,
+      equity = availableCash,
+      riskPercentage = 1.0,
+      entryPrice,
+      stopLoss,
+      symbol,
+      orderSide = 'BUY',
+      sellQuantity,
+      currentHeldQuantity = 0,
+      maxRiskPercentage = 2.5,
+      timestamp = Date.now(),
+      currencyConverter = PointInTimeCurrencyConverter.getInstance(),
+    } = options;
+
+    if (!symbol) {
+      return {
+        symbol: '',
+        entryPrice: 0,
+        stopLoss: 0,
+        availableCash: 0,
+        equity: 0,
+        riskPercentage: 0,
+        riskAmountINR: 0,
+        riskPerUnitINR: 0,
+        quantityByRisk: 0,
+        quantityByCash: 0,
+        calculatedQuantity: 0,
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate: 1,
+        isValid: false,
+        rejectionReason: 'Symbol is required for spot position sizing',
+      };
+    }
+
+    let canonicalSym: SupportedSpotSymbol;
+    let spotInst: any;
+    try {
+      canonicalSym = canonicalizeSpotSymbol(symbol);
+      spotInst = getAuthoritativeSpotInstrument(canonicalSym);
+    } catch (err: any) {
+      return {
+        symbol,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage,
+        riskAmountINR: 0,
+        riskPerUnitINR: 0,
+        quantityByRisk: 0,
+        quantityByCash: 0,
+        calculatedQuantity: 0,
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate: 1,
+        isValid: false,
+        rejectionReason: err.message,
+      };
+    }
+
+    // Spot Invariant: No naked shorting
+    if (orderSide === 'SELL') {
+      const sellQty = sellQuantity ?? 0;
+      if (currentHeldQuantity <= 0 || sellQty > currentHeldQuantity) {
+        return {
+          symbol: canonicalSym,
+          entryPrice,
+          stopLoss,
+          availableCash,
+          equity,
+          riskPercentage,
+          riskAmountINR: 0,
+          riskPerUnitINR: 0,
+          quantityByRisk: 0,
+          quantityByCash: 0,
+          calculatedQuantity: 0,
+          roundedQuantity: 0,
+          positionNotionalQuote: 0,
+          positionNotionalINR: 0,
+          fxRate: 1,
+          isValid: false,
+          rejectionReason: `SPOT_SHORT_SELLING_FORBIDDEN: Naked short selling is prohibited in spot architecture. Sell quantity (${sellQty}) exceeds currently held inventory (${currentHeldQuantity})`,
+        };
+      }
+    }
+
+    if (entryPrice <= 0 || stopLoss <= 0) {
+      return {
+        symbol: canonicalSym,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage,
+        riskAmountINR: 0,
+        riskPerUnitINR: 0,
+        quantityByRisk: 0,
+        quantityByCash: 0,
+        calculatedQuantity: 0,
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate: 1,
+        isValid: false,
+        rejectionReason: 'Entry price and stop loss must be positive finite numbers',
+      };
+    }
+
+    const stopDistance = Math.abs(entryPrice - stopLoss);
+    if (stopDistance <= 0) {
+      return {
+        symbol: canonicalSym,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage,
+        riskAmountINR: 0,
+        riskPerUnitINR: 0,
+        quantityByRisk: 0,
+        quantityByCash: 0,
+        calculatedQuantity: 0,
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate: 1,
+        isValid: false,
+        rejectionReason: 'Entry price cannot equal stop loss (risk per unit is zero)',
+      };
+    }
+
+    if (availableCash <= 0 || equity <= 0) {
+      return {
+        symbol: canonicalSym,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage,
+        riskAmountINR: 0,
+        riskPerUnitINR: 0,
+        quantityByRisk: 0,
+        quantityByCash: 0,
+        calculatedQuantity: 0,
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate: 1,
+        isValid: false,
+        rejectionReason: 'Available cash and equity must be positive finite numbers',
+      };
+    }
+
+    // Resolve Point-In-Time FX Rate (Fail-closed on missing rate for cross-currency)
+    let fxRate = 1.0;
+    if (spotInst.quoteCurrency !== 'INR') {
+      try {
+        const fxRes = currencyConverter.getRate(spotInst.quoteCurrency, 'INR', timestamp);
+        fxRate = fxRes.fxRate;
+      } catch (err: any) {
+        return {
+          symbol: canonicalSym,
+          entryPrice,
+          stopLoss,
+          availableCash,
+          equity,
+          riskPercentage,
+          riskAmountINR: 0,
+          riskPerUnitINR: 0,
+          quantityByRisk: 0,
+          quantityByCash: 0,
+          calculatedQuantity: 0,
+          roundedQuantity: 0,
+          positionNotionalQuote: 0,
+          positionNotionalINR: 0,
+          fxRate: 1,
+          isValid: false,
+          rejectionReason: `MISSING_FX_RATE: ${err.message}`,
+        };
+      }
+    }
+
+    const clampedRiskPct = Math.min(maxRiskPercentage, Math.max(0.01, riskPercentage));
+    const riskAmountINR = equity * (clampedRiskPct / 100);
+    const riskPerUnitINR = stopDistance * spotInst.contractMultiplier * fxRate;
+    const unitPriceINR = entryPrice * spotInst.contractMultiplier * fxRate;
+
+    // Spot Sizing Formula
+    const quantityByRisk = riskAmountINR / riskPerUnitINR;
+    const quantityByCash = availableCash / unitPriceINR;
+    const calculatedQuantity = Math.min(quantityByRisk, quantityByCash);
+
+    const lot = spotInst.lotSize;
+    let roundedQuantity = Math.floor(calculatedQuantity / lot) * lot;
+    roundedQuantity = Number(roundedQuantity.toFixed(spotInst.quantityPrecision));
+
+    if (roundedQuantity <= 0 || roundedQuantity < spotInst.minimumQuantity) {
+      return {
+        symbol: canonicalSym,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage: clampedRiskPct,
+        riskAmountINR: Number(riskAmountINR.toFixed(2)),
+        riskPerUnitINR: Number(riskPerUnitINR.toFixed(4)),
+        quantityByRisk: Number(quantityByRisk.toFixed(spotInst.quantityPrecision)),
+        quantityByCash: Number(quantityByCash.toFixed(spotInst.quantityPrecision)),
+        calculatedQuantity: Number(calculatedQuantity.toFixed(spotInst.quantityPrecision)),
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate,
+        isValid: false,
+        rejectionReason: `Calculated quantity (${calculatedQuantity}) is below minimum lot (${spotInst.minimumQuantity})`,
+      };
+    }
+
+    const positionNotionalQuote = Number((roundedQuantity * entryPrice * spotInst.contractMultiplier).toFixed(4));
+    const positionNotionalINR = Number((positionNotionalQuote * fxRate).toFixed(2));
+
+    if (positionNotionalINR > availableCash + 1e-4) {
+      return {
+        symbol: canonicalSym,
+        entryPrice,
+        stopLoss,
+        availableCash,
+        equity,
+        riskPercentage: clampedRiskPct,
+        riskAmountINR: Number(riskAmountINR.toFixed(2)),
+        riskPerUnitINR: Number(riskPerUnitINR.toFixed(4)),
+        quantityByRisk: Number(quantityByRisk.toFixed(spotInst.quantityPrecision)),
+        quantityByCash: Number(quantityByCash.toFixed(spotInst.quantityPrecision)),
+        calculatedQuantity: Number(calculatedQuantity.toFixed(spotInst.quantityPrecision)),
+        roundedQuantity: 0,
+        positionNotionalQuote: 0,
+        positionNotionalINR: 0,
+        fxRate,
+        isValid: false,
+        rejectionReason: `Position value (${positionNotionalINR} INR) exceeds available cash (${availableCash} INR)`,
+      };
+    }
+
+    return {
+      symbol: canonicalSym,
+      entryPrice,
+      stopLoss,
+      availableCash,
+      equity,
+      riskPercentage: clampedRiskPct,
+      riskAmountINR: Number(riskAmountINR.toFixed(2)),
+      riskPerUnitINR: Number(riskPerUnitINR.toFixed(4)),
+      quantityByRisk: Number(quantityByRisk.toFixed(spotInst.quantityPrecision)),
+      quantityByCash: Number(quantityByCash.toFixed(spotInst.quantityPrecision)),
+      calculatedQuantity: Number(calculatedQuantity.toFixed(spotInst.quantityPrecision)),
+      roundedQuantity,
+      positionNotionalQuote,
+      positionNotionalINR,
+      fxRate,
+      isValid: true,
+    };
+  }
 }
+

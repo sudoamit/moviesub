@@ -412,6 +412,7 @@ export interface IEntryExecutionSnapshot {
 
 export interface IBacktestTrade {
   id: string;
+  symbol?: string;
   direction: Direction;
   entryTime: Date;
   entryPrice: number;
