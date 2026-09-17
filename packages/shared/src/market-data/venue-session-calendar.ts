@@ -14,9 +14,11 @@ export class VenueSessionCalendar {
     if (
       sym.startsWith('NSE:') ||
       sym === 'NIFTY' ||
+      sym === 'NIFTY_SPOT' ||
       sym === 'NIFTY50' ||
       sym === '^NSEI' ||
       sym === 'BANKNIFTY' ||
+      sym === 'BANKNIFTY_SPOT' ||
       sym === '^NSEBANK' ||
       sym === 'FINNIFTY' ||
       sym === 'RELIANCE' ||
@@ -43,6 +45,7 @@ export class VenueSessionCalendar {
       sym.startsWith('CRYPTO:') ||
       sym.startsWith('BINANCE:') ||
       sym === 'BTCUSDT' ||
+      sym === 'BTCUSDT_SPOT' ||
       sym === 'BTCUSD' ||
       sym === 'ETHUSDT' ||
       sym === 'PAXGUSDT' ||

@@ -7,7 +7,9 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
 
   private static readonly YAHOO_SYMBOL_MAP: Record<string, string> = {
     NIFTY: '^NSEI',
+    NIFTY_SPOT: '^NSEI',
     BANKNIFTY: '^NSEBANK',
+    BANKNIFTY_SPOT: '^NSEBANK',
     RELIANCE: 'RELIANCE.NS',
     HDFCBANK: 'HDFCBANK.NS',
     INFY: 'INFY.NS',
@@ -68,10 +70,11 @@ export class RealLiveMarketDataProvider implements IMarketDataProvider {
     timeframe: Timeframe | string,
     limit: number,
   ): Promise<ICandle[]> {
+    const binanceSymbol = symbol === 'BTCUSDT_SPOT' ? 'BTCUSDT' : symbol;
     const interval = this.mapTimeframeToBinance(timeframe);
     const durationMs = getTimeframeDurationMs(timeframe);
     const serverNow = Date.now();
-    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${Math.min(limit + 10, 500)}`;
+    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(binanceSymbol)}&interval=${interval}&limit=${Math.min(limit + 10, 500)}`;
 
     try {
       const res = await fetch(url);
