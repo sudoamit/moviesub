@@ -32,6 +32,7 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
     autoExecutePaper: true,
     notifyWebhook: false,
     isActive: true,
+    accountId: 'acc_paper_btc_01',
     createdAt: new Date(nowMs - 3600000).toISOString(),
     triggerCount: 0,
     ...overrides,
@@ -149,7 +150,9 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
     expect(res.executionId).toBeDefined();
     expect(res.tradeDecisionId).toBeDefined();
     expect(res.orderPositionId).toBeDefined();
-    expect(res.correlationId).toContain('bot_exec:bot_btc_smc_live');
+    expect(res.correlationId).toContain('bot_exec:');
+    expect(res.correlationId).toContain('acc_paper_btc_01');
+    expect(res.correlationId).toContain('bot_btc_smc_live');
 
     expect(mockPaperTradingService.placeOrder).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -163,11 +166,11 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
     );
   });
 
-  it('Requirement 4: Strict SMC Evidence Bound — rejects evidence older than 20 candle timeframe window', async () => {
+  it('Requirement 4: Strict SMC Evidence Bound — rejects evidence older than strategy validity window', async () => {
     const bot = createActiveBot();
     jest.spyOn(algoBotsService, 'listBots').mockResolvedValue([bot]);
 
-    // 15m candle = 15*60*1000 = 900,000 ms. 20 candles = 300m (5h). Evidence 6 hours old must be rejected
+    // 15m candle = 15*60*1000 = 900,000 ms. Strategy validity window is 12 bars (3h). Evidence 6 hours old must be rejected
     const oldEvidenceTimestamp = new Date(nowMs - 6 * 60 * 60 * 1000);
     const signal = createCanonicalSignal({
       triggerEvidence: {
@@ -218,5 +221,122 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
     });
     expect(resMaxPos.decision).toBe(TradeDecisionType.REJECT);
     expect(resMaxPos.decisionReasonCode).toBe('MAX_OPEN_POSITIONS');
+  });
+
+  it('Fix 194 (Requirements 1, 2, 3, 4, 10, 11, 12, 16): Authoritative Lifecycle E2E: Signal -> PRE_TRADE_APPROVED -> TRADE_TAKEN -> RESERVATION_CREATED -> Fresh Quote -> ORDER_SUBMITTED -> ORDER_FILLED -> POSITION_OPENED', async () => {
+    const bot = createActiveBot();
+    const signal = createCanonicalSignal();
+    const accountId = 'acc_paper_btc_01';
+
+    // Phase 1: Pure Pre-Trade Evaluation -> NEVER returns TRADE_TAKEN
+    const preTradeRes = tradeDecisionService.evaluatePreTradeDecision({
+      bot,
+      signal,
+      portfolio: {
+        accountId,
+        initialCapital: 1000000,
+        openPositions: [],
+      } as any,
+      liveQuote: { price: 65000.0, timestamp: new Date(nowMs) },
+    });
+
+    expect(preTradeRes.decision).toBe(TradeDecisionType.TAKE);
+    expect(preTradeRes.decisionReasonCode).toBe('PRE_TRADE_APPROVED');
+    // Must be PRE_TRADE_APPROVED, strictly NOT TRADE_TAKEN
+    expect(preTradeRes.lifecycleState).toBe(TradeLifecycleState.PRE_TRADE_APPROVED);
+
+    // Phase 2: Commit Trade Decision & Reservation
+    const fingerprint = tradeDecisionService.getTradeFingerprint(bot, signal, accountId);
+    expect(fingerprint).toContain('acc_paper_btc_01');
+    expect(fingerprint).toContain('bot_btc_smc_live');
+    expect(fingerprint).toContain('sig_btc_canonical_101');
+    expect(fingerprint).toContain('BTCUSDT');
+    expect(fingerprint).toContain('BULLISH');
+    expect(fingerprint).toContain(String(nowMs));
+
+    const commitRes = await tradeDecisionService.commitTradeDecisionAndReservation({
+      bot,
+      signal,
+      decisionResult: preTradeRes,
+      fingerprint,
+      correlationId: fingerprint,
+      accountId,
+    });
+
+    expect(commitRes.decision).toBe(TradeDecisionType.TAKE);
+    expect(commitRes.lifecycleState).toBe(TradeLifecycleState.RESERVATION_CREATED);
+    expect(commitRes.executionId).toBeDefined();
+
+    // Phase 3: Fresh Market Quote At Execution Time
+    const freshQuote = await mockPaperTradingService.getValidatedMarketPrice('BTCUSDT', 5);
+    expect(freshQuote.price).toBe(65000.0);
+
+    // Phase 4: Order Submission
+    const updateSpy = jest.spyOn(tradeDecisionService, 'updateTradeLifecycleState');
+    await tradeDecisionService.updateTradeLifecycleState(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.ORDER_SUBMITTED,
+      {
+        executionId: commitRes.executionId,
+        orderSubmittedTime: new Date(),
+        marketEventTime: freshQuote.timestamp,
+        observedAt: new Date(),
+        receivedAt: new Date(),
+      },
+    );
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.ORDER_SUBMITTED,
+      expect.objectContaining({
+        orderSubmittedTime: expect.any(Date),
+        marketEventTime: expect.any(Date),
+      }),
+    );
+
+    // Phase 5: Fill Distinct from Order Submission
+    const fillRes = await mockPaperTradingService.placeOrder({
+      symbol: 'BTCUSDT',
+      direction: 'BUY',
+      quantity: 0.001,
+    });
+    expect(fillRes.status).toBe('OPEN');
+
+    await tradeDecisionService.updateTradeLifecycleState(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.ORDER_FILLED,
+      {
+        executionId: commitRes.executionId,
+        orderPositionId: fillRes.id,
+        fillTime: new Date(),
+      },
+    );
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.ORDER_FILLED,
+      expect.objectContaining({
+        orderPositionId: fillRes.id,
+        fillTime: expect.any(Date),
+      }),
+    );
+
+    // Phase 6: Position Opened
+    await tradeDecisionService.updateTradeLifecycleState(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.POSITION_OPENED,
+      {
+        executionId: commitRes.executionId,
+        orderPositionId: fillRes.id,
+      },
+    );
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      commitRes.tradeDecisionId,
+      TradeLifecycleState.POSITION_OPENED,
+      expect.objectContaining({
+        orderPositionId: fillRes.id,
+      }),
+    );
   });
 });

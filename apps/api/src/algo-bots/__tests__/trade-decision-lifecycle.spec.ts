@@ -32,6 +32,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
     autoExecutePaper: true,
     notifyWebhook: false,
     isActive: true,
+    accountId: 'paper_primary_account',
     createdAt: new Date().toISOString(),
     triggerCount: 0,
     ...overrides,

@@ -1204,6 +1204,7 @@ enum TradeLifecycleState {
   PRE_TRADE_APPROVED
   TRADE_TAKEN
   TRADE_REJECTED
+  RESERVATION_CREATED
   RESERVED
   RESERVATION_FAILED
   ORDER_SUBMITTED
@@ -1225,7 +1226,7 @@ enum TradeLifecycleState {
 model TradeDecision {
   id                    String              @id @default(uuid())
   fingerprint           String              @unique
-  accountId             String?
+  accountId             String
   botId                 String
   signalId              String?
   symbol                String
@@ -1251,6 +1252,14 @@ model TradeDecision {
   marketSnapshotJson    Json?
   riskSnapshotJson      Json?
   canonicalDecisionTime DateTime?
+  decisionTime          DateTime?
+  tradeTakenTime        DateTime?
+  reservationTime       DateTime?
+  orderSubmittedTime    DateTime?
+  fillTime              DateTime?
+  marketEventTime       DateTime?
+  observedAt            DateTime?
+  receivedAt            DateTime?
   executionId           String?             @unique
   execution             AlgoBotExecution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
   orderPositionId       String?

@@ -11,6 +11,7 @@ import {
   getAuthoritativeInstrument,
   hasInstrument,
   IInstrument,
+  IPositionSizing,
   ISignalSetup,
   SignalGrade,
   SignalState,
@@ -18,6 +19,7 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
 } from '@quant/shared';
+import { PortfolioRiskManager } from '@quant/risk-engine';
 import { IAlgoBot } from './algo-bots.service';
 import { IPaperPortfolio } from '../paper-trading/execution-provider.interface';
 import * as crypto from 'crypto';
@@ -106,9 +108,21 @@ export class TradeDecisionService {
 
   /**
    * Computes a deterministic, collision-resistant trade fingerprint based on authoritative event identity.
-   * Fails closed if canonicalCandleTime is absent or non-numeric (zero tolerance for non-deterministic fallbacks).
+   * Enforces 7 explicit identity elements:
+   * 1. accountId
+   * 2. botId
+   * 3. strategy/config version
+   * 4. signal identity
+   * 5. canonical candle time
+   * 6. instrument/contract identity
+   * 7. direction
+   * Fails closed if accountId or canonicalCandleTime is absent or invalid.
    */
-  public getTradeFingerprint(bot: IAlgoBot, signal: ISignalSetup): string {
+  public getTradeFingerprint(
+    bot: IAlgoBot,
+    signal: ISignalSetup,
+    accountId?: string,
+  ): string {
     if (
       !signal.canonicalCandleTime ||
       typeof signal.canonicalCandleTime !== 'number' ||
@@ -120,10 +134,18 @@ export class TradeDecisionService {
       );
     }
 
+    const effectiveAccountId = accountId || (bot as any).accountId;
+    if (!effectiveAccountId || typeof effectiveAccountId !== 'string' || effectiveAccountId.trim() === '') {
+      throw new Error(
+        'ACCOUNT_ID_REQUIRED: Auto-execution fingerprint requires non-empty accountId',
+      );
+    }
+
     const normTf = this.normalizeTimeframe(signal.timeframe);
     const normSymbol = bot.symbol.toUpperCase();
     const contract = (signal as any).contractSymbol || (signal as any).instrument || normSymbol;
     const normDir = signal.direction;
+    const signalId = signal.id || 'sig_canonical';
 
     const configHash = crypto
       .createHash('sha256')
@@ -133,7 +155,7 @@ export class TradeDecisionService {
       .digest('hex')
       .substring(0, 8);
 
-    return `bot_exec:${bot.id}:v${configHash}:${contract}:${normTf}:${normDir}:${signal.canonicalCandleTime}`;
+    return `bot_exec:${effectiveAccountId}:${bot.id}:v${configHash}:${signalId}:${contract}:${normTf}:${normDir}:${signal.canonicalCandleTime}`;
   }
 
   /**
@@ -168,8 +190,34 @@ export class TradeDecisionService {
   }
 
   /**
-   * SMC Trigger Evidence Validation with Strict Bounded Age (NO arbitrary *50 relaxation).
-   * Evidence timestamp must strictly be within 1 candle timeframe window of canonical decision event.
+   * Strategy-specific evidence validity window per trigger condition.
+   * Replaces arbitrary 20 * timeframe multiplier with explicit strategy-defined validity bounds.
+   */
+  public getStrategyEvidenceValidityWindowMs(
+    condition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
+    timeframe: string | Timeframe,
+  ): number {
+    const tfMs = this.getMaxSignalAgeMs(timeframe);
+    switch (condition) {
+      case 'ORDER_BLOCK':
+        // Order block mitigation retains structural validity within 12 execution bars
+        return tfMs * 12;
+      case 'FVG':
+        // Fair value gap mitigation requires resolution within 6 bars
+        return tfMs * 6;
+      case 'LIQUIDITY_SWEEP':
+        // Liquidity sweep trigger requires near-term reaction within 4 bars
+        return tfMs * 4;
+      case 'ANY_CONFLUENCE':
+      default:
+        // Combined confluence window bounded to 8 bars
+        return tfMs * 8;
+    }
+  }
+
+  /**
+   * SMC Trigger Evidence Validation with Strategy-Specific Evidence Validity.
+   * Evidence timestamp must strictly be within strategy-specific validity window of canonical decision event.
    */
   public matchesSmcCondition(
     condition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
@@ -193,31 +241,33 @@ export class TradeDecisionService {
       return false;
     }
 
-    // SMC execution structure evidence bounded to 20-candle execution structure lookback
-    const maxStructureAgeMs = this.getMaxSignalAgeMs(signal.timeframe) * 20;
-
-    const isEvidenceItemValid = (item: any): boolean => {
+    const isEvidenceItemValid = (
+      item: any,
+      condType: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE',
+    ): boolean => {
       if (!item || item.matched !== true) return false;
       if (item.timestamp) {
         const itemTime = new Date(item.timestamp).getTime();
         if (Number.isNaN(itemTime)) return false;
-        // Evidence timestamp must not be from the future (> 5000ms) or older than 4 candle intervals
-        if (itemTime > signalTime + 5000 || signalTime - itemTime > maxStructureAgeMs) {
+        const maxValidityMs =
+          item.validityWindowMs || this.getStrategyEvidenceValidityWindowMs(condType, signal.timeframe);
+        // Evidence timestamp must not be from the future (> 5000ms) or older than strategy validity window
+        if (itemTime > signalTime + 5000 || signalTime - itemTime > maxValidityMs) {
           return false;
         }
       }
       return true;
     };
 
-    if (condition === 'ORDER_BLOCK') return isEvidenceItemValid(evidence.orderBlock);
-    if (condition === 'FVG') return isEvidenceItemValid(evidence.fvg);
-    if (condition === 'LIQUIDITY_SWEEP') return isEvidenceItemValid(evidence.liquiditySweep);
+    if (condition === 'ORDER_BLOCK') return isEvidenceItemValid(evidence.orderBlock, 'ORDER_BLOCK');
+    if (condition === 'FVG') return isEvidenceItemValid(evidence.fvg, 'FVG');
+    if (condition === 'LIQUIDITY_SWEEP') return isEvidenceItemValid(evidence.liquiditySweep, 'LIQUIDITY_SWEEP');
     if (condition === 'ANY_CONFLUENCE') {
       return (
-        isEvidenceItemValid(evidence.orderBlock) ||
-        isEvidenceItemValid(evidence.fvg) ||
-        isEvidenceItemValid(evidence.liquiditySweep) ||
-        isEvidenceItemValid(evidence.structureBreak)
+        isEvidenceItemValid(evidence.orderBlock, 'ORDER_BLOCK') ||
+        isEvidenceItemValid(evidence.fvg, 'FVG') ||
+        isEvidenceItemValid(evidence.liquiditySweep, 'LIQUIDITY_SWEEP') ||
+        isEvidenceItemValid(evidence.structureBreak, 'ANY_CONFLUENCE')
       );
     }
     return false;
@@ -456,62 +506,162 @@ export class TradeDecisionService {
       }
     }
 
-    // Gate 16: Comprehensive Multi-Constraint Risk Pre-Flight
-    if (systemConfig) {
-      if (systemConfig.emergencyStop) {
+    // Gate 16: Comprehensive Multi-Constraint Risk Evaluation via Authoritative Risk Engine
+    if (systemConfig?.emergencyStop) {
+      reasons.push({
+        code: 'EMERGENCY_STOP',
+        message: 'Trading halted by system Emergency Stop switch',
+      });
+    }
+
+    if (portfolio) {
+      const openPositions = portfolio.openPositions || (portfolio as any).positions || [];
+      const instLeverage = instrument?.defaultLeverage || 1.0;
+      const instMarginMode = (instrument?.marginMode || 'SPOT') as any;
+      const instInitialMarginRate =
+        instrument?.initialMarginRate !== undefined
+          ? instrument.initialMarginRate
+          : 1.0 / instLeverage;
+      const instMaintenanceMarginRate =
+        instrument?.maintenanceMarginRate !== undefined
+          ? instrument.maintenanceMarginRate
+          : 0.05;
+      const instLiquidationModel = (instrument?.liquidationModel || 'STANDARD') as any;
+      const instAssetType =
+        instrument?.assetType ||
+        (bot.symbol.includes('BTC') || bot.symbol.includes('ETH') || bot.symbol.includes('SOL')
+          ? 'CRYPTO'
+          : 'EQUITY');
+
+      const totalPosVal = (optEntry || 0) * resolvedQuantity * contractSize;
+      const proposedPosition: IPositionSizing = {
+        accountBalance: initialCapital,
+        riskPercentage: riskPercent,
+        riskAmount,
+        entryPrice: optEntry || 0,
+        stopLoss: sl || 0,
+        riskPerUnit: riskDistance,
+        calculatedUnits: resolvedQuantity,
+        lotSize: contractSize,
+        roundedUnits: resolvedQuantity,
+        totalPositionValue: totalPosVal,
+        maximumLoss: riskAmount,
+        leverage: instLeverage,
+        initialMarginRequired:
+          instMarginMode === 'SPOT'
+            ? totalPosVal
+            : totalPosVal * instInitialMarginRate,
+        maintenanceMarginRequired: totalPosVal * instMaintenanceMarginRate,
+        isValid: isLevelsValid,
+        accountingSnapshot: {
+          assetClass: instAssetType,
+          contractSize,
+          lotSize: 1,
+          accountCurrency: 'INR',
+          quoteCurrency: 'INR',
+          fxPair: bot.symbol.includes('BTC') ? 'BTC/USDT' : `${bot.symbol}/INR`,
+          fxRate: 1.0,
+          fxTimestamp: Date.now(),
+          fxSource: 'PORTFOLIO_RISK_AUTH',
+          fxSnapshotHash: 'hash',
+          snapshotHash: 'hash',
+          calculatedAt: Date.now(),
+          resolvedMarginModel: {
+            marginMode: instMarginMode,
+            effectiveLeverage: instLeverage,
+            initialMarginRate: instInitialMarginRate,
+            maintenanceMarginRate: instMaintenanceMarginRate,
+            liquidationModel: instLiquidationModel,
+          },
+        } as any,
+      };
+
+      const maxPosRisk = Number(systemConfig?.maxPositionRiskPercent ?? 2.5);
+      const maxConcurrent =
+        typeof systemConfig?.maxOpenPositions === 'number' ? systemConfig.maxOpenPositions : 5;
+      const maxDailyLoss = Number(systemConfig?.maxDailyLossPercent ?? 3.0);
+      const maxConsecutive = Number(systemConfig?.maxConsecutiveLosses ?? 3);
+
+      const sanitizedOpenPositions = openPositions.map((p: any) => ({
+        ...p,
+        units:
+          typeof p.units === 'number'
+            ? p.units
+            : typeof p.quantity === 'number'
+              ? p.quantity
+              : 1,
+        currentPrice:
+          typeof p.currentPrice === 'number'
+            ? p.currentPrice
+            : typeof p.entryPrice === 'number'
+              ? p.entryPrice
+              : 100,
+        entryPrice: typeof p.entryPrice === 'number' ? p.entryPrice : 100,
+        stopLoss: typeof p.stopLoss === 'number' ? p.stopLoss : 90,
+        assetType:
+          p.assetType ||
+          (p.symbol?.includes('BTC') || p.symbol?.includes('ETH') || p.symbol?.includes('SOL')
+            ? 'CRYPTO'
+            : 'EQUITY'),
+        leverage: typeof p.leverage === 'number' ? p.leverage : 1,
+      }));
+
+      const portStatus = PortfolioRiskManager.validateNewPosition(
+        initialCapital,
+        sanitizedOpenPositions as any,
+        proposedPosition,
+        bot.symbol,
+        instAssetType,
+        {
+          maxRiskPercentage: maxPosRisk,
+          maxConcurrentPositions: maxConcurrent,
+          maxDailyDrawdownPercent: maxDailyLoss,
+          maxConsecutiveLosses: maxConsecutive,
+        },
+        {
+          currentDrawdownPercent:
+            typeof (portfolio as any).dailyLossPercent === 'number'
+              ? (portfolio as any).dailyLossPercent
+              : 0,
+          consecutiveLosses:
+            typeof (portfolio as any).consecutiveLosses === 'number'
+              ? (portfolio as any).consecutiveLosses
+              : 0,
+        },
+      );
+
+      if (!portStatus.isAllowed) {
+        let code = 'PORTFOLIO_RISK_LIMIT_EXCEEDED';
+        const msg = portStatus.rejectionReason || '';
+        if (msg.includes('Concurrent') || msg.includes('concurrent') || msg.includes('max open positions')) {
+          code = 'MAX_OPEN_POSITIONS';
+        } else if (msg.includes('Risk per trade') || msg.includes('exceeds max')) {
+          code = 'POSITION_RISK_LIMIT';
+        } else if (msg.includes('Daily drawdown') || msg.includes('daily loss')) {
+          code = 'DAILY_LOSS_LIMIT';
+        } else if (msg.includes('Consecutive losses') || msg.includes('consecutive')) {
+          code = 'MAX_CONSECUTIVE_LOSSES';
+        }
         reasons.push({
-          code: 'EMERGENCY_STOP',
-          message: 'Trading halted by system Emergency Stop switch',
+          code,
+          message: portStatus.rejectionReason || 'Portfolio risk limits breached',
         });
       }
+    }
 
-      if (
-        portfolio &&
-        typeof systemConfig.maxOpenPositions === 'number' &&
-        portfolio.openPositions.length >= systemConfig.maxOpenPositions
-      ) {
+    if (
+      systemConfig &&
+      liveQuote &&
+      isLevelsValid &&
+      optEntry &&
+      typeof systemConfig.maxSlippageBps === 'number'
+    ) {
+      const slippageBps = (Math.abs(liveQuote.price - optEntry) / optEntry) * 10000;
+      if (slippageBps > systemConfig.maxSlippageBps) {
         reasons.push({
-          code: 'MAX_OPEN_POSITIONS',
-          message: `Max open positions limit (${systemConfig.maxOpenPositions}) reached`,
+          code: 'SLIPPAGE_LIMIT_EXCEEDED',
+          message: `Market slippage (${Math.round(slippageBps)} bps) exceeds max allowed (${systemConfig.maxSlippageBps} bps)`,
         });
-      }
-
-      const maxPosRisk = Number(systemConfig.maxPositionRiskPercent ?? 1.0);
-      if (riskPercent > maxPosRisk) {
-        reasons.push({
-          code: 'POSITION_RISK_LIMIT',
-          message: `Trade risk percent (${riskPercent}%) exceeds max position risk limit (${maxPosRisk}%)`,
-        });
-      }
-
-      if (portfolio && typeof (portfolio as any).dailyLossPercent === 'number') {
-        const maxDailyLoss = Number(systemConfig.maxDailyLossPercent ?? 3.0);
-        if ((portfolio as any).dailyLossPercent >= maxDailyLoss) {
-          reasons.push({
-            code: 'DAILY_LOSS_LIMIT',
-            message: `Portfolio daily loss (${(portfolio as any).dailyLossPercent}%) reached daily loss limit (${maxDailyLoss}%)`,
-          });
-        }
-      }
-
-      if (portfolio && typeof (portfolio as any).consecutiveLosses === 'number') {
-        const maxConsLoss = Number(systemConfig.maxConsecutiveLosses ?? 3);
-        if ((portfolio as any).consecutiveLosses >= maxConsLoss) {
-          reasons.push({
-            code: 'MAX_CONSECUTIVE_LOSSES',
-            message: `Consecutive losses count (${(portfolio as any).consecutiveLosses}) reached limit (${maxConsLoss})`,
-          });
-        }
-      }
-
-      if (liveQuote && isLevelsValid && optEntry && typeof systemConfig.maxSlippageBps === 'number') {
-        const slippageBps = Math.abs(liveQuote.price - optEntry) / optEntry * 10000;
-        if (slippageBps > systemConfig.maxSlippageBps) {
-          reasons.push({
-            code: 'SLIPPAGE_LIMIT_EXCEEDED',
-            message: `Market slippage (${Math.round(slippageBps)} bps) exceeds max allowed (${systemConfig.maxSlippageBps} bps)`,
-          });
-        }
       }
     }
 
@@ -589,8 +739,9 @@ export class TradeDecisionService {
 
   /**
    * Atomically persists a durable TradeDecision and reserves execution in PostgreSQL.
-   * Creates TradeDecision first as authoritative parent record, then creates AlgoBotExecution linked 1:1.
-   * Transitions lifecycle state from TRADE_TAKEN -> RESERVED atomically.
+   * Creates TradeDecision first as authoritative parent record (TRADE_TAKEN),
+   * then creates AlgoBotExecution linked 1:1 (RESERVED).
+   * Transitions lifecycle state: PRE_TRADE_APPROVED -> TRADE_TAKEN -> RESERVATION_CREATED.
    */
   public async commitTradeDecisionAndReservation(params: {
     bot: IAlgoBot;
@@ -598,17 +749,15 @@ export class TradeDecisionService {
     decisionResult: IPreTradeDecisionResult;
     fingerprint: string;
     correlationId: string;
-    accountId?: string;
+    accountId: string;
   }): Promise<ICommitTradeDecisionResult> {
     const { bot, signal, decisionResult, fingerprint, correlationId, accountId } = params;
 
-    // Strict Account Identity Enforcement for TAKE decisions
-    if (decisionResult.decision === TradeDecisionType.TAKE) {
-      if (!accountId || typeof accountId !== 'string' || accountId.trim() === '') {
-        throw new BadRequestException(
-          'ACCOUNT_ID_REQUIRED: A valid accountId is required to commit an approved trade decision',
-        );
-      }
+    // Strict Account Identity Enforcement on ALL trade decision commitments
+    if (!accountId || typeof accountId !== 'string' || accountId.trim() === '') {
+      throw new BadRequestException(
+        'ACCOUNT_ID_REQUIRED: A valid accountId is required to commit a trade decision',
+      );
     }
 
     if (!this.prisma) {
@@ -621,62 +770,17 @@ export class TradeDecisionService {
         decisionReason: decisionResult.decisionReason,
         lifecycleState:
           decisionResult.decision === TradeDecisionType.TAKE
-            ? TradeLifecycleState.RESERVED
+            ? TradeLifecycleState.RESERVATION_CREATED
             : TradeLifecycleState.TRADE_REJECTED,
         executionId:
           decisionResult.decision === TradeDecisionType.TAKE ? `test_exec_${fingerprint}` : undefined,
       };
     }
 
-    const runner = typeof this.prisma.$transaction === 'function'
-      ? (cb: (tx: any) => Promise<any>) => this.prisma!.$transaction(cb)
-      : (cb: (tx: any) => Promise<any>) => cb(this.prisma);
+    const now = new Date();
 
     try {
-      return await runner(async (tx: any) => {
-        // Handle mock test Prisma instances without full tradeDecision model
-        if (!tx.tradeDecision) {
-          if (decisionResult.decision === TradeDecisionType.REJECT) {
-            return {
-              tradeDecisionId: `test_dec_${fingerprint}`,
-              fingerprint,
-              decision: TradeDecisionType.REJECT,
-              decisionReasonCode: decisionResult.decisionReasonCode,
-              decisionReason: decisionResult.decisionReason,
-              lifecycleState: TradeLifecycleState.TRADE_REJECTED,
-            };
-          }
-
-          let executionId = `test_exec_${fingerprint}`;
-          if (tx.algoBotExecution?.create) {
-            const signalTimestamp = new Date(signal.canonicalCandleTime!);
-            const execution = await tx.algoBotExecution.create({
-              data: {
-                fingerprint,
-                botId: bot.id,
-                symbol: bot.symbol.toUpperCase(),
-                timeframe: this.normalizeTimeframe(bot.timeframe),
-                direction: signal.direction as any,
-                signalId: signal.id || null,
-                signalTimestamp,
-                state: 'RESERVED',
-                correlationId,
-              },
-            });
-            executionId = execution.id;
-          }
-
-          return {
-            tradeDecisionId: `test_dec_${fingerprint}`,
-            fingerprint,
-            decision: TradeDecisionType.TAKE,
-            decisionReasonCode: decisionResult.decisionReasonCode,
-            decisionReason: decisionResult.decisionReason,
-            lifecycleState: TradeLifecycleState.RESERVED,
-            executionId,
-          };
-        }
-
+      return await this.prisma.$transaction(async (tx: any) => {
         // 1. Check for existing TradeDecision with the same fingerprint
         const existingDecision = await tx.tradeDecision.findUnique({
           where: { fingerprint },
@@ -700,7 +804,7 @@ export class TradeDecisionService {
           const rejectedDecision = await tx.tradeDecision.create({
             data: {
               fingerprint,
-              accountId: accountId || null,
+              accountId,
               botId: bot.id,
               signalId: signal.id || null,
               symbol: bot.symbol.toUpperCase(),
@@ -712,7 +816,9 @@ export class TradeDecisionService {
               decisionReasonCode: decisionResult.decisionReasonCode,
               decisionReason: decisionResult.decisionReason,
               lifecycleState: TradeLifecycleState.TRADE_REJECTED,
-              entryPlanJson: decisionResult.plannedLevels ? (decisionResult.plannedLevels as any) : null,
+              entryPlanJson: decisionResult.plannedLevels
+                ? (decisionResult.plannedLevels as any)
+                : null,
               initialEntryPrice: decisionResult.plannedLevels?.optimalEntry
                 ? new Decimal(decisionResult.plannedLevels.optimalEntry)
                 : null,
@@ -745,6 +851,7 @@ export class TradeDecisionService {
                 : signal.canonicalCandleTime
                   ? new Date(signal.canonicalCandleTime)
                   : null,
+              decisionTime: now,
               correlationId,
             },
           });
@@ -759,13 +866,16 @@ export class TradeDecisionService {
           };
         }
 
-        // 3. Decision is TAKE -> Atomically create TradeDecision (TRADE_TAKEN), create AlgoBotExecution, and link 1:1 (RESERVED)
+        // 3. Decision is TAKE -> Atomically:
+        //    Step A: Create TradeDecision in TRADE_TAKEN state
+        //    Step B: Create AlgoBotExecution (reservation)
+        //    Step C: Link executionId and transition TradeDecision to RESERVATION_CREATED
         const signalTimestamp = new Date(signal.canonicalCandleTime!);
 
         const initialTradeDecision = await tx.tradeDecision.create({
           data: {
             fingerprint,
-            accountId: accountId!,
+            accountId,
             botId: bot.id,
             signalId: signal.id || null,
             symbol: bot.symbol.toUpperCase(),
@@ -777,7 +887,9 @@ export class TradeDecisionService {
             decisionReasonCode: decisionResult.decisionReasonCode,
             decisionReason: decisionResult.decisionReason,
             lifecycleState: TradeLifecycleState.TRADE_TAKEN,
-            entryPlanJson: decisionResult.plannedLevels ? (decisionResult.plannedLevels as any) : null,
+            entryPlanJson: decisionResult.plannedLevels
+              ? (decisionResult.plannedLevels as any)
+              : null,
             initialEntryPrice: decisionResult.plannedLevels?.optimalEntry
               ? new Decimal(decisionResult.plannedLevels.optimalEntry)
               : null,
@@ -808,6 +920,8 @@ export class TradeDecisionService {
             canonicalDecisionTime: signal.canonicalDecisionTime
               ? new Date(signal.canonicalDecisionTime)
               : signalTimestamp,
+            decisionTime: now,
+            tradeTakenTime: now,
             correlationId,
           },
         });
@@ -823,16 +937,19 @@ export class TradeDecisionService {
             signalTimestamp,
             state: 'RESERVED',
             correlationId,
+            reservedAt: now,
           },
         });
 
-        // Link executionId 1:1 and advance lifecycle to RESERVED
+        // Link executionId 1:1 and advance lifecycle to RESERVATION_CREATED
+        const reservationTime = new Date();
         await tx.tradeDecision.update({
           where: { id: initialTradeDecision.id },
           data: {
             executionId: execution.id,
-            lifecycleState: TradeLifecycleState.RESERVED,
-            updatedAt: new Date(),
+            lifecycleState: TradeLifecycleState.RESERVATION_CREATED,
+            reservationTime,
+            updatedAt: reservationTime,
           },
         });
 
@@ -842,7 +959,7 @@ export class TradeDecisionService {
           decision: TradeDecisionType.TAKE,
           decisionReasonCode: initialTradeDecision.decisionReasonCode,
           decisionReason: initialTradeDecision.decisionReason || '',
-          lifecycleState: TradeLifecycleState.RESERVED,
+          lifecycleState: TradeLifecycleState.RESERVATION_CREATED,
           executionId: execution.id,
         };
       });
@@ -850,11 +967,9 @@ export class TradeDecisionService {
       // Handle Unique Constraint Violation on duplicate concurrent execution
       if (err?.code === 'P2002') {
         this.logger.warn(`Duplicate reservation conflict for fingerprint '${fingerprint}'`);
-        const existingDecision = this.prisma?.tradeDecision
-          ? await this.prisma.tradeDecision.findUnique({
-              where: { fingerprint },
-            })
-          : null;
+        const existingDecision = await this.prisma.tradeDecision.findUnique({
+          where: { fingerprint },
+        });
         if (existingDecision) {
           return {
             tradeDecisionId: existingDecision.id,
@@ -887,9 +1002,14 @@ export class TradeDecisionService {
     updateData?: {
       executionId?: string;
       orderPositionId?: string;
+      orderSubmittedTime?: Date;
+      fillTime?: Date;
+      marketEventTime?: Date;
+      observedAt?: Date;
+      receivedAt?: Date;
     },
   ): Promise<void> {
-    if (!this.prisma || !this.prisma.tradeDecision || tradeDecisionId.startsWith('test_dec_')) return;
+    if (!this.prisma) return;
 
     try {
       await this.prisma.tradeDecision.update({
@@ -898,6 +1018,11 @@ export class TradeDecisionService {
           lifecycleState: state,
           executionId: updateData?.executionId,
           orderPositionId: updateData?.orderPositionId,
+          orderSubmittedTime: updateData?.orderSubmittedTime,
+          fillTime: updateData?.fillTime,
+          marketEventTime: updateData?.marketEventTime,
+          observedAt: updateData?.observedAt,
+          receivedAt: updateData?.receivedAt,
           updatedAt: new Date(),
         },
       });

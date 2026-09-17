@@ -222,6 +222,7 @@ export interface IAlgoBot {
   isActive: boolean;
   createdAt: string;
   triggerCount: number;
+  accountId?: string;
   configVersion?: string;
   lastTriggeredAt?: string;
   lastTriggerDetails?: string;
@@ -1575,7 +1576,7 @@ export class AlgoBotsService implements OnModuleInit {
         liveQuoteError = err;
       }
 
-      const accountId = (portfolio as any)?.accountId || (portfolio as any)?.id || 'paper_primary_account';
+      const accountId = (portfolio as any)?.accountId || (bot as any)?.accountId || 'paper_primary_account';
 
       // 1. Authoritative Pre-Trade Decision Evaluation
       const decisionResult = this.tradeDecisionService!.evaluatePreTradeDecision({
@@ -1587,7 +1588,7 @@ export class AlgoBotsService implements OnModuleInit {
         liveQuoteError,
       } as any);
 
-      const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, signal);
+      const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, signal, accountId);
 
       if (decisionResult.decision === TradeDecisionType.REJECT) {
         if (decisionResult.decisionReasonCode === 'AUTO_EXECUTE_DISABLED') {
@@ -1686,10 +1687,35 @@ export class AlgoBotsService implements OnModuleInit {
       try {
         this.lastExecutionAttempt = new Date();
         await this.markExecutionStarted(executionId);
+
+        // Obtain fresh authoritative market quote again at execution time
+        let freshExecutionQuote = null;
+        try {
+          freshExecutionQuote = await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+        } catch (quoteErr: any) {
+          this.logger.error(
+            `[EXECUTION QUOTE FAILED] Cannot execute bot '${bot.id}': fresh market quote unavailable at execution time: ${quoteErr.message}`,
+          );
+          throw quoteErr;
+        }
+
+        const marketEventTime = freshExecutionQuote?.timestamp
+          ? new Date(freshExecutionQuote.timestamp)
+          : new Date();
+        const observedAt = new Date();
+        const receivedAt = new Date();
+        const orderSubmittedTime = new Date();
+
         await this.tradeDecisionService!.updateTradeLifecycleState(
           tradeDecisionId,
           TradeLifecycleState.ORDER_SUBMITTED,
-          { executionId },
+          {
+            executionId,
+            orderSubmittedTime,
+            marketEventTime,
+            observedAt,
+            receivedAt,
+          },
         );
 
         this.logger.log(
@@ -1716,11 +1742,27 @@ export class AlgoBotsService implements OnModuleInit {
           correlationId: fingerprint,
         });
 
+        const fillTime = new Date();
         await this.markExecutionExecuted(executionId, orderResult.id);
+
+        // Distinct execution fill transition: ORDER_FILLED -> POSITION_OPENED
+        await this.tradeDecisionService!.updateTradeLifecycleState(
+          tradeDecisionId,
+          TradeLifecycleState.ORDER_FILLED,
+          {
+            executionId,
+            orderPositionId: orderResult.id,
+            fillTime,
+          },
+        );
+
         await this.tradeDecisionService!.updateTradeLifecycleState(
           tradeDecisionId,
           TradeLifecycleState.POSITION_OPENED,
-          { executionId, orderPositionId: orderResult.id },
+          {
+            executionId,
+            orderPositionId: orderResult.id,
+          },
         );
 
         this.lastExecutionSuccess = new Date();

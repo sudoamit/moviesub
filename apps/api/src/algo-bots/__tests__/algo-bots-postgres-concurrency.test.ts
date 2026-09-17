@@ -40,8 +40,9 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
     await prismaB.$connect();
 
     const mockPaperTrading = {
-      getPortfolio: jest.fn().mockResolvedValue({ positions: [] }),
-      placeOrder: jest.fn().mockResolvedValue({ id: 'order_123', status: 'FILLED' }),
+      getPortfolio: jest.fn().mockResolvedValue({ positions: [], openPositions: [], accountId: 'acc_conc_01' }),
+      getValidatedMarketPrice: jest.fn().mockResolvedValue({ price: 50000, timestamp: new Date() }),
+      placeOrder: jest.fn().mockResolvedValue({ id: 'order_123', status: 'FILLED', entryPrice: 50000 }),
     };
 
     algoBotsServiceA = new AlgoBotsService(
@@ -650,6 +651,112 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       ).rejects.toThrow(InternalServerErrorException);
     } finally {
       await prismaA.algoBotExecution.deleteMany({ where: { fingerprint } });
+      await prismaA.algoBot.deleteMany({ where: { id: botId } });
+    }
+  });
+
+  it('11 (Fix 194): Real PostgreSQL Concurrency: same signal x 2 workers -> exactly 1 TradeDecision TAKE, 1 TRADE_TAKEN, 1 reservation, 1 execution, 1 position', async () => {
+    if (!DB_URL) return;
+
+    const botId = `bot_conc_194_${Date.now()}`;
+    await prismaA.algoBot.create({
+      data: {
+        id: botId,
+        name: 'Concurrent Test Bot 194',
+        symbol: 'BTCUSDT',
+        direction: 'BULLISH',
+        timeframe: '15m',
+        isActive: true,
+        autoExecutePaper: true,
+        minScore: 70,
+        lots: 1,
+        smcCondition: 'ANY_CONFLUENCE',
+      },
+    });
+
+    const now = Date.now();
+    const candleTime = Math.floor(now / (15 * 60 * 1000)) * (15 * 60 * 1000);
+    const signal: ISignalSetup = {
+      id: `sig_conc_194_${now}`,
+      symbol: 'BTCUSDT',
+      direction: Direction.BULLISH,
+      grade: SignalGrade.A_PLUS,
+      score: 85,
+      entryZone: { min: 49900, max: 50100, optimal: 50000 },
+      stopLoss: 49500,
+      takeProfits: { tp1: 51000, tp2: 52000, tp3: 53000 },
+      riskRewardRatios: { rr1: 2.0, rr2: 4.0, rr3: 6.0 },
+      timeframe: Timeframe.M15,
+      timestamp: new Date(candleTime),
+      canonicalCandleTime: candleTime,
+      canonicalDecisionTime: new Date(candleTime),
+      state: SignalState.ACTIVE,
+      triggerEvidence: {
+        fvg: { matched: true, timestamp: new Date(candleTime) },
+      },
+      reasoning: {
+        htfStructure: 'Bullish',
+        liquidityReason: 'Swept',
+        triggerReason: 'FVG',
+        invalidationReason: 'SL',
+        confirmedChecklist: ['FVG'],
+        summary: 'Bullish FVG',
+      },
+      scoreBreakdown: {
+        htfBias: 20,
+        liquiditySweep: 15,
+        bos: 15,
+        fvg: 20,
+        orderBlock: 0,
+        displacement: 10,
+        volumeConfirmation: 5,
+        premiumDiscount: 0,
+        riskReward: 0,
+        indicatorAlignment: 0,
+        totalScore: 85,
+        grade: SignalGrade.A_PLUS,
+      },
+    };
+
+    try {
+      // Execute 2 concurrent worker runs on separate DB client instances
+      const [resultsA, resultsB] = await Promise.all([
+        algoBotsServiceA.evaluateSignalForBots(signal),
+        algoBotsServiceB.evaluateSignalForBots(signal),
+      ]);
+
+      const allResults = [...resultsA, ...resultsB];
+      const executed = allResults.filter((r) => r.status === 'EXECUTED');
+      const rejected = allResults.filter((r) => r.status === 'REJECTED');
+
+      expect(executed).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(executed[0].decision).toBe('TAKE');
+      expect(executed[0].reasonCode).toBe('ORDER_PLACED_SUCCESSFULLY');
+      expect(rejected[0].reasonCode).toBe('EXECUTION_LOCKED');
+
+      // Verify PostgreSQL DB State
+      const fingerprint = executed[0].correlationId!;
+      const decisions = await prismaA.tradeDecision.findMany({
+        where: { fingerprint },
+      });
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].decision).toBe('TAKE');
+      expect(decisions[0].lifecycleState).toBe('POSITION_OPENED');
+      expect(decisions[0].tradeTakenTime).toBeDefined();
+      expect(decisions[0].reservationTime).toBeDefined();
+      expect(decisions[0].orderSubmittedTime).toBeDefined();
+      expect(decisions[0].fillTime).toBeDefined();
+
+      const executions = await prismaA.algoBotExecution.findMany({
+        where: { fingerprint },
+      });
+      expect(executions).toHaveLength(1);
+      expect(executions[0].state).toBe('EXECUTED');
+      expect(executions[0].orderPositionId).toBeDefined();
+    } finally {
+      await prismaA.tradeDecision.deleteMany({ where: { botId } });
+      await prismaA.algoBotExecution.deleteMany({ where: { botId } });
       await prismaA.algoBot.deleteMany({ where: { id: botId } });
     }
   });
