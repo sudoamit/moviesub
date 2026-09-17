@@ -1,3 +1,5 @@
+import React from 'react';
+import ReactDOMServer from 'react-dom/server';
 import { NAV_GROUPS, NavGroup, NavTab, StrategyMode } from '../components/Header';
 import { MarketDataState } from '../hooks/useMarketContext';
 import { EmptyStatePreset } from '../components/common/EmptyState';
@@ -6,6 +8,7 @@ import {
   calculateExecutionLifecycle,
   StageState,
 } from '../components/execution/lifecycle-projection';
+import { ExecutionStageRail } from '../components/execution/ExecutionStageRail';
 import { ISignalSetup, Direction, SignalGrade, SignalState } from '@quant/shared';
 
 describe('Frontend UI Architecture & Trading UX Tests', () => {
@@ -505,11 +508,6 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
     });
 
     it('renders ExecutionStageRail component markup correctly without crashing', () => {
-      // Dynamic require or import to test component rendering
-      const React = require('react');
-      const ReactDOMServer = require('react-dom/server');
-      const { ExecutionStageRail } = require('../components/execution/ExecutionStageRail');
-
       const signal: ISignalSetup = {
         id: 'sig_render_1',
         symbol: 'BANKNIFTY',

@@ -140,8 +140,8 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
       });
 
       expect(result.decision).toBe(TradeDecisionType.TAKE);
-      expect(result.decisionReasonCode).toBe('ELIGIBLE_AND_RISK_APPROVED');
-      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_TAKEN);
+      expect(result.decisionReasonCode).toBe('PRE_TRADE_APPROVED');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.PRE_TRADE_APPROVED);
       expect(result.plannedLevels).toBeDefined();
       expect(result.plannedLevels?.optimalEntry).toBe(24005);
       expect(result.plannedLevels?.stopLoss).toBe(23950);
@@ -164,6 +164,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
 
       expect(result.decision).toBe(TradeDecisionType.REJECT);
       expect(result.decisionReasonCode).toBe('BOT_INACTIVE');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
     });
 
     it('should REJECT when signal is not active', () => {
@@ -177,6 +178,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
 
       expect(result.decision).toBe(TradeDecisionType.REJECT);
       expect(result.decisionReasonCode).toBe('SIGNAL_NOT_ACTIVE');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
     });
 
     it('should REJECT when direction is NEUTRAL or grade is NO_TRADE', () => {
@@ -190,6 +192,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
 
       expect(result.decision).toBe(TradeDecisionType.REJECT);
       expect(result.decisionReasonCode).toBe('INVALID_SIGNAL');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
     });
 
     it('should REJECT when price levels geometry is inverted', () => {
@@ -204,6 +207,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
 
       expect(result.decision).toBe(TradeDecisionType.REJECT);
       expect(result.decisionReasonCode).toBe('INVALID_LEVELS');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
     });
 
     it('should REJECT when open position already exists in portfolio', () => {
@@ -221,6 +225,26 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
 
       expect(result.decision).toBe(TradeDecisionType.REJECT);
       expect(result.decisionReasonCode).toBe('POSITION_ALREADY_OPEN');
+      expect(result.lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
+    });
+
+    it('should REJECT SMC evidence that is older than 20 candle intervals (No *50 relaxation)', () => {
+      const bot = createTestBot({ smcCondition: 'ORDER_BLOCK' });
+      // 15m candle = 15*60*1000 = 900000ms. 20 candles = 300m (5h). Evidence 6 hours old must be rejected
+      const staleEvidenceTime = new Date(nowMs - 6 * 60 * 60 * 1000);
+      const signal = createTestSignal({
+        triggerEvidence: {
+          orderBlock: { matched: true, timestamp: staleEvidenceTime, details: 'Stale OB tap' },
+        },
+      });
+
+      const result = tradeDecisionService.evaluatePreTradeDecision({
+        bot,
+        signal,
+      });
+
+      expect(result.decision).toBe(TradeDecisionType.REJECT);
+      expect(result.decisionReasonCode).toBe('SMC_CONDITION_MISMATCH');
     });
   });
 
@@ -237,6 +261,15 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
       expect(fp1).toContain('bot_nifty_smc_test');
       expect(fp1).toContain('NIFTY');
       expect(fp1).toContain('BULLISH');
+    });
+
+    it('should fail closed when canonicalCandleTime is missing or invalid', () => {
+      const bot = createTestBot();
+      const malformedSignal = createTestSignal({ canonicalCandleTime: undefined as any });
+
+      expect(() => tradeDecisionService.getTradeFingerprint(bot, malformedSignal)).toThrow(
+        /CANONICAL_TIMESTAMP_REQUIRED/,
+      );
     });
 
     it('should generate different fingerprint for different candle boundaries', () => {
@@ -290,6 +323,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
       expect(results).toHaveLength(1);
       expect(results[0].status).toBe('REJECTED');
       expect(results[0].decision).toBe('REJECT');
+      expect(results[0].lifecycleState).toBe(TradeLifecycleState.TRADE_REJECTED);
       expect(results[0].reasonCode).toBe('SCORE_BELOW_THRESHOLD');
       expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
     });
@@ -314,6 +348,30 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
   });
 
   describe('4. Lifecycle State Machine & Idempotent Commit', () => {
+    it('should require accountId when committing a TAKE decision', async () => {
+      const bot = createTestBot();
+      const signal = createTestSignal();
+      const fingerprint = tradeDecisionService.getTradeFingerprint(bot, signal);
+
+      const decisionResult = tradeDecisionService.evaluatePreTradeDecision({
+        bot,
+        signal,
+        portfolio: { initialCapital: 1000000, openPositions: [] } as any,
+        liveQuote: { price: 24005.0, timestamp: new Date(nowMs) },
+      });
+
+      await expect(
+        tradeDecisionService.commitTradeDecisionAndReservation({
+          bot,
+          signal,
+          decisionResult,
+          fingerprint,
+          correlationId: fingerprint,
+          accountId: '', // Empty accountId
+        }),
+      ).rejects.toThrow(/ACCOUNT_ID_REQUIRED/);
+    });
+
     it('should return isDuplicate when committing duplicate fingerprint in mock fallback', async () => {
       const bot = createTestBot();
       const signal = createTestSignal();
@@ -332,6 +390,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
         decisionResult,
         fingerprint,
         correlationId: fingerprint,
+        accountId: 'paper_test_acc_1',
       });
 
       expect(commit1.decision).toBe(TradeDecisionType.TAKE);
@@ -357,3 +416,4 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
     });
   });
 });
+

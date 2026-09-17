@@ -221,7 +221,7 @@ export class CandidateArtifactBuilder {
                 ? (((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>).stopLossAtrMultiplier as number)
                 : typeof (options?.executionConfig as Record<string, unknown>)?.stopLossAtrMultiplier === 'number'
                   ? ((options?.executionConfig as Record<string, unknown>).stopLossAtrMultiplier as number)
-                  : 1.0;
+                  : undefined;
 
     if (stopLossAtrMultiplier === undefined || !Number.isFinite(stopLossAtrMultiplier) || stopLossAtrMultiplier <= 0) {
       throw new Error(`MISSING_STOP_LOSS_ATR_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive stopLossAtrMultiplier`);
@@ -240,7 +240,7 @@ export class CandidateArtifactBuilder {
                 ? (((candidate as unknown as Record<string, unknown>).executionConfig as Record<string, unknown>).sizingMultiplier as number)
                 : typeof (options?.executionConfig as Record<string, unknown>)?.sizingMultiplier === 'number'
                   ? ((options?.executionConfig as Record<string, unknown>).sizingMultiplier as number)
-                  : 1.0;
+                  : undefined;
 
     if (sizingMultiplier === undefined || !Number.isFinite(sizingMultiplier) || sizingMultiplier <= 0) {
       throw new Error(`MISSING_SIZING_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive sizingMultiplier`);

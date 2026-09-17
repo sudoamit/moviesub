@@ -567,6 +567,15 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       minScore: 60,
       stopLossAtrMultiplier: 1.0,
       sizingMultiplier: 1.0,
+      initialCapital: 100000,
+      partialExitPolicy: {
+        tp1Ratio: 0.33,
+        tp2Ratio: 0.33,
+        tp3Ratio: 0.34,
+        moveStopToBreakevenOnTp1: true,
+        trailStopOnTp2: true,
+        trailStopOffsetR: 1.0,
+      },
     });
 
     const runnerRes = CandidateBacktestRunner.runCandidateBacktest(cand, [], {
@@ -589,15 +598,47 @@ describe('AI Fix 6 — True Strategy Replay, Candidate Trade Discovery & End-to-
       candidateVersion: 'v2.0-eval-diff',
       type: 'THRESHOLD',
       description: 'Candidate with threshold 70',
-      change: { minMtfScore: 70 },
+      change: {
+        minMtfScore: 70,
+        riskConfig: {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        },
+      },
       evidence: { sampleSize: 10, expectancyBefore: 0, expectancyAfterHistorical: 0 },
       status: 'GENERATED',
       createdAt: new Date(),
     };
 
+    const baselineCandidate = CandidateEvaluator.createBaselineBenchmarkCandidate(
+      'v2.0',
+      'BTCUSDT',
+      cand.change.riskConfig as any,
+      {
+        candidateId: 'baseline_v2.0',
+        candidateVersion: 'v2.0',
+        strategyVersion: 'v2.0',
+        symbol: 'BTCUSDT',
+        fillModel: 'OHLC_PATH',
+        ambiguityMode: 'CONSERVATIVE',
+        latencyMs: 10,
+        minMtfScore: 60,
+        stopLossAtrMultiplier: 1.5,
+        sizingMultiplier: 1.0,
+      } as any,
+    );
+
     const evalResult = CandidateEvaluator.evaluate(
       cand,
-      { candles: continuousCandles, costStressConfig: { mode: 'NORMAL' } },
+      { candles: continuousCandles, baselineCandidate, costStressConfig: { mode: 'NORMAL' } },
     );
 
     expect(evalResult).toBeDefined();

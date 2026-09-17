@@ -16,7 +16,47 @@ describe('AlgoBotsService Execution State Machine', () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
     executionsDb = new Map();
 
+    const tradeDecisionsDb = new Map<string, any>();
+
     prismaClient = {
+      $transaction: jest.fn().mockImplementation(async (cb: any) => cb(prismaClient)),
+      tradeDecision: {
+        create: jest.fn().mockImplementation(async ({ data }) => {
+          const fp = data.fingerprint;
+          if (tradeDecisionsDb.has(fp)) {
+            const err: any = new Error('Unique constraint failed on fingerprint');
+            err.code = 'P2002';
+            throw err;
+          }
+          const record = {
+            id: `dec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            ...data,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          tradeDecisionsDb.set(fp, record);
+          return record;
+        }),
+        update: jest.fn().mockImplementation(async ({ where, data }) => {
+          let found: any = null;
+          if (where.id) {
+            found = Array.from(tradeDecisionsDb.values()).find((d) => d.id === where.id);
+          } else if (where.fingerprint) {
+            found = tradeDecisionsDb.get(where.fingerprint);
+          }
+          if (found) {
+            Object.assign(found, data, { updatedAt: new Date() });
+            return found;
+          }
+          return null;
+        }),
+        findUnique: jest.fn().mockImplementation(async ({ where }) => {
+          if (where.fingerprint) {
+            return tradeDecisionsDb.get(where.fingerprint) || null;
+          }
+          return Array.from(tradeDecisionsDb.values()).find((d) => d.id === where.id) || null;
+        }),
+      },
       algoBot: {
         findMany: jest.fn().mockResolvedValue([
           {

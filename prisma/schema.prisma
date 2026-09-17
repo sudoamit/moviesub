@@ -1182,6 +1182,7 @@ model AlgoBotExecution {
   failureReason     String?
   failureReasonCode String?
   orderPositionId   String?
+  tradeDecision   TradeDecision?
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
 
@@ -1197,9 +1198,12 @@ enum TradeDecisionType {
 
 enum TradeLifecycleState {
   SIGNAL_DETECTED
+  SIGNAL_VALIDATED
   ELIGIBILITY_EVALUATED
   RISK_APPROVED
+  PRE_TRADE_APPROVED
   TRADE_TAKEN
+  TRADE_REJECTED
   RESERVED
   RESERVATION_FAILED
   ORDER_SUBMITTED
@@ -1232,7 +1236,7 @@ model TradeDecision {
   decision              TradeDecisionType
   decisionReasonCode    String
   decisionReason        String?
-  lifecycleState        TradeLifecycleState @default(TRADE_TAKEN)
+  lifecycleState        TradeLifecycleState @default(PRE_TRADE_APPROVED)
   entryPlanJson         Json?
   initialEntryPrice     Decimal?            @db.Decimal(18, 6)
   stopLoss              Decimal?            @db.Decimal(18, 6)
@@ -1247,14 +1251,17 @@ model TradeDecision {
   marketSnapshotJson    Json?
   riskSnapshotJson      Json?
   canonicalDecisionTime DateTime?
-  executionId           String?
+  executionId           String?             @unique
+  execution             AlgoBotExecution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
   orderPositionId       String?
   correlationId         String
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
 
   @@index([botId, symbol, createdAt(sort: Desc)])
+  @@index([accountId, symbol])
   @@index([correlationId])
   @@index([decision, decisionReasonCode])
   @@map("trade_decisions")
 }
+

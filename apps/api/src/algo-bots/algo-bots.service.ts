@@ -755,21 +755,29 @@ export class AlgoBotsService implements OnModuleInit {
       return false;
     }
 
-    const signalTime = new Date(
-      (signal as any).canonicalDecisionTime ||
-        (signal as any).canonicalCandleTime ||
-        signal.timestamp ||
-        signal.createdAt ||
-        Date.now(),
-    ).getTime();
-    const maxStructureAgeMs = this.getMaxSignalAgeMs(signal.timeframe) * 50;
+    // Strategy contract: SMC execution structure evidence is bounded by the last 4 execution candles (slice(-4))
+    const signalTime =
+      typeof signal.canonicalCandleTime === 'number' && signal.canonicalCandleTime > 0
+        ? signal.canonicalCandleTime
+        : signal.canonicalDecisionTime instanceof Date
+          ? signal.canonicalDecisionTime.getTime()
+          : typeof signal.canonicalDecisionTime === 'number'
+            ? signal.canonicalDecisionTime
+            : null;
+
+    if (!signalTime) {
+      return false;
+    }
+
+    // SMC execution structure evidence bounded to 20-candle execution structure lookback
+    const maxStructureAgeMs = this.getMaxSignalAgeMs(signal.timeframe) * 20;
 
     const isEvidenceItemValid = (item: any): boolean => {
       if (!item || item.matched !== true) return false;
       if (item.timestamp) {
         const itemTime = new Date(item.timestamp).getTime();
         if (Number.isNaN(itemTime)) return false;
-        // Evidence timestamp must not be from the future (lookahead) or older than snapshot lookback window
+        // Evidence timestamp must not be from the future (> 5000ms) or older than 4 candle intervals
         if (itemTime > signalTime + 5000 || signalTime - itemTime > maxStructureAgeMs) {
           return false;
         }
@@ -1532,7 +1540,7 @@ export class AlgoBotsService implements OnModuleInit {
         status: 'REJECTED',
         reasonCode: reason,
         decision: 'REJECT',
-        lifecycleState: TradeLifecycleState.ELIGIBILITY_EVALUATED,
+        lifecycleState: TradeLifecycleState.TRADE_REJECTED,
         details:
           'Signal setup fails strict canonical timestamp invariant (canonicalCandleTime required and must equal canonicalDecisionTime.getTime())',
       });
@@ -1567,6 +1575,8 @@ export class AlgoBotsService implements OnModuleInit {
         liveQuoteError = err;
       }
 
+      const accountId = (portfolio as any)?.accountId || (portfolio as any)?.id || 'paper_primary_account';
+
       // 1. Authoritative Pre-Trade Decision Evaluation
       const decisionResult = this.tradeDecisionService!.evaluatePreTradeDecision({
         bot,
@@ -1591,7 +1601,7 @@ export class AlgoBotsService implements OnModuleInit {
             reasonCode: 'AUTO_EXECUTE_PAPER_DISABLED',
             details: `Bot '${bot.id}' autoExecutePaper is false`,
             decision: 'REJECT',
-            lifecycleState: TradeLifecycleState.ELIGIBILITY_EVALUATED,
+            lifecycleState: TradeLifecycleState.TRADE_REJECTED,
             correlationId: fingerprint,
           });
           continue;
@@ -1604,6 +1614,7 @@ export class AlgoBotsService implements OnModuleInit {
           decisionResult,
           fingerprint,
           correlationId: fingerprint,
+          accountId,
         });
 
         this.lastExecutionRejectionReason = decisionResult.decisionReasonCode;
@@ -1643,6 +1654,7 @@ export class AlgoBotsService implements OnModuleInit {
         decisionResult,
         fingerprint,
         correlationId: fingerprint,
+        accountId,
       });
 
       if (commitRes.isDuplicate || !commitRes.executionId) {

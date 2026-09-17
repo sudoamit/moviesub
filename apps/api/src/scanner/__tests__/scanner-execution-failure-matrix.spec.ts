@@ -487,6 +487,19 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     let scanOptions: any;
 
     beforeEach(() => {
+      const btcBot = botsDb.get('bot_btc_liquidity_sweep');
+      if (btcBot) {
+        btcBot.isActive = true;
+        btcBot.autoExecutePaper = true;
+        btcBot.timeframe = '15m';
+        btcBot.smcCondition = 'LIQUIDITY_SWEEP';
+        btcBot.lots = 1;
+      }
+      positionsDb.clear();
+      if (liveProvider) {
+        liveProvider.throwQuoteError = undefined;
+      }
+
       scanOptions = {
         strategyConfig: {
           deterministicSignal: {
@@ -656,6 +669,19 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
     let scanOptions: any;
 
     beforeEach(() => {
+      const btcBot = botsDb.get('bot_btc_liquidity_sweep');
+      if (btcBot) {
+        btcBot.isActive = true;
+        btcBot.autoExecutePaper = true;
+        btcBot.timeframe = '15m';
+        btcBot.smcCondition = 'LIQUIDITY_SWEEP';
+        btcBot.lots = 1;
+      }
+      positionsDb.clear();
+      if (liveProvider) {
+        liveProvider.throwQuoteError = undefined;
+      }
+
       scanOptions = {
         strategyConfig: {
           deterministicSignal: {

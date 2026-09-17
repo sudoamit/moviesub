@@ -264,6 +264,7 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
 
     // Clean execution and trade tables in real PostgreSQL
     await prismaService.algoBotExecution.deleteMany({});
+    await prismaService.tradeDecision.deleteMany({});
     await prismaService.paperFill.deleteMany({});
     await prismaService.paperTrade.deleteMany({});
     await prismaService.paperPosition.deleteMany({});
@@ -406,7 +407,6 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
 
     // 1. Authoritative Entry Point: Trigger scan from ScannerService
     const scanResult: any = await scannerService.triggerScan(Timeframe.M15);
-    console.log('EVAL RESULTS:', JSON.stringify(await evaluateSpy.mock.results[0]?.value, null, 2));
 
     // Assert Scanner summary metrics
     expect(scanResult.scannedCount).toBeGreaterThanOrEqual(1);
@@ -466,26 +466,31 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
   });
 
   it('2. FAIL-CLOSED INVARIANT: Missing H1 or H4 HTF data produces zero executions', async () => {
-    // Return empty array for H1
-    global.fetch = jest.fn().mockImplementation(async (url: string) => {
-      const urlStr = String(url);
-      if (urlStr.includes('interval=1h')) {
-        return { ok: true, status: 200, json: async () => [] } as any;
-      }
-      const klines = buildBinanceKlinesPayload(decisionTime);
-      return {
-        ok: true,
-        status: 200,
-        json: async () => (urlStr.includes('interval=15m') ? klines.m15 : klines.h4),
-      } as any;
-    });
+    const origFetch = global.fetch;
+    try {
+      // Return empty array for H1
+      global.fetch = jest.fn().mockImplementation(async (url: string) => {
+        const urlStr = String(url);
+        if (urlStr.includes('interval=1h')) {
+          return { ok: true, status: 200, json: async () => [] } as any;
+        }
+        const klines = buildBinanceKlinesPayload(decisionTime);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (urlStr.includes('interval=15m') ? klines.m15 : klines.h4),
+        } as any;
+      });
 
-    const res: any = await scannerService.triggerScan(Timeframe.M15);
-    expect(res.executedCount).toBe(0);
-    expect(res.executionAttemptedCount).toBe(0);
+      const res: any = await scannerService.triggerScan(Timeframe.M15);
+      expect(res.executedCount).toBe(0);
+      expect(res.executionAttemptedCount).toBe(0);
 
-    const dbPositions = await prismaService.paperPosition.findMany({});
-    expect(dbPositions.length).toBe(0);
+      const dbPositions = await prismaService.paperPosition.findMany({});
+      expect(dbPositions.length).toBe(0);
+    } finally {
+      global.fetch = origFetch;
+    }
   });
 
   it('3. ERROR CLASSIFICATION & RETRY SEMANTICS: Broker 503 classifies as BROKER_UNAVAILABLE and transitions to FAILED_RETRYABLE', async () => {
