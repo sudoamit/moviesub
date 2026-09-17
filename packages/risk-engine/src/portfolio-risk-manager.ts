@@ -3,6 +3,8 @@ import {
   buildAccountingSnapshot,
   CurrencyCode,
   getAuthoritativeInstrument,
+  getAuthoritativeSpotInstrument,
+  isSupportedSpotSymbol,
   hasInstrument,
   IPositionSizing,
   ITradeAccountingSnapshot,
@@ -93,20 +95,39 @@ export class PortfolioRiskManager {
 
     for (const pos of openPositions) {
       const posSymbol = pos.symbol;
-      const instrument = hasInstrument(posSymbol) ? getAuthoritativeInstrument(posSymbol) : undefined;
-      const contractSize = pos.contractSize ?? instrument?.contractSize ?? 1;
-      const quoteCurrency: CurrencyCode =
-        (pos.quoteCurrency as CurrencyCode) ||
-        instrument?.quoteCurrency ||
-        (instrument?.currency as CurrencyCode) ||
-        'INR';
+      const isSpot = isSupportedSpotSymbol(posSymbol);
+      let contractSize = pos.contractSize ?? 1;
+      let quoteCurrency: CurrencyCode = (pos.quoteCurrency as CurrencyCode) || 'INR';
+      let instrument: any;
+
+      if (isSpot) {
+        const spotInst = getAuthoritativeSpotInstrument(posSymbol);
+        contractSize = pos.contractSize ?? spotInst.contractMultiplier;
+        quoteCurrency = (pos.quoteCurrency as CurrencyCode) || spotInst.quoteCurrency;
+      } else {
+        instrument = hasInstrument(posSymbol) ? getAuthoritativeInstrument(posSymbol) : undefined;
+        contractSize = pos.contractSize ?? instrument?.contractSize ?? 1;
+        quoteCurrency =
+          (pos.quoteCurrency as CurrencyCode) ||
+          instrument?.quoteCurrency ||
+          (instrument?.currency as CurrencyCode) ||
+          'INR';
+      }
 
       let posSnapshot: ITradeAccountingSnapshot | undefined = pos.accountingSnapshot;
 
       if (!posSnapshot) {
         const posTimestamp = pos.openTimestamp ? pos.openTimestamp.getTime() : Date.now();
         const fxRes = currencyConverter.getRate(quoteCurrency, 'INR', posTimestamp);
-        const resolvedMargin = instrument
+        const resolvedMargin = isSpot
+          ? {
+              marginMode: 'SPOT' as const,
+              effectiveLeverage: 1,
+              initialMarginRate: 1.0,
+              maintenanceMarginRate: 0.0,
+              liquidationModel: 'SPOT_NONE' as const,
+            }
+          : instrument
           ? resolveMarginModel(instrument, { requestedLeverage: pos.leverage })
           : {
               marginMode: pos.leverage && pos.leverage > 1 ? ('ISOLATED' as const) : ('SPOT' as const),

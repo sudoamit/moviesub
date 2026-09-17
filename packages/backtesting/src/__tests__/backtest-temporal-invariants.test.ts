@@ -43,7 +43,7 @@ describe('Backtesting Temporal Invariants', () => {
     const datasetDFuture = createSyntheticCandles(130);
 
     const resultD = BacktestSimulator.runSimulation({
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       timeframe: Timeframe.M15,
       candles: datasetD,
       asOfTimestamp,
@@ -53,7 +53,7 @@ describe('Backtesting Temporal Invariants', () => {
     });
 
     const resultDFuture = BacktestSimulator.runSimulation({
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       timeframe: Timeframe.M15,
       candles: datasetDFuture,
       asOfTimestamp,
@@ -92,7 +92,7 @@ describe('Backtesting Temporal Invariants', () => {
 
     // Batch evaluation with explicit asOfTimestamp
     const batchResult = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: Timeframe.M15,
       candles,
       asOfTimestamp: cutoffTime,
@@ -103,7 +103,7 @@ describe('Backtesting Temporal Invariants', () => {
     // Incremental evaluation using sliced input data up to cutoffIndex
     const slicedCandles = candles.slice(0, cutoffIndex + 1);
     const incrementalResult = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: Timeframe.M15,
       candles: slicedCandles,
       initialCapital: 50000,

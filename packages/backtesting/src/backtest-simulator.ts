@@ -160,19 +160,30 @@ export class BacktestSimulator {
     const rawSymbol = (options.symbol || '').toUpperCase().trim();
     if (FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(rawSymbol)) {
       throw new Error(
-        `FORBIDATIVE_DERIVATIVE_INSTRUMENT: Derivative instrument '${rawSymbol}' is strictly forbidden in spot trading architecture.`.replace(
-          'FORBIDATIVE',
-          'FORBIDDEN',
-        ),
+        `FORBIDDEN_DERIVATIVE_INSTRUMENT: Derivative instrument '${rawSymbol}' is strictly forbidden in spot trading architecture.`,
       );
     }
     const isSpotTrading =
       Boolean(options.isSpot) ||
       isSupportedSpotSymbol(rawSymbol) ||
+      rawSymbol.endsWith('_SPOT') ||
+      rawSymbol in LEGACY_SPOT_ALIASES ||
       (options as any).spotOnly === true;
 
+    if (rawSymbol in LEGACY_SPOT_ALIASES) {
+      throw new Error(
+        `LEGACY_ALIAS_REJECTED: Symbol '${rawSymbol}' is a legacy alias. Spot strategy and backtest engine strictly require canonical symbol '${LEGACY_SPOT_ALIASES[rawSymbol as keyof typeof LEGACY_SPOT_ALIASES]}'.`,
+      );
+    }
+
+    if (isSpotTrading && !isSupportedSpotSymbol(rawSymbol)) {
+      throw new Error(
+        `UNSUPPORTED_SPOT_INSTRUMENT: Symbol '${rawSymbol}' is not a supported spot instrument. Supported universe is strictly {NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT}.`,
+      );
+    }
+
     const symbol = isSpotTrading
-      ? canonicalizeSpotSymbol(rawSymbol, { allowLegacyAliases: true })
+      ? canonicalizeSpotSymbol(rawSymbol, { allowLegacyAliases: false })
       : options.symbol;
 
     // Data Provenance: Mock data provider strictly fails closed in research backtests
@@ -279,6 +290,9 @@ export class BacktestSimulator {
       options.spreadConfig,
       options.costStressConfig,
     );
+    if (isSpotTrading) {
+      execSim.setSpotOnly(true);
+    }
 
     const trades: IBacktestTrade[] = [];
     const positionLots: PositionLot[] = [];
@@ -1104,7 +1118,9 @@ export class BacktestSimulator {
 
         const finalProceedsQuote = finalClose * activeLot.remainingQuantity * termContractSize;
         const finalProceedsINR = Number((finalProceedsQuote * termFxRate).toFixed(2));
-        currentCash = Number((currentCash + finalProceedsINR - (totalFees - (firstFill?.fee || 0))).toFixed(2));
+        const finalExitFeesQuote = totalFees - (firstFill?.fee || 0);
+        const finalExitFeesINR = termQuoteCurrency !== 'INR' ? Number((finalExitFeesQuote * termFxRate).toFixed(2)) : finalExitFeesQuote;
+        currentCash = Number((currentCash + finalProceedsINR - finalExitFeesINR).toFixed(2));
         currentEquity = currentCash;
       } else {
         const terminalInst = hasInstrument(activeLot.symbol) ? getAuthoritativeInstrument(activeLot.symbol) : undefined;

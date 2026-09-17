@@ -22,13 +22,13 @@ describe('AblationSimulator', () => {
   it('should run multi-variant ablation study and compare all 6 variants', () => {
     const candles = createMockCandles(100, 24000);
     const ablation = AblationSimulator.runAblationStudy({
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       candles,
       timeframe: '15m',
       initialCapital: 100000,
     });
 
-    expect(ablation.symbol).toBe('NIFTY');
+    expect(ablation.symbol).toBe('NIFTY_SPOT');
     expect(ablation.variants.length).toBe(6);
     expect(ablation.variants.map((v) => v.variant)).toContain('SMC_ONLY');
     expect(ablation.variants.map((v) => v.variant)).toContain('FULL_SYSTEM');

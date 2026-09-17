@@ -9,6 +9,7 @@ import {
   normalizeDirection,
   hasInstrument,
   getAuthoritativeInstrument,
+  getAuthoritativeSpotInstrument,
   PointInTimeCurrencyConverter,
   MarginMode,
   IResolvedMarginModel,
@@ -247,6 +248,61 @@ export class TradeLifecycleManager {
 
     if (lot.accountingSnapshot) {
       accountingSnapshot = lot.accountingSnapshot;
+    } else if (isSupportedSpotSymbol(lot.symbol)) {
+      const spotInst = getAuthoritativeSpotInstrument(lot.symbol);
+      const contractSize = spotInst.contractMultiplier;
+      const lotSize = spotInst.lotSize;
+      const quoteCurrency = spotInst.quoteCurrency;
+      const accountCurrency = spotInst.accountingCurrency;
+
+      let fxRate = options?.fxRate;
+      let fxTimestamp = lot.openedAt;
+      let fxPair = `${quoteCurrency}/${accountCurrency}`;
+      let fxSource = 'SYSTEM_DIRECT';
+      let fxSnapshotHash = 'LOCAL_HASH';
+      if (fxRate === undefined) {
+        if (quoteCurrency === accountCurrency) {
+          fxRate = 1.0;
+        } else {
+          const fxResult = PointInTimeCurrencyConverter.getInstance().getRate(
+            quoteCurrency,
+            accountCurrency,
+            lot.openedAt,
+          );
+          fxRate = fxResult.fxRate;
+          fxTimestamp = fxResult.fxTimestamp;
+          fxPair = fxResult.fxPair;
+          fxSource = fxResult.fxSource;
+          fxSnapshotHash = fxResult.fxSnapshotHash;
+        }
+      }
+
+      accountingSnapshot = buildAccountingSnapshot({
+        accountCurrency,
+        quoteCurrency,
+        fxResult: {
+          convertedAmount: 0,
+          originalAmount: 0,
+          fromCurrency: quoteCurrency,
+          toCurrency: accountCurrency,
+          fxPair,
+          fxRate,
+          fxTimestamp,
+          fxSource,
+          fxVersion: '1.0',
+          fxSnapshotHash,
+        },
+        contractSize,
+        lotSize,
+        resolvedMarginModel: {
+          marginMode: 'SPOT',
+          effectiveLeverage: 1,
+          initialMarginRate: 1.0,
+          maintenanceMarginRate: 0.0,
+          liquidationModel: 'SPOT_NONE',
+        },
+        calculatedAt: lot.openedAt,
+      });
     } else {
       const instrument = hasInstrument(lot.symbol) ? getAuthoritativeInstrument(lot.symbol) : undefined;
       const contractSize = options?.contractSize ?? instrument?.contractSize ?? 1;

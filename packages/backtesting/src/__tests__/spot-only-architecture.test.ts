@@ -307,6 +307,147 @@ describe('Spot-Only Trading Architecture Invariants (Requirement 15)', () => {
       }).toThrow(/LEGACY_ALIAS_REJECTED/);
     });
 
+    test('BacktestSimulator strictly rejects legacy aliases (NIFTY, BANKNIFTY, BTCUSDT) with fail-closed error', () => {
+      expect(() => {
+        BacktestSimulator.runSimulation({
+          symbol: 'NIFTY',
+          candles: [],
+        });
+      }).toThrow(/LEGACY_ALIAS_REJECTED/);
+
+      expect(() => {
+        BacktestSimulator.runSimulation({
+          symbol: 'BANKNIFTY',
+          candles: [],
+        });
+      }).toThrow(/LEGACY_ALIAS_REJECTED/);
+
+      expect(() => {
+        BacktestSimulator.runSimulation({
+          symbol: 'BTCUSDT',
+          candles: [],
+        });
+      }).toThrow(/LEGACY_ALIAS_REJECTED/);
+    });
+
+    test('BacktestSimulator accepts canonical spot symbols (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT)', () => {
+      for (const sym of ['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']) {
+        expect(() => {
+          BacktestSimulator.runSimulation({
+            symbol: sym,
+            candles: [],
+          });
+        }).not.toThrow(/LEGACY_ALIAS_REJECTED/);
+      }
+    });
+
+    test('execution boundary in ExecutionSimulator strictly enforces spot allowlist before order creation', () => {
+      const execSim = new ExecutionSimulator(FillModel.NEXT_BAR_MARKET, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 });
+      execSim.setSpotOnly(true);
+
+      expect(() => {
+        execSim.submitOrder({
+          tradeId: 't1',
+          symbol: 'NIFTY',
+          side: 'BUY',
+          orderType: 'MARKET',
+          quantity: 1,
+          timestamp: testTimestamp,
+        });
+      }).toThrow(/UNSUPPORTED_SPOT_INSTRUMENT/);
+
+      expect(() => {
+        execSim.submitOrder({
+          tradeId: 't2',
+          symbol: 'BTCUSDT',
+          side: 'BUY',
+          orderType: 'MARKET',
+          quantity: 1,
+          timestamp: testTimestamp,
+        });
+      }).toThrow(/UNSUPPORTED_SPOT_INSTRUMENT/);
+
+      expect(() => {
+        execSim.submitOrder({
+          tradeId: 't3',
+          symbol: 'GOLD',
+          side: 'BUY',
+          orderType: 'MARKET',
+          quantity: 1,
+          timestamp: testTimestamp,
+        });
+      }).toThrow(/UNSUPPORTED_SPOT_INSTRUMENT/);
+
+      // Canonical spot symbol succeeds
+      const order = execSim.submitOrder({
+        tradeId: 't4',
+        symbol: 'NIFTY_SPOT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        quantity: 1,
+        timestamp: testTimestamp,
+      });
+      expect(order.orderId).toBeDefined();
+    });
+
+    test('naked short selling rules: SELL with zero holdings, SELL > holdings, SELL <= holdings, and SHORT positions', () => {
+      // 1. SELL with zero holdings -> reject
+      const sellZero = PositionSizer.calculateSpotPosition({
+        symbol: 'NIFTY_SPOT',
+        orderSide: 'SELL',
+        currentHeldQuantity: 0,
+        sellQuantity: 5,
+        availableCash: 100000,
+        entryPrice: 24000,
+        stopLoss: 23800,
+        timestamp: testTimestamp,
+      });
+      expect(sellZero.isValid).toBe(false);
+      expect(sellZero.rejectionReason).toMatch(/SPOT_SHORT_SELLING_FORBIDDEN/);
+
+      // 2. SELL quantity > holdings -> reject
+      const sellExcess = PositionSizer.calculateSpotPosition({
+        symbol: 'NIFTY_SPOT',
+        orderSide: 'SELL',
+        currentHeldQuantity: 3,
+        sellQuantity: 5,
+        availableCash: 100000,
+        entryPrice: 24000,
+        stopLoss: 23800,
+        timestamp: testTimestamp,
+      });
+      expect(sellExcess.isValid).toBe(false);
+      expect(sellExcess.rejectionReason).toMatch(/SPOT_SHORT_SELLING_FORBIDDEN/);
+
+      // 3. SELL quantity <= holdings -> accept
+      const sellValid = PositionSizer.calculateSpotPosition({
+        symbol: 'NIFTY_SPOT',
+        orderSide: 'SELL',
+        currentHeldQuantity: 10,
+        sellQuantity: 5,
+        availableCash: 100000,
+        entryPrice: 24000,
+        stopLoss: 23800,
+        timestamp: testTimestamp,
+      });
+      expect(sellValid.isValid).toBe(true);
+
+      // 4. SHORT entry position in ExecutionSimulator -> reject
+      const execSim = new ExecutionSimulator(FillModel.NEXT_BAR_MARKET, SameCandleAmbiguityMode.CONSERVATIVE, { submissionLatencyMs: 0, processingLatencyMs: 0 });
+      expect(() => {
+        execSim.submitOrder({
+          tradeId: 'short_entry_fail',
+          symbol: 'NIFTY_SPOT',
+          side: 'SELL',
+          positionSide: PositionSide.SHORT,
+          orderType: 'MARKET',
+          quantity: 1,
+          timestamp: testTimestamp,
+          exitTarget: 'ENTRY',
+        });
+      }).toThrow(/SPOT_SHORT_SELLING_FORBIDDEN/);
+    });
+
     test('arbitrary unsupported instruments (GOLD, ETHUSDT) fail closed in SpotBacktestSimulator', () => {
       expect(() => {
         SpotBacktestSimulator.runSimulation({

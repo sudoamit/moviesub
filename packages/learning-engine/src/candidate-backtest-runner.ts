@@ -1,4 +1,4 @@
-import { ICandle, IBacktestTrade } from '@quant/shared';
+import { ICandle, IBacktestTrade, LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { BacktestSimulator, ExecutionCostStressConfig, IBacktestOptions } from '@quant/backtesting';
 import {
   CandidateArtifact,
@@ -302,9 +302,12 @@ export class CandidateBacktestRunner {
         ? options.warmupBars
         : PRODUCTION_DEFAULT_WARMUP_BARS;
 
-    const sym = options?.symbol || artifact.symbol || config.symbol || (artifact as any).executionConfig?.symbol;
+    let sym = options?.symbol || artifact.symbol || config.symbol || (artifact as any).executionConfig?.symbol;
     if (!sym || typeof sym !== 'string' || sym.trim() === '') {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in backtest execution`);
+    }
+    if (sym in LEGACY_SPOT_ALIASES) {
+      sym = LEGACY_SPOT_ALIASES[sym as keyof typeof LEGACY_SPOT_ALIASES];
     }
 
     let feeConfig = productionContext.executionContext === 'PRODUCTION' ? productionContext.feeConfig : options?.feeConfig;

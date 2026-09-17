@@ -16,7 +16,14 @@ import {
   EXECUTION_PRECISION,
   ISubmitOrderParams,
 } from './types';
-import { ICandle, isLongPosition } from '@quant/shared';
+import {
+  ICandle,
+  isLongPosition,
+  isSupportedSpotSymbol,
+  SUPPORTED_SPOT_SYMBOLS,
+  LEGACY_SPOT_ALIASES,
+  FORBIDDEN_DERIVATIVE_INSTRUMENTS,
+} from '@quant/shared';
 import { FillModelEngine } from './fill-model';
 import { IExecutionEvent } from '@quant/risk-engine';
 import { OHLCPathCursor } from './ohlc-path-cursor';
@@ -33,6 +40,11 @@ export class ExecutionSimulator {
   private spreadConfig?: ISpreadConfig;
   private costStressConfig?: ExecutionCostStressConfig;
   private partialFillRatio?: number;
+  private isSpotOnly = false;
+
+  setSpotOnly(spotOnly = true): void {
+    this.isSpotOnly = spotOnly;
+  }
   private orderCounter = 0;
   private fillCounter = 0;
   private eventCounter = 0;
@@ -210,13 +222,22 @@ export class ExecutionSimulator {
       );
     }
 
+    // Enforce spot allowlist at the execution boundary
+    const isSpotExecution =
+      this.isSpotOnly ||
+      Boolean((params as any).isSpot) ||
+      (params.symbol && params.symbol.endsWith('_SPOT'));
+
+    if (isSpotExecution) {
+      if (!isSupportedSpotSymbol(params.symbol)) {
+        throw new Error(
+          `UNSUPPORTED_SPOT_INSTRUMENT: Symbol '${params.symbol}' is not a supported spot instrument. Execution boundary strictly enforces {NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT}.`,
+        );
+      }
+    }
+
     // Spot-Only Invariant: Prohibit naked short selling entry orders for spot instruments
-    const isSpotSym =
-      params.symbol &&
-      (params.symbol === 'NIFTY_SPOT' ||
-        params.symbol === 'BANKNIFTY_SPOT' ||
-        params.symbol === 'BTCUSDT_SPOT' ||
-        params.symbol.endsWith('_SPOT'));
+    const isSpotSym = isSupportedSpotSymbol(params.symbol) || this.isSpotOnly || Boolean((params as any).isSpot);
     if (isSpotSym && params.exitTarget === 'ENTRY' && (params.side === 'SELL' || params.positionSide === 'SHORT')) {
       throw new Error(
         `SPOT_SHORT_SELLING_FORBIDDEN: Naked short selling entry orders are strictly prohibited for spot instrument '${params.symbol}'`,

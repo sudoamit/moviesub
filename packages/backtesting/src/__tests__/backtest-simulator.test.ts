@@ -8,7 +8,7 @@ describe('BacktestSimulator', () => {
     const candles = await provider.getHistoricalCandles('NIFTY', '15m', 250);
 
     const result = BacktestSimulator.runSimulation({
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       timeframe: Timeframe.M15,
       candles,
       initialCapital: 100000,
@@ -17,7 +17,7 @@ describe('BacktestSimulator', () => {
     });
 
     expect(result).toBeDefined();
-    expect(result.symbol).toBe('NIFTY');
+    expect(result.symbol).toBe('NIFTY_SPOT');
     expect(result.initialCapital).toBe(100000);
     expect(result.finalEquity).toBeGreaterThan(0);
     expect(result.equityCurve.length).toBeGreaterThanOrEqual(1);
@@ -50,7 +50,7 @@ describe('BacktestSimulator', () => {
     // It must NEVER default to 1.0 (treating 1 USDT = 1 INR)
     expect(() => {
       BacktestSimulator.runSimulation({
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_SPOT',
         timeframe: '15m' as any,
         initialCapital: 100000,
         candles,
@@ -61,7 +61,7 @@ describe('BacktestSimulator', () => {
           deterministicSignals: [
             {
               id: 'sig_btcusdt_test',
-              symbol: 'BTCUSDT',
+              symbol: 'BTCUSDT_SPOT',
               direction: 'BULLISH',
               score: 85,
               entryPrice: 100.0,
@@ -117,7 +117,7 @@ describe('BacktestSimulator', () => {
     candles.push({ timestamp: new Date(t0 + 34 * interval), open: 99.2, high: 100.0, low: 99.0, close: 99.5, volume: 1000 });
 
     const result = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: '15m' as any,
       initialCapital: 100000,
       candles,
@@ -128,7 +128,7 @@ describe('BacktestSimulator', () => {
         deterministicSignals: [
           {
             id: 'sig_btcusdt_test',
-            symbol: 'BTCUSDT',
+            symbol: 'BTCUSDT_SPOT',
             direction: 'BULLISH',
             score: 85,
             entryPrice: 100.0,
@@ -144,7 +144,7 @@ describe('BacktestSimulator', () => {
     });
 
     expect(result).toBeDefined();
-    expect(result.symbol).toBe('BTCUSDT');
+    expect(result.symbol).toBe('BTCUSDT_SPOT');
     expect(result.equityCurve.length).toBeGreaterThan(0);
   });
 

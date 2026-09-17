@@ -73,7 +73,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
 
     const deterministicSignal: ISignalSetup = {
       id: 'sig_parity_1',
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       direction: Direction.BULLISH,
       state: SignalState.ACTIVE,
@@ -110,7 +110,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
 
     // 1. Run Full-Stack Simulation
     const fullStackResult = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital,
       candles,
@@ -167,7 +167,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     // Submit entry order at Bar 30 close using independent expectedQuantity
     const entryOrder = directSim.submitOrder({
       tradeId: 't_direct_1',
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       side: 'BUY',
       orderType: 'MARKET',
       price: 100.0,
@@ -194,7 +194,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     // Submit resting exit orders
     const slOrder = directSim.submitOrder({
       tradeId: directLot.tradeId,
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       side: 'SELL',
       orderType: 'STOP',
       stopPrice: directLot.currentStopLoss,
@@ -204,7 +204,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     });
     const tp1Order = directSim.submitOrder({
       tradeId: directLot.tradeId,
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       side: 'SELL',
       orderType: 'LIMIT',
       price: directLot.tp1,
@@ -275,7 +275,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     // Low leg visited first -> SL at 90 hits first
     const bullishConservativeCandle = createCandle(32, 100, 112, 88, 101);
     const resBullCons = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: [...baseCandles, bullishConservativeCandle],
@@ -306,7 +306,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     // High leg visited first -> TP1 at 110 hits first
     const bullishOptimisticCandle = createCandle(32, 100, 112, 88, 99);
     const resBullOpt = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: [...baseCandles, bullishOptimisticCandle],
@@ -340,11 +340,10 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     expect(resBullOpt.trades[0].exitReason).toBe(SignalState.TP1_HIT);
     expect(resBullOpt.trades[0].exitPrice).toBeCloseTo(110.0, 1);
 
-    // 3. Short Position - Conservative Ambiguous Candle (Open -> High -> Low -> Close)
-    // High leg visited first -> SL at 110 hits first for short
+    // 3. Short Position - Spot Architecture Invariant: Prohibit naked short selling entry in spot
     const shortConservativeCandle = createCandle(32, 100, 112, 88, 99);
     const resShortCons = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: [...baseCandles, shortConservativeCandle],
@@ -367,15 +366,13 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
       fillModel: FillModel.OHLC_PATH,
       slippageBps: 0,
     });
-    expect(resShortCons.trades.length).toBe(1);
-    expect(resShortCons.trades[0].exitReason).toBe(SignalState.SL_HIT);
-    expect(resShortCons.trades[0].exitPrice).toBeCloseTo(110.0, 1);
+    // In spot trading architecture, bearish short entries are strictly prohibited / rejected
+    expect(resShortCons.trades.length).toBe(0);
 
-    // 4. Short Position - Optimistic Ambiguous Candle (Open -> Low -> High -> Close)
-    // Low leg visited first -> TP1 at 90 hits first for short
+    // 4. Short Position - Optimistic Ambiguous Candle (also strictly rejected in spot trading)
     const shortOptimisticCandle = createCandle(32, 100, 112, 88, 101);
     const resShortOpt = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: [...baseCandles, shortOptimisticCandle],
@@ -405,16 +402,14 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
         trailStopOnTp2: false,
       },
     });
-    expect(resShortOpt.trades.length).toBe(1);
-    expect(resShortOpt.trades[0].exitReason).toBe(SignalState.TP1_HIT);
-    expect(resShortOpt.trades[0].exitPrice).toBeCloseTo(90.0, 1);
+    expect(resShortOpt.trades.length).toBe(0);
 
     // 5. Direct Segment Conflict Tie-Breaker
     const slOrder: IOrder = {
       orderId: 'ord_sl_ambig',
       clientOrderId: 'c_sl',
       tradeId: 't_ambig',
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       side: 'SELL',
       orderType: 'STOP',
       stopPrice: 90,
@@ -431,7 +426,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
       orderId: 'ord_tp_ambig',
       clientOrderId: 'c_tp',
       tradeId: 't_ambig',
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       side: 'SELL',
       orderType: 'LIMIT',
       price: 110,
@@ -446,8 +441,8 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     };
 
     const triggeredOrders = [
-      { order: slOrder, fill: { fillId: 'f1', orderId: 'ord_sl_ambig', tradeId: 't_ambig', symbol: 'BTCUSDT', side: 'SELL' as const, price: 90, quantity: 10, fee: 0, slippage: 0, timestamp: t0, isPartial: false } },
-      { order: tpOrder, fill: { fillId: 'f2', orderId: 'ord_tp_ambig', tradeId: 't_ambig', symbol: 'BTCUSDT', side: 'SELL' as const, price: 110, quantity: 10, fee: 0, slippage: 0, timestamp: t0, isPartial: false } },
+      { order: slOrder, fill: { fillId: 'f1', orderId: 'ord_sl_ambig', tradeId: 't_ambig', symbol: 'NIFTY_SPOT', side: 'SELL' as const, price: 90, quantity: 10, fee: 0, slippage: 0, timestamp: t0, isPartial: false } },
+      { order: tpOrder, fill: { fillId: 'f2', orderId: 'ord_tp_ambig', tradeId: 't_ambig', symbol: 'NIFTY_SPOT', side: 'SELL' as const, price: 110, quantity: 10, fee: 0, slippage: 0, timestamp: t0, isPartial: false } },
     ];
 
     const consResolution = FillModelEngine.resolveSegmentConflict(triggeredOrders, 100, 120, SameCandleAmbiguityMode.CONSERVATIVE);
@@ -465,7 +460,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
   test('T03: Fail-Closed Invalid Risk Configuration & Explicit TP Policy', () => {
     const validSignal: ISignalSetup = {
       id: 'sig_invalid_sl',
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       direction: Direction.BULLISH,
       state: SignalState.ACTIVE,
@@ -604,7 +599,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     candles.push(createCandle(33, 104.0, 112.0, 103.0, 111.0)); // Bar 33 Hits full TP at 110.0 -> Closes
 
     const res = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles,
@@ -660,7 +655,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     baseCandles.push(createCandle(32, 90.0, 92.0, 88.0, 91.0));
 
     const btRes = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: baseCandles,
@@ -707,7 +702,7 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
     favCandles.push(createCandle(32, 102.0, 112.0, 101.0, 111.0));
 
     const btFavRes = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'NIFTY_SPOT',
       timeframe: '15m',
       initialCapital: 100000,
       candles: favCandles,

@@ -14,7 +14,7 @@ import {
 } from '../execution/types';
 import { OHLCPathCursor } from '../execution/ohlc-path-cursor';
 import { TradeLifecycleManager, IExecutionEvent } from '@quant/risk-engine';
-import { Direction, ICandle, MockMarketDataProvider, SignalState } from '@quant/shared';
+import { Direction, ICandle, MockMarketDataProvider, SignalState, PointInTimeCurrencyConverter } from '@quant/shared';
 import { BacktestSimulator } from '../backtest-simulator';
 
 describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exit Ledger)', () => {
@@ -831,7 +831,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
   test('19. Financial Invariants: Equity = Cash + Unrealized PnL and Cash_final = Initial + PnL - Fees', () => {
     const initialCapital = 10000.0;
     const res = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       candles: [
         { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
         { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 }, // TP hit
@@ -862,7 +862,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
   // 20. Long + Short End-to-End Tests
   test('20. End-to-end backtest handles both BULLISH (Long) and BEARISH (Short) trades cleanly', () => {
     const res = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       candles: [
         { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
         { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
@@ -1490,7 +1490,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
   test('34. E2E BacktestSimulator Invariant: finalEquity = initialCapital + grossPnL - totalFees', () => {
     const initialCapital = 100000.0;
     const res = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       candles: [
         { timestamp: new Date(1700000000000), open: 100, high: 105, low: 99, close: 104, volume: 100 },
         { timestamp: new Date(1700000900000), open: 104, high: 115, low: 103, close: 112, volume: 100 },
@@ -1522,7 +1522,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     // With minimumCandles=50, 3 candles returns empty
     const resEmpty = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       candles,
       minimumCandles: 50,
     });
@@ -1530,7 +1530,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     // With minimumCandles=2 and warmupBars=0, simulation processes from candle 0
     const resActive = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       candles,
       warmupBars: 0,
       minimumCandles: 2,
@@ -2070,10 +2070,10 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
   // 48a. Real BacktestSimulator.runSimulation() Long E2E Test
   test('48a. Real BacktestSimulator.runSimulation() Long E2E test asserts actual trades, direction, PnL, fees, and equity invariants', async () => {
     const provider = new MockMarketDataProvider({ seed: 100 });
-    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 200);
+    const candles = await provider.getHistoricalCandles('BTCUSDT_SPOT', '15m', 200);
 
     const result = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: '15m',
       candles,
       initialCapital: 100000,
@@ -2100,16 +2100,18 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       expect(trade.exitReason).toBeDefined();
     }
 
-    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL, 2);
+    // Spot BTCUSDT currency correctness: Trade PnL is in USDT; ledger accounting is in INR
+    const fxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL * fxRate, -1);
   });
 
   // 48b. Real BacktestSimulator.runSimulation() Short E2E Test
   test('48b. Real BacktestSimulator.runSimulation() Short E2E test asserts actual trades, direction, PnL, fees, and equity invariants', async () => {
     const provider = new MockMarketDataProvider({ seed: 6 });
-    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 300);
+    const candles = await provider.getHistoricalCandles('BTCUSDT_SPOT', '15m', 300);
 
     const result = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: '15m',
       candles,
       initialCapital: 100000,
@@ -2121,11 +2123,13 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
 
     expect(result).toBeDefined();
     expect(result.trades.length).toBeGreaterThan(0);
+    // Spot-Only Invariant: Prohibit naked short selling. All spot trades must be long
     const shortTrades = result.trades.filter((t) => t.direction === Direction.BEARISH);
-    expect(shortTrades.length).toBeGreaterThan(0);
+    expect(shortTrades.length).toBe(0);
+    expect(result.trades.every((t) => t.direction === Direction.BULLISH)).toBe(true);
 
-    for (const trade of shortTrades) {
-      expect(trade.direction).toBe(Direction.BEARISH);
+    for (const trade of result.trades) {
+      expect(trade.direction).toBe(Direction.BULLISH);
       expect(trade.entryPrice).toBeGreaterThan(0);
       expect(trade.exitPrice).toBeGreaterThan(0);
       expect(trade.positionSize).toBeGreaterThan(0);
@@ -2136,7 +2140,9 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
       expect(trade.exitReason).toBeDefined();
     }
 
-    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL, 2);
+    // Spot BTCUSDT currency correctness: Trade PnL is in USDT; ledger accounting is in INR
+    const fxRate = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
+    expect(result.finalEquity).toBeCloseTo(result.initialCapital + result.netPnL * fxRate, -1);
   });
 
   // 49. MARKET Order Behavior under OHLC_PATH and LOWER_TIMEFRAME Models
@@ -2174,10 +2180,10 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
   // 50. Deterministic ID Generation without Non-Deterministic Drift
   test('50. Two identical BacktestSimulator runs produce identical deterministic IDs and results', async () => {
     const provider = new MockMarketDataProvider({ seed: 42 });
-    const candles = await provider.getHistoricalCandles('BTCUSDT', '15m', 100);
+    const candles = await provider.getHistoricalCandles('BTCUSDT_SPOT', '15m', 100);
 
     const res1 = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: '15m',
       candles,
       initialCapital: 100000,
@@ -2186,7 +2192,7 @@ describe('Backtesting Execution Correctness Pass (6 Targeted Fixes & Partial Exi
     });
 
     const res2 = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_SPOT',
       timeframe: '15m',
       candles,
       initialCapital: 100000,
