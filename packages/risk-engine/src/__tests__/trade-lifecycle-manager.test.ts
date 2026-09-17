@@ -4,7 +4,7 @@ import { Direction, ISignalSetup, SignalGrade, SignalState, Timeframe } from '@q
 describe('TradeLifecycleManager', () => {
   const signal: ISignalSetup = {
     id: 'sig-1',
-    symbol: 'NIFTY',
+    symbol: 'NIFTY_SPOT',
     direction: Direction.BULLISH,
     timeframe: Timeframe.M15,
     state: SignalState.PENDING,

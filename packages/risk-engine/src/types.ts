@@ -205,5 +205,13 @@ export interface ICalculateSpotPositionOptions {
   maxRiskPercentage?: number;
   timestamp?: number;
   currencyConverter?: import('@quant/shared').PointInTimeCurrencyConverter;
+  /**
+   * Optional entry fee rate in basis points (bps) used to reserve cash for fees
+   * in the BUY cash ceiling calculation.
+   * Formula: tradeNotional + tradeNotional * (entryFeeRateBps / 10_000) <= availableCash
+   * Default: 0 (no fee reservation — backward-compatible).
+   * Example: 4 bps = 0.04% Binance taker fee, 1 bps = 0.01% NSE research cost.
+   */
+  entryFeeRateBps?: number;
 }
 

@@ -509,11 +509,13 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
       TradeLifecycleManager.createPositionLot({ ...validSignal, stopLoss: undefined as any }, 100, 10, t0),
     ).toThrow('INVALID_SIGNAL_STOP_LOSS');
 
-    // 4. Inverted Stop Loss relative to execution price throws INVALID_POSITION_PROTECTION
+    // 4. Inverted Stop Loss relative to execution price throws INVALID_POSITION_PROTECTION (BULLISH)
     expect(() =>
       TradeLifecycleManager.createPositionLot({ ...validSignal, stopLoss: 105 }, 100, 10, t0),
     ).toThrow('INVALID_POSITION_PROTECTION');
 
+    // 4b. BEARISH entry on a spot symbol (NIFTY_SPOT) throws SPOT_SHORT_SELLING_FORBIDDEN
+    //     (the lifecycle boundary guard fires before INVALID_POSITION_PROTECTION)
     expect(() =>
       TradeLifecycleManager.createPositionLot(
         { ...validSignal, direction: Direction.BEARISH, stopLoss: 95 },
@@ -521,7 +523,8 @@ describe('AI Fix 77 — Full-Stack TP/SL Parity, Independent Sizing, Explicit TP
         10,
         t0,
       ),
-    ).toThrow('INVALID_POSITION_PROTECTION');
+    ).toThrow('SPOT_SHORT_SELLING_FORBIDDEN');
+
 
     // 5. Missing Take-Profit with autoDeriveTargets = false throws INVALID_SIGNAL_TAKE_PROFIT
     const policyNoDerive = { ...DEFAULT_PARTIAL_EXIT_POLICY, autoDeriveTargets: false };

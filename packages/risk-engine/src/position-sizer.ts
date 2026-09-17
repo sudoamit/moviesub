@@ -517,7 +517,8 @@ export class PositionSizer {
     let canonicalSym: SupportedSpotSymbol;
     let spotInst: any;
     try {
-      canonicalSym = canonicalizeSpotSymbol(symbol);
+      // Reject legacy aliases (NIFTY, BANKNIFTY, BTCUSDT) — spot engine requires canonical symbols.
+      canonicalSym = canonicalizeSpotSymbol(symbol, { allowLegacyAliases: false });
       spotInst = getAuthoritativeSpotInstrument(canonicalSym);
     } catch (err: any) {
       return {
@@ -668,9 +669,18 @@ export class PositionSizer {
     const riskPerUnitINR = stopDistance * spotInst.contractMultiplier * fxRate;
     const unitPriceINR = entryPrice * spotInst.contractMultiplier * fxRate;
 
+    // ── Fee-Adjusted Cash Ceiling ─────────────────────────────────────────────
+    // The cash ceiling must reserve room for entry fees so that the final fill
+    // (notional + fees) fits within availableCash.
+    // feeRateFactor = entryFeeRateBps / 10_000 (default 0 — no breaking change).
+    // tradeNotional + estimatedEntryFees <= availableCash
+    //   =>  quantity <= availableCash / (unitPriceINR * (1 + feeRateFactor))
+    const feeRateFactor = (options.entryFeeRateBps ?? 0) / 10_000;
+    const unitPriceWithFeeINR = unitPriceINR * (1 + feeRateFactor);
+
     // Spot Sizing Formula
     const quantityByRisk = riskAmountINR / riskPerUnitINR;
-    const quantityByCash = availableCash / unitPriceINR;
+    const quantityByCash = availableCash / unitPriceWithFeeINR;
     const calculatedQuantity = Math.min(quantityByRisk, quantityByCash);
 
     const lot = spotInst.lotSize;
@@ -701,6 +711,36 @@ export class PositionSizer {
 
     const positionNotionalQuote = Number((roundedQuantity * entryPrice * spotInst.contractMultiplier).toFixed(4));
     const positionNotionalINR = Number((positionNotionalQuote * fxRate).toFixed(2));
+
+    // ── Post-Rounding Fee Recheck ─────────────────────────────────────────────
+    // After lot-floor rounding, verify: notional + estimated fees <= availableCash.
+    // Round down by one lot if not satisfied; reject if still below minimum.
+    const estimatedEntryFeeINR = Number((positionNotionalINR * feeRateFactor).toFixed(2));
+    if (positionNotionalINR + estimatedEntryFeeINR > availableCash + 1e-4) {
+      const reducedQty = Number(Math.max(0, roundedQuantity - lot).toFixed(spotInst.quantityPrecision));
+      if (reducedQty < spotInst.minimumQuantity) {
+        return {
+          symbol: canonicalSym,
+          entryPrice,
+          stopLoss,
+          availableCash,
+          equity,
+          riskPercentage: clampedRiskPct,
+          riskAmountINR: Number(riskAmountINR.toFixed(2)),
+          riskPerUnitINR: Number(riskPerUnitINR.toFixed(4)),
+          quantityByRisk: Number(quantityByRisk.toFixed(spotInst.quantityPrecision)),
+          quantityByCash: Number(quantityByCash.toFixed(spotInst.quantityPrecision)),
+          calculatedQuantity: Number(calculatedQuantity.toFixed(spotInst.quantityPrecision)),
+          roundedQuantity: 0,
+          positionNotionalQuote: 0,
+          positionNotionalINR: 0,
+          fxRate,
+          isValid: false,
+          rejectionReason: `FEE_CEILING_BREACH: Notional (${positionNotionalINR} INR) + estimated entry fees (${estimatedEntryFeeINR} INR) exceeds available cash (${availableCash} INR) and cannot be reduced further without breaching minimum lot`,
+        };
+      }
+      roundedQuantity = reducedQty;
+    }
 
     if (positionNotionalINR > availableCash + 1e-4) {
       return {

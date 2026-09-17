@@ -74,6 +74,20 @@ export class TradeLifecycleManager {
     const tradeId = signal.id || `trade_${signal.symbol}_${executionTime}`;
     const isLong = isLongPosition(signal.direction);
 
+    // ── Spot-Only Lifecycle Boundary Guard ────────────────────────────────────
+    // For supported spot symbols, new positions may ONLY be created from a
+    // BUY/BULLISH entry. SELL/SHORT/BEARISH entries are strictly prohibited.
+    // This guard operates at the lifecycle boundary — independently of the
+    // ExecutionSimulator and PositionSizer guards — to prevent any path from
+    // creating a short PositionLot for a spot instrument.
+    if (isSupportedSpotSymbol(signal.symbol) && !isLong) {
+      throw new Error(
+        `SPOT_SHORT_SELLING_FORBIDDEN: Cannot create a short/bearish PositionLot for spot instrument '${signal.symbol}'. ` +
+          `Spot instruments (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT) are long-only. ` +
+          `BUY/BULLISH entries open positions; SELL reduces/closes existing long holdings only.`,
+      );
+    }
+
     // Strict validation of stopLoss (no silent synthetic risk creation)
     if (typeof signal.stopLoss !== 'number' || !Number.isFinite(signal.stopLoss) || signal.stopLoss <= 0) {
       throw new Error(`INVALID_SIGNAL_STOP_LOSS: Signal for trade '${tradeId}' must provide a valid positive stopLoss, got ${signal.stopLoss}`);
