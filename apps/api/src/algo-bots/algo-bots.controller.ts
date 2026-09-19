@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Param, Query } from '@nestjs/common';
 import { AlgoBotsService, IAlgoBot } from './algo-bots.service';
 
 @Controller('api/algo-bots')
@@ -10,9 +10,19 @@ export class AlgoBotsController {
     return this.algoBotsService.listBots();
   }
 
+  @Get('executions')
+  async listExecutions(@Query('limit') limit?: number) {
+    return this.algoBotsService.listExecutions(limit);
+  }
+
   @Get('health')
   async getHealth() {
     return this.algoBotsService.getAlgoExecutionHealth();
+  }
+
+  @Get(':id/diagnostics')
+  async getBotDiagnostics(@Param('id') id: string) {
+    return this.algoBotsService.getBotDiagnostics(id);
   }
 
   @Post()

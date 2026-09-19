@@ -55,22 +55,6 @@ export class LivePriceStreamerService implements OnModuleInit, OnModuleDestroy {
       },
     ],
     [
-      'BTCUSDT',
-      {
-        symbol: 'BTCUSDT',
-        price: 89480.0,
-        open: 89200.0,
-        high: 89850.0,
-        low: 89100.0,
-        close: 89480.0,
-        volume: 45000,
-        prevClose: 88900.0,
-        tickSize: 0.1,
-        volatility: 12.0,
-        candleStartTime: Date.now(),
-      },
-    ],
-    [
       'RELIANCE',
       {
         symbol: 'RELIANCE',
@@ -123,7 +107,9 @@ export class LivePriceStreamerService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly redis: RedisService) {}
 
   onModuleInit() {
-    this.startStreaming();
+    throw new Error(
+      '[PRODUCTION_SYNTHETIC_PROHIBITED] LivePriceStreamerService is permanently disabled and prohibited from running. Random/synthetic BTC price generators are strictly forbidden.',
+    );
   }
 
   startStreaming() {

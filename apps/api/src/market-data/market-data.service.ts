@@ -55,9 +55,15 @@ export class MarketDataService {
     rawCandles: ICandle[],
   ): Promise<IIngestionSummary> {
     const sym = symbol.toUpperCase();
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: sym },
-    });
+    const inst =
+      (await this.prisma.instrument.findUnique({
+        where: { symbol: sym },
+      })) ||
+      (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT'
+        ? await this.prisma.instrument.findUnique({
+            where: { symbol: sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT' },
+          })
+        : null);
 
     if (!inst) {
       throw new NotFoundException(`Instrument with symbol '${sym}' not found`);
@@ -272,9 +278,15 @@ export class MarketDataService {
     const limit = options.limit || 200;
     const durationMs = getTimeframeDurationMs(timeframe as string);
 
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: sym },
-    });
+    const inst =
+      (await this.prisma.instrument.findUnique({
+        where: { symbol: sym },
+      })) ||
+      (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT'
+        ? await this.prisma.instrument.findUnique({
+            where: { symbol: sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT' },
+          })
+        : null);
 
     if (!inst) {
       throw new NotFoundException(

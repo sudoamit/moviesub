@@ -88,6 +88,8 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
   });
 
   beforeEach(async () => {
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     jest.spyOn(Date, 'now').mockReturnValue(nowMs);
 
     mockPaperTradingService = {
@@ -95,6 +97,7 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
         initialCapital: 1000000,
         currentCapital: 1000000,
         openPositions: [],
+        accountId: 'paper_primary_account',
       }),
       getValidatedMarketPrice: jest.fn().mockResolvedValue({
         price: 24005.0,
@@ -125,6 +128,8 @@ describe('TradeDecisionService & Authoritative Trade Lifecycle (Fix 192)', () =>
   });
 
   afterEach(() => {
+    delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
     jest.restoreAllMocks();
   });
 

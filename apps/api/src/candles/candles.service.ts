@@ -98,6 +98,20 @@ export class CandlesService {
     private readonly marketDataService: MarketDataService,
   ) {}
 
+  private async findInstrument(symbol: string) {
+    const sym = symbol.toUpperCase();
+    let inst = await this.prisma.instrument.findUnique({
+      where: { symbol: sym },
+    });
+    if (!inst && (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT')) {
+      const alt = sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT';
+      inst = await this.prisma.instrument.findUnique({
+        where: { symbol: alt },
+      });
+    }
+    return inst;
+  }
+
   /**
    * Fetches real live exchange candlestick history (Yahoo Finance for NSE/COMEX, Binance for Crypto)
    */
@@ -124,8 +138,16 @@ export class CandlesService {
       const durationMs = getTimeframeDurationMs(timeframe);
       const serverNow = Date.now();
 
-      // Binance Crypto routing
-      if (sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT' || sym === 'BTCUSD' || sym === 'ETHUSDT' || sym === 'PAXGUSDT') {
+      // Binance Crypto & Spot Gold routing
+      if (
+        sym === 'BTCUSDT' ||
+        sym === 'BTCUSDT_SPOT' ||
+        sym === 'BTCUSD' ||
+        sym === 'ETHUSDT' ||
+        sym === 'PAXGUSDT' ||
+        sym === 'XAUUSD' ||
+        sym === 'GOLD'
+      ) {
         const binanceInterval = is1m
           ? '1m'
           : is5m
@@ -137,7 +159,12 @@ export class CandlesService {
                 : is4h
                   ? '4h'
                   : '1d';
-        const binanceSym = sym === 'BTCUSD' || sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : sym;
+        const binanceSym =
+          sym === 'BTCUSD' || sym === 'BTCUSDT_SPOT'
+            ? 'BTCUSDT'
+            : sym === 'XAUUSD' || sym === 'GOLD'
+              ? 'PAXGUSDT'
+              : sym;
         let res: Response | null = null;
         for (let attempt = 0; attempt <= 2; attempt++) {
           try {
@@ -183,7 +210,7 @@ export class CandlesService {
       // Yahoo Finance routing for NSE, COMEX Gold, MCX
       const isNifty = sym === 'NIFTY' || sym === 'NIFTY_SPOT' || sym === 'NIFTY50' || sym === '^NSEI';
       const isBankNifty = sym === 'BANKNIFTY' || sym === 'BANKNIFTY_SPOT' || sym === '^NSEBANK';
-      const isGold = sym === 'XAUUSD' || sym === 'GOLD' || sym === 'GOLD_MCX';
+      const isGold = sym === 'GOLD_MCX' || sym === 'GC=F';
       const isReliance = sym === 'RELIANCE';
       const isHdfc = sym === 'HDFCBANK';
       const isInfy = sym === 'INFY';
@@ -309,9 +336,7 @@ export class CandlesService {
     }
 
     // 2. Database / Historical Provider Query: Used for BACKTEST, LEARNING, HISTORICAL, and CHART fallbacks
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol },
-    });
+    const inst = await this.findInstrument(symbol);
 
     if (!inst) {
       throw new NotFoundException(`Instrument with symbol '${symbol}' not found`);
@@ -373,9 +398,7 @@ export class CandlesService {
     limit = 200,
   ): Promise<ChartMarketSnapshot> {
     const sym = symbol.toUpperCase();
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: sym },
-    });
+    const inst = await this.findInstrument(sym);
 
     if (!inst) {
       throw new NotFoundException(`Instrument with symbol '${sym}' not found`);
@@ -512,7 +535,7 @@ export class CandlesService {
     };
 
     return {
-      symbol: inst.symbol,
+      symbol: sym,
       timeframe,
       closedCandles,
       formingCandle: candlesResp.formingCandle
@@ -539,7 +562,7 @@ export class CandlesService {
       sourceIdentity,
       isDegraded,
       smcSnapshot: {
-        symbol: inst.symbol,
+        symbol: sym,
         timeframe,
         asOfTimestamp: observationTime,
         computedAt: observationTime,
@@ -585,9 +608,7 @@ export class CandlesService {
       }
     }
 
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: sym },
-    });
+    const inst = await this.findInstrument(sym);
 
     if (!inst) {
       throw new NotFoundException(`Instrument with symbol '${sym}' not found`);

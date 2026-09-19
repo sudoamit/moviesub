@@ -31,16 +31,24 @@ interface LivePositionTrackerProps {
   symbol: string;
   signal: ISignalSetup | null;
   livePrice: number;
+  activePosition?: RunningPaperPosition | any | null;
   onClosePosition?: (exitPrice: number, pnl: number, r: number, reason: string) => void;
 }
 
 interface RunningPaperPosition {
+  id?: string;
   symbol: string;
   direction: 'BUY' | 'SELL';
+  quantity?: number;
   entryPrice?: number;
   entryTime?: string;
   averageEntryPrice?: number;
   openedAt?: string;
+  usedMargin?: number;
+  unrealizedPnL?: number;
+  unrealizedR?: number;
+  fxRateUsed?: number;
+  status?: string;
 }
 
 const formatDateTimeIST = (date: Date | null | undefined) => {
@@ -61,7 +69,7 @@ const formatDateTimeIST = (date: Date | null | undefined) => {
  * Calculates authentic market-session-aware timestamps strictly respecting NSE Market Hours (09:15 AM - 03:30 PM IST)
  */
 function getMarketAwareTimestamps(symbol: string, signalTimestamp?: Date | string | number | null) {
-  const isCrypto = symbol === 'BTCUSDT';
+  const isCrypto = symbol === 'BTCUSDT' || symbol.toUpperCase().includes('BTC');
   const isGold = symbol === 'XAUUSD' || symbol === 'GOLD';
   const now = new Date();
 
@@ -100,10 +108,13 @@ function getMarketAwareTimestamps(symbol: string, signalTimestamp?: Date | strin
   };
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
 export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   symbol,
   signal,
   livePrice,
+  activePosition,
   onClosePosition,
 }) => {
   const isCrypto =
@@ -111,6 +122,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     symbol.toUpperCase().includes('BTC') ||
     symbol.toUpperCase().includes('ETH');
   const isGold = symbol === 'XAUUSD' || symbol === 'GOLD' || symbol.toUpperCase().includes('XAU');
+  const nativeCurrency = isCrypto || isGold ? '$' : '₹';
   const currencySymbol = '₹';
 
   const [isOptionMode, setIsOptionMode] = useState<boolean>(!isCrypto && !isGold);
@@ -121,38 +133,61 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
   const [optionData, setOptionData] = useState<any>(null);
 
-  const direction = signal?.direction || 'BEARISH';
-  const isBull = direction === 'BULLISH';
-  const positionLockKey = `${symbol}_${direction}`;
-  const executionEntryTimeStorageKey = `quant_running_entry_time_${positionLockKey}`;
-  const [paperPosition, setPaperPosition] = useState<RunningPaperPosition | null>(null);
+  const [paperPosition, setPaperPosition] = useState<RunningPaperPosition | null>(
+    activePosition || null,
+  );
 
   useEffect(() => {
-    let isMounted = true;
+    if (activePosition !== undefined) {
+      setPaperPosition(activePosition || null);
+    }
+  }, [activePosition]);
 
-    const fetchPaperPosition = async () => {
-      try {
-        const res = await fetch('http://localhost:3001/api/paper-trading/portfolio');
-        const data = await res.json();
-        const expectedSide = direction === 'BULLISH' ? 'BUY' : 'SELL';
-        const positions = Array.isArray(data?.openPositions) ? data.openPositions : [];
-        // Strict matching by symbol + direction + contractSymbol (never symbol alone)
-        const found = positions.find(
-          (p: RunningPaperPosition) => p.symbol === symbol && p.direction === expectedSide,
-        );
+  const direction = signal?.direction || 'BULLISH';
+  const effectiveDirection = paperPosition
+    ? paperPosition.direction === 'BUY'
+      ? 'BULLISH'
+      : 'BEARISH'
+    : direction;
+  const isBull = effectiveDirection === 'BULLISH';
+  const hasActiveTrade = Boolean(paperPosition);
+  const [isPlacingOrder, setIsPlacingOrder] = useState<boolean>(false);
+  const positionLockKey = `${symbol}_${effectiveDirection}`;
+  const executionEntryTimeStorageKey = `quant_running_entry_time_${positionLockKey}`;
 
-        if (!isMounted) return;
-        setPaperPosition(found || null);
-      } catch {}
-    };
+  const fetchPaperPosition = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/paper-trading/portfolio`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const positions = Array.isArray(data?.openPositions) ? data.openPositions : [];
+      const normSym = symbol.toUpperCase().replace(/_SPOT$/, '');
+      const matchingPositions = positions.filter(
+        (p: any) =>
+          (p.symbol === symbol ||
+            p.symbol === `${symbol}_SPOT` ||
+            p.symbol?.toUpperCase().replace(/_SPOT$/, '') === normSym ||
+            ((symbol === 'GOLD' || symbol === 'XAUUSD') &&
+              (p.symbol === 'XAUUSD' || p.symbol === 'GOLD')) ||
+            p.contractSymbol?.startsWith(symbol)) &&
+          (p.status === 'OPEN' || p.status === 'PARTIALLY_CLOSED' || !p.status),
+      );
+      const found =
+        (activePosition?.id && matchingPositions.find((p: any) => p.id === activePosition.id)) ||
+        matchingPositions[0] ||
+        null;
 
+      setPaperPosition(found || activePosition || null);
+    } catch {}
+  }, [symbol, activePosition]);
+
+  useEffect(() => {
     fetchPaperPosition();
     const interval = setInterval(fetchPaperPosition, 1500);
     return () => {
-      isMounted = false;
       clearInterval(interval);
     };
-  }, [symbol, direction]);
+  }, [fetchPaperPosition]);
 
   const { entryDate, estCloseDate, isMarketOpen, marketSessionLabel, isNSE } = useMemo(() => {
     const authoritativeEntryTime = paperPosition?.entryTime || paperPosition?.openedAt;
@@ -193,7 +228,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     if (!price || price <= 0 || isNaN(price)) return false;
     if (sym === 'BTCUSDT' || sym.toUpperCase().includes('BTC')) return price >= 50000;
     if (sym === 'XAUUSD' || sym === 'GOLD' || sym.toUpperCase().includes('XAU'))
-      return price >= 1500 && price <= 8000;
+      return price >= 3500 && price <= 8000;
     if (sym === 'NIFTY') return price >= 15000 && price <= 35000;
     if (sym === 'BANKNIFTY') return price >= 35000 && price <= 75000;
     if (sym === 'RELIANCE') return price >= 500 && price <= 5000;
@@ -236,15 +271,18 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // Client-side hydration sync & cross-window/tab event synchronization
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const isCut =
-        localStorage.getItem(cutStorageKey) === 'true' ||
-        localStorage.getItem(symbolCutKey) === 'true' ||
-        Boolean(
-          signal &&
-          (signal.state === 'TP2_HIT' || signal.state === 'TP3_HIT' || signal.state === 'SL_HIT'),
-        );
-
-      setIsPositionCut(isCut);
+      if (paperPosition) {
+        setIsPositionCut(false);
+      } else {
+        const isCut =
+          localStorage.getItem(cutStorageKey) === 'true' ||
+          localStorage.getItem(symbolCutKey) === 'true' ||
+          Boolean(
+            signal &&
+            (signal.state === 'TP2_HIT' || signal.state === 'TP3_HIT' || signal.state === 'SL_HIT'),
+          );
+        setIsPositionCut(isCut);
+      }
 
       const summaryStr = localStorage.getItem(cutSummaryStorageKey);
       if (summaryStr) {
@@ -260,6 +298,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     }
   }, [
     symbol,
+    paperPosition,
     positionLockKey,
     cutStorageKey,
     symbolCutKey,
@@ -310,29 +349,35 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const spotStorageKey = `quant_locked_spot_entry_${setupKey}`;
   const strikeStorageKey = `quant_locked_strike_${setupKey}`;
 
-  // Initial spot entry should strictly match signal's optimal entry price (or live price if entered at market)
-  const initialSpotCandidate = isSaneSpot(symbol, rawSignalOptimal)
-    ? rawSignalOptimal
-    : isSaneSpot(symbol, rawLivePrice)
-      ? rawLivePrice
-      : symbol === 'BTCUSDT'
-        ? 78200
-        : symbol === 'XAUUSD' || symbol === 'GOLD'
-          ? 2885.5
-          : symbol === 'BANKNIFTY'
-            ? 57400
-            : 24060;
+  // Initial spot entry should strictly match paper position entry (if open) or signal's optimal entry price
+  const paperEntryPrice = paperPosition ? Number(paperPosition.entryPrice) : null;
+  const initialSpotCandidate =
+    paperEntryPrice && isSaneSpot(symbol, paperEntryPrice)
+      ? paperEntryPrice
+      : isSaneSpot(symbol, rawSignalOptimal)
+        ? rawSignalOptimal
+        : isSaneSpot(symbol, rawLivePrice)
+          ? rawLivePrice
+          : symbol === 'BTCUSDT' || symbol.toUpperCase().includes('BTC')
+            ? 78200
+            : symbol === 'XAUUSD' || symbol === 'GOLD'
+              ? 4360.0
+              : symbol === 'BANKNIFTY'
+                ? 57400
+                : 24060;
 
   const [lockedSpotEntry, setLockedSpotEntry] = useState<number>(initialSpotCandidate);
 
   const lockedSpotRef = React.useRef<number>(lockedSpotEntry);
 
   const spotEntryPrice =
-    lockedSpotRef.current > 0 && isSaneSpot(symbol, lockedSpotRef.current)
-      ? lockedSpotRef.current
-      : lockedSpotEntry > 0 && isSaneSpot(symbol, lockedSpotEntry)
-        ? lockedSpotEntry
-        : initialSpotCandidate;
+    paperEntryPrice && isSaneSpot(symbol, paperEntryPrice)
+      ? paperEntryPrice
+      : lockedSpotRef.current > 0 && isSaneSpot(symbol, lockedSpotRef.current)
+        ? lockedSpotRef.current
+        : lockedSpotEntry > 0 && isSaneSpot(symbol, lockedSpotEntry)
+          ? lockedSpotEntry
+          : initialSpotCandidate;
 
   const currentCMP = livePrice && isSaneSpot(symbol, livePrice) ? livePrice : spotEntryPrice;
 
@@ -367,6 +412,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         if (isSaneSpot(symbol, p)) validSpot = p;
       }
 
+      // Clean up corrupted or outdated static Gold entry price (< 3500)
+      if (isGold && (validSpot < 3500 || validSpot > 8000)) {
+        validSpot = initialSpotCandidate;
+        localStorage.removeItem(spotStorageKey);
+      }
+
       if (!validSpot || validSpot === 0) {
         validSpot = initialSpotCandidate;
         localStorage.setItem(spotStorageKey, String(validSpot));
@@ -384,7 +435,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       }
 
       const savedOpt = localStorage.getItem(lockStorageKey);
-      const initialOpt = savedOpt ? Number(savedOpt) : 0;
+      let initialOpt = savedOpt ? Number(savedOpt) : 0;
+      // Sanity check: If NIFTY entry premium is corrupted with inflated ITM value (> 350) from previous bug
+      if (symbol === 'NIFTY' && initialOpt > 350) {
+        initialOpt = 0;
+        localStorage.removeItem(lockStorageKey);
+      }
       setLockedEntryPremium(initialOpt);
       lockedEntryRef.current = initialOpt;
     }
@@ -398,18 +454,19 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     isSaneSpot,
     defaultStrike,
     initialSpotCandidate,
+    isGold,
   ]);
 
   // Fetch Live Option Smart Strike Data & Locked Entry Premium
   useEffect(() => {
-    if (isCrypto) return;
+    if (isCrypto || isGold) return;
     let isMounted = true;
 
     const fetchOptionData = async () => {
       try {
         // 1. Fetch live market option data at current CMP
         const resLive = await fetch(
-          `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${currentCMP}&strike=${activeStrike}`,
+          `${API_BASE}/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${currentCMP}&strike=${activeStrike}`,
         );
         const dataLive = await resLive.json();
         if (isMounted && dataLive && dataLive.contractName) {
@@ -419,7 +476,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         // 2. Lock initial entry premium calculated strictly at spotEntryPrice if not already locked
         if (!lockedEntryRef.current || lockedEntryRef.current === 0) {
           const resEntry = await fetch(
-            `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotEntryPrice}&strike=${activeStrike}`,
+            `${API_BASE}/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotEntryPrice}&strike=${activeStrike}`,
           );
           const dataEntry = await resEntry.json();
           if (isMounted && dataEntry && dataEntry.optionLtp > 0) {
@@ -441,11 +498,24 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     };
   }, [symbol, direction, currentCMP, spotEntryPrice, activeStrike, isCrypto, lockStorageKey]);
 
-  // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY
-  const lotSize = symbol === 'NIFTY' ? 65 : symbol === 'BANKNIFTY' ? 15 : isCrypto ? 0.01 : 100;
-  const activeQty = isAutoScaledOut ? lotSize * 0.5 : lotSize;
+  // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY, 0.01 for BTC, 1 oz for Gold
+  const lotSize =
+    symbol === 'NIFTY'
+      ? 65
+      : symbol === 'BANKNIFTY'
+        ? 15
+        : isCrypto
+          ? 0.01
+          : isGold
+            ? 1
+            : 100;
+  const activeQty = paperPosition
+    ? Number(paperPosition.quantity)
+    : isAutoScaledOut
+      ? lotSize * 0.5
+      : lotSize;
   const numericQty = activeQty;
-  const totalQuantity = isCrypto ? activeQty.toFixed(4) : activeQty.toLocaleString();
+  const totalQuantity = isCrypto ? activeQty.toFixed(4) : isGold ? `${activeQty}` : activeQty.toLocaleString();
 
   // Fixed Initial Entry Premium (LOCKED & IMMUTABLE) vs Live Current Option Premium (TICKING)
   const optionEntryPremium =
@@ -470,41 +540,47 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const optionTP2 = Number((optionEntryPremium + optionRiskDistance * 2.5).toFixed(2)); // 2.5R (e.g. +62.5 pts)
   const optionTP3 = Number((optionEntryPremium + optionRiskDistance * 4.0).toFixed(2)); // 4.0R (e.g. +100.0 pts)
   // Active Effective Parameters (Option Mode vs Spot Mode)
-  const effectiveEntryPrice = isOptionMode && !isCrypto ? optionEntryPremium : spotEntryPrice;
-  const effectiveCurrentPrice = isOptionMode && !isCrypto ? liveOptionPremium : currentCMP;
+  const effectiveEntryPrice = isOptionMode && !isCrypto && !isGold ? optionEntryPremium : spotEntryPrice;
+  const effectiveCurrentPrice = isOptionMode && !isCrypto && !isGold ? liveOptionPremium : currentCMP;
 
   // Strict Directional Stop Loss Geometry Validator (Bearish SL strictly > Entry, Bullish SL strictly < Entry)
   const safeInitialSL = React.useMemo(() => {
     const rawSL = Number(signal?.stopLoss);
-    if (isOptionMode && !isCrypto) return optionStopLoss;
+    if (isOptionMode && !isCrypto && !isGold) return optionStopLoss;
 
-    // Tight sniper SL defaults: BTC max 180 pts, NIFTY max 20 pts, BANKNIFTY max 55 pts
+    // Tight sniper SL defaults: BTC max 180 pts, Gold 15 pts, NIFTY max 20 pts, BANKNIFTY max 55 pts
     const defaultRisk = isCrypto
       ? 160.0
-      : symbol === 'NIFTY'
-        ? 20.0
-        : symbol === 'BANKNIFTY'
-          ? 55.0
-          : spotEntryPrice * 0.004;
+      : isGold
+        ? 15.0
+        : symbol === 'NIFTY'
+          ? 20.0
+          : symbol === 'BANKNIFTY'
+            ? 55.0
+            : spotEntryPrice * 0.004;
+
+    const minAllowedDist = isGold ? 10.0 : isCrypto ? 80.0 : 5.0;
 
     if (isBull) {
       if (rawSL > 0 && rawSL < spotEntryPrice) {
         const dist = spotEntryPrice - rawSL;
-        // Clamp excessive SL on BTC to tight sniper range (max 220 pts)
-        if (isCrypto && dist > 250) return Number((spotEntryPrice - 180.0).toFixed(2));
+        // Clamp excessive SL on BTC only if extreme (> 500 pts)
+        if (isCrypto && dist > 500) return Number((spotEntryPrice - 300.0).toFixed(2));
+        // Clamp micro-SL on Gold if < 10.0 pts
+        if (isGold && dist < minAllowedDist) return Number((spotEntryPrice - defaultRisk).toFixed(2));
         return rawSL;
       }
       return Number((spotEntryPrice - defaultRisk).toFixed(2));
     } else {
       if (rawSL > 0 && rawSL > spotEntryPrice) {
         const dist = rawSL - spotEntryPrice;
-        // Clamp excessive SL on BTC to tight sniper range (max 220 pts)
-        if (isCrypto && dist > 250) return Number((spotEntryPrice + 180.0).toFixed(2));
+        if (isCrypto && dist > 500) return Number((spotEntryPrice + 300.0).toFixed(2));
+        if (isGold && dist < minAllowedDist) return Number((spotEntryPrice + defaultRisk).toFixed(2));
         return rawSL;
       }
       return Number((spotEntryPrice + defaultRisk).toFixed(2));
     }
-  }, [signal?.stopLoss, isOptionMode, isCrypto, optionStopLoss, isBull, spotEntryPrice, symbol]);
+  }, [signal?.stopLoss, isOptionMode, isCrypto, isGold, optionStopLoss, isBull, spotEntryPrice, symbol]);
 
   const originalSL = safeInitialSL;
   const riskPerUnit = Math.abs(effectiveEntryPrice - originalSL);
@@ -512,7 +588,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // Dynamic Trailing Stop Loss Calculation
   const trailingSL = React.useMemo(() => {
     if (!isTrailingSLActive || riskPerUnit <= 0) return originalSL;
-    if (isOptionMode && !isCrypto) {
+    if (isOptionMode && !isCrypto && !isGold) {
       return Number(Math.max(originalSL, effectiveCurrentPrice - riskPerUnit * 0.6).toFixed(2));
     }
     if (isBull) {
@@ -530,6 +606,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     isBull,
     isOptionMode,
     isCrypto,
+    isGold,
   ]);
 
   const currentSL = isTrailingSLActive
@@ -539,23 +616,31 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       : originalSL;
 
   const isProfitLocked =
-    isOptionMode && !isCrypto
+    isOptionMode && !isCrypto && !isGold
       ? currentSL > effectiveEntryPrice
       : isBull
         ? currentSL > effectiveEntryPrice
         : currentSL < effectiveEntryPrice;
 
-  // FX rates from backend running position
-  const cryptoFxRate = (paperPosition as any)?.fxRateUsed ?? 1.0;
+  // FX rates from backend running position (Gold: USD/INR 87.5, BTC: USDT/INR 92.5)
+  const cryptoFxRate = (paperPosition as any)?.fxRateUsed ?? (isGold ? 87.5 : isCrypto ? 92.5 : 1.0);
 
-  // Read leverage from localStorage (written by PaperTradingWidget) or fall back to 5x default
-  const [activeLeverage, setActiveLeverage] = React.useState<number>(5);
+  // Read leverage from localStorage or default (5x for Gold/Crypto CFD, 1x for Indian indices)
+  const defaultLeverage = isCrypto || isGold ? 5 : 1;
+  const [activeLeverage, setActiveLeverage] = React.useState<number>(defaultLeverage);
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('quant_risk_leverage');
-      if (saved && !isNaN(Number(saved))) setActiveLeverage(Number(saved));
+      if (saved && !isNaN(Number(saved)) && Number(saved) > 1) {
+        setActiveLeverage(Number(saved));
+      } else {
+        setActiveLeverage(defaultLeverage);
+      }
     }
-  }, []);
+  }, [defaultLeverage]);
+
+  const effectiveLeverage =
+    (paperPosition as any)?.leverage || (activeLeverage > 1 ? activeLeverage : defaultLeverage);
 
   const rawLockedProfit = isProfitLocked
     ? Math.abs(effectiveEntryPrice - currentSL) * numericQty
@@ -569,57 +654,78 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     (isCrypto || isGold ? rawMaxRisk * cryptoFxRate : rawMaxRisk).toFixed(2),
   );
 
-  // Display price helper: converts USD/USDT prices to INR for BTC and Gold display.
-  // Internal computation values (spotEntryPrice, currentSL, tp1, etc.) remain in native quote currency.
-  const dp = React.useCallback(
-    (price: number) => (isCrypto || isGold ? price * cryptoFxRate : price),
-    [isCrypto, isGold, cryptoFxRate],
-  );
+  // Display price helper: preserves native instrument quote currency for display
+  const dp = React.useCallback((price: number) => price, []);
 
   // Guaranteed Directional Take Profit Roadmap (Strictly < Entry for BEARISH, > Entry for BULLISH)
+  const minTargetDist = isGold ? 12.0 : isCrypto ? 120.0 : 15.0;
+  const targetRisk = Math.max(minTargetDist, riskPerUnit);
+
+  const rawTP1 = Number(signal?.takeProfits?.tp1);
+  const rawTP2 = Number(signal?.takeProfits?.tp2);
+  const rawTP3 = Number(signal?.takeProfits?.tp3);
+
   const validTP1 = isBull
-    ? Number(signal?.takeProfits?.tp1) > spotEntryPrice
-      ? Number(signal?.takeProfits?.tp1)
-      : Number((spotEntryPrice + riskPerUnit * 1.5).toFixed(2))
-    : Number(signal?.takeProfits?.tp1) < spotEntryPrice && Number(signal?.takeProfits?.tp1) > 0
-      ? Number(signal?.takeProfits?.tp1)
-      : Number((spotEntryPrice - riskPerUnit * 1.5).toFixed(2));
+    ? rawTP1 > spotEntryPrice && (rawTP1 - spotEntryPrice) >= minTargetDist * 0.8
+      ? rawTP1
+      : Number((spotEntryPrice + targetRisk * 1.5).toFixed(2))
+    : rawTP1 < spotEntryPrice && rawTP1 > 0 && (spotEntryPrice - rawTP1) >= minTargetDist * 0.8
+      ? rawTP1
+      : Number((spotEntryPrice - targetRisk * 1.5).toFixed(2));
 
   const validTP2 = isBull
-    ? Number(signal?.takeProfits?.tp2) > spotEntryPrice
-      ? Number(signal?.takeProfits?.tp2)
-      : Number((spotEntryPrice + riskPerUnit * 2.5).toFixed(2))
-    : Number(signal?.takeProfits?.tp2) < spotEntryPrice && Number(signal?.takeProfits?.tp2) > 0
-      ? Number(signal?.takeProfits?.tp2)
-      : Number((spotEntryPrice - riskPerUnit * 2.5).toFixed(2));
+    ? rawTP2 > spotEntryPrice && (rawTP2 - spotEntryPrice) >= minTargetDist * 1.5
+      ? rawTP2
+      : Number((spotEntryPrice + targetRisk * 2.5).toFixed(2))
+    : rawTP2 < spotEntryPrice && rawTP2 > 0 && (spotEntryPrice - rawTP2) >= minTargetDist * 1.5
+      ? rawTP2
+      : Number((spotEntryPrice - targetRisk * 2.5).toFixed(2));
 
   const validTP3 = isBull
-    ? Number(signal?.takeProfits?.tp3) > spotEntryPrice
-      ? Number(signal?.takeProfits?.tp3)
-      : Number((spotEntryPrice + riskPerUnit * 4.0).toFixed(2))
-    : Number(signal?.takeProfits?.tp3) < spotEntryPrice && Number(signal?.takeProfits?.tp3) > 0
-      ? Number(signal?.takeProfits?.tp3)
-      : Number((spotEntryPrice - riskPerUnit * 4.0).toFixed(2));
+    ? rawTP3 > spotEntryPrice && (rawTP3 - spotEntryPrice) >= minTargetDist * 2.5
+      ? rawTP3
+      : Number((spotEntryPrice + targetRisk * 4.0).toFixed(2))
+    : rawTP3 < spotEntryPrice && rawTP3 > 0 && (spotEntryPrice - rawTP3) >= minTargetDist * 2.5
+      ? rawTP3
+      : Number((spotEntryPrice - targetRisk * 4.0).toFixed(2));
 
-  const tp1 = isOptionMode && !isCrypto ? optionTP1 : validTP1;
-  const tp2 = isOptionMode && !isCrypto ? optionTP2 : validTP2;
-  const tp3 = isOptionMode && !isCrypto ? optionTP3 : validTP3;
+  const tp1 = isOptionMode && !isCrypto && !isGold ? optionTP1 : validTP1;
+  const tp2 = isOptionMode && !isCrypto && !isGold ? optionTP2 : validTP2;
+  const tp3 = isOptionMode && !isCrypto && !isGold ? optionTP3 : validTP3;
 
-  // Presentation-only Running P&L: consume backend authoritative unrealized P&L
-  const runningPnL =
-    (paperPosition as any)?.unrealizedPnL !== undefined
-      ? Number((paperPosition as any).unrealizedPnL)
-      : 0;
+  // Option buyers always gain when current premium > entry premium (effectiveCurrentPrice - effectiveEntryPrice)
+  const priceDifference =
+    isOptionMode && !isCrypto && !isGold
+      ? effectiveCurrentPrice - effectiveEntryPrice
+      : isBull
+        ? effectiveCurrentPrice - effectiveEntryPrice
+        : effectiveEntryPrice - effectiveCurrentPrice;
 
-  // Margin used: consume backend authoritative usedMargin
+  // Margin used: consume backend authoritative usedMargin or calculate fallback
+  const fallbackMargin =
+    isOptionMode && !isCrypto && !isGold
+      ? Number((effectiveEntryPrice * numericQty).toFixed(2))
+      : Number(
+          (
+            (effectiveEntryPrice * numericQty * (isCrypto || isGold ? cryptoFxRate : 1)) /
+            (effectiveLeverage || 1)
+          ).toFixed(2),
+        );
+
   const totalMarginUsed =
     (paperPosition as any)?.usedMargin !== undefined
       ? Number((paperPosition as any).usedMargin)
-      : 0;
+      : fallbackMargin;
 
-  const priceDifference = isBull
-    ? effectiveCurrentPrice - effectiveEntryPrice
-    : effectiveEntryPrice - effectiveCurrentPrice;
+  // Presentation-only Running P&L: consume backend authoritative unrealized P&L or fallback to live calculated P&L
+  const fallbackPnL = Number(
+    (priceDifference * numericQty * (isCrypto || isGold ? cryptoFxRate : 1)).toFixed(2),
+  );
+
+  const runningPnL =
+    (paperPosition as any)?.unrealizedPnL !== undefined
+      ? Number((paperPosition as any).unrealizedPnL)
+      : fallbackPnL;
 
   const runningRMultiple =
     (paperPosition as any)?.unrealizedR !== undefined
@@ -637,50 +743,80 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // Progress towards Targets
   const totalTargetDistance = Math.abs(tp2 - effectiveEntryPrice);
   const currentProgressDistance = Math.max(0, priceDifference);
-  const progressPercent = Math.min(
-    100,
-    Math.max(
-      0,
-      totalTargetDistance > 0 ? (currentProgressDistance / totalTargetDistance) * 100 : 0,
-    ),
-  );
+  const progressPercent = hasActiveTrade
+    ? Math.min(
+        100,
+        Math.max(
+          0,
+          totalTargetDistance > 0 ? (currentProgressDistance / totalTargetDistance) * 100 : 0,
+        ),
+      )
+    : 0;
 
   // Authentic Spot & Option Stop Loss Evaluation (Strict directional geometric safety)
-  const isSpotSLHit = isBull
-    ? currentSL < spotEntryPrice && currentCMP > 0 && currentCMP <= currentSL
-    : currentSL > spotEntryPrice && currentCMP > 0 && currentCMP >= currentSL;
+  const isSpotSLHit =
+    hasActiveTrade &&
+    (isBull
+      ? currentSL < spotEntryPrice && currentCMP > 0 && currentCMP <= currentSL
+      : currentSL > spotEntryPrice && currentCMP > 0 && currentCMP >= currentSL);
   const isOptionSLHit =
+    hasActiveTrade &&
     isOptionMode &&
     !isCrypto &&
+    !isGold &&
     optionData?.optionLtp > 0 &&
     optionStopLoss > 0 &&
     liveOptionPremium > 0 &&
     liveOptionPremium <= currentSL;
-  const isSLReached = isOptionMode && !isCrypto ? isOptionSLHit : isSpotSLHit;
+  const isSLReached = isOptionMode && !isCrypto && !isGold ? isOptionSLHit : isSpotSLHit;
 
   const spotTP3 = validTP3;
-  const isSpotTP3Hit = isBull
-    ? spotTP3 > spotEntryPrice && currentCMP >= spotTP3
-    : spotTP3 < spotEntryPrice && currentCMP <= spotTP3;
+  const isSpotTP3Hit =
+    hasActiveTrade &&
+    (isBull
+      ? spotTP3 > spotEntryPrice && currentCMP >= spotTP3
+      : spotTP3 < spotEntryPrice && currentCMP <= spotTP3);
   const isOptionTP3Hit =
-    isOptionMode && !isCrypto && optionTP3 > 0 && liveOptionPremium > 0 && liveOptionPremium >= tp3;
-  const isTP3Reached = isOptionMode && !isCrypto ? isOptionTP3Hit : isSpotTP3Hit;
+    hasActiveTrade &&
+    isOptionMode &&
+    !isCrypto &&
+    !isGold &&
+    optionTP3 > 0 &&
+    liveOptionPremium > 0 &&
+    liveOptionPremium >= tp3;
+  const isTP3Reached = isOptionMode && !isCrypto && !isGold ? isOptionTP3Hit : isSpotTP3Hit;
 
   const spotTP2 = validTP2;
-  const isSpotTP2Hit = isBull
-    ? spotTP2 > spotEntryPrice && currentCMP >= spotTP2
-    : spotTP2 < spotEntryPrice && currentCMP <= spotTP2;
+  const isSpotTP2Hit =
+    hasActiveTrade &&
+    (isBull
+      ? spotTP2 > spotEntryPrice && currentCMP >= spotTP2
+      : spotTP2 < spotEntryPrice && currentCMP <= spotTP2);
   const isOptionTP2Hit =
-    isOptionMode && !isCrypto && optionTP2 > 0 && liveOptionPremium > 0 && liveOptionPremium >= tp2;
-  const isTP2Reached = isOptionMode && !isCrypto ? isOptionTP2Hit : isSpotTP2Hit;
+    hasActiveTrade &&
+    isOptionMode &&
+    !isCrypto &&
+    !isGold &&
+    optionTP2 > 0 &&
+    liveOptionPremium > 0 &&
+    liveOptionPremium >= tp2;
+  const isTP2Reached = isOptionMode && !isCrypto && !isGold ? isOptionTP2Hit : isSpotTP2Hit;
 
   const spotTP1 = validTP1;
-  const isSpotTP1Hit = isBull
-    ? spotTP1 > spotEntryPrice && currentCMP >= spotTP1
-    : spotTP1 < spotEntryPrice && currentCMP <= spotTP1;
+  const isSpotTP1Hit =
+    hasActiveTrade &&
+    (isBull
+      ? spotTP1 > spotEntryPrice && currentCMP >= spotTP1
+      : spotTP1 < spotEntryPrice && currentCMP <= spotTP1);
   const isOptionTP1Hit =
-    isOptionMode && !isCrypto && optionTP1 > 0 && liveOptionPremium > 0 && liveOptionPremium >= tp1;
-  const isTP1Reached = isOptionMode && !isCrypto ? isOptionTP1Hit : isSpotTP1Hit;
+    hasActiveTrade &&
+    isOptionMode &&
+    !isCrypto &&
+    !isGold &&
+    optionTP1 > 0 &&
+    liveOptionPremium > 0 &&
+    liveOptionPremium >= tp1;
+  const isTP1Reached = isOptionMode && !isCrypto && !isGold ? isOptionTP1Hit : isSpotTP1Hit;
 
   const autoCutExecutedRef = React.useRef<string | null>(null);
 
@@ -692,7 +828,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     }
 
     try {
-      const res = await fetch('http://localhost:3001/api/paper-trading/close-position', {
+      const res = await fetch(`${API_BASE}/api/paper-trading/close-position`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -745,6 +881,57 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     } catch (err: any) {
       setManualCloseToast(`EXIT FAILED / EXIT PENDING: ${err.message}`);
       setTimeout(() => setManualCloseToast(null), 8000);
+    }
+  };
+
+  const handleExecutePaperOrder = async () => {
+    if (isPlacingOrder) return;
+    setIsPlacingOrder(true);
+    try {
+      const payload = {
+        symbol,
+        direction: isBull ? 'BUY' : 'SELL',
+        quantity: numericQty,
+        orderType: 'MARKET',
+        price: effectiveCurrentPrice,
+        stopLoss: originalSL,
+        target1: tp1,
+        target2: tp2,
+        target3: tp3,
+        leverage: effectiveLeverage,
+        signalId: signal?.id,
+      };
+
+      const res = await fetch(`${API_BASE}/api/paper-trading/order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.message || 'Failed to place paper order');
+      }
+
+      setIsPositionCut(false);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(cutStorageKey);
+        localStorage.removeItem(symbolCutKey);
+        localStorage.removeItem(cutSummaryStorageKey);
+        window.dispatchEvent(new CustomEvent('quant_trade_opened', { detail: { symbol } }));
+      }
+
+      await fetchPaperPosition();
+
+      setManualCloseToast(
+        `🚀 Executed Paper Position: ${direction} ${totalQuantity} ${symbol} @ ${nativeCurrency}${dp(effectiveCurrentPrice).toFixed(2)} | SL: ${nativeCurrency}${dp(originalSL).toFixed(2)}`,
+      );
+      setTimeout(() => setManualCloseToast(null), 6000);
+    } catch (err: any) {
+      setManualCloseToast(`Order Execution Failed: ${err.message}`);
+      setTimeout(() => setManualCloseToast(null), 6000);
+    } finally {
+      setIsPlacingOrder(false);
     }
   };
 
@@ -803,16 +990,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   }, [activeStrike, isBull, symbol]);
 
   const isSetupClosed =
-    isPositionCut ||
-    isTP2Reached ||
-    isTP3Reached ||
-    Boolean(
-      signal &&
-      (signal.state === 'SL_HIT' ||
-        signal.state === 'TP2_HIT' ||
-        signal.state === 'TP1_HIT' ||
-        signal.state === 'TP3_HIT'),
-    );
+    !paperPosition &&
+    isPositionCut &&
+    Boolean(closedTradeSummary);
 
   if (isSetupClosed) {
     return (
@@ -858,7 +1038,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       {/* Top Background Glow Effect */}
       <div
         className={`absolute -top-12 -right-12 w-40 h-40 rounded-full blur-3xl opacity-20 pointer-events-none ${
-          runningPnL >= 0 ? 'bg-emerald-500' : 'bg-rose-500'
+          hasActiveTrade ? (runningPnL >= 0 ? 'bg-emerald-500' : 'bg-rose-500') : 'bg-cyan-500'
         }`}
       />
 
@@ -866,13 +1046,29 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
-            </span>
+            {hasActiveTrade ? (
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
+              </span>
+            ) : (
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-50" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-cyan-500" />
+              </span>
+            )}
             <h3 className="text-xs font-black uppercase tracking-wider font-mono flex items-center gap-1.5 text-white">
-              <Zap className="w-4 h-4 text-cyan-400" />
-              ACTIVE RUNNING POSITION TRACKER
+              {hasActiveTrade ? (
+                <>
+                  <Zap className="w-4 h-4 text-cyan-400" />
+                  ACTIVE RUNNING POSITION TRACKER
+                </>
+              ) : (
+                <>
+                  <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
+                  SMC TRADE SETUP RADAR (STANDBY)
+                </>
+              )}
             </h3>
           </div>
 
@@ -880,22 +1076,45 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             {symbol}
           </span>
 
-          <span
-            className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono flex items-center gap-1 ${
-              isBull
-                ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/80'
-                : 'bg-rose-950/80 text-rose-400 border border-rose-800/80'
-            }`}
-          >
-            {isBull ? (
-              <TrendingUp className="w-3.5 h-3.5" />
-            ) : (
-              <TrendingDown className="w-3.5 h-3.5" />
-            )}
-            {isOptionMode && !isCrypto
-              ? `${optionData?.contractName || (isBull ? `${symbol} CE` : `${symbol} PE`)}`
-              : `${direction} SPOT`}
-          </span>
+          {hasActiveTrade && (
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono flex items-center gap-1 ${
+                paperPosition?.direction === 'BUY'
+                  ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/80'
+                  : 'bg-rose-950/80 text-rose-400 border border-rose-800/80'
+              }`}
+            >
+              {paperPosition?.direction === 'BUY' ? (
+                <TrendingUp className="w-3.5 h-3.5" />
+              ) : (
+                <TrendingDown className="w-3.5 h-3.5" />
+              )}
+              ACTIVE POSITION: {paperPosition?.direction === 'BUY' ? 'BUY / BULLISH' : 'SELL / BEARISH'}
+            </span>
+          )}
+
+          {signal && (
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono flex items-center gap-1 ${
+                signal.direction === 'BULLISH'
+                  ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/50'
+                  : 'bg-rose-950/40 text-rose-300 border border-rose-800/50'
+              }`}
+            >
+              {signal.direction === 'BULLISH' ? (
+                <TrendingUp className="w-3.5 h-3.5" />
+              ) : (
+                <TrendingDown className="w-3.5 h-3.5" />
+              )}
+              CURRENT SIGNAL: {signal.direction}
+            </span>
+          )}
+
+          {!hasActiveTrade && (
+            <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold">
+              READY FOR EXECUTION
+            </span>
+          )}
 
           {isAutoScaledOut && (
             <span className="bg-amber-950/90 text-amber-300 border border-amber-600 px-2 py-0.5 rounded text-[10px] font-mono font-bold animate-pulse">
@@ -904,7 +1123,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           )}
 
           {/* Mode Switcher Toggle */}
-          {!isCrypto && (
+          {!isCrypto && !isGold && (
             <button
               onClick={() => setIsOptionMode(!isOptionMode)}
               className={`text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full border transition-all flex items-center gap-1 shadow-sm ${
@@ -943,7 +1162,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             suppressHydrationWarning
           >
             <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-            ENTRY: {entryDate ? formatDateTimeIST(entryDate) : 'N/A'}
+            {hasActiveTrade
+              ? `ENTRY: ${entryDate ? formatDateTimeIST(entryDate) : 'N/A'}`
+              : `SETUP DETECTED: ${signal?.timestamp ? formatDateTimeIST(new Date(signal.timestamp)) : formatDateTimeIST(new Date())}`}
           </span>
 
           <span
@@ -951,13 +1172,15 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             suppressHydrationWarning
           >
             <Timer className="w-3.5 h-3.5 text-amber-400" />
-            {isMarketOpen ? `ELAPSED: ${formattedElapsed}` : `SESSION DURATION: 45m`}
+            {hasActiveTrade
+              ? (isMarketOpen ? `ELAPSED: ${formattedElapsed}` : `SESSION DURATION: 45m`)
+              : 'STATUS: ENGINE STANDBY'}
           </span>
         </div>
       </div>
 
       {/* Option Strike Selector Banner (If Option Mode Active) */}
-      {isOptionMode && !isCrypto && optionData && (
+      {isOptionMode && !isCrypto && !isGold && optionData && (
         <div className="bg-gradient-to-r from-slate-900 via-indigo-950/60 to-slate-900 border border-indigo-500/40 rounded-xl p-3 font-mono space-y-2 text-xs shadow-inner">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -965,7 +1188,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 RECOMMENDED CONTRACT
               </span>
               <strong className="text-white text-sm font-black tracking-wider">
-                {optionData.contractName}
+                {optionData.recommendedStrike === activeStrike && optionData.contractName
+                  ? optionData.contractName
+                  : `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`}
               </strong>
               <span className="text-slate-400 text-[11px]">({optionData.expiryLabel})</span>
             </div>
@@ -1007,9 +1232,50 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
       {/* Main PnL & Quantity Metrics Matrix */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3 font-mono">
-        {/* 1. Realized or Unrealized P&L */}
+        {/* 1. Realized or Unrealized P&L or Standby Setup Asymmetry */}
         {(() => {
           const isClosed = isPositionCut && !!closedTradeSummary;
+          if (!hasActiveTrade && !isClosed) {
+            const spreadToCMP = currentCMP - spotEntryPrice;
+            const plannedRisk = Math.abs(spotEntryPrice - originalSL);
+            const projectedReward = Math.abs(tp2 - spotEntryPrice);
+            const rrRatio = plannedRisk > 0 ? (projectedReward / plannedRisk).toFixed(1) : '2.5';
+
+            return (
+              <div className="bg-slate-900/90 border border-cyan-500/30 p-3.5 rounded-xl col-span-2 sm:col-span-2 relative overflow-hidden">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-cyan-400 uppercase tracking-wider block font-bold flex items-center gap-1">
+                    <Radio className="w-3 h-3 text-cyan-400" /> SMC SETUP ASYMMETRY (STANDBY)
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-black px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                      1 : {rrRatio} R (Target R:R)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-baseline gap-2 mt-1">
+                  <span className="text-2xl sm:text-3xl font-black tracking-tight text-cyan-300">
+                    +2.5R POTENTIAL
+                  </span>
+                  <span className="text-sm font-bold text-slate-400">
+                    (Ready to Execute)
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-300 block mt-1.5 font-bold">
+                  <span className="text-slate-400">
+                    Live CMP: {nativeCurrency}{dp(currentCMP).toFixed(2)}
+                  </span>
+                  <span className="text-slate-500 mx-1">•</span>
+                  <span className="text-cyan-300">
+                    Optimal Entry: {nativeCurrency}{dp(spotEntryPrice).toFixed(2)}
+                    {Math.abs(spreadToCMP) > 0.01 && ` (${spreadToCMP >= 0 ? '+' : ''}${dp(spreadToCMP).toFixed(2)} pts)`}
+                  </span>
+                </span>
+              </div>
+            );
+          }
+
           const displayPnL = isClosed ? closedTradeSummary!.pnl : runningPnL;
           const displayR = isClosed ? closedTradeSummary!.r : runningRMultiple;
           const isProfitableDisplay = displayPnL >= 0;
@@ -1028,7 +1294,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
                   {isClosed
                     ? `POSITION CLOSED • ${closedTradeSummary?.reason?.toUpperCase() || 'STOP LOSS HIT'}`
-                    : isOptionMode && !isCrypto
+                    : isOptionMode && !isCrypto && !isGold
                       ? 'UNREALIZED RUNNING OPTION P&L'
                       : 'UNREALIZED RUNNING SPOT P&L'}
                 </span>
@@ -1071,23 +1337,23 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               <span className="text-[10px] text-slate-300 block mt-1.5 font-bold">
                 {isClosed ? (
                   <span className="text-slate-400 block mt-0.5">
-                    Exited @ {currencySymbol}
+                    Exited @ {nativeCurrency}
                     {dp(closedTradeSummary.exitPrice).toFixed(2)} ({closedTradeSummary.reason}) •
                     Logged to Institutional Trade Journal
                   </span>
-                ) : isOptionMode && !isCrypto ? (
+                ) : isOptionMode && !isCrypto && !isGold ? (
                   <>
                     <span className={priceDifference >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                      Option LTP: {currencySymbol}
-                      {dp(effectiveCurrentPrice).toFixed(2)} (Entry: {currencySymbol}
+                      Option LTP: {nativeCurrency}
+                      {dp(effectiveCurrentPrice).toFixed(2)} (Entry: {nativeCurrency}
                       {dp(effectiveEntryPrice).toFixed(2)} | {priceDifference >= 0 ? '+' : ''}
                       {dp(priceDifference).toFixed(2)} pts)
                     </span>
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
-                      Spot CMP: {currencySymbol}
+                      Spot CMP: {nativeCurrency}
                       {dp(currentCMP).toFixed(2)} ({isBull ? 'Long' : 'Short'} Entry:{' '}
-                      {currencySymbol}
+                      {nativeCurrency}
                       {dp(spotEntryPrice).toFixed(2)})
                     </span>
                   </>
@@ -1100,8 +1366,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                     </span>
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
-                      CMP: {currencySymbol}
-                      {dp(currentCMP).toFixed(2)} (Entry: {currencySymbol}
+                      CMP: {nativeCurrency}
+                      {dp(currentCMP).toFixed(2)} (Entry: {nativeCurrency}
                       {dp(spotEntryPrice).toFixed(2)})
                     </span>
                   </>
@@ -1114,18 +1380,22 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         {/* 2. Position Size & Strike Contract */}
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
           <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
-            {isOptionMode && !isCrypto && !isGold ? 'ACTIVE STRIKE & QTY' : 'CONTRACT QUANTITY'}
+            {hasActiveTrade
+              ? isOptionMode && !isCrypto && !isGold
+                ? 'ACTIVE STRIKE & QTY'
+                : 'CONTRACT QUANTITY'
+              : 'ORDER QUANTITY'}
           </span>
           <span className="text-xl font-black text-cyan-300 block mt-1">
             {totalQuantity} {isCrypto ? 'BTC' : isGold ? 'oz' : 'Qty'}
           </span>
           <span className="text-[10px] text-indigo-300 font-bold block mt-0.5 truncate">
             {isOptionMode && !isCrypto && !isGold
-              ? `⚡ ${optionData?.contractName || `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`} (Locked)`
+              ? `⚡ ${optionData?.recommendedStrike === activeStrike && optionData?.contractName ? optionData.contractName : `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`} (Locked)`
               : isCrypto
                 ? `0.01 BTC Contract (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                 : isGold
-                  ? `10.0 oz Gold Spot (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
+                  ? `${totalQuantity} oz Gold Spot (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                   : `${symbol === 'NIFTY' ? '1 Lot (65 Qty)' : '1 Lot'}`}
           </span>
         </div>
@@ -1133,34 +1403,40 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         {/* 3. Option Entry Premium */}
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
           <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
-            {isOptionMode && !isCrypto ? 'ENTRY PREMIUM (LOCKED)' : 'SPOT ENTRY (LOCKED)'}
+            {hasActiveTrade
+              ? isOptionMode && !isCrypto && !isGold
+                ? 'ENTRY PREMIUM (LOCKED)'
+                : 'SPOT ENTRY (LOCKED)'
+              : 'OPTIMAL ENTRY ZONE'}
           </span>
           <span className="text-xl font-black text-white block mt-1">
-            {currencySymbol}
+            {nativeCurrency}
             {dp(effectiveEntryPrice).toFixed(2)}
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">
-            {isOptionMode && !isCrypto
-              ? `Spot: ${currencySymbol}${dp(spotEntryPrice).toFixed(2)} | Margin: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-              : `Margin Used: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto ? ` (${activeLeverage}x Leverage)` : ''}`}
+            {isOptionMode && !isCrypto && !isGold
+              ? `Spot: ${nativeCurrency}${dp(spotEntryPrice).toFixed(2)} | Margin: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+              : `${hasActiveTrade ? 'Margin Used' : 'Projected Margin'}: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto || isGold ? ` (${effectiveLeverage}x Leverage)` : ''}`}
           </span>
         </div>
 
         {/* 4. Active Stop Loss (With Trailing Profit Lock / BE Indicator) */}
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block">
-              {isProfitLocked
-                ? 'TRAILING SL (PROFIT LOCKED)'
-                : isOptionMode && !isCrypto
-                  ? 'OPTION SL PREMIUM'
-                  : 'STOP LOSS'}
+            <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
+              {!hasActiveTrade
+                ? 'PLANNED STOP LOSS'
+                : isProfitLocked
+                  ? 'TRAILING SL (PROFIT LOCKED)'
+                  : isOptionMode && !isCrypto && !isGold
+                    ? 'OPTION SL PREMIUM'
+                    : 'STOP LOSS'}
             </span>
-            {isProfitLocked ? (
+            {hasActiveTrade && isProfitLocked ? (
               <span className="text-[9px] bg-emerald-950 text-emerald-300 border border-emerald-800/80 px-1.5 py-0.5 rounded font-bold">
                 PROFIT LOCKED
               </span>
-            ) : isBreakevenActive ? (
+            ) : hasActiveTrade && isBreakevenActive ? (
               <span className="text-[9px] bg-cyan-950 text-cyan-400 border border-cyan-800/80 px-1.5 py-0.5 rounded font-bold">
                 BE ACTIVE
               </span>
@@ -1168,20 +1444,20 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           </div>
           <span
             className={`text-xl font-black block mt-1 ${
-              isProfitLocked
+              hasActiveTrade && isProfitLocked
                 ? 'text-emerald-400'
-                : isBreakevenActive
+                : hasActiveTrade && isBreakevenActive
                   ? 'text-cyan-400'
                   : 'text-rose-400'
             }`}
           >
-            {currencySymbol}
+            {nativeCurrency}
             {dp(currentSL).toFixed(2)}
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">
-            {isProfitLocked
+            {hasActiveTrade && isProfitLocked
               ? `Locked Profit: +${currencySymbol}${lockedProfitAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Risk Free)`
-              : isBreakevenActive
+              : hasActiveTrade && isBreakevenActive
                 ? `Max Risk: ${currencySymbol}0.00 (Risk Free)`
                 : `Max Risk: -${currencySymbol}${maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
           </span>
@@ -1193,24 +1469,24 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-slate-400 flex items-center gap-1 font-bold">
             <Target className="w-3.5 h-3.5 text-cyan-400" />
-            {isOptionMode && !isCrypto
+            {isOptionMode && !isCrypto && !isGold
               ? 'OPTION PREMIUM TARGET ROADMAP:'
               : 'TARGET PROGRESSION & MARKET TIMELINE:'}
           </span>
           <div className="flex items-center gap-3 text-[10px]">
             <span className={isTP1Reached ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
-              TP1: {currencySymbol}
+              TP1: {nativeCurrency}
               {dp(tp1).toFixed(2)} ({isTP1Reached ? '✅ HIT' : '+100%'})
             </span>
             <span className="text-slate-600">•</span>
             <span className={isTP2Reached ? 'text-teal-300 font-bold' : 'text-slate-400'}>
-              TP2: {currencySymbol}
+              TP2: {nativeCurrency}
               {dp(tp2).toFixed(2)} ({isTP2Reached ? '🎯 HIT' : '+250%'})
             </span>
             <span className="text-slate-600">•</span>
-            <span className="text-slate-400">
-              TP3: {currencySymbol}
-              {dp(tp3).toFixed(2)} (+400%)
+            <span className={isTP3Reached ? 'text-purple-300 font-bold' : 'text-slate-400'}>
+              TP3: {nativeCurrency}
+              {dp(tp3).toFixed(2)} ({isTP3Reached ? '🏆 HIT' : '+400%'})
             </span>
           </div>
         </div>
@@ -1219,22 +1495,26 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800 relative">
           <div
             className={`h-full transition-all duration-300 rounded-full ${
-              isTP2Reached
-                ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
-                : isTP1Reached
-                  ? 'bg-gradient-to-r from-cyan-500 to-emerald-400'
-                  : 'bg-cyan-500'
+              isTP3Reached
+                ? 'bg-gradient-to-r from-teal-400 to-purple-400'
+                : isTP2Reached
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
+                  : isTP1Reached
+                    ? 'bg-gradient-to-r from-cyan-500 to-emerald-400'
+                    : 'bg-cyan-500'
             }`}
             style={{ width: `${progressPercent}%` }}
           />
         </div>
 
         <div className="flex items-center justify-between text-[9px] text-slate-500">
-          <span>Session Entry: {entryDate ? formatDateTimeIST(entryDate) : 'N/A'}</span>
+          <span>{hasActiveTrade ? `Session Entry: ${entryDate ? formatDateTimeIST(entryDate) : 'N/A'}` : 'Session Entry: Awaiting Execution'}</span>
           <span className="text-cyan-400 font-bold">
-            {progressPercent.toFixed(1)}% to Full Target (TP2)
+            {hasActiveTrade
+              ? `${progressPercent.toFixed(1)}% to Target (${isTP3Reached ? 'TP3 HIT' : isTP2Reached ? 'TP2 HIT' : isTP1Reached ? 'TP1 HIT' : 'TP2'})`
+              : '0.0% to Target (Standby - Armed)'}
           </span>
-          <span>Session Target Exit: {estCloseDate ? formatDateTimeIST(estCloseDate) : 'N/A'}</span>
+          <span>{hasActiveTrade ? `Session Target Exit: ${estCloseDate ? formatDateTimeIST(estCloseDate) : 'N/A'}` : 'Target Exit: Estimated 45m - 2h'}</span>
         </div>
       </div>
 
@@ -1256,7 +1536,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       )}
 
       {/* Fast Action Controls Bar */}
-      {isPositionCut ? (
+      {isPositionCut && !!closedTradeSummary ? (
         <div className="w-full bg-slate-900/90 border border-slate-800 p-3 rounded-xl flex flex-wrap items-center justify-between gap-3 font-mono text-xs shadow-lg">
           <div className="flex items-center gap-2 text-slate-300">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -1266,12 +1546,18 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleReopenTrade}
+              className="text-xs text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-lg transition-all font-bold"
+            >
+              Track Next Setup
+            </button>
             <span className="text-[11px] text-cyan-400 font-bold bg-cyan-950/80 px-2.5 py-1 rounded border border-cyan-800/60">
               Awaiting Next Institutional SMC Signal
             </span>
           </div>
         </div>
-      ) : (
+      ) : hasActiveTrade ? (
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1 font-mono text-xs">
           <div className="flex flex-wrap items-center gap-2">
             {/* Move to Breakeven Toggle */}
@@ -1322,8 +1608,27 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               onClick={() => handleCutTrade('Manual Market Cut @ Current Price')}
               className="bg-rose-500 hover:bg-rose-400 text-slate-950 font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg shadow-rose-500/20 transition-all text-xs"
             >
-              <XCircle className="w-4 h-4" />⚡ Exit Trade @ Market ({currencySymbol}
+              <XCircle className="w-4 h-4" />⚡ Exit Trade @ Market ({nativeCurrency}
               {dp(effectiveCurrentPrice).toFixed(2)})
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="w-full bg-slate-900/90 border border-slate-800 p-3 rounded-xl flex flex-wrap items-center justify-between gap-3 font-mono text-xs shadow-lg">
+          <div className="flex items-center gap-2 text-slate-300">
+            <Radio className="w-4 h-4 text-cyan-400 shrink-0 animate-pulse" />
+            <span>
+              SMC Setup Armed • Optimal Entry: <strong className="text-white">{nativeCurrency}{dp(spotEntryPrice).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:2.5R</strong> | Max Risk: <strong className="text-rose-400">{currencySymbol}{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExecutePaperOrder}
+              disabled={isPlacingOrder}
+              className="bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-50 text-slate-950 font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 transition-all text-xs"
+            >
+              <Zap className="w-4 h-4" />
+              {isPlacingOrder ? 'Executing...' : `Execute Paper Trade @ Market (${nativeCurrency}${dp(currentCMP).toFixed(2)})`}
             </button>
           </div>
         </div>

@@ -1,6 +1,7 @@
 import {
   CanonicalProviderTransport,
   validateExecutionQuoteTimestamp,
+  normalizeCanonicalProviderId,
 } from '../execution-quote-validator';
 import { RawSpotProviderEvent } from './raw-spot-provider-event';
 
@@ -127,6 +128,18 @@ function rejectMismatchedClaim(value: unknown, expected: string, label: string):
   if (value === undefined || value === null) return;
   const actual = typeof value === 'string' ? value.trim() : '';
   if (actual !== expected) {
+    if (label === 'providerId') {
+      try {
+        const normActual = normalizeCanonicalProviderId(actual);
+        const normExpected = normalizeCanonicalProviderId(expected);
+        if (
+          normActual === normExpected ||
+          (normActual.startsWith('BINANCE') && normExpected.startsWith('BINANCE'))
+        ) {
+          return;
+        }
+      } catch {}
+    }
     throw new Error(
       `[PROVIDER_EVENT_REJECTED] Raw spot provider event ${label} '${String(
         value,

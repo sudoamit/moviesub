@@ -208,6 +208,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
 
   beforeEach(async () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     process.env.NODE_ENV = 'test';
     delete process.env.APP_ENV;
 
@@ -479,6 +480,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
   });
 
   afterEach(() => {
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
     jest.restoreAllMocks();
   });
 

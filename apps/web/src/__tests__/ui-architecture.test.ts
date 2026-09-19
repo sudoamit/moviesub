@@ -178,7 +178,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         stopLoss: 24150,
         takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
         riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
-        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] } as any,
         scoreBreakdown: {} as any,
       };
 
@@ -207,7 +207,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         stopLoss: 24150,
         takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
         riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
-        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] } as any,
         scoreBreakdown: {} as any,
       };
 
@@ -342,7 +342,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         stopLoss: 24150,
         takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
         riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
-        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] } as any,
         scoreBreakdown: {} as any,
       };
 
@@ -428,7 +428,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         stopLoss: 24150,
         takeProfits: { tp1: 24300, tp2: 24400, tp3: 24500 },
         riskRewardRatios: { rr1: 1.5, rr2: 3.1, rr3: 4.8 },
-        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] } as any,
         scoreBreakdown: {} as any,
       };
 
@@ -520,7 +520,7 @@ describe('Frontend UI Architecture & Trading UX Tests', () => {
         stopLoss: 51100,
         takeProfits: { tp1: 51400, tp2: 51600, tp3: 51800 },
         riskRewardRatios: { rr1: 1.5, rr2: 3.2, rr3: 4.8 },
-        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] },
+        reasoning: { summary: 'SMC Sweep', confirmedChecklist: ['OB'] } as any,
         scoreBreakdown: {} as any,
       };
 

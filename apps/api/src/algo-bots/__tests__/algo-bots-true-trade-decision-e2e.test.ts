@@ -86,6 +86,8 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
   });
 
   beforeEach(async () => {
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     jest.spyOn(Date, 'now').mockReturnValue(nowMs);
 
     mockPaperTradingService = {
@@ -128,6 +130,8 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
   });
 
   afterEach(() => {
+    delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
     jest.restoreAllMocks();
   });
 

@@ -112,6 +112,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
 
   beforeEach(async () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     executionsDb = new Map();
     positionsDb = new Map();
 
@@ -256,10 +257,16 @@ describe('Scanner Live Pipeline E2E Test', () => {
       paperTrade: {
         findMany: jest.fn().mockResolvedValue([]),
       },
+      tradeDecision: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(async ({ data }) => ({ id: `td_${Date.now()}`, ...data })),
+        update: jest.fn().mockImplementation(async ({ data }) => ({ id: `td_${Date.now()}`, ...data })),
+      },
       algoBotExecution: {
         create: jest.fn().mockImplementation(async ({ data }) => {
-          if (executionsDb.has(data.idempotencyFingerprint)) {
-            const err: any = new Error('Unique constraint failed on idempotencyFingerprint');
+          const fp = data.fingerprint || data.idempotencyFingerprint || `fp_${Date.now()}`;
+          if (executionsDb.has(fp)) {
+            const err: any = new Error('Unique constraint failed on fingerprint');
             err.code = 'P2002';
             throw err;
           }
@@ -270,7 +277,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           };
-          executionsDb.set(data.idempotencyFingerprint, record);
+          executionsDb.set(fp, record);
           return record;
         }),
         update: jest.fn().mockImplementation(async ({ where, data }) => {
@@ -341,6 +348,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
 
   afterEach(() => {
     delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
   });
 
   it('proves the full application flow: ScannerService.triggerScan() -> SignalsService -> AlgoBotsService -> PaperTradingService position placement', async () => {

@@ -11,6 +11,7 @@ import { RedisService } from '../common/redis/redis.service';
 import {
   Direction,
   PositionState,
+  TradeLifecycleState,
   WS_EVENTS,
   getAuthoritativeInstrument,
   PointInTimeCurrencyConverter,
@@ -132,32 +133,39 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       return;
     }
 
-    const entryPrice = Number(pos.entryPrice);
-    const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : null;
+    let currentStopLoss = pos.stopLoss ? Number(pos.stopLoss) : null;
     const target1 = pos.target1 ? Number(pos.target1) : null;
     const target2 = pos.target2 ? Number(pos.target2) : null;
     const target3 = pos.target3 ? Number(pos.target3) : null;
+    const entryPrice = Number(pos.entryPrice);
+    const existingEvents = (pos.executionEventsJson as any) || {};
 
-    // 2. Evaluate Active Stop Loss Threshold
+    // 2. Evaluate Active Stop Loss Threshold FIRST (Full close remaining quantity)
     let isSLHit = false;
-    if (stopLoss !== null) {
-      if (isBuy && livePrice <= stopLoss) {
+    if (currentStopLoss !== null) {
+      if (isBuy && livePrice <= currentStopLoss) {
         isSLHit = true;
-      } else if (!isBuy && livePrice >= stopLoss) {
+      } else if (!isBuy && livePrice >= currentStopLoss) {
         isSLHit = true;
       }
     }
 
     if (isSLHit) {
+      const isBreakeven =
+        existingEvents.currentStopLoss === entryPrice ||
+        existingEvents.tp1FillTime ||
+        currentStopLoss === entryPrice;
+      const exitReason = isBreakeven ? 'Breakeven Stop Loss Hit' : 'Stop Loss Hit';
+
       this.logger.log(
-        `🚨 [AUTO TP/SL MONITOR] SL Threshold Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs SL ${stopLoss}. Triggering backend auto-close...`,
+        `🚨 [AUTO TP/SL MONITOR] SL Threshold Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs SL ${currentStopLoss}. Triggering backend auto-close [${exitReason}]...`,
       );
       try {
         const completedTrade = await this.paperTradingService.closePosition(
           pos.id,
-          'Stop Loss Hit',
+          exitReason,
           {
-            triggerPrice: stopLoss!,
+            triggerPrice: currentStopLoss!,
             triggerMarketEventTime: marketEventTime,
             exitPriceOverride: livePrice,
             allowPriceOverride: true,
@@ -175,44 +183,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       }
     }
 
-    // 3. Evaluate Target 2 / Target 3 Full Take-Profit Thresholds
-    const activeFullTarget = target3 ?? target2;
-    let isTPHit = false;
-    if (activeFullTarget !== null) {
-      if (isBuy && livePrice >= activeFullTarget) {
-        isTPHit = true;
-      } else if (!isBuy && livePrice <= activeFullTarget) {
-        isTPHit = true;
-      }
-    }
-
-    if (isTPHit) {
-      const exitReason =
-        target3 && livePrice >= target3 ? 'Target 3 Completed' : 'Target 2 Completed';
-      this.logger.log(
-        `🎯 [AUTO TP/SL MONITOR] TP Threshold Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target ${activeFullTarget}. Triggering backend auto-close...`,
-      );
-      try {
-        const completedTrade = await this.paperTradingService.closePosition(pos.id, exitReason, {
-          triggerPrice: activeFullTarget!,
-          triggerMarketEventTime: marketEventTime,
-          exitPriceOverride: livePrice,
-          allowPriceOverride: true,
-          isInternalCall: true,
-          executionMode: ExecutionMode.PAPER_MARKET,
-          correlationId: pos.correlationId,
-        });
-
-        await this.publishTradeClosedEvent(completedTrade);
-        return;
-      } catch (err: any) {
-        this.logger.error(`Failed auto-closing position '${pos.id}' on TP: ${err.message}`);
-        return;
-      }
-    }
-
-    // 4. Evaluate TP1 Partial Scale-Out (if position is OPEN and has target1)
-    if (target1 !== null && pos.status === PositionState.OPEN) {
+    // 3. Evaluate TP1 Partial Scale-Out (Sequential Gating: TP1 must be evaluated if position has not filled TP1)
+    let hasTP1 = Boolean(existingEvents.tp1FillTime);
+    if (!hasTP1 && target1 !== null && pos.status === PositionState.OPEN) {
       let isTP1Hit = false;
       if (isBuy && livePrice >= target1) {
         isTP1Hit = true;
@@ -222,12 +195,131 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
 
       if (isTP1Hit) {
         this.logger.log(
-          `✂️ [AUTO TP/SL MONITOR] TP1 Scale-Out Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target1 ${target1}. Executing 50% partial close...`,
+          `✂️ [AUTO TP/SL MONITOR] TP1 Scale-Out Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target1 ${target1}. Executing 30% partial close...`,
         );
         try {
-          await this.executePartialScaleOut(pos, target1, livePrice, marketEventTime);
+          const tp1Result = await this.executePartialScaleOut(
+            pos,
+            'TP1',
+            target1,
+            livePrice,
+            marketEventTime,
+            0.3,
+          );
+          if (tp1Result) {
+            hasTP1 = true;
+            pos.status = PositionState.PARTIALLY_CLOSED;
+            pos.quantity = tp1Result.remainingQuantity;
+            pos.stopLoss = tp1Result.newStopLoss;
+            currentStopLoss = tp1Result.newStopLoss;
+            existingEvents.tp1FillTime = tp1Result.fillTimestamp;
+            existingEvents.tp1Quantity = tp1Result.partialQty;
+            existingEvents.partialLegs = tp1Result.partialLegs;
+          }
         } catch (err: any) {
-          this.logger.error(`Failed partial scale-out for position '${pos.id}': ${err.message}`);
+          this.logger.error(`Failed partial TP1 scale-out for position '${pos.id}': ${err.message}`);
+        }
+      }
+    }
+
+    // 4. Evaluate TP2 Scale-Out (Sequential Gating: TP2 CANNOT execute unless TP1 has completed)
+    let hasTP2 = Boolean(existingEvents.tp2FillTime);
+    if (hasTP1 && !hasTP2 && target2 !== null && pos.status === PositionState.PARTIALLY_CLOSED) {
+      let isTP2Hit = false;
+      if (isBuy && livePrice >= target2) {
+        isTP2Hit = true;
+      } else if (!isBuy && livePrice <= target2) {
+        isTP2Hit = true;
+      }
+
+      if (isTP2Hit) {
+        if (target3 !== null) {
+          // If TP3 exists, execute canonical 30% TP2 partial scale-out
+          this.logger.log(
+            `✂️ [AUTO TP/SL MONITOR] TP2 Scale-Out Crossed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target2 ${target2}. Executing 30% partial close...`,
+          );
+          try {
+            const tp2Result = await this.executePartialScaleOut(
+              pos,
+              'TP2',
+              target2,
+              livePrice,
+              marketEventTime,
+              0.3,
+            );
+            if (tp2Result) {
+              hasTP2 = true;
+              pos.quantity = tp2Result.remainingQuantity;
+              pos.stopLoss = tp2Result.newStopLoss;
+              currentStopLoss = tp2Result.newStopLoss;
+              existingEvents.tp2FillTime = tp2Result.fillTimestamp;
+              existingEvents.tp2Quantity = tp2Result.partialQty;
+              existingEvents.partialLegs = tp2Result.partialLegs;
+            }
+          } catch (err: any) {
+            this.logger.error(`Failed partial TP2 scale-out for position '${pos.id}': ${err.message}`);
+          }
+        } else {
+          // If no target3 exists, target2 is final exit: close remaining quantity
+          this.logger.log(
+            `🎯 [AUTO TP/SL MONITOR] Target 2 Completed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target2 ${target2}. Triggering full close...`,
+          );
+          try {
+            const completedTrade = await this.paperTradingService.closePosition(
+              pos.id,
+              'Target 2 Completed',
+              {
+                triggerPrice: target2,
+                triggerMarketEventTime: marketEventTime,
+                exitPriceOverride: livePrice,
+                allowPriceOverride: true,
+                isInternalCall: true,
+                executionMode: ExecutionMode.PAPER_MARKET,
+                correlationId: pos.correlationId,
+              },
+            );
+            await this.publishTradeClosedEvent(completedTrade);
+            return;
+          } catch (err: any) {
+            this.logger.error(`Failed closing position '${pos.id}' on TP2: ${err.message}`);
+            return;
+          }
+        }
+      }
+    }
+
+    // 5. Evaluate TP3 Full Close (Sequential Gating: TP3 CANNOT execute unless TP2 has completed)
+    if (hasTP2 && target3 !== null && pos.status === PositionState.PARTIALLY_CLOSED) {
+      let isTP3Hit = false;
+      if (isBuy && livePrice >= target3) {
+        isTP3Hit = true;
+      } else if (!isBuy && livePrice <= target3) {
+        isTP3Hit = true;
+      }
+
+      if (isTP3Hit) {
+        this.logger.log(
+          `🎯 [AUTO TP/SL MONITOR] Target 3 Completed for position '${pos.id}' (${pos.contractSymbol}): Live ${livePrice} vs Target3 ${target3}. Triggering final runner close...`,
+        );
+        try {
+          const completedTrade = await this.paperTradingService.closePosition(
+            pos.id,
+            'Target 3 Completed',
+            {
+              triggerPrice: target3,
+              triggerMarketEventTime: marketEventTime,
+              exitPriceOverride: livePrice,
+              allowPriceOverride: true,
+              isInternalCall: true,
+              executionMode: ExecutionMode.PAPER_MARKET,
+              correlationId: pos.correlationId,
+            },
+          );
+          await this.publishTradeClosedEvent(completedTrade);
+          return;
+        } catch (err: any) {
+          this.logger.error(`Failed closing position '${pos.id}' on TP3: ${err.message}`);
+          return;
         }
       }
     }
@@ -312,49 +404,109 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
   }
 
   /**
-   * Backend Real Partial Scale-Out at TP1 (Creates Execution Leg ONLY — NO duplicate PaperTrade row)
+   * Backend Real Partial Scale-Out at TP1 or TP2 (Creates Execution Leg ONLY — NO duplicate PaperTrade row)
    */
   private async executePartialScaleOut(
     pos: any,
-    target1: number,
-    livePrice: number,
-    marketEventTime: Date,
-    partialRatio = 0.5,
-  ): Promise<void> {
-    const idempotencyKey = `tp1_partial_${pos.id}`;
+    stageOrExitPrice: 'TP1' | 'TP2' | number,
+    targetPriceOrTriggerPrice?: number,
+    livePriceOrTriggerTime?: number | Date,
+    marketEventTimeOrStage?: Date | 'TP1' | 'TP2',
+    partialRatio = 0.3,
+  ): Promise<{
+    remainingQuantity: number;
+    partialQty: number;
+    newStopLoss: number;
+    fillTimestamp: string;
+    partialLegs: any[];
+  } | null> {
+    let stage: 'TP1' | 'TP2' = 'TP1';
+    let targetPrice = 0;
+    let livePrice = 0;
+    let marketEventTime: Date = new Date();
+    let ratio = partialRatio;
 
-    // Deterministic check to avoid duplicate TP1 execution
-    const existingOrder = await this.prisma.paperOrder.findUnique({
-      where: { idempotencyKey },
-    });
-    if (existingOrder) {
-      this.logger.log(
-        `[TP1 IDEMPOTENCY] Partial scale-out already executed for position '${pos.id}'.`,
-      );
-      return;
+    if (typeof stageOrExitPrice === 'number') {
+      livePrice = stageOrExitPrice;
+      targetPrice = typeof targetPriceOrTriggerPrice === 'number' ? targetPriceOrTriggerPrice : livePrice;
+      marketEventTime = livePriceOrTriggerTime instanceof Date ? livePriceOrTriggerTime : new Date();
+      if (typeof marketEventTimeOrStage === 'string' && (marketEventTimeOrStage === 'TP1' || marketEventTimeOrStage === 'TP2')) {
+        stage = marketEventTimeOrStage;
+      }
+      ratio = 0.3;
+    } else {
+      stage = stageOrExitPrice;
+      targetPrice = typeof targetPriceOrTriggerPrice === 'number' ? targetPriceOrTriggerPrice : 0;
+      livePrice = typeof livePriceOrTriggerTime === 'number' ? livePriceOrTriggerTime : targetPrice;
+      marketEventTime = marketEventTimeOrStage instanceof Date ? marketEventTimeOrStage : new Date();
+      ratio = partialRatio;
     }
 
-    const totalQuantity = Number(pos.quantity);
-    const partialQty = Number((totalQuantity * partialRatio).toFixed(4));
-    const remainingQty = totalQuantity - partialQty;
+    const idempotencyKey = stage === 'TP1' ? `tp1_partial:${pos.id}` : `tp2_partial:${pos.id}`;
+
+    // Deterministic check to avoid duplicate execution
+    let existingOrder: any = null;
+    if (typeof (this.prisma.paperOrder as any).findFirst === 'function') {
+      existingOrder = await this.prisma.paperOrder.findFirst({
+        where: {
+          OR: [
+            { idempotencyKey },
+            { idempotencyKey: `${stage.toLowerCase()}_partial_${pos.id}` },
+          ],
+        },
+      });
+    } else if (typeof (this.prisma.paperOrder as any).findUnique === 'function') {
+      existingOrder = await this.prisma.paperOrder.findUnique({
+        where: { idempotencyKey },
+      });
+    }
+    if (existingOrder) {
+      this.logger.log(
+        `[${stage} IDEMPOTENCY] Scale-out already executed for position '${pos.id}'.`,
+      );
+      return null;
+    }
+
+    const existingEvents = (pos.executionEventsJson as any) || {};
+    const partialLegs = existingEvents.partialLegs || [];
+    const currentQuantity = Number(pos.quantity);
+    const alreadyClosedQty = partialLegs.reduce(
+      (sum: number, l: any) => sum + Number(l.quantity || 0),
+      0,
+    );
+    const originalQuantity = Number(
+      existingEvents.initialQuantity || (currentQuantity + alreadyClosedQty).toFixed(4),
+    );
+    const partialQty = Number((originalQuantity * ratio).toFixed(4));
+    const remainingQty = Number((currentQuantity - partialQty).toFixed(4));
     const entryPrice = Number(pos.entryPrice);
     const isBuy = pos.direction === Direction.BULLISH;
-    const isCrypto = pos.symbol === 'BTCUSDT' || pos.symbol === 'BTCUSD';
-
-    const exitTurnover = livePrice * partialQty;
-    const exitCharges = this.paperTradingService.calculateCharges(exitTurnover, isCrypto);
+    const isCrypto =
+      pos.symbol === 'BTCUSDT' ||
+      pos.symbol === 'BTCUSD' ||
+      pos.symbol === 'BTCUSDT_SPOT';
 
     // Canonical P&L via TradeAccountingEngine using the persisted lifecycle accounting snapshot
     const openingSnapshot =
-      (pos.executionEventsJson as any)?.accountingSnapshot ??
+      existingEvents.accountingSnapshot ??
       (pos.featureSnapshotJson as any)?.accountingSnapshot;
 
     if (!openingSnapshot) {
       throw new Error(
-        `[MALFORMED_LIFECYCLE] Cannot execute partial TP1 scale-out for position '${pos.id}': Missing authoritative immutable opening accounting snapshot. Silently querying an ad-hoc FX rate during execution leg settlement is strictly prohibited.`,
+        `[MALFORMED_LIFECYCLE] Cannot execute partial TP1 scale-out (stage: ${stage}) for position '${pos.id}': Missing authoritative immutable opening accounting snapshot. Silently querying an ad-hoc FX rate during execution leg settlement is strictly prohibited.`,
       );
     }
     const fxRate = openingSnapshot.fxRate;
+    const contractSize = openingSnapshot.contractSize ?? 1;
+
+    const exitTurnover = livePrice * partialQty * contractSize;
+    const exitCharges = this.paperTradingService.calculateCharges(
+      exitTurnover,
+      isCrypto,
+      fxRate,
+      marketEventTime.getTime(),
+      'EXIT',
+    );
 
     const initialSL = pos.initialStopLoss
       ? Number(pos.initialStopLoss)
@@ -363,7 +515,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         : undefined;
 
     const legSettlement = TradeAccountingEngine.settleExecutionLeg({
-      role: 'TP1_PARTIAL',
+      role: stage === 'TP1' ? 'TP1_PARTIAL' : 'TP2_PARTIAL',
       entryPrice,
       fillPrice: livePrice,
       quantity: partialQty,
@@ -376,16 +528,21 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const partialGrossPnL = legSettlement.grossPnL;
     const partialNetPnL = legSettlement.netPnL;
     const partialRealizedR = legSettlement.realizedR;
-    const releasedMargin = Number((Number(pos.usedMargin) * partialRatio).toFixed(2));
 
-    const existingEvents = (pos.executionEventsJson as any) || {};
-    const partialLegs = existingEvents.partialLegs || [];
+    const posUsedMargin = Number(pos.usedMargin);
+    const fractionOfCurrent = currentQuantity > 0 ? partialQty / currentQuantity : 0;
+    const releasedMargin = Number((posUsedMargin * fractionOfCurrent).toFixed(2));
+
+    const newStopLoss =
+      stage === 'TP1' ? entryPrice : pos.target1 ? Number(pos.target1) : entryPrice;
+
     const execTimeStr = new Date().toISOString();
     const marketTimeStr = marketEventTime.toISOString();
-    partialLegs.push({
-      role: 'TP1_PARTIAL',
+
+    const newLeg = {
+      role: stage === 'TP1' ? 'TP1_PARTIAL' : 'TP2_PARTIAL',
       quantity: partialQty,
-      triggerPrice: target1,
+      triggerPrice: targetPrice,
       triggerMarketEventTime: marketTimeStr,
       fillPrice: livePrice,
       fillTimestamp: execTimeStr,
@@ -406,32 +563,78 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       executionTime: execTimeStr,
       timestamp: marketTimeStr,
       fxRate,
-      accountingSnapshotHash: legSettlement.accountingSnapshotHash ?? openingSnapshot?.snapshotHash,
-    });
+      accountingSnapshotHash:
+        legSettlement.accountingSnapshotHash ?? openingSnapshot?.snapshotHash,
+    };
+
+    const updatedPartialLegs = [...partialLegs, newLeg];
+
+    const stageMetadata =
+      stage === 'TP1'
+        ? {
+            tp1TriggeredAt: execTimeStr,
+            tp1TriggerPrice: targetPrice,
+            tp1TriggerMarketEventTime: marketTimeStr,
+            tp1FillPrice: livePrice,
+            tp1FillTime: execTimeStr,
+            tp1Quantity: partialQty,
+            tp1RealizedPnL: partialNetPnL,
+            currentLifecycleState: TradeLifecycleState.TP1_PARTIAL_FILLED,
+            currentStopLoss: newStopLoss,
+            remainingQuantity: remainingQty,
+            highestTargetReached: 'TP1',
+          }
+        : {
+            tp2TriggeredAt: execTimeStr,
+            tp2TriggerPrice: targetPrice,
+            tp2TriggerMarketEventTime: marketTimeStr,
+            tp2FillPrice: livePrice,
+            tp2FillTime: execTimeStr,
+            tp2Quantity: partialQty,
+            tp2RealizedPnL: partialNetPnL,
+            currentLifecycleState: TradeLifecycleState.TP2_PARTIAL_FILLED,
+            currentStopLoss: newStopLoss,
+            remainingQuantity: remainingQty,
+            highestTargetReached: 'TP2',
+          };
 
     try {
       await this.prisma.$transaction(async (tx) => {
-        const existingTxOrder = await tx.paperOrder.findUnique({
-          where: { idempotencyKey },
-        });
+        let existingTxOrder: any = null;
+        if (typeof (tx.paperOrder as any).findFirst === 'function') {
+          existingTxOrder = await (tx.paperOrder as any).findFirst({
+            where: {
+              OR: [
+                { idempotencyKey },
+                { idempotencyKey: `${stage.toLowerCase()}_partial_${pos.id}` },
+              ],
+            },
+          });
+        } else if (typeof (tx.paperOrder as any).findUnique === 'function') {
+          existingTxOrder = await (tx.paperOrder as any).findUnique({
+            where: { idempotencyKey },
+          });
+        }
         if (existingTxOrder) return;
 
         const updated = await tx.paperPosition.updateMany({
-          where: {
-            id: pos.id,
-            status: { in: [PositionState.OPEN] },
-          },
+          where:
+            stage === 'TP1'
+              ? { id: pos.id, status: PositionState.OPEN }
+              : { id: pos.id, status: PositionState.PARTIALLY_CLOSED },
           data: {
             status: PositionState.PARTIALLY_CLOSED,
             quantity: new Decimal(remainingQty),
-            stopLoss: new Decimal(entryPrice), // Move SL to breakeven
-            usedMargin: new Decimal(Number(pos.usedMargin) - releasedMargin),
+            stopLoss: new Decimal(newStopLoss),
+            usedMargin: new Decimal(Math.max(0, posUsedMargin - releasedMargin)),
             executionEventsJson: {
               ...existingEvents,
+              initialQuantity: originalQuantity,
               accountingSnapshot: openingSnapshot ?? existingEvents.accountingSnapshot,
               accountingSnapshotHash:
                 openingSnapshot?.snapshotHash ?? existingEvents.accountingSnapshotHash,
-              partialLegs,
+              ...stageMetadata,
+              partialLegs: updatedPartialLegs,
             } as any,
           },
         });
@@ -471,9 +674,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           },
         });
 
-        // MODEL-A ACCOUNTING CONTRACT:
-        // At TP1 partial exit: cashBalance += TP1 grossPnL - TP1 exitFees, realizedPnL += TP1 grossPnL - TP1 exitFees, totalChargesPaid += TP1 exitFees, usedMargin -= releasedMargin.
-        // PaperTrade record is created ONLY on final exit to preserve 1 Position = 1 PaperTrade lifecycle.
+        // Update PaperAccount
         await tx.paperAccount.update({
           where: { id: pos.accountId },
           data: {
@@ -483,6 +684,99 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             totalChargesPaid: { increment: new Decimal(exitCharges.totalCharges) },
           },
         });
+
+        // Synchronize TradeDecision if linked
+        const tradeDecisionId = existingEvents.tradeDecisionId || pos.tradeDecisionId;
+        if (tradeDecisionId) {
+          await tx.tradeDecision.updateMany({
+            where: { id: tradeDecisionId },
+            data: {
+              lifecycleState: stageMetadata.currentLifecycleState,
+              updatedAt: new Date(),
+            },
+          });
+        }
+
+        // Emit Stage Audit Events
+        if (stage === 'TP1') {
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'TP1_TRIGGERED',
+              entityType: 'POSITION',
+              entityId: pos.id,
+              payloadJson: { targetPrice, livePrice, partialQty, positionId: pos.id },
+              correlationId: pos.correlationId,
+            },
+          });
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'TP1_FILLED',
+              entityType: 'ORDER',
+              entityId: exitOrder.id,
+              payloadJson: {
+                orderId: exitOrder.id,
+                fillPrice: livePrice,
+                quantity: partialQty,
+                netPnL: partialNetPnL,
+              },
+              correlationId: pos.correlationId,
+            },
+          });
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'POSITION_PARTIALLY_CLOSED',
+              entityType: 'POSITION',
+              entityId: pos.id,
+              payloadJson: { positionId: pos.id, remainingQuantity: remainingQty, stage: 'TP1' },
+              correlationId: pos.correlationId,
+            },
+          });
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'STOP_MOVED_TO_BREAKEVEN',
+              entityType: 'POSITION',
+              entityId: pos.id,
+              payloadJson: { positionId: pos.id, newStopLoss },
+              correlationId: pos.correlationId,
+            },
+          });
+        } else {
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'TP2_TRIGGERED',
+              entityType: 'POSITION',
+              entityId: pos.id,
+              payloadJson: { targetPrice, livePrice, partialQty, positionId: pos.id },
+              correlationId: pos.correlationId,
+            },
+          });
+          await tx.auditEvent.create({
+            data: {
+              actor: 'SYSTEM',
+              service: 'PAPER_TRADING',
+              eventType: 'TP2_FILLED',
+              entityType: 'ORDER',
+              entityId: exitOrder.id,
+              payloadJson: {
+                orderId: exitOrder.id,
+                fillPrice: livePrice,
+                quantity: partialQty,
+                netPnL: partialNetPnL,
+              },
+              correlationId: pos.correlationId,
+            },
+          });
+        }
       });
     } catch (err: any) {
       if (
@@ -491,16 +785,24 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         err?.message?.includes('idempotencyKey')
       ) {
         this.logger.log(
-          `[TP1 IDEMPOTENCY P2002] Concurrent race caught for position '${pos.id}'. Order idempotently created by another process.`,
+          `[${stage} IDEMPOTENCY P2002] Concurrent race caught for position '${pos.id}'. Order idempotently created by another process.`,
         );
-        return;
+        return null;
       }
       throw err;
     }
 
     this.logger.log(
-      `✓ [TP1 PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${totalQuantity} to ${remainingQty}. SL moved to breakeven (${entryPrice}). Realized P&L: ₹${partialNetPnL}. Execution leg created.`,
+      `✓ [${stage} PARTIAL SCALE-OUT EXECUTED] Position '${pos.id}' reduced from ${currentQuantity} to ${remainingQty}. SL: ${newStopLoss}. Realized P&L: ₹${partialNetPnL}. Execution leg created.`,
     );
+
+    return {
+      remainingQuantity: remainingQty,
+      partialQty,
+      newStopLoss,
+      fillTimestamp: execTimeStr,
+      partialLegs: updatedPartialLegs,
+    };
   }
 
   private async publishTradeClosedEvent(trade: any) {

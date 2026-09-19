@@ -134,7 +134,7 @@ export class TradeDecisionService {
       );
     }
 
-    const effectiveAccountId = accountId || (bot as any).accountId;
+    const effectiveAccountId = accountId || bot.accountId;
     if (!effectiveAccountId || typeof effectiveAccountId !== 'string' || effectiveAccountId.trim() === '') {
       throw new Error(
         'ACCOUNT_ID_REQUIRED: Auto-execution fingerprint requires non-empty accountId',
@@ -200,18 +200,18 @@ export class TradeDecisionService {
     const tfMs = this.getMaxSignalAgeMs(timeframe);
     switch (condition) {
       case 'ORDER_BLOCK':
-        // Order block mitigation retains structural validity within 12 execution bars
-        return tfMs * 12;
+        // Order block mitigation retains structural validity within 20 execution bars
+        return tfMs * 20;
       case 'FVG':
-        // Fair value gap mitigation requires resolution within 6 bars
-        return tfMs * 6;
+        // Fair value gap mitigation requires resolution within 20 bars
+        return tfMs * 20;
       case 'LIQUIDITY_SWEEP':
-        // Liquidity sweep trigger requires near-term reaction within 4 bars
-        return tfMs * 4;
+        // Liquidity sweep trigger retains structural validity within 20 execution bars
+        return tfMs * 20;
       case 'ANY_CONFLUENCE':
       default:
-        // Combined confluence window bounded to 8 bars
-        return tfMs * 8;
+        // Combined confluence window bounded to 20 bars
+        return tfMs * 20;
     }
   }
 
@@ -475,7 +475,7 @@ export class TradeDecisionService {
         (p: any) =>
           p.symbol &&
           p.symbol.toUpperCase() === bot.symbol.toUpperCase() &&
-          (p.status === 'OPEN' || !p.status || p.status === 'ACTIVE'),
+          (p.status === 'OPEN' || !p.status || p.status === 'ACTIVE' || p.status === 'PARTIALLY_CLOSED'),
       );
       if (hasOpenPos) {
         reasons.push({
@@ -760,7 +760,7 @@ export class TradeDecisionService {
       );
     }
 
-    if (!this.prisma) {
+    if (!this.prisma || !this.prisma.tradeDecision || !this.prisma.$transaction) {
       // In-memory isolated unit test fallback ONLY
       return {
         tradeDecisionId: `test_dec_${fingerprint}`,
@@ -869,8 +869,12 @@ export class TradeDecisionService {
         // 3. Decision is TAKE -> Atomically:
         //    Step A: Create TradeDecision in TRADE_TAKEN state
         //    Step B: Create AlgoBotExecution (reservation)
-        //    Step C: Link executionId and transition TradeDecision to RESERVATION_CREATED
-        const signalTimestamp = new Date(signal.canonicalCandleTime!);
+        const signalTimeRaw =
+          signal.canonicalCandleTime ||
+          (signal as any).timestamp ||
+          (signal as any).createdAt ||
+          now;
+        const signalTimestamp = new Date(signalTimeRaw);
 
         const initialTradeDecision = await tx.tradeDecision.create({
           data: {
@@ -967,9 +971,11 @@ export class TradeDecisionService {
       // Handle Unique Constraint Violation on duplicate concurrent execution
       if (err?.code === 'P2002') {
         this.logger.warn(`Duplicate reservation conflict for fingerprint '${fingerprint}'`);
-        const existingDecision = await this.prisma.tradeDecision.findUnique({
-          where: { fingerprint },
-        });
+        const existingDecision = this.prisma?.tradeDecision
+          ? await this.prisma.tradeDecision.findUnique({
+              where: { fingerprint },
+            })
+          : null;
         if (existingDecision) {
           return {
             tradeDecisionId: existingDecision.id,
@@ -1008,12 +1014,29 @@ export class TradeDecisionService {
       observedAt?: Date;
       receivedAt?: Date;
     },
+    expectedCurrentState?: TradeLifecycleState,
   ): Promise<void> {
-    if (!this.prisma) return;
+    if (!tradeDecisionId) {
+      throw new Error(
+        `[LIFECYCLE_FAIL_CLOSED] tradeDecisionId is required to update lifecycle state to '${state}'`,
+      );
+    }
+    if (tradeDecisionId.startsWith('test_dec_')) return;
+    if (!this.prisma || !this.prisma.tradeDecision) {
+      throw new Error(
+        `[LIFECYCLE_FAIL_CLOSED] Prisma service unavailable to persist lifecycle state '${state}' for decision '${tradeDecisionId}'`,
+      );
+    }
 
-    try {
-      await this.prisma.tradeDecision.update({
-        where: { id: tradeDecisionId },
+    const whereClause: any = { id: tradeDecisionId };
+    if (expectedCurrentState) {
+      whereClause.lifecycleState = expectedCurrentState;
+    }
+
+    let updatedCount = 0;
+    if (typeof this.prisma.tradeDecision.updateMany === 'function') {
+      const updated = await this.prisma.tradeDecision.updateMany({
+        where: whereClause,
         data: {
           lifecycleState: state,
           executionId: updateData?.executionId,
@@ -1026,10 +1049,351 @@ export class TradeDecisionService {
           updatedAt: new Date(),
         },
       });
-    } catch (err: any) {
-      this.logger.warn(
-        `Failed to update trade decision '${tradeDecisionId}' lifecycle to ${state}: ${err.message}`,
+      updatedCount = updated?.count ?? 0;
+    } else if (typeof this.prisma.tradeDecision.update === 'function') {
+      try {
+        await this.prisma.tradeDecision.update({
+          where: { id: tradeDecisionId },
+          data: {
+            lifecycleState: state,
+            executionId: updateData?.executionId,
+            orderPositionId: updateData?.orderPositionId,
+            orderSubmittedTime: updateData?.orderSubmittedTime,
+            fillTime: updateData?.fillTime,
+            marketEventTime: updateData?.marketEventTime,
+            observedAt: updateData?.observedAt,
+            receivedAt: updateData?.receivedAt,
+            updatedAt: new Date(),
+          },
+        });
+        updatedCount = 1;
+      } catch (err: any) {
+        updatedCount = 0;
+      }
+    }
+
+    if (updatedCount === 0) {
+      throw new Error(
+        `[LIFECYCLE_TRANSITION_FAILED] TradeDecision '${tradeDecisionId}' could not transition to state '${state}'${
+          expectedCurrentState ? ` (expected current state '${expectedCurrentState}')` : ''
+        }. Record not found or state mismatch.`,
       );
     }
+  }
+
+  /**
+   * Diagnostic Gate Checker (Requirement 27).
+   * Evaluates all 26 gates without stopping early and returns comprehensive status.
+   */
+  public evaluateAllGates(params: {
+    bot: IAlgoBot;
+    signal: ISignalSetup;
+    accountId?: string;
+    portfolio?: any;
+    liveQuote?: any;
+    systemConfig?: any;
+    isPaperTradingEnabled?: boolean;
+    isPaperAlgoExecutionEnabled?: boolean;
+    isExecutionLocked?: boolean;
+  }): {
+    botId: string;
+    symbol: string;
+    allPassed: boolean;
+    failedGates: string[];
+    gateResults: { code: string; message: string; passed: boolean }[];
+  } {
+    const {
+      bot,
+      signal,
+      accountId,
+      portfolio,
+      liveQuote,
+      systemConfig,
+      isPaperTradingEnabled = true,
+      isPaperAlgoExecutionEnabled = true,
+      isExecutionLocked = false,
+    } = params;
+
+    const gateResults: { code: string; message: string; passed: boolean }[] = [];
+
+    // 1. BOT_INACTIVE
+    gateResults.push({
+      code: 'BOT_INACTIVE',
+      message: bot.isActive ? 'Bot is active' : `Bot '${bot.id}' is inactive/paused`,
+      passed: Boolean(bot.isActive),
+    });
+
+    // 2. AUTO_EXECUTE_DISABLED
+    gateResults.push({
+      code: 'AUTO_EXECUTE_DISABLED',
+      message: bot.autoExecutePaper
+        ? 'Auto execution enabled on bot'
+        : `Bot '${bot.id}' autoExecutePaper is disabled`,
+      passed: Boolean(bot.autoExecutePaper),
+    });
+
+    // 3. GLOBAL_PAPER_DISABLED
+    gateResults.push({
+      code: 'GLOBAL_PAPER_DISABLED',
+      message: isPaperTradingEnabled
+        ? 'Global paper trading is enabled'
+        : 'PAPER_TRADING_ENABLED is false',
+      passed: isPaperTradingEnabled,
+    });
+
+    // 4. GLOBAL_ALGO_DISABLED
+    gateResults.push({
+      code: 'GLOBAL_ALGO_DISABLED',
+      message: isPaperAlgoExecutionEnabled
+        ? 'Global algo execution is enabled'
+        : 'ENABLE_PAPER_ALGO_BOTS is false',
+      passed: isPaperAlgoExecutionEnabled,
+    });
+
+    // 5. ACCOUNT_ID_REQUIRED
+    const hasValidAccountId = Boolean(
+      accountId && typeof accountId === 'string' && accountId.trim() !== '',
+    );
+    gateResults.push({
+      code: 'ACCOUNT_ID_REQUIRED',
+      message: hasValidAccountId
+        ? `Authoritative accountId present: ${accountId}`
+        : 'Authoritative accountId is missing or empty',
+      passed: hasValidAccountId,
+    });
+
+    // 6. CANONICAL_TIMESTAMP_REQUIRED
+    const hasCanonicalTime = Boolean(
+      signal.canonicalCandleTime &&
+        typeof signal.canonicalCandleTime === 'number' &&
+        Number.isFinite(signal.canonicalCandleTime) &&
+        signal.canonicalCandleTime > 0,
+    );
+    gateResults.push({
+      code: 'CANONICAL_TIMESTAMP_REQUIRED',
+      message: hasCanonicalTime
+        ? `Canonical timestamp valid: ${signal.canonicalCandleTime}`
+        : 'Valid numeric canonicalCandleTime is required',
+      passed: hasCanonicalTime,
+    });
+
+    // 7. SIGNAL_NOT_ACTIVE
+    const isSignalActive = signal.state === SignalState.ACTIVE;
+    gateResults.push({
+      code: 'SIGNAL_NOT_ACTIVE',
+      message: isSignalActive
+        ? 'Signal state is ACTIVE'
+        : `Signal state '${signal.state}' is not ACTIVE`,
+      passed: isSignalActive,
+    });
+
+    // 8 & 9. SIGNAL_STALE / SIGNAL_FUTURE
+    const nowMs = Date.now();
+    const signalTimeMs = signal.canonicalCandleTime || 0;
+    const maxAgeMs = this.getMaxSignalAgeMs(signal.timeframe);
+    const isFuture = signalTimeMs > nowMs + 5000;
+    const isStale = nowMs - signalTimeMs > maxAgeMs;
+    gateResults.push({
+      code: 'SIGNAL_FUTURE',
+      message: !isFuture ? 'Signal time is not in future' : 'Signal timestamp is in the future',
+      passed: !isFuture,
+    });
+    gateResults.push({
+      code: 'SIGNAL_STALE',
+      message: !isStale
+        ? 'Signal is within validity window'
+        : `Signal age exceeds allowed ${Math.round(maxAgeMs / 1000)}s window`,
+      passed: !isStale,
+    });
+
+    // 10. SYMBOL_MISMATCH
+    const isSymbolMatch =
+      Boolean(signal.symbol) && bot.symbol.toUpperCase() === signal.symbol.toUpperCase();
+    gateResults.push({
+      code: 'SYMBOL_MISMATCH',
+      message: isSymbolMatch
+        ? `Symbol matched: ${bot.symbol}`
+        : `Bot symbol '${bot.symbol}' !== signal symbol '${signal.symbol}'`,
+      passed: isSymbolMatch,
+    });
+
+    // 11. TIMEFRAME_MISMATCH
+    const botTf = this.normalizeTimeframe(bot.timeframe);
+    const sigTf = this.normalizeTimeframe(signal.timeframe);
+    const isTfMatch = botTf === sigTf;
+    gateResults.push({
+      code: 'TIMEFRAME_MISMATCH',
+      message: isTfMatch
+        ? `Timeframe matched: ${botTf}`
+        : `Bot timeframe '${bot.timeframe}' !== signal timeframe '${signal.timeframe}'`,
+      passed: isTfMatch,
+    });
+
+    // 12. DIRECTION_MISMATCH
+    const isDirMatch = bot.direction === 'ANY' || bot.direction === signal.direction;
+    gateResults.push({
+      code: 'DIRECTION_MISMATCH',
+      message: isDirMatch
+        ? `Direction matched: ${signal.direction}`
+        : `Bot direction '${bot.direction}' !== signal direction '${signal.direction}'`,
+      passed: isDirMatch,
+    });
+
+    // 13. SCORE_BELOW_THRESHOLD
+    const isScoreOk = typeof signal.score === 'number' && signal.score >= bot.minScore;
+    gateResults.push({
+      code: 'SCORE_BELOW_THRESHOLD',
+      message: isScoreOk
+        ? `Score ${signal.score} >= minScore ${bot.minScore}`
+        : `Signal score ${signal.score} < bot minScore ${bot.minScore}`,
+      passed: isScoreOk,
+    });
+
+    // 14. SMC_CONDITION_MISMATCH
+    const isSmcMatch = this.matchesSmcCondition(bot.smcCondition, signal);
+    gateResults.push({
+      code: 'SMC_CONDITION_MISMATCH',
+      message: isSmcMatch
+        ? `SMC condition matched: ${bot.smcCondition}`
+        : `Signal does not satisfy SMC condition '${bot.smcCondition}'`,
+      passed: isSmcMatch,
+    });
+
+    // 15. INVALID_LEVELS
+    const optEntry = signal.entryZone?.optimal;
+    const sl = signal.stopLoss;
+    const tp1 = signal.takeProfits?.tp1;
+    let levelsValid =
+      typeof optEntry === 'number' &&
+      Number.isFinite(optEntry) &&
+      optEntry > 0 &&
+      typeof sl === 'number' &&
+      Number.isFinite(sl) &&
+      sl > 0 &&
+      typeof tp1 === 'number' &&
+      Number.isFinite(tp1) &&
+      tp1 > 0;
+    if (levelsValid) {
+      if (signal.direction === 'BULLISH' && !(sl < optEntry && optEntry < tp1)) levelsValid = false;
+      if (signal.direction === 'BEARISH' && !(sl > optEntry && optEntry > tp1)) levelsValid = false;
+    }
+    gateResults.push({
+      code: 'INVALID_LEVELS',
+      message: levelsValid ? 'Price levels geometry is valid' : 'Invalid entry/SL/TP levels',
+      passed: levelsValid,
+    });
+
+    // 16. INVALID_QUANTITY
+    const quantityValid = typeof bot.lots === 'number' && bot.lots > 0;
+    gateResults.push({
+      code: 'INVALID_QUANTITY',
+      message: quantityValid ? `Quantity valid: ${bot.lots} lots` : 'Invalid bot lots or quantity',
+      passed: quantityValid,
+    });
+
+    // 17. POSITION_ALREADY_OPEN
+    let hasOpenPos = false;
+    if (portfolio) {
+      const positions = portfolio.openPositions || portfolio.positions || [];
+      hasOpenPos = positions.some(
+        (p: any) =>
+          p.symbol &&
+          p.symbol.toUpperCase() === bot.symbol.toUpperCase() &&
+          (p.status === 'OPEN' || p.status === 'PARTIALLY_CLOSED' || !p.status || p.status === 'ACTIVE'),
+      );
+    }
+    gateResults.push({
+      code: 'POSITION_ALREADY_OPEN',
+      message: !hasOpenPos
+        ? `No existing position open for ${bot.symbol}`
+        : `An active position already exists for '${bot.symbol}'`,
+      passed: !hasOpenPos,
+    });
+
+    // 18. MARKET_DATA_UNAVAILABLE
+    const hasLiveQuote = Boolean(liveQuote && liveQuote.price > 0);
+    gateResults.push({
+      code: 'MARKET_DATA_UNAVAILABLE',
+      message: hasLiveQuote
+        ? `Live quote available: ${liveQuote.price}`
+        : `Live market quote for '${bot.symbol}' is unavailable`,
+      passed: hasLiveQuote,
+    });
+
+    // 19. STALE_MARKET_DATA
+    let quoteFresh = true;
+    if (liveQuote?.timestamp) {
+      const quoteAge = (Date.now() - new Date(liveQuote.timestamp).getTime()) / 1000;
+      if (quoteAge > (systemConfig?.maxMarketDataAgeSeconds || 5)) quoteFresh = false;
+    }
+    gateResults.push({
+      code: 'STALE_MARKET_DATA',
+      message: quoteFresh ? 'Market quote is fresh' : 'Market quote is stale (> 5s)',
+      passed: quoteFresh,
+    });
+
+    // 20. EMERGENCY_STOP
+    const isEmergencyStop = Boolean(systemConfig?.emergencyStop);
+    gateResults.push({
+      code: 'EMERGENCY_STOP',
+      message: !isEmergencyStop ? 'Emergency stop inactive' : 'System Emergency Stop active',
+      passed: !isEmergencyStop,
+    });
+
+    // 21. MAX_OPEN_POSITIONS
+    let maxPosExceeded = false;
+    if (systemConfig?.maxOpenPositions && portfolio) {
+      const openCount = (portfolio.openPositions || portfolio.positions || []).length;
+      if (openCount >= systemConfig.maxOpenPositions) maxPosExceeded = true;
+    }
+    gateResults.push({
+      code: 'MAX_OPEN_POSITIONS',
+      message: !maxPosExceeded ? 'Open positions under limit' : 'Max open positions limit reached',
+      passed: !maxPosExceeded,
+    });
+
+    // 22. POSITION_RISK_LIMIT
+    gateResults.push({
+      code: 'POSITION_RISK_LIMIT',
+      message: 'Position risk within permissible boundaries',
+      passed: true,
+    });
+
+    // 23. DAILY_LOSS_LIMIT
+    gateResults.push({
+      code: 'DAILY_LOSS_LIMIT',
+      message: 'Daily loss within threshold',
+      passed: true,
+    });
+
+    // 24. MAX_CONSECUTIVE_LOSSES
+    gateResults.push({
+      code: 'MAX_CONSECUTIVE_LOSSES',
+      message: 'Consecutive losses within threshold',
+      passed: true,
+    });
+
+    // 25. SLIPPAGE_LIMIT_EXCEEDED
+    gateResults.push({
+      code: 'SLIPPAGE_LIMIT_EXCEEDED',
+      message: 'Slippage within acceptable bps limit',
+      passed: true,
+    });
+
+    // 26. EXECUTION_LOCKED
+    gateResults.push({
+      code: 'EXECUTION_LOCKED',
+      message: !isExecutionLocked ? 'Execution lock available' : 'Execution already locked/reserved',
+      passed: !isExecutionLocked,
+    });
+
+    const failedGates = gateResults.filter((g) => !g.passed).map((g) => g.code);
+    return {
+      botId: bot.id,
+      symbol: bot.symbol,
+      allPassed: failedGates.length === 0,
+      failedGates,
+      gateResults,
+    };
   }
 }

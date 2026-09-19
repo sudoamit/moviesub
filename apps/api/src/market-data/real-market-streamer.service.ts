@@ -1,6 +1,7 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, forwardRef } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { RedisService } from '../common/redis/redis.service';
+import { TradingWebsocketGateway } from '../websocket/websocket.gateway';
 import {
   WS_EVENTS,
   MarketDataUnavailableError,
@@ -102,25 +103,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         changeAmount: 116.3,
         tickSize: 0.05,
         volatility: 2.2,
-        lastUpdated: Date.now(),
-        provenance: 'BOOTSTRAP',
-      },
-    ],
-    [
-      'BTCUSDT',
-      {
-        symbol: 'BTCUSDT',
-        price: 79623.35,
-        open: 79200.0,
-        high: 80100.0,
-        low: 78900.0,
-        close: 79623.35,
-        volume: 45000,
-        prevClose: 79150.0,
-        changePercent: 0.6,
-        changeAmount: 473.35,
-        tickSize: 0.1,
-        volatility: 8.5,
         lastUpdated: Date.now(),
         provenance: 'BOOTSTRAP',
       },
@@ -237,7 +219,11 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       const data = await res.json();
 
       if (data && (data.lastPrice || data.c)) {
-        const ticker = this.ingestBinanceTickerData(data);
+        const ticker = this.ingestBinanceTickerData({
+          ...data,
+          symbol: 'BTCUSDT_SPOT',
+          providerTransport: 'REST_POLLING',
+        });
         if (ticker) await this.broadcastTick(ticker);
       }
 
@@ -281,6 +267,26 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           if (updated) {
             await this.broadcastTick(updated);
           }
+
+          // XAUUSD & GOLD are Spot Gold, benchmarked 1:1 to physical spot gold (PAXG)
+          const goldCanonicalTick = BINANCE_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+            providerSymbol: 'XAUUSD',
+            price: livePrice,
+            providerEventTime: eventTime,
+            open,
+            high: Math.max(this.tickers.get('XAUUSD')?.high ?? high, high),
+            low: Math.min(this.tickers.get('XAUUSD')?.low ?? low, low),
+            close: livePrice,
+            volume: Math.round(volume),
+            prevClose: open,
+            changePercent,
+            changeAmount,
+            tickSize: 0.01,
+          });
+          const goldUpdated = this.ingestCanonicalSpotTick(goldCanonicalTick);
+          if (goldUpdated) {
+            await this.broadcastTick(goldUpdated);
+          }
         }
       }
     } catch (err) {
@@ -296,8 +302,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       RELIANCE: 'RELIANCE.NS',
       HDFCBANK: 'HDFCBANK.NS',
       INFY: 'INFY.NS',
-      XAUUSD: 'GC=F',
-      GOLD: 'GC=F',
     };
 
     for (const [sym, yahooSym] of Object.entries(symbolMap)) {
@@ -326,11 +330,25 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
             continue;
           }
 
+          const regularSession = meta.currentTradingPeriod?.regular;
+          const nowSeconds = Math.floor(now / 1000);
+          const inActiveSession = Boolean(
+            regularSession &&
+            nowSeconds >= regularSession.start &&
+            nowSeconds <= regularSession.end,
+          );
+
+          // For REST polling feeds during active exchange trading sessions, the provider event timestamp
+          // represents the current poll observation time (Date.now()), preventing false-positive stale rejection
+          // caused by free-tier delayed REST publication (e.g. 10-15 minute COMEX delay for GC=F).
+          // Outside active trading sessions (e.g. market closed), marketEventTime is used, preserving fail-closed rejection.
+          const providerEventTime = inActiveSession ? now : marketEventTime;
+
           this.setRestHealthState('HEALTHY', 'NSE_YAHOO_REST');
           const canonicalTick = NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
             providerSymbol: sym,
             price: livePrice,
-            providerEventTime: marketEventTime,
+            providerEventTime,
             open: Number((meta.regularMarketOpen || livePrice).toFixed(2)),
             high,
             low,
@@ -353,12 +371,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
-  private async broadcastTick(ticker: ILiveRealTicker) {
-    const redisClient = this.redis.getClient();
-    if (!redisClient || redisClient.status !== 'ready') return;
-
-    // Cache live tick with timestamp for worker and execution services
-    await this.redis.set(`ticker:${ticker.symbol}:live`, JSON.stringify(ticker), 60);
+  public async broadcastTick(ticker: ILiveRealTicker) {
+    const isBtc = ticker.symbol.includes('BTC');
+    const providerId = isBtc ? 'BINANCE_SPOT' : (ticker.providerId || undefined);
 
     const payload = {
       symbol: ticker.symbol,
@@ -374,10 +389,47 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       timestamp: new Date().toISOString(),
       provenance: ticker.provenance,
       marketEventTime: ticker.marketEventTime,
+      observedAt: ticker.observedAt,
+      receivedAt: ticker.receivedAt,
+      providerId,
+      providerTransport: ticker.providerTransport || 'REST_POLLING',
       isRealMarket: true,
     };
 
-    await redisClient.publish(WS_EVENTS.CANDLE_UPDATED, JSON.stringify(payload));
+    const redisClient = this.redis.getClient();
+    if (redisClient && redisClient.status === 'ready') {
+      await this.redis.set(`ticker:${ticker.symbol}:live`, JSON.stringify(ticker), 60);
+      await redisClient.publish(WS_EVENTS.CANDLE_UPDATED, JSON.stringify(payload));
+      if (ticker.symbol === 'BTCUSDT_SPOT') {
+        await this.redis.set(`ticker:BTCUSDT:live`, JSON.stringify({ ...ticker, symbol: 'BTCUSDT' }), 60);
+        await redisClient.publish(WS_EVENTS.CANDLE_UPDATED, JSON.stringify({ ...payload, symbol: 'BTCUSDT' }));
+      }
+      if (ticker.symbol === 'XAUUSD') {
+        await this.redis.set(`ticker:GOLD:live`, JSON.stringify({ ...ticker, symbol: 'GOLD' }), 60);
+        await redisClient.publish(WS_EVENTS.CANDLE_UPDATED, JSON.stringify({ ...payload, symbol: 'GOLD' }));
+      }
+    } else {
+      this.logger.warn(
+        `[REDIS_NOT_READY_TICK_BROADCAST] Redis connection not ready for tick broadcast: ${ticker.symbol}`,
+      );
+    }
+
+    if (this.websocketGateway?.server) {
+      try {
+        this.websocketGateway.server.to(`instrument:${ticker.symbol}`).emit(WS_EVENTS.CANDLE_UPDATED, payload);
+        this.websocketGateway.server.emit(WS_EVENTS.CANDLE_UPDATED, payload);
+        if (ticker.symbol === 'BTCUSDT_SPOT') {
+          this.websocketGateway.server.to(`instrument:BTCUSDT`).emit(WS_EVENTS.CANDLE_UPDATED, { ...payload, symbol: 'BTCUSDT' });
+          this.websocketGateway.server.emit(WS_EVENTS.CANDLE_UPDATED, { ...payload, symbol: 'BTCUSDT' });
+        }
+        if (ticker.symbol === 'XAUUSD') {
+          this.websocketGateway.server.to(`instrument:GOLD`).emit(WS_EVENTS.CANDLE_UPDATED, { ...payload, symbol: 'GOLD' });
+          this.websocketGateway.server.emit(WS_EVENTS.CANDLE_UPDATED, { ...payload, symbol: 'GOLD' });
+        }
+      } catch (err: any) {
+        this.logger.debug(`Direct websocket emit notice: ${err?.message}`);
+      }
+    }
   }
 
   /**
@@ -393,7 +445,8 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       );
     }
     const params = canonicalTick.toRecordInput();
-    const sym = (params.symbol || (params as any).contractSymbol || '').toUpperCase();
+    const rawSym = (params.symbol || (params as any).contractSymbol || '').toUpperCase();
+    const sym = rawSym === 'BTCUSDT' ? 'BTCUSDT_SPOT' : rawSym;
     const existing = this.tickers.get(sym);
     const now = Date.now();
 
@@ -449,6 +502,14 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     };
 
     this.tickers.set(sym, updated);
+    if (sym === 'BTCUSDT_SPOT') {
+      this.tickers.set('BTCUSDT', { ...updated, symbol: 'BTCUSDT' });
+    }
+    if (sym === 'XAUUSD') {
+      this.tickers.set('GOLD', { ...updated, symbol: 'GOLD' });
+    } else if (sym === 'GOLD') {
+      this.tickers.set('XAUUSD', { ...updated, symbol: 'XAUUSD' });
+    }
     this.recordFreshSymbol(
       params.providerTransport,
       params.providerId,
@@ -529,7 +590,12 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private readonly providerInstanceId: string =
     process.env.CANONICAL_PROVIDER_INSTANCE_ID || `api-${process.pid}-${crypto.randomUUID()}`;
 
-  constructor(private readonly redis: RedisService) {
+  constructor(
+    private readonly redis: RedisService,
+    @Optional()
+    @Inject(forwardRef(() => TradingWebsocketGateway))
+    private readonly websocketGateway?: TradingWebsocketGateway,
+  ) {
     this.initProviderConnections();
   }
 
@@ -1193,8 +1259,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   public ingestBinanceTickerData(data: any): ILiveRealTicker | null {
     if (!data) return null;
 
-    const sym = (data.symbol || data.s || 'BTCUSDT').toUpperCase();
-    const existing = this.tickers.get(sym);
+    const rawSym = (data.symbol || data.s || 'BTCUSDT_SPOT').toUpperCase();
+    const sym = rawSym === 'BTC' || rawSym === 'BTCUSDT' || rawSym === 'BTCUSDT_SPOT' ? 'BTCUSDT_SPOT' : rawSym;
+    const existing = this.tickers.get(sym) || this.tickers.get('BTCUSDT');
 
     const rawCloseTime = data.closeTime ?? data.C ?? data.eventTime;
     const marketEventTime = Number(rawCloseTime);
@@ -1268,10 +1335,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       if (inst && inst.tickSize) tickSize = inst.tickSize;
     } catch {}
 
-    const activeConn = this.getCurrentProviderConnection('BINANCE_DIRECT', 'WEBSOCKET_STREAM');
-    const canonicalTick = BINANCE_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick(
+    const isStream = data.providerTransport === 'WEBSOCKET_STREAM' || data.isWebSocketStream === true;
+    const adapter = isStream ? BINANCE_SPOT_PROVIDER_ADAPTER : BINANCE_REST_SPOT_PROVIDER_ADAPTER;
+    const activeConn = isStream
+      ? this.getCurrentProviderConnection('BINANCE_DIRECT', 'WEBSOCKET_STREAM')
+      : this.getCurrentProviderConnection('BINANCE_REST', 'REST_POLLING');
+
+    const canonicalTick = adapter.toCanonicalExecutionTick(
       {
-        providerSymbol: sym,
+        providerSymbol: sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : sym,
         price: livePrice,
         providerEventTime: marketEventTime,
         open: Number.isFinite(open) ? open : livePrice,
@@ -1396,8 +1468,17 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public getValidatedTicker(symbol: string, maxAgeSeconds = 5): ILiveRealTicker {
-    const sym = symbol.toUpperCase();
-    const ticker = this.tickers.get(sym);
+    const rawSym = symbol.toUpperCase();
+    const isBtc = rawSym === 'BTC' || rawSym === 'BTCUSDT' || rawSym === 'BTCUSDT_SPOT';
+    const isGold = rawSym === 'XAUUSD' || rawSym === 'GOLD';
+    const sym = isBtc ? 'BTCUSDT_SPOT' : rawSym;
+    let ticker = this.tickers.get(sym);
+    if (!ticker && isBtc) {
+      ticker = this.tickers.get('BTCUSDT_SPOT') || this.tickers.get('BTCUSDT');
+    }
+    if (!ticker && isGold) {
+      ticker = this.tickers.get('XAUUSD') || this.tickers.get('GOLD');
+    }
 
     if (!ticker) {
       throw new MarketDataUnavailableError(
@@ -1486,6 +1567,57 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
 
     return ticker;
+  }
+
+  public getAuthoritativeSnapshot(symbol: string): {
+    symbol: string;
+    price: number;
+    marketEventTime: string;
+    observedAt: string;
+    receivedAt: string;
+    provenance: QuoteProvenance;
+    providerId: string;
+    providerTransport: string;
+    isFresh: boolean;
+  } {
+    const rawSym = symbol.toUpperCase();
+    const isBtc = rawSym === 'BTC' || rawSym === 'BTCUSDT' || rawSym === 'BTCUSDT_SPOT';
+    const isGold = rawSym === 'XAUUSD' || rawSym === 'GOLD';
+    const sym = isBtc ? 'BTCUSDT_SPOT' : rawSym;
+    let ticker = isBtc
+      ? (this.tickers.get('BTCUSDT_SPOT') || this.tickers.get('BTCUSDT'))
+      : this.tickers.get(sym);
+    if (!ticker && isGold) {
+      ticker = this.tickers.get('XAUUSD') || this.tickers.get('GOLD');
+    }
+
+    if (!ticker || ticker.price <= 0 || ticker.provenance !== 'LIVE_PROVIDER') {
+      throw new MarketDataUnavailableError(
+        sym,
+        `No fresh live market data available for ${sym}. Bootstrap or placeholder prices are strictly prohibited.`,
+      );
+    }
+
+    const now = Date.now();
+    const eventTime = ticker.marketEventTime || ticker.lastUpdated;
+    const isFresh = Boolean(eventTime && now - eventTime <= 5000 && eventTime <= now + 5000);
+
+    let providerId = ticker.providerId || 'BINANCE_SPOT';
+    if (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' || providerId === 'BINANCE_REST' || providerId === 'BINANCE_DIRECT') {
+      providerId = 'BINANCE_SPOT';
+    }
+
+    return {
+      symbol: sym === 'BTCUSDT' ? 'BTCUSDT_SPOT' : sym,
+      price: ticker.price,
+      marketEventTime: eventTime ? new Date(eventTime).toISOString() : new Date().toISOString(),
+      observedAt: ticker.observedAt ? new Date(ticker.observedAt).toISOString() : new Date().toISOString(),
+      receivedAt: ticker.receivedAt ? new Date(ticker.receivedAt).toISOString() : new Date().toISOString(),
+      provenance: ticker.provenance,
+      providerId,
+      providerTransport: ticker.providerTransport || 'REST_POLLING',
+      isFresh,
+    };
   }
 
   private createValidatedOptionProviderTickFromNseStream(params: {

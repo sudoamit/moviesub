@@ -14,7 +14,7 @@ export interface AuthoritativePosition {
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
   realizedPnL?: number;
-  status: 'OPEN' | 'CLOSED' | 'CANCELLED';
+  status: 'OPEN' | 'PARTIALLY_CLOSED' | 'CLOSED' | 'CANCELLED';
   openedAt: string;
   closedAt?: string;
   sourceBotId?: string;
@@ -55,6 +55,16 @@ export interface AlgoExecutionRecord {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+export function isSameSymbol(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const normA = a.toUpperCase().replace(/_SPOT$/, '');
+  const normB = b.toUpperCase().replace(/_SPOT$/, '');
+  if (normA === normB) return true;
+  if ((normA === 'GOLD' || normA === 'XAUUSD') && (normB === 'GOLD' || normB === 'XAUUSD')) return true;
+  return false;
+}
 
 export function usePaperTrading(selectedSymbol: string) {
   const [portfolio, setPortfolio] = useState<AuthoritativePortfolio | null>(null);
@@ -107,14 +117,17 @@ export function usePaperTrading(selectedSymbol: string) {
   const activePositionForSymbol = useMemo(() => {
     if (!portfolio || !portfolio.openPositions) return null;
     return (
-      portfolio.openPositions.find((p) => p.symbol === selectedSymbol && p.status === 'OPEN') ||
-      null
+      portfolio.openPositions.find(
+        (p) =>
+          isSameSymbol(p.symbol, selectedSymbol) &&
+          (p.status === 'OPEN' || p.status === 'PARTIALLY_CLOSED'),
+      ) || null
     );
   }, [portfolio, selectedSymbol]);
 
   const activeExecutionForSymbol = useMemo(() => {
     if (!executions || executions.length === 0) return null;
-    return executions.find((e) => e.symbol === selectedSymbol) || null;
+    return executions.find((e) => isSameSymbol(e.symbol, selectedSymbol)) || null;
   }, [executions, selectedSymbol]);
 
   const closePosition = useCallback(

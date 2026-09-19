@@ -90,85 +90,38 @@ export class PositionMonitorProcessor extends WorkerHost {
 
   /**
    * Main evaluation loop for all open/partially closed positions across all paper accounts.
+   * Requirement 11: PaperPositionMonitorService in API is the single authoritative TP/SL lifecycle executor.
+   * Worker yields lifecycle mutation authority to prevent competing TP/SL state machines.
    */
   public async evaluateActivePositions(): Promise<{
     checked: number;
     closed: number;
     updated: number;
   }> {
-    const config = await this.getSystemConfig();
-
-    if (
-      !config ||
-      typeof config.maxMarketDataAgeSeconds !== 'number' ||
-      typeof config.maxSlippageBps !== 'number'
-    ) {
-      this.logger.error(
-        '[PositionMonitor] Failed to load TradingSystemConfig from database. Failing closed.',
-      );
-      return { checked: 0, closed: 0, updated: 0 };
-    }
-
-    const maxMarketDataAgeSeconds = config.maxMarketDataAgeSeconds;
-    const maxSlippageBps = config.maxSlippageBps;
-
     const activePositions = await this.prisma.paperPosition.findMany({
       where: {
         status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING] },
       },
-      include: { account: true },
     });
 
     if (activePositions.length === 0) {
       return { checked: 0, closed: 0, updated: 0 };
     }
 
-    let closedCount = 0;
-    let updatedCount = 0;
+    this.logger.debug(
+      `[PositionMonitor] Found ${activePositions.length} active positions. Yielding lifecycle execution authority to PaperPositionMonitorService.`,
+    );
 
-    for (const pos of activePositions) {
+    if (this.redis) {
       try {
-        const liveTick = await this.resolveLivePrice(pos.symbol, maxMarketDataAgeSeconds);
-
-        // Fail-closed: If live tick is null/stale/invalid, do NOT close or alter the position
-        if (!liveTick || liveTick.price <= 0) {
-          if (pos.status === PositionState.EXIT_PENDING) {
-            this.logger.debug(
-              `[PositionMonitor] Position ${pos.id} (${pos.symbol}) is EXIT_PENDING but waiting for a fresh live tick; remaining EXIT_PENDING.`,
-            );
-          }
-          continue;
-        }
-
-        const livePrice = liveTick.price;
-        const tickTimestamp = liveTick.timestamp;
-
-        // If position was already EXIT_PENDING, attempt immediate close ONLY with the validated fresh live tick
-        if (pos.status === PositionState.EXIT_PENDING) {
-          await this.executeFullClose(
-            pos,
-            livePrice,
-            'Exit Pending Completed on Next Tick',
-            'MANUAL',
-            tickTimestamp,
-            maxSlippageBps,
-          );
-          closedCount++;
-          continue;
-        }
-
-        const isClosed = await this.evaluatePositionTick(pos, livePrice, tickTimestamp, maxSlippageBps);
-        if (isClosed) {
-          closedCount++;
-        } else {
-          updatedCount++;
-        }
-      } catch (err: any) {
-        this.logger.error(`Error evaluating position ${pos.id} (${pos.symbol}): ${err?.message}`);
-      }
+        await this.redis.publish(
+          'position-monitor:tick',
+          JSON.stringify({ activeCount: activePositions.length, timestamp: Date.now() }),
+        );
+      } catch {}
     }
 
-    return { checked: activePositions.length, closed: closedCount, updated: updatedCount };
+    return { checked: activePositions.length, closed: 0, updated: 0 };
   }
 
   /**

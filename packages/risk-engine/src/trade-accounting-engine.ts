@@ -28,6 +28,7 @@ export interface ITradePnlCalculation {
   realizedR: number;
   fees: number;
   slippage: number;
+  fxRateUsed?: number;
   accountingSnapshot?: ITradeAccountingSnapshot;
 }
 
@@ -61,7 +62,7 @@ export interface ITradePnlParams {
 }
 
 export interface IExecutionLegSettlementParams {
-  role: 'ENTRY' | 'TP1_PARTIAL' | 'FINAL_EXIT';
+  role: 'ENTRY' | 'TP1_PARTIAL' | 'TP2_PARTIAL' | 'FINAL_EXIT';
   entryPrice: number;
   fillPrice: number;
   quantity: number;
@@ -74,7 +75,7 @@ export interface IExecutionLegSettlementParams {
 }
 
 export interface IExecutionLegSettlement {
-  role: 'ENTRY' | 'TP1_PARTIAL' | 'FINAL_EXIT';
+  role: 'ENTRY' | 'TP1_PARTIAL' | 'TP2_PARTIAL' | 'FINAL_EXIT';
   grossPnL: number;
   netPnL: number;
   realizedR: number;
@@ -459,6 +460,7 @@ export class TradeAccountingEngine {
       realizedR,
       fees: safeFees,
       slippage: safeSlippage,
+      fxRateUsed: effectiveFx,
       accountingSnapshot: acctSnap,
     };
   }

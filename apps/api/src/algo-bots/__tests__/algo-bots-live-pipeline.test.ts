@@ -11,6 +11,8 @@ describe('AlgoBotsService execution integration test', () => {
   let executionsDb: Map<string, any>;
 
   beforeEach(() => {
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     executionsDb = new Map();
 
     prismaClient = {
@@ -89,7 +91,7 @@ describe('AlgoBotsService execution integration test', () => {
     };
 
     mockPaperTradingService = {
-      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [] }),
+      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [], accountId: 'acc_live_test' }),
       getValidatedMarketPrice: jest
         .fn()
         .mockResolvedValue({ price: 65000.0, timestamp: new Date() }),
@@ -111,6 +113,11 @@ describe('AlgoBotsService execution integration test', () => {
       prismaClient as unknown as PrismaService,
       null as any,
     );
+  });
+
+  afterEach(() => {
+    delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
   });
 
   const buildNaturalLiveSMCCandles = () => {

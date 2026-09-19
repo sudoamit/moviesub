@@ -126,6 +126,7 @@ export const TerminalWorkspace: React.FC<TerminalWorkspaceProps> = ({
         symbol={selectedSymbol}
         signal={selectedSignal}
         livePrice={currentTicker.price ?? 0}
+        activePosition={activePosition}
       />
 
       {/* Quant Intelligence Engine Panel */}

@@ -53,6 +53,18 @@ async function main() {
             isActive: true,
         },
         {
+            symbol: 'BTCUSDT_SPOT',
+            name: 'Bitcoin / Tether USD (Spot)',
+            exchange: 'BINANCE_SPOT',
+            assetType: client_1.AssetType.CRYPTO,
+            tickSize: 0.01,
+            lotSize: 1,
+            contractSize: 1,
+            currency: 'USDT',
+            tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
+            isActive: true,
+        },
+        {
             symbol: 'XAUUSD',
             name: 'Gold Spot / US Dollar',
             exchange: 'COMEX',

@@ -30,7 +30,9 @@ export function useMarketContext(initialSymbol = 'NIFTY', initialTimeframe = '15
   // Normalize symbol naming
   const normalizeSymbol = useCallback((rawSym: string): string => {
     const s = (rawSym || '').toUpperCase();
-    if (s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN') return 'BTCUSDT';
+    if (s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN' || s === 'BTCUSDT' || s === 'BTCUSDT_SPOT') {
+      return 'BTCUSDT_SPOT';
+    }
     if (s === 'GOLD' || s === 'XAU' || s === 'XAU/USD' || s === 'SPOTGOLD') return 'XAUUSD';
     return s;
   }, []);

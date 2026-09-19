@@ -5,6 +5,17 @@ import { ISignalSetup } from '@quant/shared';
 import { StrategyMode } from '../components/Header';
 import { useMarketStream } from '../context/MarketStreamContext';
 
+function matchSignalSymbol(signalSym?: string, targetSym?: string): boolean {
+  if (!signalSym || !targetSym) return false;
+  if (signalSym === targetSym) return true;
+  const normSig = signalSym.toUpperCase().replace(/_SPOT$/, '');
+  const normTgt = targetSym.toUpperCase().replace(/_SPOT$/, '');
+  if (normSig === normTgt) return true;
+  if ((normSig === 'GOLD' || normSig === 'XAUUSD') && (normTgt === 'GOLD' || normTgt === 'XAUUSD')) return true;
+  if ((normSig === 'BTC' || normSig.includes('BTC')) && (normTgt === 'BTC' || normTgt.includes('BTC'))) return true;
+  return false;
+}
+
 export function useSignals(
   selectedSymbol: string,
   selectedTimeframe: string,
@@ -27,7 +38,7 @@ export function useSignals(
           const data = await res.json();
           if (Array.isArray(data)) {
             setSignals(data);
-            const current = data.find((s) => s.symbol === selectedSymbol);
+            const current = data.find((s) => matchSignalSymbol(s.symbol, selectedSymbol));
             setSelectedSignal(current || null);
           }
         }
@@ -46,7 +57,7 @@ export function useSignals(
 
   // Keep selectedSignal in sync when symbol changes
   useEffect(() => {
-    const current = signals.find((s) => s.symbol === selectedSymbol);
+    const current = signals.find((s) => matchSignalSymbol(s.symbol, selectedSymbol));
     setSelectedSignal(current || null);
   }, [selectedSymbol, signals]);
 

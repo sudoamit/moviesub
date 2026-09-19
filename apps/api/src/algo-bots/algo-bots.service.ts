@@ -25,7 +25,7 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
 } from '@quant/shared';
-import { TradeDecisionService } from './trade-decision.service';
+import { TradeDecisionService, IPreTradeDecisionResult } from './trade-decision.service';
 import * as crypto from 'crypto';
 
 export enum ExecutionFailureReason {
@@ -288,6 +288,21 @@ export class AlgoBotsService implements OnModuleInit {
       createdAt: new Date().toISOString(),
       triggerCount: 0,
     },
+    {
+      id: 'bot_gold_order_flow',
+      name: 'XAUUSD 15m Institutional Order Flow Scalper',
+      symbol: 'XAUUSD',
+      direction: 'ANY',
+      timeframe: '15m',
+      minScore: 75,
+      smcCondition: 'ANY_CONFLUENCE',
+      lots: 1,
+      autoExecutePaper: true,
+      notifyWebhook: false,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    },
   ];
 
   private lastScanTime?: Date;
@@ -295,6 +310,11 @@ export class AlgoBotsService implements OnModuleInit {
   private lastExecutionAttempt?: Date;
   private lastExecutionSuccess?: Date;
   private lastExecutionRejectionReason?: string;
+  private lastTradeDecisionId?: string;
+  private lastExecutionId?: string;
+  private lastPositionId?: string;
+  private lastLifecycleState?: string;
+  private lastLifecycleTransitionTime?: Date;
 
   constructor(
     private readonly paperTradingService: PaperTradingService,
@@ -317,19 +337,32 @@ export class AlgoBotsService implements OnModuleInit {
     this.lastSignalTime = time;
   }
 
-  public isPaperExecutionEnabled(): boolean {
+  public isPaperTradingEnabled(): boolean {
     return process.env.PAPER_TRADING_ENABLED === 'true';
   }
 
+  public isPaperAlgoExecutionEnabled(): boolean {
+    return (
+      process.env.PAPER_TRADING_ENABLED === 'true' &&
+      process.env.ENABLE_PAPER_ALGO_BOTS === 'true'
+    );
+  }
+
+  public isPaperExecutionEnabled(): boolean {
+    return this.isPaperAlgoExecutionEnabled();
+  }
+
   async onModuleInit() {
-    const paperEnabled = this.isPaperExecutionEnabled();
+    const paperTradingEnabled = this.isPaperTradingEnabled();
+    const paperAlgoExecutionEnabled = this.isPaperAlgoExecutionEnabled();
 
     this.logger.log(
       `[ALGO PAPER EXECUTION STATUS]\n` +
         `ENABLE_PAPER_ALGO_BOTS=${process.env.ENABLE_PAPER_ALGO_BOTS || 'false'}\n` +
         `PAPER_TRADING_ENABLED=${process.env.PAPER_TRADING_ENABLED || 'false'}\n` +
         `NODE_ENV=${process.env.NODE_ENV || 'development'}\n` +
-        `paperExecutionEnabled=${paperEnabled}`,
+        `paperTradingEnabled=${paperTradingEnabled}\n` +
+        `paperAlgoExecutionEnabled=${paperAlgoExecutionEnabled}`,
     );
 
     if (this.prisma) {
@@ -348,28 +381,16 @@ export class AlgoBotsService implements OnModuleInit {
                 minScore: bot.minScore,
                 smcCondition: bot.smcCondition as any,
                 lots: bot.lots,
-                autoExecutePaper: paperEnabled ? true : bot.autoExecutePaper,
+                autoExecutePaper: bot.autoExecutePaper,
                 notifyWebhook: bot.notifyWebhook,
-                isActive: paperEnabled ? true : bot.isActive,
+                isActive: bot.isActive,
                 triggerCount: bot.triggerCount,
               },
             });
           }
-        } else if (paperEnabled) {
-          for (const bot of this.presetBots) {
-            await this.prisma.algoBot.updateMany({
-              where: { id: bot.id, isActive: false },
-              data: { isActive: true, autoExecutePaper: true },
-            });
-          }
         }
       } catch (err: any) {
-        this.logger.warn(`Failed to seed/sync preset AlgoBots in database: ${err?.message}`);
-      }
-    } else if (paperEnabled) {
-      for (const bot of this.presetBots) {
-        bot.isActive = true;
-        bot.autoExecutePaper = true;
+        this.logger.warn(`Failed to seed preset AlgoBots in database: ${err?.message}`);
       }
     }
 
@@ -426,6 +447,18 @@ export class AlgoBotsService implements OnModuleInit {
       }
     }
     return this.presetBots;
+  }
+
+  async listExecutions(limit = 20) {
+    if (!this.prisma) return [];
+    try {
+      return await this.prisma.algoBotExecution.findMany({
+        take: Number(limit) || 20,
+        orderBy: { createdAt: 'desc' },
+      });
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -1139,87 +1172,99 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * P0 #1 & P0 #2: True Atomic Execution Reservation via PostgreSQL `@unique(fingerprint)`
+   * @deprecated Deprecated duplicate reservation mechanism.
+   * Delegates authoritatively to TradeDecisionService.commitTradeDecisionAndReservation().
+   * Maintains backward compatibility for existing callers and tests.
    */
   public async reserveExecutionLock(
     bot: IAlgoBot,
     signal: ISignalSetup,
     fingerprint: string,
+    accountId?: string,
   ): Promise<{ success: boolean; executionId?: string; reason?: string }> {
     if (this.inMemoryLocks.has(fingerprint)) {
       return { success: false, reason: 'LOCAL_LOCK_ACTIVE' };
     }
 
-    const signalTimestamp =
-      signal.canonicalCandleTime || signal.timestamp || signal.createdAt || new Date();
+    const effectiveAccountId = accountId || bot.accountId || 'acc_authoritative';
 
-    if (this.prisma) {
+    const decisionResult: IPreTradeDecisionResult = {
+      decision: TradeDecisionType.TAKE,
+      decisionReasonCode: 'PRE_TRADE_APPROVED',
+      decisionReason: 'Authoritative reservation',
+      lifecycleState: TradeLifecycleState.PRE_TRADE_APPROVED,
+      plannedLevels: {
+        optimalEntry: signal.entryZone?.optimal || 100,
+        stopLoss: signal.stopLoss || 90,
+        target1: signal.takeProfits?.tp1 || 110,
+        quantity: bot.lots || 1,
+        leverage: 1.0,
+        riskAmount: 1000,
+        riskPercent: 1.0,
+      },
+    };
+
+    if (this.tradeDecisionService) {
       try {
-        const execution = await this.prisma.algoBotExecution.create({
-          data: {
-            fingerprint,
-            botId: bot.id,
-            symbol: bot.symbol.toUpperCase(),
-            timeframe: this.normalizeTimeframe(bot.timeframe),
-            direction: signal.direction as any,
-            signalId: signal.id || null,
-            signalTimestamp: new Date(signalTimestamp),
-            state: 'RESERVED',
-            correlationId: fingerprint,
-          },
+        const commitRes = await this.tradeDecisionService.commitTradeDecisionAndReservation({
+          bot,
+          signal,
+          decisionResult,
+          fingerprint,
+          correlationId: fingerprint,
+          accountId: effectiveAccountId,
         });
 
-        this.inMemoryLocks.add(fingerprint);
-        return { success: true, executionId: execution.id };
-      } catch (err: any) {
-        // Unique constraint violation (Prisma P2002) means this fingerprint has already been reserved
-        if (err?.code === 'P2002') {
-          const existing = await this.prisma.algoBotExecution.findUnique({
-            where: { fingerprint },
-          });
-
+        if (commitRes.isDuplicate || !commitRes.executionId) {
           // Atomic retry state transition via updateMany (prevents retry race conditions & restores clean RESERVED state)
-          if (existing && existing.state === 'FAILED_RETRYABLE') {
-            try {
-              const res = await this.transitionExecutionState(
-                existing.id,
-                'FAILED_RETRYABLE',
-                'RESERVED',
-              );
-              if (res.count === 1) {
-                this.inMemoryLocks.add(fingerprint);
-                return { success: true, executionId: existing.id };
-              }
-            } catch (retryErr: any) {
-              if (
-                retryErr instanceof InternalServerErrorException &&
-                (retryErr.message.includes('STATE_TRANSITION_REJECTED') ||
-                  retryErr.message.includes('INVALID_STATE_TRANSITION_EDGE'))
-              ) {
-                const rechecked = await this.prisma.algoBotExecution.findUnique({
-                  where: { id: existing.id },
-                });
-                if (rechecked && rechecked.state !== 'FAILED_RETRYABLE') {
+          if (this.prisma) {
+            const existing = await this.prisma.algoBotExecution.findUnique({
+              where: { fingerprint },
+            });
+
+            if (existing && existing.state === 'FAILED_RETRYABLE') {
+              try {
+                const res = await this.transitionExecutionState(
+                  existing.id,
+                  'FAILED_RETRYABLE',
+                  'RESERVED',
+                );
+                if (res.count === 1) {
                   this.inMemoryLocks.add(fingerprint);
-                  return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
+                  return { success: true, executionId: existing.id };
                 }
-                return { success: false, reason: 'STATE_TRANSITION_CONFLICT' };
+              } catch (retryErr: any) {
+                if (
+                  retryErr instanceof InternalServerErrorException &&
+                  (retryErr.message.includes('STATE_TRANSITION_REJECTED') ||
+                    retryErr.message.includes('INVALID_STATE_TRANSITION_EDGE'))
+                ) {
+                  const rechecked = await this.prisma.algoBotExecution.findUnique({
+                    where: { id: existing.id },
+                  });
+                  if (rechecked && rechecked.state !== 'FAILED_RETRYABLE') {
+                    this.inMemoryLocks.add(fingerprint);
+                    return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
+                  }
+                  return { success: false, reason: 'STATE_TRANSITION_CONFLICT' };
+                }
+                this.logger.error(
+                  `Database error during retry transition for ${fingerprint}: ${retryErr.message}`,
+                );
+                return { success: false, reason: 'DATABASE_UNAVAILABLE' };
               }
-              // Real DB exception during retry transition -> report DATABASE_UNAVAILABLE / fail closed
-              this.logger.error(
-                `Database error during retry transition for ${fingerprint}: ${retryErr.message}`,
-              );
-              return { success: false, reason: 'DATABASE_UNAVAILABLE' };
+              this.inMemoryLocks.add(fingerprint);
+              return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
             }
-            this.inMemoryLocks.add(fingerprint);
-            return { success: false, reason: 'RETRY_RACE_CONCURRENTLY_CLAIMED' };
           }
 
           this.inMemoryLocks.add(fingerprint);
           return { success: false, reason: 'DUPLICATE_RESERVATION' };
         }
 
-        // P0 #1: DB reservation is authoritative. FAIL CLOSED if DB fails.
+        this.inMemoryLocks.add(fingerprint);
+        return { success: true, executionId: commitRes.executionId };
+      } catch (err: any) {
         this.logger.error(`Database atomic reservation failed for ${fingerprint}: ${err.message}`);
         return { success: false, reason: 'DATABASE_UNAVAILABLE' };
       }
@@ -1481,34 +1526,138 @@ export class AlgoBotsService implements OnModuleInit {
   }
 
   /**
-   * Requirement 11: Health endpoint telemetry provider
+   * Requirement 26: Health & Diagnostics endpoint telemetry provider
    */
   public async getAlgoExecutionHealth(): Promise<{
+    paperTradingEnabled: boolean;
+    algoPaperExecutionEnabled: boolean;
     paperExecutionEnabled: boolean;
     hasEnabledExecutionBot: boolean;
     activeBotCount: number;
     enabledBotCount: number;
+    autoExecutionBotCount: number;
     lastSignalTime?: Date;
     lastExecutionAttempt?: Date;
     lastExecutionSuccess?: Date;
     lastExecutionRejectionReason?: string;
+    lastTradeDecisionId?: string;
+    lastExecutionId?: string;
+    lastPositionId?: string;
+    lastLifecycleState?: string;
+    lastLifecycleTransitionTime?: Date;
   }> {
     const bots = await this.listBots();
     const activeBotCount = bots.filter((b) => b.isActive).length;
     const enabledBotCount = bots.filter((b) => b.isActive && b.autoExecutePaper).length;
 
-    const paperExecutionEnabled = process.env.PAPER_TRADING_ENABLED === 'true';
+    const paperTradingEnabled = this.isPaperTradingEnabled();
+    const algoPaperExecutionEnabled = this.isPaperAlgoExecutionEnabled();
+
+    let lastTradeDecisionId = this.lastTradeDecisionId;
+    let lastExecutionId = this.lastExecutionId;
+    let lastPositionId = this.lastPositionId;
+    let lastLifecycleState = this.lastLifecycleState;
+    let lastLifecycleTransitionTime = this.lastLifecycleTransitionTime;
+
+    if (
+      !lastTradeDecisionId &&
+      this.prisma &&
+      typeof (this.prisma.tradeDecision as any)?.findFirst === 'function'
+    ) {
+      try {
+        const latestDecision = await this.prisma.tradeDecision.findFirst({
+          orderBy: { updatedAt: 'desc' },
+        });
+        if (latestDecision) {
+          lastTradeDecisionId = latestDecision.id;
+          lastExecutionId = latestDecision.executionId || undefined;
+          lastPositionId = latestDecision.orderPositionId || undefined;
+          lastLifecycleState = latestDecision.lifecycleState;
+          lastLifecycleTransitionTime = latestDecision.updatedAt;
+        }
+      } catch {}
+    }
 
     return {
-      paperExecutionEnabled,
+      paperTradingEnabled,
+      algoPaperExecutionEnabled,
+      paperExecutionEnabled: algoPaperExecutionEnabled,
       hasEnabledExecutionBot: enabledBotCount > 0,
       activeBotCount,
       enabledBotCount,
+      autoExecutionBotCount: enabledBotCount,
       lastSignalTime: this.lastSignalTime,
       lastExecutionAttempt: this.lastExecutionAttempt,
       lastExecutionSuccess: this.lastExecutionSuccess,
       lastExecutionRejectionReason: this.lastExecutionRejectionReason,
+      lastTradeDecisionId,
+      lastExecutionId,
+      lastPositionId,
+      lastLifecycleState,
+      lastLifecycleTransitionTime,
     };
+  }
+
+  /**
+   * Requirement 27: Bot-specific multi-gate diagnostics
+   */
+  public async getBotDiagnostics(
+    botId: string,
+    signal?: ISignalSetup,
+  ): Promise<{
+    botId: string;
+    symbol: string;
+    allPassed: boolean;
+    failedGates: string[];
+    gateResults: { code: string; message: string; passed: boolean }[];
+  }> {
+    const bots = await this.listBots();
+    const bot = bots.find((b) => b.id === botId);
+    if (!bot) {
+      throw new NotFoundException(`Bot with ID '${botId}' not found`);
+    }
+
+    let portfolio: any = null;
+    try {
+      portfolio = await this.paperTradingService.getPortfolio();
+    } catch {}
+
+    let liveQuote: any = null;
+    try {
+      liveQuote = await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+    } catch {}
+
+    const dummySignal: ISignalSetup = signal || {
+      id: `sig_diag_${bot.symbol}`,
+      symbol: bot.symbol,
+      timeframe: bot.timeframe as any,
+      direction: bot.direction === 'BEARISH' ? 'BEARISH' : 'BULLISH',
+      state: SignalState.ACTIVE,
+      score: bot.minScore,
+      canonicalCandleTime: Date.now(),
+      entryZone: { min: 100, max: 102, optimal: 101 },
+      stopLoss: bot.direction === 'BEARISH' ? 105 : 95,
+      takeProfits: {
+        tp1: bot.direction === 'BEARISH' ? 95 : 107,
+        tp2: bot.direction === 'BEARISH' ? 90 : 112,
+        tp3: bot.direction === 'BEARISH' ? 85 : 117,
+      },
+      triggerEvidence: {
+        orderBlock: { matched: true, timestamp: new Date().toISOString() },
+        fvg: { matched: true, timestamp: new Date().toISOString() },
+        liquiditySweep: { matched: true, timestamp: new Date().toISOString() },
+      } as any,
+    } as any;
+
+    return this.tradeDecisionService!.evaluateAllGates({
+      bot,
+      signal: dummySignal,
+      accountId: portfolio?.accountId,
+      portfolio,
+      liveQuote,
+      isPaperTradingEnabled: this.isPaperTradingEnabled(),
+      isPaperAlgoExecutionEnabled: this.isPaperAlgoExecutionEnabled(),
+    });
   }
 
   /**
@@ -1549,6 +1698,8 @@ export class AlgoBotsService implements OnModuleInit {
     }
 
     const canonicalCandleFormatted = canonicalDecisionTime.toISOString();
+    const paperTradingEnabled = this.isPaperTradingEnabled();
+    const paperAlgoExecutionEnabled = this.isPaperAlgoExecutionEnabled();
 
     for (const bot of bots) {
       if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
@@ -1558,6 +1709,79 @@ export class AlgoBotsService implements OnModuleInit {
       this.logger.log(
         `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
       );
+
+      // Gate 1: Global Paper Trading Engine Available
+      if (!paperTradingEnabled) {
+        const reason = 'PAPER_TRADING_DISABLED';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Paper trading engine is disabled globally (PAPER_TRADING_ENABLED is not true)`,
+        );
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+          details: 'Global paper trading is disabled (PAPER_TRADING_ENABLED != true)',
+        });
+        continue;
+      }
+
+      // Gate 2: Global Paper Algo Bot Execution Enabled
+      if (!paperAlgoExecutionEnabled) {
+        const reason = 'PAPER_ALGO_BOTS_DISABLED';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] Algo bot paper execution is disabled globally (ENABLE_PAPER_ALGO_BOTS is not true)`,
+        );
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+          details: 'Global paper algo bot execution is disabled (ENABLE_PAPER_ALGO_BOTS != true)',
+        });
+        continue;
+      }
+
+      // Gate 3: Bot Activation
+      if (!bot.isActive) {
+        const reason = 'BOT_INACTIVE';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(`[ALGO EXECUTION REJECTED] Bot '${bot.id}' is inactive/paused`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+          details: `Bot '${bot.id}' is inactive/paused`,
+        });
+        continue;
+      }
+
+      // Gate 4: Bot Auto-Execute Paper Setting
+      if (!bot.autoExecutePaper) {
+        const reason = 'AUTO_EXECUTE_PAPER_DISABLED';
+        this.lastExecutionRejectionReason = reason;
+        await this.recordBotTrigger(bot.id, signal);
+        this.logger.warn(`[ALGO EXECUTION SKIPPED] Bot '${bot.id}' autoExecutePaper is disabled`);
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'SKIPPED',
+          reasonCode: reason,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+          details: `Bot '${bot.id}' autoExecutePaper is false`,
+        });
+        continue;
+      }
 
       // Fetch Live Portfolio & Live Market Quote for Pre-Trade Decision Evaluation
       let portfolio = null;
@@ -1576,7 +1800,25 @@ export class AlgoBotsService implements OnModuleInit {
         liveQuoteError = err;
       }
 
-      const accountId = (portfolio as any)?.accountId || (bot as any)?.accountId || 'paper_primary_account';
+      // Gate 5: Fail closed on authoritative account identity (Requirement 4 & 10)
+      const accountId = (portfolio as any)?.accountId;
+      if (!accountId || typeof accountId !== 'string' || accountId.trim() === '') {
+        const reason = 'ACCOUNT_ID_REQUIRED';
+        this.lastExecutionRejectionReason = reason;
+        this.logger.warn(
+          `[ALGO EXECUTION REJECTED] No authoritative accountId found for portfolio`,
+        );
+        results.push({
+          botId: bot.id,
+          symbol: bot.symbol,
+          status: 'REJECTED',
+          reasonCode: reason,
+          decision: 'REJECT',
+          lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+          details: 'Authoritative accountId is required for auto execution',
+        });
+        continue;
+      }
 
       // 1. Authoritative Pre-Trade Decision Evaluation
       const decisionResult = this.tradeDecisionService!.evaluatePreTradeDecision({
@@ -1658,6 +1900,11 @@ export class AlgoBotsService implements OnModuleInit {
         accountId,
       });
 
+      this.lastTradeDecisionId = commitRes.tradeDecisionId;
+      this.lastExecutionId = commitRes.executionId;
+      this.lastLifecycleState = commitRes.lifecycleState;
+      this.lastLifecycleTransitionTime = new Date();
+
       if (commitRes.isDuplicate || !commitRes.executionId) {
         const reason = 'EXECUTION_LOCKED';
         this.lastExecutionRejectionReason = reason;
@@ -1738,6 +1985,7 @@ export class AlgoBotsService implements OnModuleInit {
           target1: signal.takeProfits.tp1,
           target2: signal.takeProfits.tp2,
           target3: signal.takeProfits.tp3,
+          tradeDecisionId,
           idempotencyKey: fingerprint,
           correlationId: fingerprint,
         });
@@ -1765,7 +2013,10 @@ export class AlgoBotsService implements OnModuleInit {
           },
         );
 
+        this.lastPositionId = orderResult.id;
         this.lastExecutionSuccess = new Date();
+        this.lastLifecycleState = TradeLifecycleState.POSITION_OPENED;
+        this.lastLifecycleTransitionTime = new Date();
 
         this.logger.warn(
           `[ALGO EXECUTION DECISION]\n` +
@@ -1801,6 +2052,8 @@ export class AlgoBotsService implements OnModuleInit {
       } catch (e: any) {
         const classification = classifyExecutionFailure(e);
         this.lastExecutionRejectionReason = classification.reasonCode;
+        this.lastLifecycleState = TradeLifecycleState.TRADE_FAILED;
+        this.lastLifecycleTransitionTime = new Date();
         this.logger.error(
           `[BOT EXECUTION ERROR] Bot '${bot.id}' order placement failed: ${e.message}`,
           e.stack,

@@ -339,6 +339,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     await expect(
       service.placeOrder({
         symbol: 'NIFTY',
+        contractSymbol: 'NIFTY 24000 PE',
+        instrumentType: 'OPTION',
         direction: 'SELL',
         quantity: 25,
         orderType: 'MARKET',
@@ -381,6 +383,8 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
     await expect(
       service.placeOrder({
         symbol: 'NIFTY',
+        contractSymbol: 'NIFTY 24000 PE',
+        instrumentType: 'OPTION',
         direction: 'SELL',
         quantity: 25,
         orderType: 'MARKET',

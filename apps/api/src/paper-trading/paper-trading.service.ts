@@ -27,6 +27,9 @@ import {
   resolveMarginModel,
   ExecutionAggregator,
   IFillRecord,
+  isSupportedSpotSymbol,
+  LEGACY_SPOT_ALIASES,
+  TradeLifecycleState,
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { Decimal } from '@prisma/client/runtime/library';
@@ -61,6 +64,7 @@ export class PaperTradingService implements IExecutionProvider {
   async getOrCreateAccount(): Promise<any> {
     let account = await this.prisma.paperAccount.findFirst({
       where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
     });
 
     if (!account) {
@@ -120,45 +124,77 @@ export class PaperTradingService implements IExecutionProvider {
    * Calculates realistic Indian stock & crypto transaction charges (Brokerage, STT, GST, Exchange turnover)
    */
   public calculateCharges(
-    turnover: number,
+    turnoverQuote: number,
     isCrypto: boolean,
+    fxRate = 1.0,
+    fxTimestamp = Date.now(),
+    stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE' = 'ENTRY',
   ): {
+    feeCurrency: string;
+    accountCurrency: string;
+    brokerageQuote: number;
+    brokerageAccount: number;
+    totalChargesQuote: number;
+    totalCharges: number; // in account currency (INR)
+    fxRate: number;
+    fxRateTimestamp: number;
+    feeCalculationBasis: string;
+    stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE';
     brokerage: number;
     stt: number;
     exchangeTurnover: number;
     gst: number;
     sebiTurnover: number;
-    totalCharges: number;
   } {
     if (isCrypto) {
-      const brokerage = Number((turnover * 0.001).toFixed(2)); // 0.1% Binance maker/taker fee
-      const totalCharges = brokerage;
+      const brokerageQuote = Number((turnoverQuote * 0.001).toFixed(4)); // 0.1% Binance maker/taker fee in USDT
+      const totalChargesQuote = brokerageQuote;
+      const brokerageAccount = Number((brokerageQuote * fxRate).toFixed(2));
+      const totalCharges = brokerageAccount;
       return {
-        brokerage,
+        feeCurrency: 'USDT',
+        accountCurrency: 'INR',
+        brokerageQuote,
+        brokerageAccount,
+        totalChargesQuote,
+        totalCharges,
+        fxRate,
+        fxRateTimestamp: fxTimestamp,
+        feeCalculationBasis: 'BINANCE_SPOT_0_1_PERCENT',
+        stage,
+        brokerage: brokerageAccount,
         stt: 0,
         exchangeTurnover: 0,
         gst: 0,
         sebiTurnover: 0,
-        totalCharges,
       };
     }
 
     const brokerage = 20.0;
-    const stt = Number((turnover * 0.000125).toFixed(2));
-    const exchangeTurnover = Number((turnover * 0.0000345).toFixed(2));
+    const stt = Number((turnoverQuote * 0.000125).toFixed(2));
+    const exchangeTurnover = Number((turnoverQuote * 0.0000345).toFixed(2));
     const gst = Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
-    const sebiTurnover = Number((turnover * 0.000001).toFixed(2));
+    const sebiTurnover = Number((turnoverQuote * 0.000001).toFixed(2));
     const totalCharges = Number(
       (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
     );
 
     return {
+      feeCurrency: 'INR',
+      accountCurrency: 'INR',
+      brokerageQuote: brokerage,
+      brokerageAccount: brokerage,
+      totalChargesQuote: totalCharges,
+      totalCharges,
+      fxRate: 1.0,
+      fxRateTimestamp: fxTimestamp,
+      feeCalculationBasis: 'NSE_EQUITY_DERIVATIVE_SCHEDULE',
+      stage,
       brokerage,
       stt,
       exchangeTurnover,
       gst,
       sebiTurnover,
-      totalCharges,
     };
   }
 
@@ -299,6 +335,46 @@ export class PaperTradingService implements IExecutionProvider {
         };
       }
 
+      const target1 = pos.target1 ? Number(pos.target1) : undefined;
+      const target2 = pos.target2 ? Number(pos.target2) : undefined;
+      const target3 = pos.target3 ? Number(pos.target3) : undefined;
+
+      let tp1Hit = false;
+      let tp2Hit = false;
+      let tp3Hit = false;
+
+      if (isBuy) {
+        tp1Hit = target1 !== undefined && livePrice >= target1;
+        tp2Hit = target2 !== undefined && livePrice >= target2;
+        tp3Hit = target3 !== undefined && livePrice >= target3;
+      } else {
+        tp1Hit = target1 !== undefined && livePrice <= target1;
+        tp2Hit = target2 !== undefined && livePrice <= target2;
+        tp3Hit = target3 !== undefined && livePrice <= target3;
+      }
+
+      const highestTargetReached = tp3Hit
+        ? 'TP3'
+        : tp2Hit
+          ? 'TP2'
+          : tp1Hit
+            ? 'TP1'
+            : 'NONE';
+
+      let targetProgressPercent = 0;
+      const effectiveEntry = entryPrice;
+      const anchorTarget = target2 ?? target1;
+      if (anchorTarget && effectiveEntry) {
+        const totalDist = Math.abs(anchorTarget - effectiveEntry);
+        const currentDist = isBuy
+          ? Math.max(0, livePrice - effectiveEntry)
+          : Math.max(0, effectiveEntry - livePrice);
+        targetProgressPercent =
+          totalDist > 0
+            ? Number(Math.min(100, Math.max(0, (currentDist / totalDist) * 100)).toFixed(1))
+            : 0;
+      }
+
       formattedPositions.push({
         id: pos.id,
         accountId: pos.accountId,
@@ -315,9 +391,9 @@ export class PaperTradingService implements IExecutionProvider {
         currentPrice: livePrice,
         stopLoss,
         initialStopLoss,
-        target1: pos.target1 ? Number(pos.target1) : undefined,
-        target2: pos.target2 ? Number(pos.target2) : undefined,
-        target3: pos.target3 ? Number(pos.target3) : undefined,
+        target1,
+        target2,
+        target3,
         initialTarget1: pos.initialTarget1 ? Number(pos.initialTarget1) : undefined,
         initialTarget2: pos.initialTarget2 ? Number(pos.initialTarget2) : undefined,
         initialTarget3: pos.initialTarget3 ? Number(pos.initialTarget3) : undefined,
@@ -338,6 +414,17 @@ export class PaperTradingService implements IExecutionProvider {
         fxRateUsed: fxRate,
         fxRateTimestamp: openingSnapshot?.calculatedAt || Date.now(),
         accountingSnapshotHash: openingSnapshot?.snapshotHash,
+        grossUnrealizedPnlQuote: pnlCalc.grossPnlQuote,
+        grossUnrealizedPnlAccount: pnlCalc.grossPnlAccount,
+        incurredFeesAccount: charges.totalCharges,
+        unrealizedNetPnlAccount: pnlCalc.netPnlAccount,
+        feeCurrency: charges.feeCurrency || (quoteCurrency === 'USDT' ? 'USDT' : 'INR'),
+        pnlDirection: isBuy ? 'LONG' : 'SHORT',
+        pnlFormula: isBuy
+          ? '(exit - entry) * qty * contractSize * fxRate - fees'
+          : '(entry - exit) * qty * contractSize * fxRate - fees',
+        targetProgressPercent,
+        highestTargetReached,
       });
 
       totalUnrealized += unrealizedPnL;
@@ -442,11 +529,31 @@ export class PaperTradingService implements IExecutionProvider {
       );
     }
 
-    const symbol = this.normalizeSymbol(req.symbol);
-    const isCrypto = symbol === 'BTCUSDT' || symbol === 'BTCUSD';
+    const rawSymbol = this.normalizeSymbol(req.symbol);
+    const instrumentType = req.instrumentType || (req.strike ? 'OPTION' : 'SPOT');
+    const isOption = instrumentType === 'OPTION' || Boolean(req.strike);
+
+    const isSpot = instrumentType === 'SPOT' && !isOption;
+    const canonicalSpotSymbol =
+      LEGACY_SPOT_ALIASES[rawSymbol] || (isSupportedSpotSymbol(rawSymbol) ? rawSymbol : null);
+
+    if (isSpot && canonicalSpotSymbol && req.direction !== 'BUY' && !req.tradeDecisionId) {
+      throw new BadRequestException(
+        `SPOT_SHORT_SELLING_FORBIDDEN: Cannot create a short/bearish position for spot instrument '${rawSymbol}'. ` +
+          `Spot instruments (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT) are long-only. ` +
+          `BUY entries open positions; SELL reduces/closes existing long holdings only.`,
+      );
+    }
+
+    const symbol = rawSymbol;
+
+    const isCrypto =
+      symbol === 'BTCUSDT' ||
+      symbol === 'BTCUSDT_SPOT' ||
+      symbol === 'BTCUSD' ||
+      symbol.toUpperCase().includes('BTC');
     const correlationId =
       req.correlationId || `corr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const instrumentType = req.instrumentType || (req.strike ? 'OPTION' : 'SPOT');
     const contractSymbol =
       req.contractSymbol ||
       (req.strike && req.optionType ? `${symbol} ${req.strike} ${req.optionType}` : symbol);
@@ -864,17 +971,13 @@ export class PaperTradingService implements IExecutionProvider {
     const finalFillPrice = slippageResult.fillPrice;
     const slippageAmount = slippageResult.slippageAmount;
 
-    const turnover = finalFillPrice * req.quantity;
-    const charges = this.calculateCharges(turnover, isCrypto);
-    const effLeverage = Math.max(1, Math.min(req.leverage || 5, Number(config.maxLeverage)));
-    // requiredMargin is pure margin (notional / leverage); charges are a separate cash deduction
-    const requiredMargin = Number((turnover / effLeverage).toFixed(2));
-    const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
-
-    // 6. Execute Order & Persist Position inside Atomic Concurrency-Safe Transaction
     const orderSubmittedAt = new Date();
     const fillExecutionTime = new Date();
-    const openingInst = getAuthoritativeInstrument(symbol);
+    const baseLookupSymbol = symbol.includes(' ') ? symbol.split(' ')[0] : symbol;
+    const openingInst = getAuthoritativeInstrument(baseLookupSymbol);
+    const maxInstLeverage = openingInst.marginMode === 'SPOT' ? 1 : Number(config.maxLeverage || 5);
+    const requestedLeverage = req.leverage ?? (openingInst.marginMode === 'SPOT' ? 1 : Math.min(5, maxInstLeverage));
+    const effLeverage = Math.max(1, Math.min(requestedLeverage, maxInstLeverage));
     const openingQuoteCurrency = openingInst.currency;
     const openingConverter = PointInTimeCurrencyConverter.getInstance();
     const openingFxRes = openingConverter.getRate(
@@ -882,13 +985,28 @@ export class PaperTradingService implements IExecutionProvider {
       'INR',
       fillExecutionTime.getTime(),
     );
+    const fxRate = openingFxRes.fxRate;
+    const contractSize = openingInst.contractSize ?? 1;
+
+    const turnoverQuote = finalFillPrice * req.quantity * contractSize;
+    const turnoverAccount = Number((turnoverQuote * fxRate).toFixed(2));
+    const charges = this.calculateCharges(
+      turnoverQuote,
+      isCrypto,
+      fxRate,
+      fillExecutionTime.getTime(),
+      'ENTRY',
+    );
+    const requiredMargin = Number((turnoverAccount / effLeverage).toFixed(2));
+    const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
+
     const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
 
     const openingAccountingSnapshot = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: openingQuoteCurrency,
       fxResult: openingFxRes,
-      contractSize: openingInst.contractSize ?? 1,
+      contractSize,
       lotSize: Number(req.quantity),
       resolvedMarginModel: openingMarginModel,
       calculatedAt: fillExecutionTime.getTime(),
@@ -904,7 +1022,15 @@ export class PaperTradingService implements IExecutionProvider {
       }
 
       const txCash = Number(txAccount.cashBalance);
-      const txUsedMargin = Number(txAccount.usedMargin);
+      // Reconcile used margin directly from active open positions to prevent dirty/stale margin locks
+      const activePositions = await tx.paperPosition.findMany({
+        where: {
+          accountId: account.id,
+          status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
+        },
+        select: { usedMargin: true },
+      });
+      const txUsedMargin = activePositions.reduce((sum, p) => sum + Number(p.usedMargin), 0);
       const txAvailable = txCash - txUsedMargin;
 
       if (txAvailable < requiredMargin + charges.totalCharges) {
@@ -954,7 +1080,7 @@ export class PaperTradingService implements IExecutionProvider {
           fillPrice: new Decimal(finalFillPrice),
           fillQuantity: new Decimal(req.quantity),
           fee: new Decimal(charges.totalCharges),
-          feeBreakdownJson: charges,
+          feeBreakdownJson: charges as any,
           slippage: new Decimal(slippageAmount),
           executionPriceSource: ExecutionPriceSource.LIVE_TICK,
           liquidityType: 'TAKER',
@@ -994,11 +1120,18 @@ export class PaperTradingService implements IExecutionProvider {
           maxFavorableExcursion: new Decimal(0.0),
           maxAdverseExcursion: new Decimal(0.0),
           status: PositionState.OPEN,
-          chargesJson: charges,
+          chargesJson: charges as any,
           featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
           executionEventsJson: {
             accountingSnapshot: openingAccountingSnapshot as any,
             accountingSnapshotHash: openingAccountingSnapshot.snapshotHash,
+            tradeDecisionId: req.tradeDecisionId,
+            managedBy: 'API_MONITOR',
+            currentLifecycleState: TradeLifecycleState.POSITION_OPENED,
+            initialQuantity: Number(req.quantity),
+            remainingQuantity: Number(req.quantity),
+            currentStopLoss: Number(stopLoss),
+            partialLegs: [],
           } as any,
           openedAt: fill.fillTimestamp,
           correlationId,
@@ -1006,7 +1139,6 @@ export class PaperTradingService implements IExecutionProvider {
       });
 
       // MODEL-A ACCOUNTING CONTRACT:
-      // PaperAccount.realizedPnL === PaperTrade.realizedPnL === (cashBalanceFinal - cashBalanceInitial) over any completed lifecycle.
       // At ENTRY: cashBalance -= entryFees, realizedPnL -= entryFees, totalChargesPaid += entryFees, usedMargin += requiredMargin.
       await tx.paperAccount.update({
         where: { id: account.id },
@@ -1018,22 +1150,58 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // Create Audit Events
+      // Synchronize TradeDecision if tradeDecisionId provided (fail-closed inside tx)
+      if (req.tradeDecisionId) {
+        await tx.tradeDecision.updateMany({
+          where: { id: req.tradeDecisionId },
+          data: {
+            lifecycleState: TradeLifecycleState.POSITION_OPENED,
+            orderPositionId: position.id,
+            orderSubmittedTime: orderSubmittedAt,
+            fillTime: fillExecutionTime,
+            marketEventTime: sourceTimestamp,
+            observedAt: orderSubmittedAt,
+            receivedAt: fillExecutionTime,
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      // Create Audit Events with full metadata
+      const auditPayload = {
+        positionId: position.id,
+        orderId: order.id,
+        executionId: order.id,
+        tradeDecisionId: req.tradeDecisionId,
+        symbol,
+        direction: req.direction,
+        triggerPrice: finalFillPrice,
+        fillPrice: finalFillPrice,
+        quantity: req.quantity,
+        marketEventTime: sourceTimestamp.toISOString(),
+        observedAt: orderSubmittedAt.toISOString(),
+        receivedAt: fillExecutionTime.toISOString(),
+        correlationId,
+      };
+
       await tx.auditEvent.createMany({
         data: [
+          {
+            actor: 'SYSTEM',
+            service: 'PAPER_TRADING',
+            eventType: 'ORDER_SUBMITTED',
+            entityType: 'ORDER',
+            entityId: order.id,
+            payloadJson: auditPayload,
+            correlationId,
+          },
           {
             actor: 'SYSTEM',
             service: 'PAPER_TRADING',
             eventType: 'ORDER_FILLED',
             entityType: 'ORDER',
             entityId: order.id,
-            payloadJson: {
-              symbol,
-              quantity: req.quantity,
-              fillPrice: finalFillPrice,
-              executionPriceSource: ExecutionPriceSource.LIVE_TICK,
-              sourceTimestamp: sourceTimestamp.toISOString(),
-            },
+            payloadJson: auditPayload,
             correlationId,
           },
           {
@@ -1042,13 +1210,7 @@ export class PaperTradingService implements IExecutionProvider {
             eventType: 'POSITION_OPENED',
             entityType: 'POSITION',
             entityId: position.id,
-            payloadJson: {
-              symbol,
-              quantity: req.quantity,
-              entryPrice: finalFillPrice,
-              leverage: effLeverage,
-              usedMargin: requiredMargin,
-            },
+            payloadJson: auditPayload,
             correlationId,
           },
         ],
@@ -1575,6 +1737,12 @@ export class PaperTradingService implements IExecutionProvider {
           currentPrice: new Decimal(effectiveExitPrice),
           unrealizedPnL: new Decimal(0.0),
           unrealizedR: new Decimal(0.0),
+          executionEventsJson: {
+            ...((pos.executionEventsJson as any) || {}),
+            currentLifecycleState: TradeLifecycleState.TRADE_CLOSED,
+            closedAt: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
+            exitReason,
+          },
         },
       });
 
@@ -1685,7 +1853,40 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
-      // 9. Audit Log
+      // Synchronize TradeDecision lifecycle state if tradeDecisionId exists
+      const tradeDecisionId = (pos.executionEventsJson as any)?.tradeDecisionId;
+      if (tradeDecisionId) {
+        await tx.tradeDecision.updateMany({
+          where: { id: tradeDecisionId },
+          data: {
+            lifecycleState: TradeLifecycleState.TRADE_CLOSED,
+            orderPositionId: pos.id,
+            fillTime: exitTime,
+            marketEventTime: sourceTimestamp,
+            updatedAt: new Date(),
+          },
+        });
+      }
+
+      // 9. Audit Logs
+      await tx.auditEvent.create({
+        data: {
+          actor: 'SYSTEM',
+          service: 'PAPER_TRADING',
+          eventType: 'EXIT_FILLED',
+          entityType: 'ORDER',
+          entityId: exitOrder.id,
+          payloadJson: {
+            positionId: pos.id,
+            tradeId: tradeRecord.id,
+            symbol,
+            exitPrice: finalExitPrice,
+            fillQuantity: pos.quantity,
+          },
+          correlationId,
+        },
+      });
+
       await tx.auditEvent.create({
         data: {
           actor: 'SYSTEM',
@@ -1708,6 +1909,25 @@ export class PaperTradingService implements IExecutionProvider {
             accountingSnapshotHash: snapshot.snapshotHash,
             isLegacyExecutionData,
             executionDataComplete,
+          },
+          correlationId,
+        },
+      });
+
+      await tx.auditEvent.create({
+        data: {
+          actor: 'SYSTEM',
+          service: 'PAPER_TRADING',
+          eventType: 'TRADE_CLOSED',
+          entityType: 'TRADE',
+          entityId: tradeRecord.id,
+          payloadJson: {
+            tradeId: tradeRecord.id,
+            positionId: pos.id,
+            tradeDecisionId,
+            realizedPnL: canonicalRealizedPnL,
+            realizedR: canonicalRealizedR,
+            exitReason,
           },
           correlationId,
         },

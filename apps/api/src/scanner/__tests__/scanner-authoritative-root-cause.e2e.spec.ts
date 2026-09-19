@@ -184,6 +184,7 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
 
   beforeAll(async () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     process.env.NODE_ENV = 'test';
     delete process.env.APP_ENV;
 
@@ -253,6 +254,7 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
   });
 
   afterAll(async () => {
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
     global.fetch = originalFetch;
     if (prismaService) {
       await prismaService.$disconnect();

@@ -27,6 +27,9 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
   });
 
   beforeEach(async () => {
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
+
     if (prismaClient) {
       try {
         await prismaClient.tradeDecision.deleteMany({
@@ -41,7 +44,7 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
     }
 
     mockPaperTradingService = {
-      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [] }),
+      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [], accountId: 'acc_e2e_paper' }),
       getValidatedMarketPrice: jest
         .fn()
         .mockResolvedValue({ price: 65000.0, timestamp: new Date() }),
@@ -60,6 +63,11 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
     mockCandlesService = {
       getCandles: jest.fn(),
     };
+  });
+
+  afterEach(() => {
+    delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
   });
 
   function buildNaturalSMCCandles() {

@@ -35,9 +35,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   activeSignal,
   livePrice,
 }) => {
-  const isCrypto = currentSymbol === 'BTCUSDT';
+  const isCrypto =
+    currentSymbol === 'BTCUSDT' ||
+    currentSymbol === 'BTCUSDT_SPOT' ||
+    currentSymbol.toUpperCase().includes('BTC');
   const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
-  const currencySymbol = '₹';
+  const currencySymbol = isCrypto || isGold ? '$' : '₹';
   // Quote currency identifier
   const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
   // Display price helper
@@ -52,17 +55,23 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>(
     activeSignal?.direction === 'BEARISH' ? 'SELL' : 'BUY',
   );
-  const [leverage, setLeverage] = useState<number>(5);
+  const [leverage, setLeverage] = useState<number>(isCrypto ? 1 : 5);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
+  const availableLeverages = isCrypto ? [1] : [1, 2, 5, 10, 20];
+
   useEffect(() => {
+    if (isCrypto) {
+      setLeverage(1);
+      return;
+    }
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('quant_risk_leverage');
       if (saved && !isNaN(Number(saved))) {
         setLeverage(Number(saved));
       }
     }
-  }, []);
+  }, [isCrypto]);
 
   // Exact Exchange Lot Multipliers
   const getLotMultiplier = (sym: string): number => {
@@ -80,6 +89,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       case 'INFY':
         return 400;
       case 'BTCUSDT':
+      case 'BTCUSDT_SPOT':
         return 0.01;
       case 'XAUUSD':
       case 'GOLD':
@@ -125,8 +135,80 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
     }
   }, [activeSignal, currentSymbol]);
 
+  const isSpotInstrument =
+    currentSymbol === 'BTCUSDT_SPOT' ||
+    currentSymbol === 'BTCUSDT' ||
+    currentSymbol === 'NIFTY_SPOT' ||
+    currentSymbol === 'BANKNIFTY_SPOT' ||
+    currentSymbol.toUpperCase().includes('BTC');
+
+  const hasOpenPosition = portfolio?.openPositions?.some(
+    (p: any) =>
+      p.symbol === currentSymbol ||
+      p.symbol?.replace(/_SPOT$/, '') === currentSymbol.replace(/_SPOT$/, ''),
+  );
+
   const handlePlaceOrder = async (overrideSide?: 'BUY' | 'SELL') => {
     const side = overrideSide || orderSide;
+    const effectiveLeverage = isCrypto ? 1 : leverage;
+
+    if (isSpotInstrument && side === 'SELL') {
+      const openPos = portfolio?.openPositions?.find(
+        (p: any) =>
+          p.symbol === currentSymbol ||
+          p.symbol?.replace(/_SPOT$/, '') === currentSymbol.replace(/_SPOT$/, ''),
+      );
+      if (openPos) {
+        await handleClosePosition(openPos.id);
+        return;
+      } else {
+        setStatusMessage(
+          '❌ Spot instruments (BTC, NIFTY) are long-only. Short selling is not permitted on Spot.',
+        );
+        setTimeout(() => setStatusMessage(null), 5000);
+        return;
+      }
+    }
+
+    // Dynamic, mathematically guaranteed directional SL & TP relative to execution CMP
+    const defaultRisk = isCrypto ? 250 : isGold ? 20 : 25;
+    const computedSL =
+      side === 'BUY'
+        ? activeSignal?.stopLoss && Number(activeSignal.stopLoss) < cmp
+          ? Number(activeSignal.stopLoss)
+          : Number((cmp - defaultRisk).toFixed(2))
+        : activeSignal?.stopLoss && Number(activeSignal.stopLoss) > cmp
+          ? Number(activeSignal.stopLoss)
+          : Number((cmp + defaultRisk).toFixed(2));
+
+    const riskDist = Math.abs(cmp - computedSL);
+    const computedTP1 =
+      side === 'BUY'
+        ? activeSignal?.takeProfits?.tp1 && Number(activeSignal.takeProfits.tp1) > cmp
+          ? Number(activeSignal.takeProfits.tp1)
+          : Number((cmp + riskDist * 1.5).toFixed(2))
+        : activeSignal?.takeProfits?.tp1 && Number(activeSignal.takeProfits.tp1) < cmp
+          ? Number(activeSignal.takeProfits.tp1)
+          : Number((cmp - riskDist * 1.5).toFixed(2));
+
+    const computedTP2 =
+      side === 'BUY'
+        ? activeSignal?.takeProfits?.tp2 && Number(activeSignal.takeProfits.tp2) > computedTP1
+          ? Number(activeSignal.takeProfits.tp2)
+          : Number((cmp + riskDist * 2.5).toFixed(2))
+        : activeSignal?.takeProfits?.tp2 && Number(activeSignal.takeProfits.tp2) < computedTP1
+          ? Number(activeSignal.takeProfits.tp2)
+          : Number((cmp - riskDist * 2.5).toFixed(2));
+
+    const computedTP3 =
+      side === 'BUY'
+        ? activeSignal?.takeProfits?.tp3 && Number(activeSignal.takeProfits.tp3) > computedTP2
+          ? Number(activeSignal.takeProfits.tp3)
+          : Number((cmp + riskDist * 4.0).toFixed(2))
+        : activeSignal?.takeProfits?.tp3 && Number(activeSignal.takeProfits.tp3) < computedTP2
+          ? Number(activeSignal.takeProfits.tp3)
+          : Number((cmp - riskDist * 4.0).toFixed(2));
+
     try {
       setIsSubmitting(true);
       const res = await fetch('http://localhost:3001/api/paper-trading/order', {
@@ -138,11 +220,11 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           quantity: totalQuantity,
           orderType: 'MARKET',
           price: cmp,
-          stopLoss: activeSignal?.stopLoss,
-          target1: activeSignal?.takeProfits?.tp1,
-          target2: activeSignal?.takeProfits?.tp2,
-          target3: activeSignal?.takeProfits?.tp3,
-          leverage,
+          stopLoss: computedSL,
+          target1: computedTP1,
+          target2: computedTP2,
+          target3: computedTP3,
+          leverage: effectiveLeverage,
         }),
       });
 
@@ -366,10 +448,15 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
               <Zap className="w-3 h-3 text-cyan-400" /> Leverage:
             </span>
             <div className="flex gap-1">
-              {[1, 2, 5, 10, 20].map((lev) => (
+              {availableLeverages.map((lev) => (
                 <button
                   key={lev}
-                  onClick={() => setLeverage(lev)}
+                  onClick={() => {
+                    setLeverage(lev);
+                    if (typeof window !== 'undefined' && !isCrypto) {
+                      localStorage.setItem('quant_risk_leverage', String(lev));
+                    }
+                  }}
                   className={`px-2 py-1 rounded-md text-[11px] font-bold border transition-all ${
                     leverage === lev
                       ? 'bg-cyan-500 text-slate-950 border-cyan-400'
@@ -430,15 +517,31 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             {cmpINR.toFixed(2)})
           </button>
 
-          <button
-            onClick={() => handlePlaceOrder('SELL')}
-            disabled={isSubmitting}
-            className="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 text-sm transition-all shadow-lg shadow-rose-950/50 active:scale-[0.99]"
-          >
-            <TrendingDown className="w-4 h-4" />
-            1-CLICK SELL SHORT ({totalQuantity} {currentSymbol} @ {currencySymbol}
-            {cmpINR.toFixed(2)})
-          </button>
+          {isSpotInstrument && !hasOpenPosition ? (
+            <button
+              onClick={() => {
+                setStatusMessage(
+                  'ℹ️ Spot instruments (BTC, NIFTY) are long-only. Click 1-Click Buy to open a position.',
+                );
+                setTimeout(() => setStatusMessage(null), 5000);
+              }}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-400 font-bold py-3 rounded-xl flex items-center justify-center gap-2 text-xs border border-slate-700 transition-all"
+            >
+              <Shield className="w-4 h-4 text-slate-500" />
+              SPOT IS LONG-ONLY (SHORT FORBIDDEN)
+            </button>
+          ) : (
+            <button
+              onClick={() => handlePlaceOrder('SELL')}
+              disabled={isSubmitting}
+              className="bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 text-sm transition-all shadow-lg shadow-rose-950/50 active:scale-[0.99]"
+            >
+              <TrendingDown className="w-4 h-4" />
+              {isSpotInstrument
+                ? 'CLOSE OPEN POSITION'
+                : `1-CLICK SELL SHORT (${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmpINR.toFixed(2)})`}
+            </button>
+          )}
         </div>
 
         {statusMessage && (
@@ -516,8 +619,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                     {portfolio?.openPositions?.map((pos: any) => {
                       const isCryptoPos = pos.symbol === 'BTCUSDT' || pos.symbol?.includes('BTC');
                       const isGoldPos = pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD';
-                      const posFx = pos.fxRateUsed ?? 1.0;
-                      const dpPos = (p: number) => (isCryptoPos || isGoldPos ? p * posFx : p);
+                      const instSym = isCryptoPos || isGoldPos ? '$' : currencySymbol;
                       return (
                         <tr key={pos.id} className="hover:bg-slate-900/50 transition-colors">
                           <td className="p-3 font-black text-white">
@@ -538,21 +640,21 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{pos.quantity}</td>
                           <td className="p-3 text-slate-300">
-                            {currencySymbol}
-                            {dpPos(pos.entryPrice ?? pos.averageEntryPrice ?? 0).toFixed(2)}
+                            {instSym}
+                            {(pos.entryPrice ?? pos.averageEntryPrice ?? 0).toFixed(2)}
                           </td>
                           <td className="p-3 text-cyan-300 font-bold">
-                            {currencySymbol}
-                            {dpPos(pos.currentPrice).toFixed(2)}
+                            {instSym}
+                            {pos.currentPrice.toFixed(2)}
                           </td>
                           <td className="p-3 text-[11px]">
                             <span className="text-rose-400 font-bold block">
-                              SL: {currencySymbol}
-                              {pos.stopLoss ? dpPos(pos.stopLoss).toFixed(2) : '-'}
+                              SL: {instSym}
+                              {pos.stopLoss ? pos.stopLoss.toFixed(2) : '-'}
                             </span>
                             <span className="text-emerald-400 font-bold block">
-                              TP: {currencySymbol}
-                              {pos.target2 ? dpPos(pos.target2).toFixed(2) : '-'}
+                              TP: {instSym}
+                              {pos.target2 ? pos.target2.toFixed(2) : '-'}
                             </span>
                           </td>
                           <td className="p-3 font-bold">
@@ -616,9 +718,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                       const isCryptoTrade =
                         trade.symbol === 'BTCUSDT' || trade.symbol?.includes('BTC');
                       const isGoldTrade = trade.symbol === 'XAUUSD' || trade.symbol === 'GOLD';
-                      const tradeFx = trade.fxRateUsed ?? 1.0;
-                      const dpTrade = (p: number) =>
-                        isCryptoTrade || isGoldTrade ? p * tradeFx : p;
+                      const instSymTrade = isCryptoTrade || isGoldTrade ? '$' : currencySymbol;
                       return (
                         <tr key={trade.id} className="hover:bg-slate-900/50 transition-colors">
                           <td className="p-3 font-black text-white">
@@ -639,12 +739,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                           </td>
                           <td className="p-3 text-slate-300 font-bold">{trade.quantity}</td>
                           <td className="p-3 text-slate-300">
-                            {currencySymbol}
-                            {dpTrade(trade.entryPrice).toFixed(2)}
+                            {instSymTrade}
+                            {Number(trade.entryPrice).toFixed(2)}
                           </td>
                           <td className="p-3 text-cyan-300 font-bold">
-                            {currencySymbol}
-                            {dpTrade(trade.exitPrice).toFixed(2)}
+                            {instSymTrade}
+                            {Number(trade.exitPrice).toFixed(2)}
                           </td>
                           <td className="p-3 font-black">
                             <span

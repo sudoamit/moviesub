@@ -48,15 +48,29 @@ export class TradeLevelsCalculator {
         : Math.max(1, Number(lastCandle.high) - Number(lastCandle.low));
 
     const isBtc = currentPrice > 20000;
+    const isGold = currentPrice > 3000 && currentPrice < 10000;
 
     // Ultra-tight institutional invalidation buffer (0.05x ATR)
-    const slBuffer = Math.max(0.1, isBtc ? Math.min(15.0, currentAtr * 0.05) : currentAtr * 0.08);
+    const slBuffer = Math.max(
+      0.1,
+      isBtc
+        ? Math.min(15.0, currentAtr * 0.05)
+        : isGold
+          ? Math.max(0.8, currentAtr * 0.1)
+          : currentAtr * 0.08,
+    );
 
-    // Tight sniper risk boundaries (BTC capped at 120-220 pts; Indices capped at 0.10%-0.15%)
+    // Tight sniper risk boundaries (BTC capped at 120-220 pts; Gold at 10-30 pts; Indices capped at 0.10%-0.15%)
     const maxRiskPoints = isBtc
       ? Math.min(220, Math.max(120, currentAtr * 0.35))
-      : Math.max(currentAtr * 0.35, currentAtr * 0.45);
-    const minRiskPoints = isBtc ? 100.0 : Math.max(currentAtr * 0.18, currentPrice * 0.0005);
+      : isGold
+        ? Math.min(30.0, Math.max(15.0, currentAtr * 2.0))
+        : Math.max(currentAtr * 0.35, currentAtr * 0.45);
+    const minRiskPoints = isBtc
+      ? 100.0
+      : isGold
+        ? Math.max(10.0, currentAtr * 0.8)
+        : Math.max(currentAtr * 0.18, currentPrice * 0.0005);
 
     if (direction === Direction.BULLISH) {
       // 1. Long Entry Zone (Anchored strictly to Order Block, FVG, or Closed Trigger Structure)

@@ -73,10 +73,14 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
   // Available strikes for fast selection
   const step = symbol === 'NIFTY' ? 50 : 100;
   const atm = Math.round((spotPrice || 24080) / step) * step;
-  const strikeOptions =
-    symbol === 'NIFTY'
-      ? [23950, 24000, 24050, 24100, 24150, 24200]
-      : [atm - 200, atm - 100, atm, atm + 100, atm + 200];
+  const strikeOptions = [
+    atm - 2 * step,
+    atm - step,
+    atm,
+    atm + step,
+    atm + 2 * step,
+    atm + 3 * step,
+  ];
 
   return (
     <div className="bg-[#111827]/95 border border-cyan-500/40 rounded-xl p-4 shadow-xl font-mono relative overflow-hidden">

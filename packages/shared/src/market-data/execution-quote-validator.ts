@@ -237,6 +237,8 @@ export function normalizeCanonicalProviderId(providerId: unknown): string {
     case 'BINANCE':
     case 'BINANCE_WEBSOCKET':
       return 'BINANCE_DIRECT';
+    case 'BINANCE_SPOT':
+      return 'BINANCE_SPOT';
     case 'BINANCE_REST':
     case 'BINANCE_POLLING':
       return 'BINANCE_REST';
@@ -257,6 +259,7 @@ export const CANONICAL_PROVIDER_IDS = new Set([
   'NSE_YAHOO_REST',
   'BINANCE_DIRECT',
   'BINANCE_REST',
+  'BINANCE_SPOT',
   'REAL_MARKET_STREAMER',
 ]);
 
@@ -268,6 +271,7 @@ const SUPPORTED_PROVIDER_IDS = new Set([
   'BINANCE_OPTION_STREAM',
   'BINANCE_DIRECT',
   'BINANCE_REST',
+  'BINANCE_SPOT',
   'NSE_YAHOO_REST',
   'REAL_MARKET_STREAMER',
   'NSE_OPTION_PROVIDER',

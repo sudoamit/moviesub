@@ -33,6 +33,9 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
       return;
     }
 
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
+
     prismaA = new PrismaClient({ datasources: { db: { url: DB_URL } } });
     prismaB = new PrismaClient({ datasources: { db: { url: DB_URL } } });
 
@@ -61,6 +64,7 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
   });
 
   afterAll(async () => {
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
     if (prismaA) await prismaA.$disconnect();
     if (prismaB) await prismaB.$disconnect();
   });
@@ -725,7 +729,7 @@ describe('Fix 175 — PostgreSQL Concurrency, Retry Atomicity & State Machine In
         algoBotsServiceB.evaluateSignalForBots(signal),
       ]);
 
-      const allResults = [...resultsA, ...resultsB];
+      const allResults = [...resultsA, ...resultsB].filter((r) => r.botId === botId);
       const executed = allResults.filter((r) => r.status === 'EXECUTED');
       const rejected = allResults.filter((r) => r.status === 'REJECTED');
 

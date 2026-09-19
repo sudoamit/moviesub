@@ -90,9 +90,15 @@ export class SignalsService implements OnModuleInit {
   ): Promise<ISignalSetup> {
     const sym = symbol.toUpperCase();
 
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: sym },
-    });
+    const inst =
+      (await this.prisma.instrument.findUnique({
+        where: { symbol: sym },
+      })) ||
+      (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT'
+        ? await this.prisma.instrument.findUnique({
+            where: { symbol: sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT' },
+          })
+        : null);
 
     if (!inst) {
       throw new NotFoundException(`Instrument '${sym}' not found`);
@@ -293,9 +299,16 @@ export class SignalsService implements OnModuleInit {
    * Persists a completed trade into PostgreSQL Signal table
    */
   async recordCompletedTrade(data: IRecordTradeDto) {
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: data.symbol.toUpperCase() },
-    });
+    const sym = data.symbol.toUpperCase();
+    const inst =
+      (await this.prisma.instrument.findUnique({
+        where: { symbol: sym },
+      })) ||
+      (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT'
+        ? await this.prisma.instrument.findUnique({
+            where: { symbol: sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT' },
+          })
+        : null);
 
     if (!inst) {
       throw new NotFoundException(`Instrument '${data.symbol}' not found`);
@@ -475,6 +488,16 @@ export class SignalsService implements OnModuleInit {
    * Clears/removes all completed trades from the journal database
    */
   async clearAllCompletedTrades() {
+    let paperTradesDeleted = 0;
+    try {
+      if ((this.prisma as any).paperTrade?.deleteMany) {
+        const ptResult = await (this.prisma as any).paperTrade.deleteMany({});
+        paperTradesDeleted = ptResult.count;
+      }
+    } catch (err) {
+      this.logger.error(`Error clearing paper trades: ${err}`);
+    }
+
     const result = await this.prisma.signal.deleteMany({
       where: {
         OR: [
@@ -497,8 +520,23 @@ export class SignalsService implements OnModuleInit {
         ],
       },
     });
-    this.logger.log(`✓ Cleared ${result.count} closed trades completely from database.`);
-    return { success: true, count: result.count };
+
+    try {
+      if ((this.prisma as any).paperPosition?.deleteMany) {
+        await (this.prisma as any).paperPosition.deleteMany({
+          where: {
+            status: { in: ['CLOSED', 'INVALIDATED'] },
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Error clearing closed paper positions: ${err}`);
+    }
+
+    this.logger.log(
+      `✓ Cleared ${paperTradesDeleted} paper trades and ${result.count} closed signals completely from database.`,
+    );
+    return { success: true, count: paperTradesDeleted + result.count, paperTradesDeleted };
   }
 
   /**

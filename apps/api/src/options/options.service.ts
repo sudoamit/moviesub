@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { BlackScholesModel, IndianOptionsExpiryEngine, IExpiryInfo } from '@quant/trading-engine';
 
@@ -129,6 +129,7 @@ export class OptionsService {
     symbol: string = 'NIFTY',
     targetExpiryDate?: string,
     spotPriceOverride?: number,
+    requestedStrike?: number,
   ): Promise<IOptionChainResponse> {
     const sym = symbol.toUpperCase();
     const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
@@ -146,8 +147,8 @@ export class OptionsService {
         ? spotPriceOverride
         : latestCandle
           ? Number(latestCandle.close)
-          : sym === 'BTCUSDT'
-            ? 79623.35
+          : sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT'
+            ? null
             : sym === 'XAUUSD' || sym === 'GOLD'
               ? 2885.5
               : sym === 'BANKNIFTY'
@@ -159,6 +160,12 @@ export class OptionsService {
                     : sym === 'INFY'
                       ? 1892.4
                       : 24007.35;
+
+    if (!spotPrice || spotPrice <= 0) {
+      throw new BadRequestException(
+        `No live exchange market data available for ${sym} options chain. Hardcoded BTC prices are prohibited.`,
+      );
+    }
 
     const step =
       sym === 'BTCUSDT'
@@ -224,9 +231,46 @@ export class OptionsService {
                   ? 0.19
                   : 0.098;
 
-    // Generate 15 strikes: 7 below ATM, ATM, 7 above ATM
+    // Generate strike set: 7 below ATM, ATM, 7 above ATM, plus any explicitly requested strike
+    const strikeSet = new Set<number>();
     for (let i = -7; i <= 7; i++) {
-      const strikePrice = atmStrike + i * step;
+      strikeSet.add(atmStrike + i * step);
+    }
+    if (requestedStrike && requestedStrike > 0) {
+      strikeSet.add(requestedStrike);
+    }
+    const sortedStrikes = Array.from(strikeSet).sort((a, b) => a - b);
+
+    // Estimate current live spot price from raw exchange chain (where call and put prices are closest)
+    let exchangeImpliedSpot: number | null = null;
+    if (rawExchangeChains && rawExchangeChains.length > 0) {
+      let minDiff = Infinity;
+      for (const c of rawExchangeChains) {
+        const cLtp = c.callOption?.ltp;
+        const pLtp = c.putOption?.ltp;
+        if (cLtp && pLtp && cLtp > 0 && pLtp > 0) {
+          const diff = Math.abs(cLtp - pLtp);
+          if (diff < minDiff) {
+            minDiff = diff;
+            exchangeImpliedSpot = Math.round(c.strikePrice / 100);
+          }
+        }
+      }
+    }
+
+    const referenceCurrentSpot =
+      exchangeImpliedSpot || (latestCandle ? Number(latestCandle.close) : null);
+
+    // If spotPriceOverride differs from current exchange spot, live exchange quotes (from current spot) do not apply.
+    const isHistoricalSpotOverride = Boolean(
+      spotPriceOverride &&
+        spotPriceOverride > 0 &&
+        referenceCurrentSpot &&
+        Math.abs(spotPriceOverride - referenceCurrentSpot) > 40,
+    );
+
+    for (const strikePrice of sortedStrikes) {
+      const i = Math.round((strikePrice - atmStrike) / step);
       const isATM = strikePrice === atmStrike;
 
       // Check for live matching exchange contract
@@ -249,7 +293,7 @@ export class OptionsService {
       const callIV = baseIV + Math.max(0, -i) * 0.001 + Math.max(0, i) * 0.0022;
       const putIV = baseIV + Math.max(0, -i) * 0.002 + Math.max(0, i) * 0.001;
 
-      // Exact Black-Scholes Greeks Calculation
+      // Exact Black-Scholes Greeks Calculation at target spotPrice
       const bsCall = BlackScholesModel.calculate(
         spotPrice,
         strikePrice,
@@ -267,9 +311,15 @@ export class OptionsService {
         'PE',
       );
 
-      // Sourced from live exchange or fallback to BS price
-      const finalCallLtp = callLtp && callLtp > 0 ? Number(callLtp.toFixed(2)) : bsCall.price;
-      const finalPutLtp = putLtp && putLtp > 0 ? Number(putLtp.toFixed(2)) : bsPut.price;
+      // Sourced from live exchange only when matching current spot price, otherwise use Black-Scholes price
+      const finalCallLtp =
+        !isHistoricalSpotOverride && callLtp && callLtp > 0
+          ? Number(callLtp.toFixed(2))
+          : bsCall.price;
+      const finalPutLtp =
+        !isHistoricalSpotOverride && putLtp && putLtp > 0
+          ? Number(putLtp.toFixed(2))
+          : bsPut.price;
 
       const callEffectiveOI =
         callOi > 0 ? callOi : Math.round((45000 - Math.abs(i) * 3200) / lotSize) * lotSize;
@@ -429,7 +479,12 @@ export class OptionsService {
     spotPriceOverride?: number,
     strikeOverride?: number,
   ): Promise<ISmartOptionRecommendation> {
-    const chain = await this.getOptionChain(symbol, targetExpiryDate, spotPriceOverride);
+    const chain = await this.getOptionChain(
+      symbol,
+      targetExpiryDate,
+      spotPriceOverride,
+      strikeOverride,
+    );
     const isBull = direction === 'BULLISH';
     const optType: 'CE' | 'PE' = isBull ? 'CE' : 'PE';
 
@@ -437,8 +492,8 @@ export class OptionsService {
     let selectedStrike = strikeOverride
       ? chain.strikes.find((s) => s.strikePrice === strikeOverride) ||
         chain.strikes.find((s) => s.isATM) ||
-        chain.strikes[7]
-      : chain.strikes.find((s) => s.isATM) || chain.strikes[7];
+        chain.strikes[0]
+      : chain.strikes.find((s) => s.isATM) || chain.strikes[0];
     const contract = isBull ? selectedStrike.call : selectedStrike.put;
 
     // Spot delta distance translation

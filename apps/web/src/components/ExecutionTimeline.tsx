@@ -29,8 +29,8 @@ export const ExecutionTimeline: React.FC<ExecutionTimelineProps> = ({
   const isPositionOpen = position?.status === 'OPEN';
   const isPositionClosed = position?.status === 'CLOSED';
 
-  const isCrypto = symbol === 'BTCUSDT';
-  const isGold = symbol === 'XAUUSD';
+  const isCrypto = symbol === 'BTCUSDT' || symbol.toUpperCase().includes('BTC');
+  const isGold = symbol === 'XAUUSD' || symbol.toUpperCase().includes('XAU') || symbol === 'GOLD';
   const currPrefix = isCrypto || isGold ? '$' : '₹';
 
   return (

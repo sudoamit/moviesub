@@ -14,6 +14,7 @@ describe('AlgoBotsService Execution State Machine', () => {
 
   beforeEach(() => {
     process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     executionsDb = new Map();
 
     const tradeDecisionsDb = new Map<string, any>();
@@ -49,6 +50,20 @@ describe('AlgoBotsService Execution State Machine', () => {
             return found;
           }
           return null;
+        }),
+        updateMany: jest.fn().mockImplementation(async ({ where, data }) => {
+          let updatedCount = 0;
+          for (const key of tradeDecisionsDb.keys()) {
+            const item = tradeDecisionsDb.get(key);
+            if (item && (item.id === where.id || item.fingerprint === where.fingerprint)) {
+              if (where.lifecycleState && item.lifecycleState !== where.lifecycleState) {
+                continue;
+              }
+              Object.assign(item, data, { updatedAt: new Date() });
+              updatedCount++;
+            }
+          }
+          return { count: updatedCount };
         }),
         findUnique: jest.fn().mockImplementation(async ({ where }) => {
           if (where.fingerprint) {
@@ -129,7 +144,7 @@ describe('AlgoBotsService Execution State Machine', () => {
     };
 
     mockPaperTradingService = {
-      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [] }),
+      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [], accountId: 'acc_state_machine_test' }),
       getValidatedMarketPrice: jest.fn().mockResolvedValue({ price: 65000, timestamp: new Date() }),
       placeOrder: jest.fn().mockRejectedValue(new Error('Broker connection refused (503)')),
     };
@@ -148,6 +163,7 @@ describe('AlgoBotsService Execution State Machine', () => {
 
   afterEach(() => {
     delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
   });
 
   const validSignal: ISignalSetup = {

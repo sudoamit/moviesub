@@ -30,6 +30,7 @@ export interface IPaperOrderRequest {
   contractSymbol?: string;
   signalId?: string;
   featureSnapshotJson?: any;
+  tradeDecisionId?: string;
   idempotencyKey?: string;
   correlationId?: string;
 }
@@ -91,6 +92,15 @@ export interface IPaperPosition {
   fxRateUsed?: number;
   fxRateTimestamp?: number;
   accountingSnapshotHash?: string;
+  grossUnrealizedPnlQuote?: number;
+  grossUnrealizedPnlAccount?: number;
+  incurredFeesAccount?: number;
+  unrealizedNetPnlAccount?: number;
+  feeCurrency?: string;
+  pnlDirection?: 'LONG' | 'SHORT';
+  pnlFormula?: string;
+  targetProgressPercent?: number;
+  highestTargetReached?: string;
 }
 
 export interface IPaperTradeHistory {

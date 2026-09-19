@@ -15,6 +15,13 @@ export interface ITickerInfo {
   timestamp?: Date | string | number;
   volumeType?: import('@quant/shared').TickVolumeType;
   tickId?: string;
+  provenance?: 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
+  isFresh?: boolean;
+  marketEventTime?: number | string;
+  observedAt?: number | string;
+  receivedAt?: number | string;
+  providerId?: string;
+  providerTransport?: string;
 }
 
 interface LiveTickerBarProps {
@@ -32,7 +39,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
     { sym: 'NIFTY', name: 'Nifty 50', tag: 'INDEX' },
     { sym: 'BANKNIFTY', name: 'Bank Nifty', tag: 'INDEX' },
     { sym: 'XAUUSD', name: 'Gold Spot', tag: 'GOLD' },
-    { sym: 'BTCUSDT', name: 'Bitcoin', tag: 'CRYPTO' },
+    { sym: 'BTCUSDT_SPOT', name: 'Bitcoin Spot', tag: 'CRYPTO' },
     { sym: 'RELIANCE', name: 'Reliance Ind.', tag: 'EQUITY' },
     { sym: 'HDFCBANK', name: 'HDFC Bank', tag: 'EQUITY' },
     { sym: 'INFY', name: 'Infosys', tag: 'EQUITY' },
@@ -47,28 +54,38 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
         </div>
 
         {assetConfig.map(({ sym, name, tag }) => {
-          const item = tickers[sym];
-          const isSelected = selectedSymbol === sym;
+          // Check for sym or legacy alias (e.g. BTCUSDT -> BTCUSDT_SPOT)
+          const item = tickers[sym] || (sym === 'BTCUSDT_SPOT' ? tickers['BTCUSDT'] : undefined);
+          const isSelected = selectedSymbol === sym || (sym === 'BTCUSDT_SPOT' && selectedSymbol === 'BTCUSDT');
 
-          if (!item) {
+          const isLiveAndFresh =
+            item &&
+            typeof item.price === 'number' &&
+            item.price > 0 &&
+            (item.provenance ? item.provenance === 'LIVE_PROVIDER' : true) &&
+            item.isFresh !== false;
+
+          if (!item || !isLiveAndFresh) {
             return (
               <div
                 key={sym}
                 onClick={() => onSelectSymbol(sym)}
-                className={`cursor-pointer px-3 py-1 rounded-xl border text-xs font-mono transition-all ${
+                className={`cursor-pointer px-3 py-1.5 rounded-xl border text-xs font-mono transition-all flex items-center gap-2 ${
                   isSelected
                     ? 'bg-cyan-500/10 border-cyan-500/50 text-white'
                     : 'bg-slate-900/60 border-slate-800/60 text-slate-400 hover:border-slate-700'
                 }`}
               >
                 <span className="font-bold">{sym}</span>
-                <span className="ml-2 text-[10px] text-slate-500">Connecting...</span>
+                <span className="text-[10px] text-amber-500/90 animate-pulse font-sans">
+                  Waiting for live price
+                </span>
               </div>
             );
           }
 
           const isUp = item.changePercent >= 0;
-          const currency = sym === 'XAUUSD' ? '$' : sym === 'BTCUSDT' ? '$' : '₹';
+          const currency = sym === 'XAUUSD' ? '$' : sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' ? '$' : '₹';
 
           return (
             <div
@@ -97,6 +114,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
                     maximumFractionDigits: 2,
                   })}
                 </span>
+
 
                 <span
                   className={`flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded ${

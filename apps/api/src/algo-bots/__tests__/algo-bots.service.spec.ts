@@ -30,6 +30,7 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
     autoExecutePaper: true,
     notifyWebhook: false,
     isActive: true,
+    accountId: 'paper_test_account',
     createdAt: new Date().toISOString(),
     triggerCount: 0,
     ...overrides,
@@ -81,8 +82,11 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
   });
 
   beforeEach(async () => {
+    process.env.PAPER_TRADING_ENABLED = 'true';
+    process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
+
     mockPaperTradingService = {
-      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [] }),
+      getPortfolio: jest.fn().mockResolvedValue({ openPositions: [], accountId: 'paper_test_account' }),
       getValidatedMarketPrice: jest
         .fn()
         .mockResolvedValue({ price: 24000.0, timestamp: new Date() }),
@@ -104,6 +108,11 @@ describe('AlgoBotsService — Production-Grade Execution Safety & Verification (
     }).compile();
 
     service = module.get<AlgoBotsService>(AlgoBotsService);
+  });
+
+  afterEach(() => {
+    delete process.env.PAPER_TRADING_ENABLED;
+    delete process.env.ENABLE_PAPER_ALGO_BOTS;
   });
 
   // 1. Canonical SMC Evidence & Timestamp Provenance

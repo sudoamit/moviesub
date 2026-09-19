@@ -20,7 +20,7 @@ interface MarketContextBarProps {
 const SUPPORTED_SYMBOLS = [
   { symbol: 'NIFTY', label: 'NIFTY 50', assetType: 'INDEX' },
   { symbol: 'BANKNIFTY', label: 'BANK NIFTY', assetType: 'INDEX' },
-  { symbol: 'BTCUSDT', label: 'BTC / USDT', assetType: 'CRYPTO' },
+  { symbol: 'BTCUSDT_SPOT', label: 'BTC / USDT SPOT', assetType: 'CRYPTO' },
   { symbol: 'XAUUSD', label: 'XAU / USD', assetType: 'COMMODITY' },
   { symbol: 'RELIANCE', label: 'RELIANCE', assetType: 'EQUITY' },
   { symbol: 'HDFCBANK', label: 'HDFC BANK', assetType: 'EQUITY' },
@@ -57,15 +57,21 @@ export const MarketContextBar: React.FC<MarketContextBarProps> = ({
   const strategyRef = useRef<HTMLDivElement>(null);
 
   const isBullish = (currentTicker.changePercent ?? 0) >= 0;
-  const isCrypto = selectedSymbol === 'BTCUSDT';
+  const isCrypto = selectedSymbol === 'BTCUSDT' || selectedSymbol === 'BTCUSDT_SPOT';
   const isGold = selectedSymbol === 'XAUUSD';
 
+  const isLiveValid =
+    typeof currentTicker.price === 'number' &&
+    currentTicker.price > 0 &&
+    (currentTicker.provenance ? currentTicker.provenance === 'LIVE_PROVIDER' : true) &&
+    currentTicker.isFresh !== false;
+
   const priceStr =
-    typeof currentTicker.price === 'number'
+    isLiveValid
       ? isCrypto || isGold
         ? `$${currentTicker.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
         : `₹${currentTicker.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-      : '---';
+      : 'Waiting for live price';
 
   const changeStr =
     typeof currentTicker.changePercent === 'number'

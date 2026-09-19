@@ -184,10 +184,10 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
     try {
       setIsLoading(true);
-      await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'DELETE' });
-      await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'POST' }).catch(
-        () => {},
-      );
+      const resDel = await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'DELETE' });
+      if (!resDel.ok) {
+        await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'POST' }).catch(() => {});
+      }
       await fetch('http://localhost:3001/api/paper-trading/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -197,6 +197,8 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
       setTrades([]);
       setStats({
         totalTrades: 0,
+        totalVerifiedTrades: 0,
+        legacyTradeCount: 0,
         winningTrades: 0,
         losingTrades: 0,
         winRate: 0,
@@ -213,7 +215,8 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
             k &&
             (k.startsWith('quant_pos_cut_') ||
               k.startsWith('quant_trade_') ||
-              k.startsWith('quant_pos_closed_'))
+              k.startsWith('quant_pos_closed_') ||
+              k.startsWith('quant_locked_'))
           ) {
             keysToRemove.push(k);
           }
@@ -222,6 +225,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
         window.dispatchEvent(new CustomEvent('quant_journal_cleared'));
         window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol: 'ALL' } }));
       }
+      await fetchCompletedTrades();
     } catch (e) {
       console.error('Failed to clear journal:', e);
     } finally {
@@ -730,9 +734,46 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
                           <span className="bg-emerald-950/80 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 w-fit">
                             <CheckCircle2 className="w-3 h-3" /> TARGET 1 COMPLETED (1.5R)
                           </span>
+                        ) : t.exitReason?.toLowerCase().includes('breakeven') ? (
+                          <span
+                            className={`${
+                              effectivePnl != null && effectivePnl > 0
+                                ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
+                                : 'bg-cyan-950/80 text-cyan-300 border-cyan-800'
+                            } border px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 w-fit`}
+                          >
+                            <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                            {effectivePnl != null && effectivePnl > 0
+                              ? `BREAKEVEN SL HIT (+${effectiveR != null ? effectiveR.toFixed(1) : '0.0'}R)`
+                              : 'BREAKEVEN EXIT (0.0R)'}
+                          </span>
+                        ) : t.exitReason?.toLowerCase().includes('trailing') ? (
+                          <span
+                            className={`${
+                              effectivePnl != null && effectivePnl > 0
+                                ? 'bg-teal-950/80 text-teal-300 border-teal-800'
+                                : 'bg-slate-900 text-slate-300 border-slate-700'
+                            } border px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 w-fit`}
+                          >
+                            <TrendingUp className="w-3 h-3 text-teal-400" />
+                            TRAILING SL HIT (
+                            {effectiveR != null
+                              ? `${effectiveR > 0 ? '+' : ''}${effectiveR.toFixed(1)}R`
+                              : '0.0R'}
+                            )
+                          </span>
+                        ) : effectivePnl != null && effectivePnl > 0 ? (
+                          <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 w-fit">
+                            <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                            PROTECTED EXIT (+{effectiveR != null ? effectiveR.toFixed(1) : '0.0'}R)
+                          </span>
                         ) : (
                           <span className="bg-rose-950/80 text-rose-400 border border-rose-800 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 w-fit">
-                            <XCircle className="w-3 h-3" /> STOP LOSS HIT (-1.0R)
+                            <XCircle className="w-3 h-3" /> STOP LOSS HIT (
+                            {effectiveR != null
+                              ? `${effectiveR > 0 ? '+' : ''}${effectiveR.toFixed(1)}R`
+                              : '-1.0R'}
+                            )
                           </span>
                         )}
                       </div>

@@ -14,7 +14,7 @@ export class InstrumentsService {
       orderBy: { symbol: 'asc' },
     });
 
-    return instruments.map((inst) => ({
+    const mapped = instruments.map((inst) => ({
       id: inst.id,
       symbol: inst.symbol,
       name: inst.name,
@@ -29,18 +29,37 @@ export class InstrumentsService {
       createdAt: inst.createdAt,
       updatedAt: inst.updatedAt,
     }));
+
+    const btc = mapped.find((i) => i.symbol === 'BTCUSDT');
+    if (btc && !mapped.some((i) => i.symbol === 'BTCUSDT_SPOT')) {
+      mapped.push({
+        ...btc,
+        symbol: 'BTCUSDT_SPOT',
+        name: 'Bitcoin / Tether USD (Spot)',
+      });
+    }
+
+    return mapped;
   }
 
   async findBySymbol(symbol: string): Promise<IInstrument | null> {
-    const inst = await this.prisma.instrument.findUnique({
-      where: { symbol: symbol.toUpperCase() },
+    const sym = symbol.toUpperCase();
+    let inst = await this.prisma.instrument.findUnique({
+      where: { symbol: sym },
     });
+
+    if (!inst && (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT')) {
+      const alt = sym === 'BTCUSDT_SPOT' ? 'BTCUSDT' : 'BTCUSDT_SPOT';
+      inst = await this.prisma.instrument.findUnique({
+        where: { symbol: alt },
+      });
+    }
 
     if (!inst) return null;
 
     return {
       id: inst.id,
-      symbol: inst.symbol,
+      symbol: sym,
       name: inst.name,
       exchange: inst.exchange,
       assetType: inst.assetType as any,
