@@ -70,6 +70,10 @@ describe('NIFTY Paper-Trading Lifecycle End-to-End Suite (14 Invariant Tests)', 
 
     // Ensure default paper trading account and config exist
     const acc = await paperTrading.getOrCreateAccount();
+    await prisma.paperFill.deleteMany({ where: { order: { accountId: acc.id } } });
+    await prisma.paperTrade.deleteMany({ where: { accountId: acc.id } });
+    await prisma.paperPosition.deleteMany({ where: { accountId: acc.id } });
+    await prisma.paperOrder.deleteMany({ where: { accountId: acc.id } });
     await prisma.paperAccount.updateMany({
       where: { id: acc.id },
       data: {

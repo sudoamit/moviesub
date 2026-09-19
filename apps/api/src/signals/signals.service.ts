@@ -730,9 +730,9 @@ export class SignalsService implements OnModuleInit {
 
       const featureSnap = (t.featureSnapshotJson as any) || {};
       const signalSnap = (t.signalSnapshotJson as any) || featureSnap.signalSnapshot || {};
-      const actualScore = featureSnap.score ?? signalSnap.score ?? 85;
-      const actualGrade = featureSnap.grade ?? signalSnap.grade ?? 'A';
-      const actualTimeframe = featureSnap.timeframe ?? signalSnap.timeframe ?? '15m';
+      const actualScore = featureSnap.score ?? signalSnap.score ?? null;
+      const actualGrade = featureSnap.grade ?? signalSnap.grade ?? null;
+      const actualTimeframe = featureSnap.timeframe ?? signalSnap.timeframe ?? null;
       const underlying = isOption ? (t.symbol.includes(' ') ? t.symbol.split(' ')[0] : t.symbol) : t.symbol;
       const strategyDir = featureSnap.strategyDirection ?? (t.direction === Direction.BULLISH ? 'BULLISH' : 'BEARISH');
       const orderSide = isOption ? 'BUY' : (t.direction === Direction.BULLISH ? 'BUY' : 'SELL');

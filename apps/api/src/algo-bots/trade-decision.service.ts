@@ -1455,6 +1455,7 @@ export class TradeDecisionService {
               : signalTimestamp,
             decisionTime: now,
             tradeTakenTime: now,
+            tradeTakenAt: now,
             correlationId,
           },
         });
@@ -1488,6 +1489,7 @@ export class TradeDecisionService {
             executionId: execution.id,
             lifecycleState: TradeLifecycleState.RESERVATION_CREATED,
             reservationTime,
+            reservationCreatedAt: reservationTime,
             updatedAt: reservationTime,
           },
         });
@@ -1723,6 +1725,18 @@ export class TradeDecisionService {
     }
 
     let updatedCount = 0;
+    const nowTime = new Date();
+    const explicitTimestamps: any = {};
+    if (state === TradeLifecycleState.ORDER_SUBMITTED) {
+      explicitTimestamps.orderSubmittedAt = updateData?.orderSubmittedTime || nowTime;
+    }
+    if (state === TradeLifecycleState.ORDER_FILLED) {
+      explicitTimestamps.firstFillAt = updateData?.fillTime || nowTime;
+    }
+    if (state === TradeLifecycleState.POSITION_OPENED) {
+      explicitTimestamps.positionOpenedAt = nowTime;
+    }
+
     if (typeof this.prisma.tradeDecision.updateMany === 'function') {
       const updated = await this.prisma.tradeDecision.updateMany({
         where: whereClause,
@@ -1735,7 +1749,8 @@ export class TradeDecisionService {
           marketEventTime: updateData?.marketEventTime,
           observedAt: updateData?.observedAt,
           receivedAt: updateData?.receivedAt,
-          updatedAt: new Date(),
+          ...explicitTimestamps,
+          updatedAt: nowTime,
         },
       });
       updatedCount = updated?.count ?? 0;
@@ -1752,7 +1767,8 @@ export class TradeDecisionService {
             marketEventTime: updateData?.marketEventTime,
             observedAt: updateData?.observedAt,
             receivedAt: updateData?.receivedAt,
-            updatedAt: new Date(),
+            ...explicitTimestamps,
+            updatedAt: nowTime,
           },
         });
         updatedCount = 1;

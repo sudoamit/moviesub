@@ -663,6 +663,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             status: 'FILLED',
             idempotencyKey,
             correlationId: pos.correlationId,
+            submittedAt: new Date(),
+            orderSubmittedAt: new Date(),
+            firstFillAt: new Date(),
           },
         });
 
@@ -674,7 +677,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             fillPrice: new Decimal(livePrice),
             fillQuantity: new Decimal(partialQty),
             fee: new Decimal(exitCharges.totalCharges),
-            feeBreakdownJson: exitCharges,
+            feeBreakdownJson: exitCharges as any,
             slippage: new Decimal(0),
             executionPriceSource: 'LIVE_TICK',
             liquidityType: 'TAKER',

@@ -20,6 +20,14 @@ export class PaperTradingController {
     return this.paperTradingService.closePosition(body.positionId, body.reason);
   }
 
+  @Post('positions/:id/close')
+  async closePositionById(
+    @Param('id') id: string,
+    @Body() body?: { reason?: string },
+  ) {
+    return this.paperTradingService.closePosition(id, body?.reason);
+  }
+
   @Get('active-positions')
   async getActivePositions(@Query('accountId') accountId?: string) {
     return this.paperTradingService.getActivePositions(accountId);

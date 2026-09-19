@@ -53,13 +53,42 @@ function DashboardContent() {
 
   const { activeToast, dismissToast, tickers, isConnected } = useMarketStream();
 
-  // Load / Persist User Preferences
+  // Load / Persist User Preferences & URL Path Routing
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const savedTab = localStorage.getItem('quant_active_tab') as NavTab | null;
-      if (savedTab) {
-        setActiveTab(savedTab);
+      const pathSegment = window.location.pathname.replace(/^\/+/, '').split('/')[0].toLowerCase();
+      const pathToTabMap: Record<string, NavTab> = {
+        terminal: 'terminal',
+        quant: 'quant',
+        scanner: 'scanner',
+        multichart: 'multichart',
+        radar: 'radar',
+        smt: 'smt',
+        correlation: 'correlation',
+        macro: 'macro',
+        analyze: 'quant',
+        paper: 'paper',
+        options: 'options',
+        risk: 'risk',
+        trade: 'paper',
+        learning: 'learning',
+        research: 'learning',
+        backtest: 'backtest',
+        algo: 'algo',
+        automation: 'algo',
+        journal: 'journal',
+        history: 'journal',
+      };
+
+      if (pathSegment && pathToTabMap[pathSegment]) {
+        setActiveTab(pathToTabMap[pathSegment]);
+      } else {
+        const savedTab = localStorage.getItem('quant_active_tab') as NavTab | null;
+        if (savedTab) {
+          setActiveTab(savedTab);
+        }
       }
+
       const savedStrat = localStorage.getItem('quant_selected_strategy') as StrategyMode | null;
       if (savedStrat === 'SAIYAN_OCC' || savedStrat === 'HYBRID' || savedStrat === 'SMC') {
         setSelectedStrategy(savedStrat);
@@ -79,6 +108,7 @@ function DashboardContent() {
     setActiveTab(tab);
     if (typeof window !== 'undefined') {
       localStorage.setItem('quant_active_tab', tab);
+      window.history.pushState(null, '', `/${tab}`);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };

@@ -44,6 +44,8 @@ import {
 } from './execution-provider.interface';
 import * as crypto from 'crypto';
 import { isOptionsUnderlying } from '../algo-bots/option-contract-resolver';
+import { TransactionCostScheduleManager, TransactionChargesBreakdown } from './transaction-cost-schedule-manager';
+import { PositionValuationService } from './position-valuation.service';
 
 export * from './execution-provider.interface';
 
@@ -133,34 +135,7 @@ export class PaperTradingService implements IExecutionProvider {
     fxTimestamp = Date.now(),
     stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE' = 'ENTRY',
     symbolOrType?: string,
-  ): {
-    feeCurrency: string;
-    accountCurrency: string;
-    grossTurnoverQuote: number;
-    grossTurnoverAccount: number;
-    brokerage: number;
-    brokerageQuote: number;
-    brokerageAccount: number;
-    stt: number;
-    exchangeFee: number;
-    exchangeTurnover: number;
-    sebi: number;
-    sebiTurnover: number;
-    stampDuty: number;
-    gst: number;
-    totalChargesQuote: number;
-    totalChargesAccount: number;
-    totalCharges: number; // in account currency (INR)
-    fxRate: number;
-    fxRateTimestamp: number;
-    fxTimestamp: number;
-    scheduleVersion: string;
-    feeCalculationBasis: string;
-    instrumentType: string;
-    stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE';
-  } {
-    const grossTurnoverQuote = Number(turnoverQuote.toFixed(4));
-    const grossTurnoverAccount = Number((turnoverQuote * fxRate).toFixed(2));
+  ): TransactionChargesBreakdown {
     const typeStr = typeof isCryptoOrInstrumentType === 'string'
       ? isCryptoOrInstrumentType.toUpperCase()
       : isCryptoOrInstrumentType === true
@@ -183,163 +158,28 @@ export class PaperTradingService implements IExecutionProvider {
       sym.endsWith(' PE') ||
       sym.includes(' CE ') ||
       sym.includes(' PE ') ||
-      (sym.startsWith('NIFTY') && !sym.includes('SPOT') && (sym.includes('CE') || sym.includes('PE'))) ||
-      (sym.startsWith('BANKNIFTY') && !sym.includes('SPOT') && (sym.includes('CE') || sym.includes('PE')));
+      (sym.startsWith('NIFTY') && (sym.includes('CE') || sym.includes('PE'))) ||
+      (sym.startsWith('BANKNIFTY') && (sym.includes('CE') || sym.includes('PE')));
 
-    // 1. Crypto Spot (Binance: 0.1% maker/taker in USDT)
-    if (isCrypto) {
-      const brokerageQuote = Number((turnoverQuote * 0.001).toFixed(4));
-      const totalChargesQuote = brokerageQuote;
-      const brokerageAccount = Number((brokerageQuote * fxRate).toFixed(2));
-      const totalCharges = brokerageAccount;
-      return {
-        feeCurrency: 'USDT',
-        accountCurrency: 'INR',
-        grossTurnoverQuote,
-        grossTurnoverAccount,
-        brokerageQuote,
-        brokerageAccount,
-        brokerage: brokerageAccount,
-        stt: 0,
-        exchangeFee: 0,
-        exchangeTurnover: 0,
-        sebi: 0,
-        sebiTurnover: 0,
-        stampDuty: 0,
-        gst: 0,
-        totalChargesQuote,
-        totalChargesAccount: totalCharges,
-        totalCharges,
-        fxRate,
-        fxRateTimestamp: fxTimestamp,
-        fxTimestamp,
-        scheduleVersion: 'BINANCE_SPOT_2024',
-        feeCalculationBasis: 'BINANCE_SPOT_0_1_PERCENT',
-        instrumentType: 'CRYPTO',
-        stage,
-      };
-    }
+    const targetSymbol = isCrypto
+      ? 'BTCUSDT_SPOT'
+      : isGold
+        ? 'XAUUSD'
+        : isOption
+          ? (sym || 'NIFTY')
+          : (sym && sym !== 'NIFTY' && sym !== 'BANKNIFTY' ? sym : 'RELIANCE');
 
-    // 2. Commodity / Metals (COMEX: 0.02% spread/commission in USD)
-    if (isGold) {
-      const brokerageQuote = Number((turnoverQuote * 0.0002).toFixed(4));
-      const totalChargesQuote = brokerageQuote;
-      const brokerageAccount = Number((brokerageQuote * fxRate).toFixed(2));
-      const totalCharges = brokerageAccount;
-      return {
-        feeCurrency: 'USD',
-        accountCurrency: 'INR',
-        grossTurnoverQuote,
-        grossTurnoverAccount,
-        brokerageQuote,
-        brokerageAccount,
-        brokerage: brokerageAccount,
-        stt: 0,
-        exchangeFee: 0,
-        exchangeTurnover: 0,
-        sebi: 0,
-        sebiTurnover: 0,
-        stampDuty: 0,
-        gst: 0,
-        totalChargesQuote,
-        totalChargesAccount: totalCharges,
-        totalCharges,
-        fxRate,
-        fxRateTimestamp: fxTimestamp,
-        fxTimestamp,
-        scheduleVersion: 'COMEX_METALS_2024',
-        feeCalculationBasis: 'COMEX_COMMISSION_0_02_PERCENT',
-        instrumentType: 'COMMODITY',
-        stage,
-      };
-    }
-
-    // 3. NSE F&O Options (NIFTY / BANKNIFTY Options: flat ₹20 brokerage, STT on sell turnover only, exchange turnover 0.05%, stamp on buy only 0.003%)
-    if (isOption) {
-      const brokerage = 20.0;
-      // STT: 0.125% on sell premium (EXIT or LIFECYCLE only)
-      const stt = (stage === 'EXIT' || stage === 'LIFECYCLE')
-        ? Number((turnoverQuote * 0.00125).toFixed(2))
-        : 0;
-      const exchangeFee = Number((turnoverQuote * 0.0005).toFixed(2));
-      const sebi = Number((turnoverQuote * 0.000001).toFixed(2));
-      // Stamp duty: 0.003% on buy only (ENTRY or LIFECYCLE)
-      const stampDuty = (stage === 'ENTRY' || stage === 'LIFECYCLE')
-        ? Number((turnoverQuote * 0.00003).toFixed(2))
-        : 0;
-      const gst = Number(((brokerage + exchangeFee + sebi) * 0.18).toFixed(2));
-      const totalCharges = Number(
-        (brokerage + stt + exchangeFee + sebi + stampDuty + gst).toFixed(2),
-      );
-
-      return {
-        feeCurrency: 'INR',
-        accountCurrency: 'INR',
-        grossTurnoverQuote,
-        grossTurnoverAccount,
-        brokerageQuote: brokerage,
-        brokerageAccount: brokerage,
-        brokerage,
-        stt,
-        exchangeFee,
-        exchangeTurnover: exchangeFee,
-        sebi,
-        sebiTurnover: sebi,
-        stampDuty,
-        gst,
-        totalChargesQuote: totalCharges,
-        totalChargesAccount: totalCharges,
-        totalCharges,
-        fxRate: 1.0,
-        fxRateTimestamp: fxTimestamp,
-        fxTimestamp,
-        scheduleVersion: 'NSE_FO_OPTIONS_2024',
-        feeCalculationBasis: 'NSE_FO_OPTIONS_SCHEDULE',
-        instrumentType: 'OPTION',
-        stage,
-      };
-    }
-
-    // 4. NSE Cash Equities (RELIANCE, HDFCBANK, INFY: flat ₹20 brokerage, STT 0.1%, exchange 0.00325%, stamp 0.015% on buy)
-    const brokerage = 20.0;
-    const stt = Number((turnoverQuote * 0.001).toFixed(2));
-    const exchangeFee = Number((turnoverQuote * 0.0000325).toFixed(2));
-    const sebi = Number((turnoverQuote * 0.000001).toFixed(2));
-    const stampDuty = (stage === 'ENTRY' || stage === 'LIFECYCLE')
-      ? Number((turnoverQuote * 0.00015).toFixed(2))
-      : 0;
-    const gst = Number(((brokerage + exchangeFee + sebi) * 0.18).toFixed(2));
-    const totalCharges = Number(
-      (brokerage + stt + exchangeFee + sebi + stampDuty + gst).toFixed(2),
-    );
-
-    return {
-      feeCurrency: 'INR',
-      accountCurrency: 'INR',
-      grossTurnoverQuote,
-      grossTurnoverAccount,
-      brokerageQuote: brokerage,
-      brokerageAccount: brokerage,
-      brokerage,
-      stt,
-      exchangeFee,
-      exchangeTurnover: exchangeFee,
-      sebi,
-      sebiTurnover: sebi,
-      stampDuty,
-      gst,
-      totalChargesQuote: totalCharges,
-      totalChargesAccount: totalCharges,
-      totalCharges,
-      fxRate: 1.0,
-      fxRateTimestamp: fxTimestamp,
+    const side = stage === 'ENTRY' ? 'BUY' : 'SELL';
+    return TransactionCostScheduleManager.getInstance().calculateCostForSymbol(
+      turnoverQuote,
+      targetSymbol,
+      fxRate,
       fxTimestamp,
-      scheduleVersion: 'NSE_CASH_EQUITY_2024',
-      feeCalculationBasis: 'NSE_CASH_EQUITY_SCHEDULE',
-      instrumentType: 'EQUITY',
       stage,
-    };
+      side,
+    );
   }
+
 
   private normalizeSymbol(symbol: string): string {
     return symbol.trim().toUpperCase();
@@ -1461,6 +1301,8 @@ export class PaperTradingService implements IExecutionProvider {
           signalId: req.signalId,
           correlationId,
           submittedAt: orderSubmittedAt,
+          orderSubmittedAt,
+          firstFillAt: fillExecutionTime,
         },
       });
 
@@ -1532,6 +1374,7 @@ export class PaperTradingService implements IExecutionProvider {
             partialLegs: [],
           } as any,
           openedAt: fill.fillTimestamp,
+          positionOpenedAt: fill.fillTimestamp,
           correlationId,
         },
       });
@@ -1915,6 +1758,8 @@ export class PaperTradingService implements IExecutionProvider {
           idempotencyKey: `exit_order_${pos.id}_${Date.now()}`,
           correlationId,
           submittedAt: exitTime,
+          orderSubmittedAt: exitTime,
+          firstFillAt: exitTime,
         },
       });
 
@@ -1927,7 +1772,7 @@ export class PaperTradingService implements IExecutionProvider {
           fillPrice: new Decimal(finalExitPrice),
           fillQuantity: pos.quantity,
           fee: new Decimal(exitCharges.totalCharges),
-          feeBreakdownJson: exitCharges,
+          feeBreakdownJson: exitCharges as any,
           slippage: new Decimal(exitSlippage.slippageAmount),
           executionPriceSource: priceSource,
           liquidityType: 'TAKER',
