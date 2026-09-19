@@ -894,9 +894,14 @@ model PaperOrder {
   symbol            String
   contractSymbol    String
   instrumentType    String              @default("SPOT") // SPOT, OPTION
+  executionInstrument String?
+  executionInstrumentType String?
   strike            Decimal?            @db.Decimal(18, 4)
   optionType        String?             // CE, PE
+  expiry            String?
   direction         Direction           // BULLISH/BEARISH or BUY/SELL
+  strategyDirection Direction?
+  sourceBotId       String?
   orderType         String              @default("MARKET") // MARKET, LIMIT
   requestedQuantity Decimal             @db.Decimal(18, 4)
   filledQuantity    Decimal             @default(0.0) @db.Decimal(18, 4)
@@ -913,6 +918,10 @@ model PaperOrder {
   idempotencyKey    String              @unique
   signalId          String?
   correlationId     String
+  tradeDecisionId   String?
+  tradeDecision     TradeDecision?      @relation(fields: [tradeDecisionId], references: [id], onDelete: SetNull)
+  executionId       String?
+  execution         AlgoBotExecution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
   submittedAt       DateTime?
   cancelledAt       DateTime?
   createdAt         DateTime            @default(now())
@@ -930,6 +939,9 @@ model PaperFill {
   id               String       @id @default(uuid())
   orderId          String
   order            PaperOrder   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  positionId       String?
+  position         PaperPosition? @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  executionRole    String?      @default("ENTRY") // ENTRY, TP1_PARTIAL, TP2_PARTIAL, FINAL_EXIT
   fillPrice        Decimal      @db.Decimal(18, 6)
   fillQuantity     Decimal      @db.Decimal(18, 4)
   fee              Decimal      @default(0.0) @db.Decimal(18, 4)
@@ -953,12 +965,21 @@ model PaperPosition {
   account               PaperAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
   orderId               String?
   order                 PaperOrder?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  tradeDecisionId       String?
+  tradeDecision         TradeDecision? @relation(fields: [tradeDecisionId], references: [id], onDelete: SetNull)
+  executionId           String?
+  execution             AlgoBotExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
   symbol                String
   contractSymbol        String
   instrumentType        String        @default("SPOT")
+  executionInstrument   String?
+  executionInstrumentType String?
   strike                Decimal?      @db.Decimal(18, 4)
   optionType            String?
+  expiry                String?
   direction             Direction
+  strategyDirection     Direction?
+  sourceBotId           String?
   quantity              Decimal       @db.Decimal(18, 4)
   entryPrice            Decimal       @db.Decimal(18, 6)
   entryTime             DateTime      @default(now())
@@ -989,6 +1010,7 @@ model PaperPosition {
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
+  fills                 PaperFill[]
   trades                PaperTrade[]
 
   @@index([accountId, symbol, status])
@@ -1144,6 +1166,9 @@ model AlgoBot {
   id                 String              @id @default(uuid())
   name               String
   symbol             String
+  executionInstrument String?
+  executionInstrumentType String?
+  signalSourceInstrument String?
   direction          AlgoBotDirection    @default(ANY)
   timeframe          String              @default("15m")
   minScore           Int                 @default(80)
@@ -1169,6 +1194,12 @@ model AlgoBotExecution {
   botId           String
   bot             AlgoBot               @relation(fields: [botId], references: [id], onDelete: Cascade)
   symbol          String
+  executionInstrument String?
+  executionInstrumentType String?
+  contractSymbol  String?
+  strike          Decimal?              @db.Decimal(18, 4)
+  optionType      String?
+  expiry          String?
   timeframe       String
   direction       Direction
   signalId        String?
@@ -1183,6 +1214,8 @@ model AlgoBotExecution {
   failureReasonCode String?
   orderPositionId   String?
   tradeDecision   TradeDecision?
+  orders          PaperOrder[]
+  positions       PaperPosition[]
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
 
@@ -1239,6 +1272,14 @@ model TradeDecision {
   symbol                String
   contractSymbol        String?
   instrumentType        String              @default("SPOT")
+  executionInstrument   String?
+  executionInstrumentType String?
+  signalSourceInstrument String?
+  strike                Decimal?            @db.Decimal(18, 4)
+  optionType            String?
+  expiry                String?
+  signalDirection       Direction?
+  orderSide             String?
   timeframe             String
   direction             Direction
   decision              TradeDecisionType
@@ -1270,6 +1311,8 @@ model TradeDecision {
   executionId           String?             @unique
   execution             AlgoBotExecution?   @relation(fields: [executionId], references: [id], onDelete: SetNull)
   orderPositionId       String?
+  orders                PaperOrder[]
+  positions             PaperPosition[]
   correlationId         String
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt

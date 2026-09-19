@@ -156,6 +156,8 @@ describe('Fix 193 Requirements 28-35: NIFTY Bearish -> Bullish Signal Decoupled 
         id: botId,
         name: 'NIFTY Decoupled Lifecycle Bot',
         symbol: 'NIFTY_SPOT',
+        executionInstrument: 'NIFTY',
+        signalSourceInstrument: 'NIFTY_SPOT',
         direction: 'ANY',
         timeframe: '15m',
         minScore: 75,

@@ -500,12 +500,18 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const contractSize = openingSnapshot.contractSize ?? 1;
 
     const exitTurnover = livePrice * partialQty * contractSize;
+    const isGold = pos.symbol === 'XAUUSD' || pos.symbol === 'GOLD';
+    const isOptionPos =
+      pos.instrumentType === 'OPTION' ||
+      Boolean(pos.strike) ||
+      Boolean(pos.contractSymbol?.includes('CE') || pos.contractSymbol?.includes('PE'));
     const exitCharges = this.paperTradingService.calculateCharges(
       exitTurnover,
-      isCrypto,
+      isCrypto ? 'CRYPTO' : isGold ? 'COMMODITY' : isOptionPos ? 'OPTION' : 'EQUITY',
       fxRate,
       marketEventTime.getTime(),
       'EXIT',
+      pos.contractSymbol || pos.symbol,
     );
 
     const initialSL = pos.initialStopLoss
@@ -644,6 +650,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         const exitOrder = await tx.paperOrder.create({
           data: {
             accountId: pos.accountId,
+            tradeDecisionId: pos.tradeDecisionId || null,
+            executionId: pos.executionId || null,
             symbol: pos.symbol,
             contractSymbol: pos.contractSymbol,
             instrumentType: pos.instrumentType,
@@ -661,6 +669,8 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         await tx.paperFill.create({
           data: {
             orderId: exitOrder.id,
+            positionId: pos.id,
+            executionRole: stage === 'TP1' ? 'TP1_PARTIAL' : 'TP2_PARTIAL',
             fillPrice: new Decimal(livePrice),
             fillQuantity: new Decimal(partialQty),
             fee: new Decimal(exitCharges.totalCharges),

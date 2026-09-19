@@ -13,8 +13,10 @@ import {
   IInstrument,
   IPositionSizing,
   ISignalSetup,
+  MarketDataUnavailableError,
   SignalGrade,
   SignalState,
+  StaleMarketDataError,
   Timeframe,
   TradeDecisionType,
   TradeLifecycleState,
@@ -22,8 +24,359 @@ import {
 import { PortfolioRiskManager } from '@quant/risk-engine';
 import { IAlgoBot } from './algo-bots.service';
 import { IPaperPortfolio } from '../paper-trading/execution-provider.interface';
+import { OptionContractResolver, isOptionsUnderlying } from './option-contract-resolver';
 import * as crypto from 'crypto';
 import { Decimal } from '@prisma/client/runtime/library';
+
+export enum ExecutionFailureReason {
+  MARKET_DATA_UNAVAILABLE = 'MARKET_DATA_UNAVAILABLE',
+  STALE_MARKET_DATA = 'STALE_MARKET_DATA',
+  BROKER_UNAVAILABLE = 'BROKER_UNAVAILABLE',
+  BROKER_TIMEOUT = 'BROKER_TIMEOUT',
+  BROKER_REJECTED = 'BROKER_REJECTED',
+  ORDER_REJECTED = 'ORDER_REJECTED',
+  ORDER_PLACEMENT_FAILED = 'ORDER_PLACEMENT_FAILED',
+  INVALID_QUANTITY = 'INVALID_QUANTITY',
+  INVALID_LEVELS = 'INVALID_LEVELS',
+  POSITION_ALREADY_OPEN = 'POSITION_ALREADY_OPEN',
+  DATABASE_UNAVAILABLE = 'DATABASE_UNAVAILABLE',
+  STATE_TRANSITION_FAILED = 'STATE_TRANSITION_FAILED',
+  UNKNOWN_EXECUTION_ERROR = 'UNKNOWN_EXECUTION_ERROR',
+}
+
+export interface IExecutionFailureClassification {
+  retryable: boolean;
+  reasonCode: ExecutionFailureReason;
+  message: string;
+}
+
+export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
+  const errMsg = String(err?.message || err || '');
+  const errCode = err?.code || err?.reasonCode || '';
+
+  if (
+    err instanceof MarketDataUnavailableError ||
+    errCode === 'MARKET_DATA_UNAVAILABLE' ||
+    err?.name === 'MarketDataUnavailableError'
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.MARKET_DATA_UNAVAILABLE,
+      message: err?.message || 'Market data stream provider unavailable',
+    };
+  }
+
+  if (
+    err instanceof StaleMarketDataError ||
+    errCode === 'STALE_MARKET_DATA' ||
+    err?.name === 'StaleMarketDataError'
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.STALE_MARKET_DATA,
+      message: err?.message || 'Market quote is stale',
+    };
+  }
+
+  if (
+    errCode === 'BROKER_UNAVAILABLE' ||
+    errCode === 'ECONNREFUSED' ||
+    errCode === 'ENOTFOUND' ||
+    errCode === 'EAI_AGAIN' ||
+    errMsg.includes('503') ||
+    errMsg.includes('Broker connection refused') ||
+    errMsg.includes('Service Unavailable') ||
+    errMsg.includes('connection refused')
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.BROKER_UNAVAILABLE,
+      message: err?.message || 'Broker connection refused (503)',
+    };
+  }
+
+  if (
+    errCode === 'BROKER_TIMEOUT' ||
+    errCode === 'ETIMEDOUT' ||
+    errCode === 'ESOCKETTIMEDOUT' ||
+    errMsg.includes('504') ||
+    errMsg.includes('Gateway Timeout') ||
+    errMsg.includes('network timeout') ||
+    errMsg.includes('timed out') ||
+    errMsg.includes('timeout')
+  ) {
+    return {
+      retryable: true,
+      reasonCode: ExecutionFailureReason.BROKER_TIMEOUT,
+      message: err?.message || 'Broker request timed out',
+    };
+  }
+
+  if (
+    errCode === 'BROKER_REJECTED' ||
+    errCode === 'ORDER_REJECTED' ||
+    errMsg.includes('ORDER_REJECTED') ||
+    errMsg.includes('Insufficient margin') ||
+    errMsg.includes('Margin insufficient') ||
+    errMsg.includes('Account balance insufficient')
+  ) {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.BROKER_REJECTED,
+      message: err?.message || 'Broker/Exchange rejected order',
+    };
+  }
+
+  if (errCode === 'POSITION_ALREADY_OPEN') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.POSITION_ALREADY_OPEN,
+      message: err?.message || 'Open position already exists for symbol',
+    };
+  }
+
+  if (errCode === 'INVALID_QUANTITY') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.INVALID_QUANTITY,
+      message: err?.message || 'Invalid order quantity resolved',
+    };
+  }
+
+  if (errCode === 'INVALID_LEVELS') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.INVALID_LEVELS,
+      message: err?.message || 'Invalid trade levels',
+    };
+  }
+
+  if (errCode === 'ORDER_PLACEMENT_FAILED') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.ORDER_PLACEMENT_FAILED,
+      message: err?.message || 'Order placement failed',
+    };
+  }
+
+  if (errCode === 'DATABASE_UNAVAILABLE') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.DATABASE_UNAVAILABLE,
+      message: err?.message || 'Database unavailable',
+    };
+  }
+
+  if (errCode === 'STATE_TRANSITION_FAILED') {
+    return {
+      retryable: false,
+      reasonCode: ExecutionFailureReason.STATE_TRANSITION_FAILED,
+      message: err?.message || 'State transition failed',
+    };
+  }
+
+  return {
+    retryable: false,
+    reasonCode: ExecutionFailureReason.UNKNOWN_EXECUTION_ERROR,
+    message: err?.message || String(err),
+  };
+}
+
+export const ALLOWED_EXECUTION_STATE_TRANSITIONS: Record<string, string[]> = {
+  RESERVED: ['EXECUTING', 'FAILED_RETRYABLE', 'FAILED_FINAL', 'CANCELLED'],
+  EXECUTING: ['EXECUTED', 'FAILED_RETRYABLE', 'FAILED_FINAL'],
+  FAILED_RETRYABLE: ['RESERVED'],
+  EXECUTED: [],
+  FAILED_FINAL: [],
+  CANCELLED: [],
+};
+
+export const ALLOWED_LIFECYCLE_TRANSITIONS: Record<TradeLifecycleState, TradeLifecycleState[]> = {
+  [TradeLifecycleState.SIGNAL_DETECTED]: [
+    TradeLifecycleState.SIGNAL_VALIDATED,
+    TradeLifecycleState.TRADE_REJECTED,
+  ],
+  [TradeLifecycleState.SIGNAL_VALIDATED]: [
+    TradeLifecycleState.ELIGIBILITY_EVALUATED,
+    TradeLifecycleState.PRE_TRADE_APPROVED,
+    TradeLifecycleState.TRADE_REJECTED,
+  ],
+  [TradeLifecycleState.ELIGIBILITY_EVALUATED]: [
+    TradeLifecycleState.RISK_APPROVED,
+    TradeLifecycleState.PRE_TRADE_APPROVED,
+    TradeLifecycleState.TRADE_REJECTED,
+  ],
+  [TradeLifecycleState.RISK_APPROVED]: [
+    TradeLifecycleState.PRE_TRADE_APPROVED,
+    TradeLifecycleState.TRADE_REJECTED,
+  ],
+  [TradeLifecycleState.PRE_TRADE_APPROVED]: [
+    TradeLifecycleState.TRADE_TAKEN,
+    TradeLifecycleState.TRADE_REJECTED,
+  ],
+  [TradeLifecycleState.TRADE_TAKEN]: [
+    TradeLifecycleState.RESERVATION_CREATED,
+    TradeLifecycleState.TRADE_FAILED,
+    TradeLifecycleState.RESERVATION_FAILED,
+  ],
+  [TradeLifecycleState.TRADE_REJECTED]: [],
+  [TradeLifecycleState.RESERVATION_CREATED]: [
+    TradeLifecycleState.ORDER_SUBMITTED,
+    TradeLifecycleState.TRADE_FAILED,
+    TradeLifecycleState.RESERVATION_FAILED,
+  ],
+  [TradeLifecycleState.RESERVED]: [
+    TradeLifecycleState.ORDER_SUBMITTED,
+    TradeLifecycleState.TRADE_FAILED,
+    TradeLifecycleState.RESERVATION_FAILED,
+  ],
+  [TradeLifecycleState.RESERVATION_FAILED]: [],
+  [TradeLifecycleState.ORDER_SUBMITTED]: [
+    TradeLifecycleState.ORDER_FILLED,
+    TradeLifecycleState.ORDER_PARTIALLY_FILLED,
+    TradeLifecycleState.ORDER_REJECTED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.ORDER_REJECTED]: [],
+  [TradeLifecycleState.ORDER_PARTIALLY_FILLED]: [
+    TradeLifecycleState.ORDER_FILLED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.ORDER_FILLED]: [
+    TradeLifecycleState.POSITION_OPENED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.POSITION_OPENED]: [
+    TradeLifecycleState.TP1_TRIGGERED,
+    TradeLifecycleState.TP1_PARTIAL_FILLED,
+    TradeLifecycleState.POSITION_PARTIALLY_CLOSED,
+    TradeLifecycleState.SL_MOVED_TO_BREAKEVEN,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TP1_TRIGGERED]: [
+    TradeLifecycleState.TP1_PARTIAL_FILLED,
+    TradeLifecycleState.POSITION_PARTIALLY_CLOSED,
+    TradeLifecycleState.SL_MOVED_TO_BREAKEVEN,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TP1_PARTIAL_FILLED]: [
+    TradeLifecycleState.POSITION_PARTIALLY_CLOSED,
+    TradeLifecycleState.SL_MOVED_TO_BREAKEVEN,
+    TradeLifecycleState.TP2_TRIGGERED,
+    TradeLifecycleState.TP2_PARTIAL_FILLED,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.POSITION_PARTIALLY_CLOSED]: [
+    TradeLifecycleState.SL_MOVED_TO_BREAKEVEN,
+    TradeLifecycleState.TP2_TRIGGERED,
+    TradeLifecycleState.TP2_PARTIAL_FILLED,
+    TradeLifecycleState.TRAILING,
+    TradeLifecycleState.TP3_TRIGGERED,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.SL_MOVED_TO_BREAKEVEN]: [
+    TradeLifecycleState.TP2_TRIGGERED,
+    TradeLifecycleState.TP2_PARTIAL_FILLED,
+    TradeLifecycleState.TRAILING,
+    TradeLifecycleState.TP3_TRIGGERED,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TP2_TRIGGERED]: [
+    TradeLifecycleState.TP2_PARTIAL_FILLED,
+    TradeLifecycleState.TRAILING,
+    TradeLifecycleState.TP3_TRIGGERED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TP2_PARTIAL_FILLED]: [
+    TradeLifecycleState.TRAILING,
+    TradeLifecycleState.TP3_TRIGGERED,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TRAILING]: [
+    TradeLifecycleState.TP3_TRIGGERED,
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.TP3_TRIGGERED]: [
+    TradeLifecycleState.EXIT_TRIGGERED,
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.EXIT_TRIGGERED]: [
+    TradeLifecycleState.EXIT_PENDING,
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.EXIT_PENDING]: [
+    TradeLifecycleState.EXIT_SUBMITTED,
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.EXIT_SUBMITTED]: [
+    TradeLifecycleState.EXIT_FILLED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
+  [TradeLifecycleState.EXIT_FILLED]: [
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.TRADE_CLOSED,
+  ],
+  [TradeLifecycleState.POSITION_CLOSED]: [
+    TradeLifecycleState.TRADE_CLOSED,
+  ],
+  [TradeLifecycleState.TRADE_CLOSED]: [],
+  [TradeLifecycleState.TRADE_FAILED]: [],
+  [TradeLifecycleState.TRADE_CANCELLED]: [],
+};
 
 export interface IPlannedTradeLevels {
   optimalEntry: number;
@@ -143,19 +496,34 @@ export class TradeDecisionService {
 
     const normTf = this.normalizeTimeframe(signal.timeframe);
     const normSymbol = bot.symbol.toUpperCase();
-    const contract = (signal as any).contractSymbol || (signal as any).instrument || normSymbol;
+    const contract =
+      (signal as any).contractSymbol ||
+      (signal as any).instrument ||
+      (bot as any).executionInstrument ||
+      normSymbol;
+    const strike =
+      (signal as any).strike !== undefined && (signal as any).strike !== null
+        ? String((signal as any).strike)
+        : '';
+    const optionType = (signal as any).optionType || '';
+    const expiry = (signal as any).expiry || '';
+    const signalDirection = (signal as any).signalDirection || signal.direction;
+    const orderSide = (signal as any).orderSide || '';
     const normDir = signal.direction;
     const signalId = signal.id || 'sig_canonical';
 
     const configHash = crypto
       .createHash('sha256')
       .update(
-        `${bot.id}:${bot.symbol}:${bot.timeframe}:${bot.direction}:${bot.minScore}:${bot.smcCondition}:${bot.lots}`,
+        `${bot.id}:${bot.symbol}:${(bot as any).executionInstrument || ''}:${(bot as any).executionInstrumentType || ''}:${bot.timeframe}:${bot.direction}:${bot.minScore}:${bot.smcCondition}:${bot.lots}`,
       )
       .digest('hex')
       .substring(0, 8);
 
-    return `bot_exec:${effectiveAccountId}:${bot.id}:v${configHash}:${signalId}:${contract}:${normTf}:${normDir}:${signal.canonicalCandleTime}`;
+    const optSuffix = [strike, optionType, expiry, signalDirection, orderSide].filter(Boolean).join(':');
+    const optPart = optSuffix ? `:${optSuffix}` : '';
+
+    return `bot_exec:${effectiveAccountId}:${bot.id}:v${configHash}:${signalId}:${contract}:${normTf}:${normDir}${optPart}:${signal.canonicalCandleTime}`;
   }
 
   /**
@@ -384,6 +752,84 @@ export class TradeDecisionService {
       });
     }
 
+    // Gate 9.1: Spot Short Selling Protection (Requirements 8, 12, 29)
+    const effectiveExecutionInstrument =
+      (bot as any).executionInstrument ||
+      (signal as any).contractSymbol ||
+      bot.symbol.toUpperCase();
+    const SPOT_SHORT_FORBIDDEN_SET = new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']);
+    if (SPOT_SHORT_FORBIDDEN_SET.has(effectiveExecutionInstrument) && signal.direction === 'BEARISH') {
+      reasons.push({
+        code: 'SPOT_SHORT_SELLING_FORBIDDEN',
+        message: `Spot short selling is forbidden for spot instrument '${effectiveExecutionInstrument}'. To short index or spot assets, trade derivatives (e.g. NIFTY futures or PE options).`,
+      });
+    }
+
+    // Gate 9.2: Options-Only Enforcement for NIFTY & BANKNIFTY Algo Bots
+    const isOptionsUnderlyingBot = isOptionsUnderlying(bot.symbol);
+    const execInstType =
+      (signal as any).executionInstrumentType ||
+      (bot as any).executionInstrumentType;
+    const execInst =
+      (signal as any).contractSymbol ||
+      (bot as any).executionInstrument ||
+      bot.symbol;
+
+    const isExplicitSpot =
+      execInst === 'NIFTY_SPOT' ||
+      execInst === 'BANKNIFTY_SPOT' ||
+      (bot as any).executionInstrument === 'NIFTY_SPOT' ||
+      (bot as any).executionInstrument === 'BANKNIFTY_SPOT';
+
+    const isOptionBotOrSignal =
+      execInstType === 'OPTION' ||
+      Boolean((bot as any).executionInstrument?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).contractSymbol?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).strike);
+
+    if (isOptionBotOrSignal) {
+      if (isExplicitSpot || (execInstType && execInstType !== 'OPTION')) {
+        reasons.push({
+          code: 'OPTION_EXECUTION_REQUIRED',
+          message: `NIFTY and BANKNIFTY Algo Bots must execute OPTIONS ONLY. Got executionInstrumentType='${execInstType || 'SPOT'}'.`,
+        });
+      } else {
+        const strike = (signal as any).strike;
+        const optionType = (signal as any).optionType;
+        const contractSymbol = (signal as any).contractSymbol;
+
+        if (
+          strike === undefined ||
+          strike === null ||
+          typeof strike !== 'number' ||
+          !Number.isFinite(strike) ||
+          strike <= 0
+        ) {
+          reasons.push({
+            code: 'OPTION_STRIKE_REQUIRED',
+            message: `Valid strike price is required for options execution. Got '${strike}'.`,
+          });
+        }
+        if (!optionType || !['CE', 'PE'].includes(String(optionType).toUpperCase())) {
+          reasons.push({
+            code: 'OPTION_TYPE_REQUIRED',
+            message: `Valid optionType ('CE' | 'PE') is required for options execution. Got '${optionType}'.`,
+          });
+        }
+        if (!contractSymbol || typeof contractSymbol !== 'string' || contractSymbol.trim() === '') {
+          reasons.push({
+            code: 'OPTION_CONTRACT_REQUIRED',
+            message: `Valid contractSymbol is required for options execution. Got '${contractSymbol}'.`,
+          });
+        }
+      }
+    } else if (isOptionsUnderlyingBot && isExplicitSpot) {
+      reasons.push({
+        code: 'OPTION_EXECUTION_REQUIRED',
+        message: `NIFTY and BANKNIFTY Algo Bots must execute OPTIONS ONLY. Never execute underlying spot index.`,
+      });
+    }
+
     // Gate 10: Score Threshold
     if (typeof signal.score !== 'number' || signal.score < bot.minScore) {
       reasons.push({
@@ -425,7 +871,20 @@ export class TradeDecisionService {
         message: 'Incomplete or non-finite entry/SL/TP levels on signal',
       });
     } else {
-      if (signal.direction === 'BULLISH' && !(sl < optEntry && optEntry < tp1)) {
+      const isOptionLevels = Boolean(
+        (signal as any).isOptionLevels ||
+          ((signal as any).executionInstrumentType === 'OPTION' && (signal as any).orderSide === 'BUY'),
+      );
+
+      if (isOptionLevels) {
+        if (!(sl < optEntry && optEntry < tp1)) {
+          isLevelsValid = false;
+          reasons.push({
+            code: 'INVALID_LEVELS',
+            message: `Invalid OPTION BUY target orientation: SL (${sl}) < Entry (${optEntry}) < TP1 (${tp1}) required`,
+          });
+        }
+      } else if (signal.direction === 'BULLISH' && !(sl < optEntry && optEntry < tp1)) {
         isLevelsValid = false;
         reasons.push({
           code: 'INVALID_LEVELS',
@@ -445,14 +904,23 @@ export class TradeDecisionService {
     let contractSize = 1;
     let instrument: IInstrument | null = null;
     try {
-      instrument = getAuthoritativeInstrument(bot.symbol);
+      const lookupSymbol =
+        (signal as any).contractSymbol ||
+        bot.symbol;
+      instrument = getAuthoritativeInstrument(lookupSymbol);
       resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
       contractSize = Number(instrument.contractSize || 1);
     } catch (err: any) {
-      reasons.push({
-        code: 'INVALID_QUANTITY',
-        message: err?.message || 'Failed to resolve authoritative quantity',
-      });
+      try {
+        instrument = getAuthoritativeInstrument(bot.symbol);
+        resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
+        contractSize = Number(instrument.contractSize || 1);
+      } catch (innerErr: any) {
+        reasons.push({
+          code: 'INVALID_QUANTITY',
+          message: innerErr?.message || 'Failed to resolve authoritative quantity',
+        });
+      }
     }
 
     const riskDistance = isLevelsValid && optEntry && sl ? Math.abs(optEntry - sl) : 0;
@@ -487,20 +955,28 @@ export class TradeDecisionService {
 
     // Gate 15: Live Market Quote Health
     if (liveQuoteError) {
-      const errCode =
-        liveQuoteError?.code ||
-        liveQuoteError?.reasonCode ||
-        (liveQuoteError?.name === 'StaleMarketDataError'
-          ? 'STALE_MARKET_DATA'
-          : 'MARKET_DATA_UNAVAILABLE');
+      const isOpt =
+        (signal as any).executionInstrumentType === 'OPTION' ||
+        (bot as any).executionInstrumentType === 'OPTION';
+      const isStale =
+        liveQuoteError?.name === 'StaleMarketDataError' ||
+        liveQuoteError?.code === 'STALE_MARKET_DATA' ||
+        liveQuoteError?.reasonCode === 'STALE_MARKET_DATA' ||
+        liveQuoteError?.code === 'OPTION_QUOTE_STALE';
+      const code = isOpt
+        ? (isStale ? 'OPTION_QUOTE_STALE' : 'OPTION_QUOTE_UNAVAILABLE')
+        : (isStale ? 'STALE_MARKET_DATA' : 'MARKET_DATA_UNAVAILABLE');
       reasons.push({
-        code: errCode === 'STALE_MARKET_DATA' ? 'STALE_MARKET_DATA' : 'MARKET_DATA_UNAVAILABLE',
+        code,
         message: liveQuoteError?.message || `Live market quote for '${bot.symbol}' is unavailable`,
       });
     } else if (liveQuote) {
       if (!liveQuote.price || liveQuote.price <= 0) {
+        const isOpt =
+          (signal as any).executionInstrumentType === 'OPTION' ||
+          (bot as any).executionInstrumentType === 'OPTION';
         reasons.push({
-          code: 'MARKET_DATA_UNAVAILABLE',
+          code: isOpt ? 'OPTION_QUOTE_UNAVAILABLE' : 'MARKET_DATA_UNAVAILABLE',
           message: `Live market quote for '${bot.symbol}' is unavailable or non-positive`,
         });
       }
@@ -750,6 +1226,15 @@ export class TradeDecisionService {
     fingerprint: string;
     correlationId: string;
     accountId: string;
+    executionInstrument?: string;
+    signalSourceInstrument?: string;
+    executionInstrumentType?: string;
+    contractSymbol?: string;
+    strike?: number;
+    optionType?: string;
+    expiry?: string;
+    signalDirection?: Direction;
+    orderSide?: string;
   }): Promise<ICommitTradeDecisionResult> {
     const { bot, signal, decisionResult, fingerprint, correlationId, accountId } = params;
 
@@ -759,6 +1244,34 @@ export class TradeDecisionService {
         'ACCOUNT_ID_REQUIRED: A valid accountId is required to commit a trade decision',
       );
     }
+
+    const isOption =
+      params.executionInstrumentType === 'OPTION' ||
+      (bot as any).executionInstrumentType === 'OPTION' ||
+      (signal as any).executionInstrumentType === 'OPTION' ||
+      Boolean((signal as any).strike) ||
+      Boolean(params.strike);
+
+    const instrumentType = isOption ? 'OPTION' : 'SPOT';
+    const executionInstrumentType = isOption ? 'OPTION' : 'SPOT';
+    const strike = params.strike ?? (signal as any).strike ?? null;
+    const optionType = params.optionType ?? (signal as any).optionType ?? null;
+    const expiry = params.expiry ?? (signal as any).expiry ?? null;
+    const contractSymbol =
+      params.contractSymbol ??
+      (signal as any).contractSymbol ??
+      (isOption && strike && optionType ? `${bot.symbol} ${strike} ${optionType}` : bot.symbol.toUpperCase());
+    const signalDirection = params.signalDirection ?? (signal as any).signalDirection ?? signal.direction;
+    const orderSide = params.orderSide ?? (signal as any).orderSide ?? (signal.direction === 'BULLISH' ? 'BUY' : 'SELL');
+
+    const executionInstrument =
+      params.executionInstrument ||
+      (bot as any).executionInstrument ||
+      contractSymbol;
+    const signalSourceInstrument =
+      params.signalSourceInstrument ||
+      (bot as any).signalSourceInstrument ||
+      signal.symbol.toUpperCase();
 
     if (!this.prisma || !this.prisma.tradeDecision || !this.prisma.$transaction) {
       // In-memory isolated unit test fallback ONLY
@@ -808,8 +1321,16 @@ export class TradeDecisionService {
               botId: bot.id,
               signalId: signal.id || null,
               symbol: bot.symbol.toUpperCase(),
-              contractSymbol: (signal as any).contractSymbol || bot.symbol.toUpperCase(),
-              instrumentType: 'SPOT',
+              contractSymbol,
+              executionInstrument,
+              executionInstrumentType,
+              signalSourceInstrument,
+              instrumentType,
+              strike: strike ? new Decimal(strike) : null,
+              optionType,
+              expiry,
+              signalDirection: signalDirection as any,
+              orderSide,
               timeframe: this.normalizeTimeframe(bot.timeframe),
               direction: signal.direction as any,
               decision: TradeDecisionType.REJECT,
@@ -883,8 +1404,16 @@ export class TradeDecisionService {
             botId: bot.id,
             signalId: signal.id || null,
             symbol: bot.symbol.toUpperCase(),
-            contractSymbol: (signal as any).contractSymbol || bot.symbol.toUpperCase(),
-            instrumentType: 'SPOT',
+            contractSymbol,
+            executionInstrument,
+            executionInstrumentType,
+            signalSourceInstrument,
+            instrumentType,
+            strike: strike ? new Decimal(strike) : null,
+            optionType,
+            expiry,
+            signalDirection: signalDirection as any,
+            orderSide,
             timeframe: this.normalizeTimeframe(bot.timeframe),
             direction: signal.direction as any,
             decision: TradeDecisionType.TAKE,
@@ -935,6 +1464,12 @@ export class TradeDecisionService {
             fingerprint,
             botId: bot.id,
             symbol: bot.symbol.toUpperCase(),
+            executionInstrument,
+            executionInstrumentType,
+            contractSymbol,
+            strike: strike ? new Decimal(strike) : null,
+            optionType,
+            expiry,
             timeframe: this.normalizeTimeframe(bot.timeframe),
             direction: signal.direction as any,
             signalId: signal.id || null,
@@ -1000,7 +1535,135 @@ export class TradeDecisionService {
   }
 
   /**
+   * P0 #1, #2, #3: Single-Authority Atomic Conditional Execution State Transition Helper
+   *
+   * Enforces strict finite state machine graph edges:
+   *   RESERVED  -> EXECUTING / FAILED_RETRYABLE / FAILED_FINAL / CANCELLED
+   *   EXECUTING -> EXECUTED / FAILED_RETRYABLE / FAILED_FINAL
+   *   FAILED_RETRYABLE -> RESERVED (Clean Retry Reset)
+   *
+   * Rejects any transition edge that does not belong to the allowed state graph.
+   */
+  public async transitionExecutionState(
+    executionId: string,
+    expectedStates:
+      | 'RESERVED'
+      | 'EXECUTING'
+      | 'EXECUTED'
+      | 'FAILED_RETRYABLE'
+      | 'FAILED_FINAL'
+      | ('RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL')[],
+    targetState: 'RESERVED' | 'EXECUTING' | 'EXECUTED' | 'FAILED_RETRYABLE' | 'FAILED_FINAL',
+    updateData?: {
+      orderPositionId?: string | null;
+      failureReason?: string | null;
+      failureReasonCode?: string | null;
+    },
+  ): Promise<{ success: boolean; count: number }> {
+    const expectedArray = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
+
+    // 1. Validate finite state machine edge BEFORE database query or unit test mock check
+    for (const exp of expectedArray) {
+      const allowedTargets = ALLOWED_EXECUTION_STATE_TRANSITIONS[exp] || [];
+      if (!allowedTargets.includes(targetState)) {
+        this.logger.error(
+          `Invalid state transition edge requested for execution '${executionId}': edge '${exp}' -> '${targetState}' is prohibited by state machine graph`,
+        );
+        throw new InternalServerErrorException(
+          `INVALID_STATE_TRANSITION_EDGE: Transition '${exp}' -> '${targetState}' is prohibited by finite state machine graph`,
+        );
+      }
+    }
+
+    if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) {
+      return { success: true, count: 1 };
+    }
+
+    const data: any = {
+      state: targetState,
+      updatedAt: new Date(),
+    };
+
+    if (targetState === 'EXECUTING') {
+      data.startedAt = new Date();
+    } else if (targetState === 'EXECUTED') {
+      data.completedAt = new Date();
+      if (updateData?.orderPositionId !== undefined) {
+        data.orderPositionId = updateData.orderPositionId;
+      }
+    } else if (targetState === 'FAILED_RETRYABLE' || targetState === 'FAILED_FINAL') {
+      data.failedAt = new Date();
+      data.failureReason = updateData?.failureReason || null;
+      data.failureReasonCode = updateData?.failureReasonCode || null;
+    } else if (targetState === 'RESERVED') {
+      data.failureReason = null;
+      data.failureReasonCode = null;
+      data.failedAt = null;
+      data.startedAt = null;
+      data.completedAt = null;
+      data.orderPositionId = null;
+    }
+
+    try {
+      const result = await this.prisma.algoBotExecution.updateMany({
+        where: {
+          id: executionId,
+          state: { in: expectedArray as any },
+        },
+        data,
+      });
+
+      if (result.count === 0) {
+        this.logger.error(
+          `State transition conflict for execution '${executionId}': expected state [${expectedArray.join(', ')}], target '${targetState}'`,
+        );
+        throw new InternalServerErrorException(
+          `STATE_TRANSITION_REJECTED: Execution '${executionId}' is not in expected state [${expectedArray.join(', ')}] for transition to ${targetState}`,
+        );
+      }
+
+      return { success: true, count: result.count };
+    } catch (err: any) {
+      if (err instanceof InternalServerErrorException) {
+        throw err;
+      }
+      this.logger.error(
+        `Database error during state transition for ${executionId}: ${err.message}`,
+      );
+      throw new InternalServerErrorException(
+        `Execution state transition to ${targetState} failed: ${err.message}`,
+      );
+    }
+  }
+
+  public async markExecutionStarted(executionId: string): Promise<void> {
+    await this.transitionExecutionState(executionId, 'RESERVED', 'EXECUTING');
+  }
+
+  public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
+    await this.transitionExecutionState(executionId, 'EXECUTING', 'EXECUTED', { orderPositionId });
+  }
+
+  public async markExecutionFailed(
+    executionId: string,
+    err: any,
+    classificationParam?: IExecutionFailureClassification,
+  ): Promise<void> {
+    if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
+
+    const classification = classificationParam || classifyExecutionFailure(err);
+    const targetState = classification.retryable ? 'FAILED_RETRYABLE' : 'FAILED_FINAL';
+
+    await this.transitionExecutionState(executionId, ['EXECUTING', 'RESERVED'], targetState, {
+      failureReason: classification.message,
+      failureReasonCode: classification.reasonCode,
+    });
+  }
+
+  /**
    * Updates the lifecycle state of a TradeDecision as it advances through execution.
+   * Enforces strict CAS against ALLOWED_LIFECYCLE_TRANSITIONS.
+   * Throws on DB update count 0 (fail-closed, no silent fallback).
    */
   public async updateTradeLifecycleState(
     tradeDecisionId: string,
@@ -1014,13 +1677,29 @@ export class TradeDecisionService {
       observedAt?: Date;
       receivedAt?: Date;
     },
-    expectedCurrentState?: TradeLifecycleState,
+    expectedCurrentState?: TradeLifecycleState | TradeLifecycleState[],
   ): Promise<void> {
     if (!tradeDecisionId) {
       throw new Error(
         `[LIFECYCLE_FAIL_CLOSED] tradeDecisionId is required to update lifecycle state to '${state}'`,
       );
     }
+
+    // 1. Validate finite state machine edge against ALLOWED_LIFECYCLE_TRANSITIONS
+    if (expectedCurrentState) {
+      const expectedArr = Array.isArray(expectedCurrentState)
+        ? expectedCurrentState
+        : [expectedCurrentState];
+      for (const exp of expectedArr) {
+        const allowedTargets = ALLOWED_LIFECYCLE_TRANSITIONS[exp] || [];
+        if (!allowedTargets.includes(state)) {
+          throw new InternalServerErrorException(
+            `[INVALID_LIFECYCLE_TRANSITION] Transition from '${exp}' to '${state}' is prohibited by lifecycle finite state graph`,
+          );
+        }
+      }
+    }
+
     if (tradeDecisionId.startsWith('test_dec_')) return;
     if (!this.prisma || !this.prisma.tradeDecision) {
       throw new Error(
@@ -1030,7 +1709,17 @@ export class TradeDecisionService {
 
     const whereClause: any = { id: tradeDecisionId };
     if (expectedCurrentState) {
-      whereClause.lifecycleState = expectedCurrentState;
+      const expectedArr = Array.isArray(expectedCurrentState)
+        ? expectedCurrentState
+        : [expectedCurrentState];
+      whereClause.lifecycleState = expectedArr.length === 1 ? expectedArr[0] : { in: expectedArr };
+    } else {
+      const allowedSourceStates = (Object.keys(ALLOWED_LIFECYCLE_TRANSITIONS) as TradeLifecycleState[]).filter(
+        (src) => ALLOWED_LIFECYCLE_TRANSITIONS[src]?.includes(state),
+      );
+      if (allowedSourceStates.length > 0) {
+        whereClause.lifecycleState = { in: allowedSourceStates };
+      }
     }
 
     let updatedCount = 0;
@@ -1075,7 +1764,9 @@ export class TradeDecisionService {
     if (updatedCount === 0) {
       throw new Error(
         `[LIFECYCLE_TRANSITION_FAILED] TradeDecision '${tradeDecisionId}' could not transition to state '${state}'${
-          expectedCurrentState ? ` (expected current state '${expectedCurrentState}')` : ''
+          expectedCurrentState
+            ? ` (expected current state '${Array.isArray(expectedCurrentState) ? expectedCurrentState.join(', ') : expectedCurrentState}')`
+            : ''
         }. Record not found or state mismatch.`,
       );
     }
@@ -1237,6 +1928,22 @@ export class TradeDecisionService {
         ? `Direction matched: ${signal.direction}`
         : `Bot direction '${bot.direction}' !== signal direction '${signal.direction}'`,
       passed: isDirMatch,
+    });
+
+    // 12.1 SPOT_SHORT_SELLING_FORBIDDEN
+    const execInst =
+      (bot as any).executionInstrument ||
+      (signal as any).contractSymbol ||
+      bot.symbol.toUpperCase();
+    const isSpotShortForbidden =
+      new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']).has(execInst) &&
+      signal.direction === 'BEARISH';
+    gateResults.push({
+      code: 'SPOT_SHORT_SELLING_FORBIDDEN',
+      message: !isSpotShortForbidden
+        ? 'Direction permitted for instrument'
+        : `Spot short selling is forbidden for spot instrument '${execInst}'`,
+      passed: !isSpotShortForbidden,
     });
 
     // 13. SCORE_BELOW_THRESHOLD

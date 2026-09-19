@@ -43,6 +43,7 @@ import {
   ExecutionMode,
 } from './execution-provider.interface';
 import * as crypto from 'crypto';
+import { isOptionsUnderlying } from '../algo-bots/option-contract-resolver';
 
 export * from './execution-provider.interface';
 
@@ -121,80 +122,222 @@ export class PaperTradingService implements IExecutionProvider {
   }
 
   /**
-   * Calculates realistic Indian stock & crypto transaction charges (Brokerage, STT, GST, Exchange turnover)
+  /**
+   * Calculates realistic Indian stock & crypto transaction charges (Brokerage, STT, GST, Exchange turnover, SEBI, Stamp Duty)
+   * Supporting all 7 instruments: NIFTY OPTION, BANKNIFTY OPTION, BTCUSDT_SPOT, XAUUSD, RELIANCE, HDFCBANK, INFY.
    */
   public calculateCharges(
     turnoverQuote: number,
-    isCrypto: boolean,
+    isCryptoOrInstrumentType: boolean | string = false,
     fxRate = 1.0,
     fxTimestamp = Date.now(),
     stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE' = 'ENTRY',
+    symbolOrType?: string,
   ): {
     feeCurrency: string;
     accountCurrency: string;
+    grossTurnoverQuote: number;
+    grossTurnoverAccount: number;
+    brokerage: number;
     brokerageQuote: number;
     brokerageAccount: number;
+    stt: number;
+    exchangeFee: number;
+    exchangeTurnover: number;
+    sebi: number;
+    sebiTurnover: number;
+    stampDuty: number;
+    gst: number;
     totalChargesQuote: number;
+    totalChargesAccount: number;
     totalCharges: number; // in account currency (INR)
     fxRate: number;
     fxRateTimestamp: number;
+    fxTimestamp: number;
+    scheduleVersion: string;
     feeCalculationBasis: string;
+    instrumentType: string;
     stage: 'ENTRY' | 'EXIT' | 'LIFECYCLE';
-    brokerage: number;
-    stt: number;
-    exchangeTurnover: number;
-    gst: number;
-    sebiTurnover: number;
   } {
+    const grossTurnoverQuote = Number(turnoverQuote.toFixed(4));
+    const grossTurnoverAccount = Number((turnoverQuote * fxRate).toFixed(2));
+    const typeStr = typeof isCryptoOrInstrumentType === 'string'
+      ? isCryptoOrInstrumentType.toUpperCase()
+      : isCryptoOrInstrumentType === true
+        ? 'CRYPTO'
+        : 'EQUITY';
+
+    const sym = (symbolOrType || '').toUpperCase().trim();
+    const isCrypto =
+      typeStr === 'CRYPTO' ||
+      sym.includes('BTC') ||
+      sym === 'BTCUSDT' ||
+      sym === 'BTCUSDT_SPOT';
+    const isGold =
+      typeStr === 'COMMODITY' ||
+      sym === 'XAUUSD' ||
+      sym === 'GOLD';
+    const isOption =
+      typeStr === 'OPTION' ||
+      sym.endsWith(' CE') ||
+      sym.endsWith(' PE') ||
+      sym.includes(' CE ') ||
+      sym.includes(' PE ') ||
+      (sym.startsWith('NIFTY') && !sym.includes('SPOT') && (sym.includes('CE') || sym.includes('PE'))) ||
+      (sym.startsWith('BANKNIFTY') && !sym.includes('SPOT') && (sym.includes('CE') || sym.includes('PE')));
+
+    // 1. Crypto Spot (Binance: 0.1% maker/taker in USDT)
     if (isCrypto) {
-      const brokerageQuote = Number((turnoverQuote * 0.001).toFixed(4)); // 0.1% Binance maker/taker fee in USDT
+      const brokerageQuote = Number((turnoverQuote * 0.001).toFixed(4));
       const totalChargesQuote = brokerageQuote;
       const brokerageAccount = Number((brokerageQuote * fxRate).toFixed(2));
       const totalCharges = brokerageAccount;
       return {
         feeCurrency: 'USDT',
         accountCurrency: 'INR',
+        grossTurnoverQuote,
+        grossTurnoverAccount,
         brokerageQuote,
         brokerageAccount,
+        brokerage: brokerageAccount,
+        stt: 0,
+        exchangeFee: 0,
+        exchangeTurnover: 0,
+        sebi: 0,
+        sebiTurnover: 0,
+        stampDuty: 0,
+        gst: 0,
         totalChargesQuote,
+        totalChargesAccount: totalCharges,
         totalCharges,
         fxRate,
         fxRateTimestamp: fxTimestamp,
+        fxTimestamp,
+        scheduleVersion: 'BINANCE_SPOT_2024',
         feeCalculationBasis: 'BINANCE_SPOT_0_1_PERCENT',
+        instrumentType: 'CRYPTO',
         stage,
-        brokerage: brokerageAccount,
-        stt: 0,
-        exchangeTurnover: 0,
-        gst: 0,
-        sebiTurnover: 0,
       };
     }
 
+    // 2. Commodity / Metals (COMEX: 0.02% spread/commission in USD)
+    if (isGold) {
+      const brokerageQuote = Number((turnoverQuote * 0.0002).toFixed(4));
+      const totalChargesQuote = brokerageQuote;
+      const brokerageAccount = Number((brokerageQuote * fxRate).toFixed(2));
+      const totalCharges = brokerageAccount;
+      return {
+        feeCurrency: 'USD',
+        accountCurrency: 'INR',
+        grossTurnoverQuote,
+        grossTurnoverAccount,
+        brokerageQuote,
+        brokerageAccount,
+        brokerage: brokerageAccount,
+        stt: 0,
+        exchangeFee: 0,
+        exchangeTurnover: 0,
+        sebi: 0,
+        sebiTurnover: 0,
+        stampDuty: 0,
+        gst: 0,
+        totalChargesQuote,
+        totalChargesAccount: totalCharges,
+        totalCharges,
+        fxRate,
+        fxRateTimestamp: fxTimestamp,
+        fxTimestamp,
+        scheduleVersion: 'COMEX_METALS_2024',
+        feeCalculationBasis: 'COMEX_COMMISSION_0_02_PERCENT',
+        instrumentType: 'COMMODITY',
+        stage,
+      };
+    }
+
+    // 3. NSE F&O Options (NIFTY / BANKNIFTY Options: flat ₹20 brokerage, STT on sell turnover only, exchange turnover 0.05%, stamp on buy only 0.003%)
+    if (isOption) {
+      const brokerage = 20.0;
+      // STT: 0.125% on sell premium (EXIT or LIFECYCLE only)
+      const stt = (stage === 'EXIT' || stage === 'LIFECYCLE')
+        ? Number((turnoverQuote * 0.00125).toFixed(2))
+        : 0;
+      const exchangeFee = Number((turnoverQuote * 0.0005).toFixed(2));
+      const sebi = Number((turnoverQuote * 0.000001).toFixed(2));
+      // Stamp duty: 0.003% on buy only (ENTRY or LIFECYCLE)
+      const stampDuty = (stage === 'ENTRY' || stage === 'LIFECYCLE')
+        ? Number((turnoverQuote * 0.00003).toFixed(2))
+        : 0;
+      const gst = Number(((brokerage + exchangeFee + sebi) * 0.18).toFixed(2));
+      const totalCharges = Number(
+        (brokerage + stt + exchangeFee + sebi + stampDuty + gst).toFixed(2),
+      );
+
+      return {
+        feeCurrency: 'INR',
+        accountCurrency: 'INR',
+        grossTurnoverQuote,
+        grossTurnoverAccount,
+        brokerageQuote: brokerage,
+        brokerageAccount: brokerage,
+        brokerage,
+        stt,
+        exchangeFee,
+        exchangeTurnover: exchangeFee,
+        sebi,
+        sebiTurnover: sebi,
+        stampDuty,
+        gst,
+        totalChargesQuote: totalCharges,
+        totalChargesAccount: totalCharges,
+        totalCharges,
+        fxRate: 1.0,
+        fxRateTimestamp: fxTimestamp,
+        fxTimestamp,
+        scheduleVersion: 'NSE_FO_OPTIONS_2024',
+        feeCalculationBasis: 'NSE_FO_OPTIONS_SCHEDULE',
+        instrumentType: 'OPTION',
+        stage,
+      };
+    }
+
+    // 4. NSE Cash Equities (RELIANCE, HDFCBANK, INFY: flat ₹20 brokerage, STT 0.1%, exchange 0.00325%, stamp 0.015% on buy)
     const brokerage = 20.0;
-    const stt = Number((turnoverQuote * 0.000125).toFixed(2));
-    const exchangeTurnover = Number((turnoverQuote * 0.0000345).toFixed(2));
-    const gst = Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
-    const sebiTurnover = Number((turnoverQuote * 0.000001).toFixed(2));
+    const stt = Number((turnoverQuote * 0.001).toFixed(2));
+    const exchangeFee = Number((turnoverQuote * 0.0000325).toFixed(2));
+    const sebi = Number((turnoverQuote * 0.000001).toFixed(2));
+    const stampDuty = (stage === 'ENTRY' || stage === 'LIFECYCLE')
+      ? Number((turnoverQuote * 0.00015).toFixed(2))
+      : 0;
+    const gst = Number(((brokerage + exchangeFee + sebi) * 0.18).toFixed(2));
     const totalCharges = Number(
-      (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
+      (brokerage + stt + exchangeFee + sebi + stampDuty + gst).toFixed(2),
     );
 
     return {
       feeCurrency: 'INR',
       accountCurrency: 'INR',
+      grossTurnoverQuote,
+      grossTurnoverAccount,
       brokerageQuote: brokerage,
       brokerageAccount: brokerage,
+      brokerage,
+      stt,
+      exchangeFee,
+      exchangeTurnover: exchangeFee,
+      sebi,
+      sebiTurnover: sebi,
+      stampDuty,
+      gst,
       totalChargesQuote: totalCharges,
+      totalChargesAccount: totalCharges,
       totalCharges,
       fxRate: 1.0,
       fxRateTimestamp: fxTimestamp,
-      feeCalculationBasis: 'NSE_EQUITY_DERIVATIVE_SCHEDULE',
+      fxTimestamp,
+      scheduleVersion: 'NSE_CASH_EQUITY_2024',
+      feeCalculationBasis: 'NSE_CASH_EQUITY_SCHEDULE',
+      instrumentType: 'EQUITY',
       stage,
-      brokerage,
-      stt,
-      exchangeTurnover,
-      gst,
-      sebiTurnover,
     };
   }
 
@@ -240,6 +383,127 @@ export class PaperTradingService implements IExecutionProvider {
   }
 
   /**
+   * Validates and fetches authoritative live option contract price without any hardcoded fallback.
+   * Throws MarketDataUnavailableError or StaleMarketDataError if price is stale or missing.
+   */
+  public async getValidatedOptionPrice(
+    contractSymbol: string,
+    maxAgeSeconds = 5,
+  ): Promise<{ price: number; timestamp: Date }> {
+    const key = (contractSymbol || '').toUpperCase().trim();
+    if (!key) {
+      throw new MarketDataUnavailableError(
+        'UNKNOWN_OPTION',
+        'Option contract symbol is required to fetch option market price',
+      );
+    }
+
+    if (this.realMarketStreamer) {
+      try {
+        let ticker =
+          typeof this.realMarketStreamer.getOptionTicker === 'function'
+            ? this.realMarketStreamer.getOptionTicker(key)
+            : null;
+        if (!ticker && typeof this.realMarketStreamer.getValidatedTicker === 'function') {
+          ticker = this.realMarketStreamer.getValidatedTicker(key, maxAgeSeconds);
+        }
+        if (ticker && typeof ticker.price === 'number' && Number.isFinite(ticker.price) && ticker.price > 0) {
+          const ts = ticker.marketEventTime || ticker.lastUpdated || Date.now();
+          const ageMs = Date.now() - ts;
+          if (ageMs > maxAgeSeconds * 1000) {
+            throw new StaleMarketDataError(
+              key,
+              Math.round(ageMs / 1000),
+              maxAgeSeconds,
+              new Date(ts),
+            );
+          }
+          return { price: ticker.price, timestamp: new Date(ts) };
+        }
+      } catch (err: any) {
+        if (err instanceof StaleMarketDataError || err instanceof MarketDataUnavailableError) {
+          throw err;
+        }
+      }
+    }
+
+    throw new MarketDataUnavailableError(
+      key,
+      `No fresh live option market data available for execution of ${key}. Fail closed.`,
+    );
+  }
+
+  /**
+   * Authoritative Live Quote Resolver across all 7 instruments:
+   * - Options: exact contract symbol quote (getValidatedOptionPrice)
+   * - Crypto spot: BTCUSDT_SPOT / BTCUSDT live tick
+   * - Commodity spot: XAUUSD live tick
+   * - Cash equities: RELIANCE, HDFCBANK, INFY live tick
+   */
+  public async resolveLivePositionQuote(
+    pos: { symbol: string; contractSymbol?: string | null; instrumentType?: string | null; currentPrice?: any },
+    maxAgeSeconds = 5,
+  ): Promise<{ price: number; timestamp: Date; symbol: string }> {
+    const rawSym = (pos.symbol || '').trim().toUpperCase();
+    const contractSym = (pos.contractSymbol || '').trim().toUpperCase();
+    const instType = (pos.instrumentType || '').trim().toUpperCase();
+
+    const isOption =
+      instType === 'OPTION' ||
+      (contractSym.length > 0 && (contractSym.endsWith(' CE') || contractSym.endsWith(' PE') || contractSym.includes(' CE ') || contractSym.includes(' PE '))) ||
+      rawSym.endsWith(' CE') ||
+      rawSym.endsWith(' PE');
+
+    // 1. Option contracts: resolve exact contract quote
+    if (isOption) {
+      const optKey = contractSym || rawSym;
+      const optionQuote = await this.getValidatedOptionPrice(optKey, maxAgeSeconds);
+      return {
+        price: optionQuote.price,
+        timestamp: optionQuote.timestamp,
+        symbol: optKey,
+      };
+    }
+
+    // 2. Crypto Spot: BTCUSDT / BTCUSDT_SPOT
+    if (rawSym === 'BTCUSDT' || rawSym === 'BTCUSDT_SPOT' || rawSym === 'BTCUSD') {
+      try {
+        const quote = await this.getValidatedMarketPrice('BTCUSDT_SPOT', maxAgeSeconds);
+        return {
+          price: quote.price,
+          timestamp: quote.timestamp,
+          symbol: 'BTCUSDT_SPOT',
+        };
+      } catch {
+        const quote = await this.getValidatedMarketPrice('BTCUSDT', maxAgeSeconds);
+        return {
+          price: quote.price,
+          timestamp: quote.timestamp,
+          symbol: 'BTCUSDT',
+        };
+      }
+    }
+
+    // 3. Commodity Spot: XAUUSD / GOLD
+    if (rawSym === 'XAUUSD' || rawSym === 'GOLD') {
+      const quote = await this.getValidatedMarketPrice(rawSym, maxAgeSeconds);
+      return {
+        price: quote.price,
+        timestamp: quote.timestamp,
+        symbol: rawSym,
+      };
+    }
+
+    // 4. Cash Equities & other spot instruments: RELIANCE, HDFCBANK, INFY
+    const quote = await this.getValidatedMarketPrice(rawSym, maxAgeSeconds);
+    return {
+      price: quote.price,
+      timestamp: quote.timestamp,
+      symbol: rawSym,
+    };
+  }
+
+  /**
    * Strictly Read-Only Portfolio Retrieval.
    * Does NOT modify positions or trigger exits on GET.
    */
@@ -268,8 +532,8 @@ export class PaperTradingService implements IExecutionProvider {
     for (const pos of openPositions) {
       let livePrice = Number(pos.currentPrice);
       try {
-        const marketPriceObj = await this.getValidatedMarketPrice(pos.symbol, 30);
-        livePrice = marketPriceObj.price;
+        const liveQuote = await this.resolveLivePositionQuote(pos, 30);
+        livePrice = liveQuote.price;
       } catch {
         // keep pos.currentPrice if live price fetch fails on read-only view
       }
@@ -279,8 +543,18 @@ export class PaperTradingService implements IExecutionProvider {
       const isBuy = pos.direction === Direction.BULLISH;
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
       // Quote-currency conversion via point-in-time FX rate
-      const inst = getAuthoritativeInstrument(pos.symbol);
-      const quoteCurrency = inst.currency;
+      const targetSymbol = (pos.contractSymbol && pos.contractSymbol.trim().length > 0)
+        ? pos.contractSymbol.trim().toUpperCase()
+        : pos.symbol.trim().toUpperCase();
+      const isOptionPos = targetSymbol.endsWith(' CE') || targetSymbol.endsWith(' PE') || pos.instrumentType === 'OPTION';
+      let quoteCurrency = 'INR';
+      try {
+        const lookupSym = isOptionPos ? (targetSymbol.includes(' ') ? targetSymbol.split(' ')[0] : targetSymbol) : targetSymbol;
+        const inst = getAuthoritativeInstrument(lookupSym);
+        quoteCurrency = inst.currency;
+      } catch {
+        quoteCurrency = 'INR';
+      }
       const openingSnapshot =
         (pos.executionEventsJson as any)?.accountingSnapshot ??
         (pos.featureSnapshotJson as any)?.accountingSnapshot;
@@ -530,16 +804,79 @@ export class PaperTradingService implements IExecutionProvider {
     }
 
     const rawSymbol = this.normalizeSymbol(req.symbol);
-    const instrumentType = req.instrumentType || (req.strike ? 'OPTION' : 'SPOT');
-    const isOption = instrumentType === 'OPTION' || Boolean(req.strike);
+    const execSymbol = this.normalizeSymbol(req.executionInstrument || req.symbol);
+    const isOptionsUnderlyingSymbol = isOptionsUnderlying(rawSymbol);
+
+    // Section 10 Validation: Options-Only Execution for NIFTY / BANKNIFTY Algo Bots
+    const isOptionsBotOrder =
+      Boolean(req.sourceBotId) &&
+      (req.executionInstrumentType === 'OPTION' ||
+        Boolean(req.executionInstrument?.toUpperCase().includes('OPTION')) ||
+        (isOptionsUnderlyingSymbol && (req.executionInstrument === rawSymbol || !req.executionInstrument)));
+    const isExplicitOptionOrder =
+      req.instrumentType === 'OPTION' ||
+      req.executionInstrumentType === 'OPTION' ||
+      Boolean(req.strike);
+
+    if (isOptionsBotOrder && req.instrumentType !== 'OPTION') {
+      throw new BadRequestException(
+        `OPTION_EXECUTION_REQUIRED: NIFTY and BANKNIFTY Algo Bots must execute OPTIONS ONLY. Got instrumentType='${req.instrumentType || 'SPOT'}'.`,
+      );
+    }
+
+    let strike = req.strike !== undefined && req.strike !== null ? Number(req.strike) : undefined;
+    let optionType = req.optionType;
+    let contractSymbol: string = req.contractSymbol || '';
+
+    if (contractSymbol && typeof contractSymbol === 'string') {
+      const match = contractSymbol.match(/(?:NIFTY|BANKNIFTY)\s+(\d+(?:\.\d+)?)\s+(CE|PE)/i);
+      if (match) {
+        if (strike === undefined || Number.isNaN(strike)) {
+          strike = Number(match[1]);
+        }
+        if (!optionType) {
+          optionType = match[2].toUpperCase() as any;
+        }
+      }
+    }
+
+    if (isOptionsBotOrder || isExplicitOptionOrder) {
+      if (req.instrumentType !== 'OPTION') {
+        throw new BadRequestException(
+          `OPTION_EXECUTION_REQUIRED: Option orders must specify instrumentType='OPTION'.`,
+        );
+      }
+      if (
+        strike === undefined ||
+        strike === null ||
+        Number(strike) <= 0 ||
+        !Number.isFinite(Number(strike))
+      ) {
+        throw new BadRequestException(
+          `OPTION_STRIKE_REQUIRED: Option orders require a positive numeric strike price. Got '${req.strike}'.`,
+        );
+      }
+      if (!optionType || !['CE', 'PE'].includes(String(optionType).toUpperCase())) {
+        throw new BadRequestException(
+          `OPTION_TYPE_REQUIRED: Option orders require an optionType of 'CE' or 'PE'. Got '${req.optionType}'.`,
+        );
+      }
+      if (!contractSymbol || typeof contractSymbol !== 'string' || contractSymbol.trim() === '') {
+        throw new BadRequestException(
+          `OPTION_CONTRACT_REQUIRED: Option orders require a valid contractSymbol. Got '${req.contractSymbol}'.`,
+        );
+      }
+    }
+
+    const instrumentType = (isOptionsBotOrder || isExplicitOptionOrder) ? 'OPTION' : (req.instrumentType || 'SPOT');
+    const isOption = instrumentType === 'OPTION';
 
     const isSpot = instrumentType === 'SPOT' && !isOption;
-    const canonicalSpotSymbol =
-      LEGACY_SPOT_ALIASES[rawSymbol] || (isSupportedSpotSymbol(rawSymbol) ? rawSymbol : null);
+    const isSupportedSpot = isSupportedSpotSymbol(execSymbol);
 
-    if (isSpot && canonicalSpotSymbol && req.direction !== 'BUY' && !req.tradeDecisionId) {
+    if (isSpot && isSupportedSpot && req.direction !== 'BUY') {
       throw new BadRequestException(
-        `SPOT_SHORT_SELLING_FORBIDDEN: Cannot create a short/bearish position for spot instrument '${rawSymbol}'. ` +
+        `SPOT_SHORT_SELLING_FORBIDDEN: Cannot create a short/bearish position for spot instrument '${execSymbol}'. ` +
           `Spot instruments (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT) are long-only. ` +
           `BUY entries open positions; SELL reduces/closes existing long holdings only.`,
       );
@@ -554,9 +891,9 @@ export class PaperTradingService implements IExecutionProvider {
       symbol.toUpperCase().includes('BTC');
     const correlationId =
       req.correlationId || `corr_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const contractSymbol =
-      req.contractSymbol ||
-      (req.strike && req.optionType ? `${symbol} ${req.strike} ${req.optionType}` : symbol);
+    contractSymbol =
+      contractSymbol ||
+      (strike && optionType ? `${symbol} ${strike} ${optionType}` : symbol);
 
     const account = await this.getOrCreateAccount();
     const config = await this.getSystemConfig();
@@ -611,24 +948,40 @@ export class PaperTradingService implements IExecutionProvider {
 
     if (!executionPrice || executionPrice <= 0) {
       try {
-        const marketPriceData = await this.getValidatedMarketPrice(
-          symbol,
-          config.maxMarketDataAgeSeconds || 5,
-        );
-        executionPrice = marketPriceData.price;
-        sourceTimestamp = marketPriceData.timestamp;
+        if (isOption) {
+          const optionPriceData = await this.getValidatedOptionPrice(
+            contractSymbol,
+            config.maxMarketDataAgeSeconds || 5,
+          );
+          executionPrice = optionPriceData.price;
+          sourceTimestamp = optionPriceData.timestamp;
+        } else {
+          const marketPriceData = await this.getValidatedMarketPrice(
+            symbol,
+            config.maxMarketDataAgeSeconds || 5,
+          );
+          executionPrice = marketPriceData.price;
+          sourceTimestamp = marketPriceData.timestamp;
+        }
       } catch (err: any) {
+        const rejReason =
+          err instanceof StaleMarketDataError
+            ? RiskRejectionReason.STALE_MARKET_DATA
+            : RiskRejectionReason.MARKET_DATA_UNAVAILABLE;
         await this.prisma.paperOrder.create({
           data: {
             accountId: account.id,
             symbol,
             contractSymbol,
             instrumentType,
+            strike: req.strike ? new Decimal(req.strike) : null,
+            optionType: req.optionType,
+            expiry: req.expiry || null,
             direction: this.toSignalDirection(req.direction),
             orderType: req.orderType || 'MARKET',
             requestedQuantity: new Decimal(req.quantity),
             status: OrderState.REJECTED,
-            rejectionReason: RiskRejectionReason.MARKET_DATA_UNAVAILABLE,
+            rejectionReason: rejReason,
             rejectionDetails: err.message,
             idempotencyKey,
             correlationId,
@@ -992,10 +1345,11 @@ export class PaperTradingService implements IExecutionProvider {
     const turnoverAccount = Number((turnoverQuote * fxRate).toFixed(2));
     const charges = this.calculateCharges(
       turnoverQuote,
-      isCrypto,
+      isCrypto ? 'CRYPTO' : (baseLookupSymbol === 'XAUUSD' || baseLookupSymbol === 'GOLD') ? 'COMMODITY' : isOption ? 'OPTION' : 'EQUITY',
       fxRate,
       fillExecutionTime.getTime(),
       'ENTRY',
+      contractSymbol || symbol,
     );
     const requiredMargin = Number((turnoverAccount / effLeverage).toFixed(2));
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
@@ -1030,19 +1384,51 @@ export class PaperTradingService implements IExecutionProvider {
         },
         select: { usedMargin: true },
       });
-      const txUsedMargin = activePositions.reduce((sum, p) => sum + Number(p.usedMargin), 0);
-      const txAvailable = txCash - txUsedMargin;
+      const reconciledUsedMargin = activePositions.reduce(
+        (sum, p) => sum + Number(p.usedMargin),
+        0,
+      );
 
-      if (txAvailable < requiredMargin + charges.totalCharges) {
+      // Check available cash balance against required margin + entry charges
+      const txAvailable = txCash - reconciledUsedMargin;
+      const totalCashRequired = requiredMargin + charges.totalCharges;
+      if (txAvailable < totalCashRequired) {
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.INSUFFICIENT_MARGIN,
+          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${totalCashRequired.toFixed(2)} (Margin: ₹${requiredMargin.toFixed(2)} + Fees: ₹${charges.totalCharges.toFixed(2)}), Available: ₹${txAvailable.toFixed(2)}`,
+          idempotencyKey,
+          correlationId,
+        );
         throw new BadRequestException(
-          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${(requiredMargin + charges.totalCharges).toFixed(2)} (margin ₹${requiredMargin.toFixed(2)} + charges ₹${charges.totalCharges.toFixed(2)}), Available: ₹${txAvailable.toFixed(2)}`,
+          `Order Rejected [INSUFFICIENT_MARGIN]: Available cash (₹${txAvailable.toFixed(2)}) is insufficient for required margin (₹${requiredMargin.toFixed(2)}) and fees (₹${charges.totalCharges.toFixed(2)}).`,
         );
       }
 
-      const totalExposureAfterOrder = txUsedMargin + requiredMargin;
-      if (totalExposureAfterOrder > maxExposureAllowed) {
+      // Check portfolio exposure limit
+      const projectedTotalExposure = reconciledUsedMargin + requiredMargin;
+      if (projectedTotalExposure > maxExposureAllowed) {
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.TOTAL_EXPOSURE_LIMIT,
+          `Projected portfolio exposure (₹${projectedTotalExposure.toFixed(2)}) exceeds maximum allowed (₹${maxExposureAllowed.toFixed(2)})`,
+          idempotencyKey,
+          correlationId,
+        );
         throw new BadRequestException(
-          `[TOTAL_EXPOSURE_LIMIT] Concurrency check failed. Total exposure ₹${totalExposureAfterOrder.toFixed(2)} exceeds limit ₹${maxExposureAllowed.toFixed(2)}`,
+          `Order Rejected [MAX_PORTFOLIO_RISK_EXCEEDED]: Position requires ₹${requiredMargin.toFixed(2)} margin, which pushes portfolio exposure to ₹${projectedTotalExposure.toFixed(2)} (Limit: ₹${maxExposureAllowed.toFixed(2)}).`,
         );
       }
 
@@ -1050,12 +1436,17 @@ export class PaperTradingService implements IExecutionProvider {
       const order = await tx.paperOrder.create({
         data: {
           accountId: account.id,
+          tradeDecisionId: req.tradeDecisionId || null,
+          executionId: (req as any).executionId || null,
           symbol,
           contractSymbol,
           instrumentType,
           strike: req.strike ? new Decimal(req.strike) : null,
           optionType: req.optionType,
+          expiry: req.expiry || null,
           direction: this.toSignalDirection(req.direction),
+          strategyDirection: req.strategyDirection ? (req.strategyDirection.toUpperCase() as Direction) : null,
+          sourceBotId: req.sourceBotId || null,
           orderType: req.orderType || 'MARKET',
           requestedQuantity: new Decimal(req.quantity),
           filledQuantity: new Decimal(req.quantity),
@@ -1077,6 +1468,7 @@ export class PaperTradingService implements IExecutionProvider {
       const fill = await tx.paperFill.create({
         data: {
           orderId: order.id,
+          executionRole: 'ENTRY',
           fillPrice: new Decimal(finalFillPrice),
           fillQuantity: new Decimal(req.quantity),
           fee: new Decimal(charges.totalCharges),
@@ -1095,12 +1487,18 @@ export class PaperTradingService implements IExecutionProvider {
         data: {
           accountId: account.id,
           orderId: order.id,
+          tradeDecisionId: req.tradeDecisionId || null,
+          executionId: (req as any).executionId || null,
           symbol,
           contractSymbol,
           instrumentType,
+          executionInstrument: req.executionInstrument || (isOption ? contractSymbol : rawSymbol),
           strike: req.strike ? new Decimal(req.strike) : null,
           optionType: req.optionType,
+          expiry: req.expiry || null,
           direction: this.toSignalDirection(req.direction),
+          strategyDirection: req.strategyDirection ? (req.strategyDirection.toUpperCase() as Direction) : null,
+          sourceBotId: req.sourceBotId || null,
           quantity: new Decimal(req.quantity),
           entryPrice: new Decimal(finalFillPrice),
           entryTime: fill.fillTimestamp,
@@ -1138,6 +1536,14 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
+      // Link fill directly to position
+      if (typeof (tx.paperFill as any)?.update === 'function') {
+        await tx.paperFill.update({
+          where: { id: fill.id },
+          data: { positionId: position.id },
+        });
+      }
+
       // MODEL-A ACCOUNTING CONTRACT:
       // At ENTRY: cashBalance -= entryFees, realizedPnL -= entryFees, totalChargesPaid += entryFees, usedMargin += requiredMargin.
       await tx.paperAccount.update({
@@ -1152,10 +1558,18 @@ export class PaperTradingService implements IExecutionProvider {
 
       // Synchronize TradeDecision if tradeDecisionId provided (fail-closed inside tx)
       if (req.tradeDecisionId) {
+        const currentDecision = await tx.tradeDecision.findUnique({
+          where: { id: req.tradeDecisionId },
+          select: { lifecycleState: true },
+        });
+        const isBotManaged =
+          currentDecision?.lifecycleState === TradeLifecycleState.ORDER_SUBMITTED ||
+          currentDecision?.lifecycleState === TradeLifecycleState.RESERVATION_CREATED;
+
         await tx.tradeDecision.updateMany({
           where: { id: req.tradeDecisionId },
           data: {
-            lifecycleState: TradeLifecycleState.POSITION_OPENED,
+            ...(isBotManaged ? {} : { lifecycleState: TradeLifecycleState.POSITION_OPENED }),
             orderPositionId: position.id,
             orderSubmittedTime: orderSubmittedAt,
             fillTime: fillExecutionTime,
@@ -1386,12 +1800,12 @@ export class PaperTradingService implements IExecutionProvider {
       priceSource = ExecutionPriceSource.SIMULATED_FILL;
     } else {
       try {
-        const marketPriceData = await this.getValidatedMarketPrice(
-          symbol,
+        const liveQuote = await this.resolveLivePositionQuote(
+          pos,
           config.maxMarketDataAgeSeconds || 5,
         );
-        exitPrice = marketPriceData.price;
-        sourceTimestamp = marketPriceData.timestamp;
+        exitPrice = liveQuote.price;
+        sourceTimestamp = liveQuote.timestamp;
       } catch (err: any) {
         this.logger.error(
           `[EXIT REJECTED] Cannot close position '${pos.id}' for '${symbol}': ${err.message}`,
@@ -1417,16 +1831,25 @@ export class PaperTradingService implements IExecutionProvider {
     const exitTime = new Date();
     const quantity = Number(pos.quantity);
     const exitTurnover = finalExitPrice * quantity;
-    const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
+    const isOptionPos = pos.instrumentType === 'OPTION' || Boolean(pos.strike);
+    const fxRate = openingSnapshot?.fxRate ?? 1.0;
+    const exitCharges = this.calculateCharges(
+      exitTurnover,
+      isCrypto ? 'CRYPTO' : isGold ? 'COMMODITY' : isOptionPos ? 'OPTION' : 'EQUITY',
+      fxRate,
+      exitTime.getTime(),
+      'EXIT',
+      pos.contractSymbol || pos.symbol,
+    );
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
     const isBuy = pos.direction === Direction.BULLISH;
 
     // Determine outcome classification
     let outcomeClassification = 'MANUAL';
-    if (exitReason.includes('TP3')) outcomeClassification = 'WIN_TP3_RUNNER';
-    else if (exitReason.includes('TP2')) outcomeClassification = 'WIN_TP2';
-    else if (exitReason.includes('TP1')) outcomeClassification = 'WIN_TP1';
+    if (exitReason.includes('TP3') || exitReason.includes('Target 3')) outcomeClassification = 'WIN_TP3_RUNNER';
+    else if (exitReason.includes('TP2') || exitReason.includes('Target 2')) outcomeClassification = 'WIN_TP2';
+    else if (exitReason.includes('TP1') || exitReason.includes('Target 1')) outcomeClassification = 'WIN_TP1';
     else if (exitReason.includes('Breakeven')) outcomeClassification = 'BREAKEVEN';
     else if (exitReason.includes('Stop Loss') || exitReason.includes('SL'))
       outcomeClassification = 'LOSS_SL';
@@ -1476,6 +1899,8 @@ export class PaperTradingService implements IExecutionProvider {
       const exitOrder = await tx.paperOrder.create({
         data: {
           accountId: pos.accountId,
+          tradeDecisionId: pos.tradeDecisionId || null,
+          executionId: pos.executionId || null,
           symbol,
           contractSymbol: pos.contractSymbol,
           instrumentType: pos.instrumentType,
@@ -1497,6 +1922,8 @@ export class PaperTradingService implements IExecutionProvider {
       const exitFill = await tx.paperFill.create({
         data: {
           orderId: exitOrder.id,
+          positionId: pos.id,
+          executionRole: 'FINAL_EXIT',
           fillPrice: new Decimal(finalExitPrice),
           fillQuantity: pos.quantity,
           fee: new Decimal(exitCharges.totalCharges),
@@ -1757,6 +2184,7 @@ export class PaperTradingService implements IExecutionProvider {
           strike: pos.strike,
           optionType: pos.optionType,
           direction: pos.direction,
+          outcomeClassification,
           quantity: new Decimal(totalPositionQuantity),
           entryPrice:
             hasAuthoritativeEntryFills && aggregated.entry
@@ -1835,7 +2263,6 @@ export class PaperTradingService implements IExecutionProvider {
             exitTime: new Date(aggregated.exit.latestFillTimestamp).toISOString(),
             correlationId,
           },
-          outcomeClassification,
           correlationId,
         },
       });
@@ -2097,6 +2524,11 @@ export class PaperTradingService implements IExecutionProvider {
       status: pos.status as PositionState,
       featureSnapshotJson: pos.featureSnapshotJson || undefined,
       executionEventsJson: pos.executionEventsJson || undefined,
+      executionInstrument: pos.executionInstrument || undefined,
+      executionInstrumentType: (pos as any).executionInstrumentType || undefined,
+      expiry: pos.expiry || undefined,
+      strategyDirection: pos.strategyDirection || undefined,
+      sourceBotId: pos.sourceBotId || undefined,
       charges,
       accountCurrency:
         (pos.executionEventsJson as any)?.accountingSnapshot?.accountCurrency || 'INR',
@@ -2112,6 +2544,120 @@ export class PaperTradingService implements IExecutionProvider {
       accountingSnapshotHash:
         (pos.executionEventsJson as any)?.accountingSnapshot?.snapshotHash ??
         (pos.executionEventsJson as any)?.accountingSnapshotHash,
+    };
+  }
+
+  /**
+   * Retrieves authoritative active positions enriched with live quote, real P&L, and relational links.
+   */
+  async getActivePositions(accountId?: string): Promise<any[]> {
+    let targetAccountId = accountId;
+    if (!targetAccountId) {
+      const account = await this.getOrCreateAccount();
+      targetAccountId = account.id;
+    }
+
+    const positions = await this.prisma.paperPosition.findMany({
+      where: {
+        accountId: targetAccountId,
+        status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED] },
+      },
+      orderBy: { openedAt: 'desc' },
+      include: {
+        tradeDecision: {
+          select: { id: true, botId: true, fingerprint: true, lifecycleState: true },
+        },
+        execution: {
+          select: { id: true, state: true, fingerprint: true },
+        },
+        fills: {
+          select: { id: true, executionRole: true, fillPrice: true, fillQuantity: true, fillTimestamp: true },
+        },
+      },
+    });
+
+    const enriched = await Promise.all(
+      positions.map(async (pos: any) => {
+        let livePrice = Number(pos.currentPrice);
+        try {
+          const liveQuote = await this.resolveLivePositionQuote(pos, 5);
+          livePrice = liveQuote.price;
+        } catch {}
+
+        const entryPrice = Number(pos.entryPrice);
+        const quantity = Number(pos.quantity);
+        const isBuy = pos.direction === Direction.BULLISH;
+        const charges = (pos.chargesJson as any) || { totalCharges: 0 };
+        const snapshot =
+          (pos.executionEventsJson as any)?.accountingSnapshot ??
+          (pos.featureSnapshotJson as any)?.accountingSnapshot;
+
+        const pnlCalc = TradeAccountingEngine.calculateTradePnl({
+          entryPrice,
+          exitPrice: livePrice,
+          quantity,
+          direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
+          fxRate: snapshot?.fxRate ?? 1.0,
+          fees: charges.totalCharges,
+          accountingSnapshot: snapshot,
+        });
+
+        return {
+          id: pos.id,
+          positionId: pos.id,
+          accountId: pos.accountId,
+          orderId: pos.orderId,
+          tradeDecisionId: pos.tradeDecisionId,
+          executionId: pos.executionId,
+          symbol: pos.symbol,
+          contractSymbol: pos.contractSymbol,
+          instrumentType: pos.instrumentType,
+          strike: pos.strike ? Number(pos.strike) : null,
+          optionType: pos.optionType,
+          expiry: pos.expiry,
+          direction: pos.direction,
+          quantity,
+          entryPrice,
+          currentPrice: livePrice,
+          livePrice,
+          unrealizedPnL: pnlCalc.netPnlAccount,
+          unrealizedR: pnlCalc.realizedR,
+          stopLoss: pos.stopLoss ? Number(pos.stopLoss) : null,
+          initialStopLoss: pos.initialStopLoss ? Number(pos.initialStopLoss) : null,
+          target1: pos.target1 ? Number(pos.target1) : null,
+          target2: pos.target2 ? Number(pos.target2) : null,
+          target3: pos.target3 ? Number(pos.target3) : null,
+          leverage: Number(pos.leverage),
+          usedMargin: Number(pos.usedMargin),
+          status: pos.status,
+          openedAt: pos.openedAt,
+          tradeDecision: pos.tradeDecision,
+          execution: pos.execution,
+          fills: pos.fills,
+        };
+      }),
+    );
+
+    return enriched;
+  }
+
+  /**
+   * Scoped account-level clearing of completed paper trades in atomic transaction.
+   */
+  async clearAllCompletedTrades(accountId?: string): Promise<{ success: boolean; count: number }> {
+    let targetAccountId = accountId;
+    if (!targetAccountId) {
+      const account = await this.getOrCreateAccount();
+      targetAccountId = account.id;
+    }
+
+    const result = await this.prisma.paperTrade.deleteMany({
+      where: { accountId: targetAccountId },
+    });
+
+    return {
+      success: true,
+      count: result.count,
     };
   }
 }

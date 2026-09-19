@@ -71,15 +71,7 @@ export class SignalsService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    try {
-      const count = await this.prisma.signal.count();
-      if (count === 0) {
-        this.logger.log('Trade Journal empty on startup. Initializing completed trades...');
-        await this.seedInitialCompletedTrades();
-      }
-    } catch (err: any) {
-      this.logger.warn(`Failed to auto-seed initial completed trades: ${err?.message}`);
-    }
+    this.logger.log('SignalsService initialized without synthetic trade seeding.');
   }
 
   async generateSignalForSymbol(
@@ -485,48 +477,59 @@ export class SignalsService implements OnModuleInit {
   }
 
   /**
-   * Clears/removes all completed trades from the journal database
+   * Clears/removes completed trades from the journal database (scoped by account if accountId provided)
    */
-  async clearAllCompletedTrades() {
+  async clearAllCompletedTrades(accountId?: string) {
     let paperTradesDeleted = 0;
     try {
       if ((this.prisma as any).paperTrade?.deleteMany) {
-        const ptResult = await (this.prisma as any).paperTrade.deleteMany({});
+        const whereClause = accountId ? { accountId } : {};
+        const ptResult = await (this.prisma as any).paperTrade.deleteMany({
+          where: whereClause,
+        });
         paperTradesDeleted = ptResult.count;
       }
     } catch (err) {
       this.logger.error(`Error clearing paper trades: ${err}`);
     }
 
-    const result = await this.prisma.signal.deleteMany({
-      where: {
-        OR: [
-          {
-            state: {
-              in: [
-                'TP1_HIT',
-                'TP2_HIT',
-                'TP3_HIT',
-                'SL_HIT',
-                'EXPIRED',
-                'CANCELLED',
-                'INVALIDATED',
-              ],
+    let signalsDeleted = 0;
+    if (!accountId) {
+      const result = await this.prisma.signal.deleteMany({
+        where: {
+          OR: [
+            {
+              state: {
+                in: [
+                  'TP1_HIT',
+                  'TP2_HIT',
+                  'TP3_HIT',
+                  'SL_HIT',
+                  'EXPIRED',
+                  'CANCELLED',
+                  'INVALIDATED',
+                ],
+              },
             },
-          },
-          { exitPrice: { not: null } },
-          { closedAt: { not: null } },
-          { pnlAmount: { not: null } },
-        ],
-      },
-    });
+            { exitPrice: { not: null } },
+            { closedAt: { not: null } },
+            { pnlAmount: { not: null } },
+          ],
+        },
+      });
+      signalsDeleted = result.count;
+    }
 
     try {
       if ((this.prisma as any).paperPosition?.deleteMany) {
+        const posWhere: any = {
+          status: { in: ['CLOSED', 'INVALIDATED'] },
+        };
+        if (accountId) {
+          posWhere.accountId = accountId;
+        }
         await (this.prisma as any).paperPosition.deleteMany({
-          where: {
-            status: { in: ['CLOSED', 'INVALIDATED'] },
-          },
+          where: posWhere,
         });
       }
     } catch (err) {
@@ -534,9 +537,16 @@ export class SignalsService implements OnModuleInit {
     }
 
     this.logger.log(
-      `✓ Cleared ${paperTradesDeleted} paper trades and ${result.count} closed signals completely from database.`,
+      `✓ Cleared ${paperTradesDeleted} paper trades and ${signalsDeleted} closed signals from database.`,
     );
-    return { success: true, count: paperTradesDeleted + result.count, paperTradesDeleted };
+
+    return {
+      success: true,
+      paperTradesDeleted,
+      signalsDeleted,
+      totalDeleted: paperTradesDeleted + signalsDeleted,
+      count: paperTradesDeleted + signalsDeleted,
+    };
   }
 
   /**
@@ -718,23 +728,41 @@ export class SignalsService implements OnModuleInit {
           ? Math.max(0, Math.round(holdingDurationMs / 60000))
           : null;
 
+      const featureSnap = (t.featureSnapshotJson as any) || {};
+      const signalSnap = (t.signalSnapshotJson as any) || featureSnap.signalSnapshot || {};
+      const actualScore = featureSnap.score ?? signalSnap.score ?? 85;
+      const actualGrade = featureSnap.grade ?? signalSnap.grade ?? 'A';
+      const actualTimeframe = featureSnap.timeframe ?? signalSnap.timeframe ?? '15m';
+      const underlying = isOption ? (t.symbol.includes(' ') ? t.symbol.split(' ')[0] : t.symbol) : t.symbol;
+      const strategyDir = featureSnap.strategyDirection ?? (t.direction === Direction.BULLISH ? 'BULLISH' : 'BEARISH');
+      const orderSide = isOption ? 'BUY' : (t.direction === Direction.BULLISH ? 'BUY' : 'SELL');
+      const expiry = featureSnap.expiry ?? (isOption ? (contractSymbol.split(' ')[1] || 'CURRENT') : null);
+      const optionType = t.optionType || (isOption ? (contractSymbol.endsWith('PE') ? 'PE' : 'CE') : undefined);
+
       return {
         id: t.id,
         tradeId: t.id,
         positionId: t.positionId || undefined,
         symbol: t.symbol,
         contractSymbol,
+        underlying,
+        strategyDirection: strategyDir,
+        orderSide,
+        expiry,
         instrumentType: t.instrumentType || (isOption ? 'OPTION' : 'SPOT'),
         strike: t.strike ? Number(t.strike) : undefined,
-        optionType: t.optionType || undefined,
+        optionType,
         instrumentName: t.symbol,
         currency: quoteCurrency,
         direction: t.direction,
-        side: t.direction === Direction.BULLISH ? 'BUY' : 'SELL',
+        side: orderSide,
         state,
-        grade: 'A_PLUS',
-        score: 90,
-        timeframe: '15m',
+        outcomeClassification: t.outcomeClassification || state,
+        grade: actualGrade,
+        score: actualScore,
+        timeframe: actualTimeframe,
+        entryPremium: isOption ? actualEntryPrice : undefined,
+        exitPremium: isOption ? actualExitPrice : undefined,
         quantity: Number(t.quantity),
         requestedEntryPrice,
         actualEntryPrice,

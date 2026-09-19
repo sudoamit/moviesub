@@ -25,30 +25,33 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
 } from '@quant/shared';
-import { TradeDecisionService, IPreTradeDecisionResult } from './trade-decision.service';
+import {
+  TradeDecisionService,
+  IPreTradeDecisionResult,
+  ExecutionFailureReason,
+  IExecutionFailureClassification,
+  classifyExecutionFailure,
+  ALLOWED_EXECUTION_STATE_TRANSITIONS,
+} from './trade-decision.service';
 import * as crypto from 'crypto';
+import {
+  OptionContractResolver,
+  ResolvedOptionContract,
+  isOptionsUnderlying,
+} from './option-contract-resolver';
+import {
+  OptionTradeLevelsResolver,
+  ResolvedOptionLevels,
+} from './option-trade-levels-resolver';
 
-export enum ExecutionFailureReason {
-  MARKET_DATA_UNAVAILABLE = 'MARKET_DATA_UNAVAILABLE',
-  STALE_MARKET_DATA = 'STALE_MARKET_DATA',
-  BROKER_UNAVAILABLE = 'BROKER_UNAVAILABLE',
-  BROKER_TIMEOUT = 'BROKER_TIMEOUT',
-  BROKER_REJECTED = 'BROKER_REJECTED',
-  ORDER_REJECTED = 'ORDER_REJECTED',
-  ORDER_PLACEMENT_FAILED = 'ORDER_PLACEMENT_FAILED',
-  INVALID_QUANTITY = 'INVALID_QUANTITY',
-  INVALID_LEVELS = 'INVALID_LEVELS',
-  POSITION_ALREADY_OPEN = 'POSITION_ALREADY_OPEN',
-  DATABASE_UNAVAILABLE = 'DATABASE_UNAVAILABLE',
-  STATE_TRANSITION_FAILED = 'STATE_TRANSITION_FAILED',
-  UNKNOWN_EXECUTION_ERROR = 'UNKNOWN_EXECUTION_ERROR',
-}
+export {
+  ExecutionFailureReason,
+  IExecutionFailureClassification,
+  classifyExecutionFailure,
+  ALLOWED_EXECUTION_STATE_TRANSITIONS,
+};
 
-export interface IExecutionFailureClassification {
-  retryable: boolean;
-  reasonCode: ExecutionFailureReason;
-  message: string;
-}
+const ALLOWED_STATE_TRANSITIONS = ALLOWED_EXECUTION_STATE_TRANSITIONS;
 
 export interface IAlgoBotExecutionResult {
   botId: string;
@@ -64,150 +67,6 @@ export interface IAlgoBotExecutionResult {
   correlationId?: string;
 }
 
-export function classifyExecutionFailure(err: any): IExecutionFailureClassification {
-  const errMsg = String(err?.message || err || '');
-  const errCode = err?.code || err?.reasonCode || '';
-
-  if (
-    err instanceof MarketDataUnavailableError ||
-    errCode === 'MARKET_DATA_UNAVAILABLE' ||
-    err?.name === 'MarketDataUnavailableError'
-  ) {
-    return {
-      retryable: true,
-      reasonCode: ExecutionFailureReason.MARKET_DATA_UNAVAILABLE,
-      message: err?.message || 'Market data stream provider unavailable',
-    };
-  }
-
-  if (
-    err instanceof StaleMarketDataError ||
-    errCode === 'STALE_MARKET_DATA' ||
-    err?.name === 'StaleMarketDataError'
-  ) {
-    return {
-      retryable: true,
-      reasonCode: ExecutionFailureReason.STALE_MARKET_DATA,
-      message: err?.message || 'Market quote is stale',
-    };
-  }
-
-  // Broker / Transport Unavailable (Retryable)
-  if (
-    errCode === 'BROKER_UNAVAILABLE' ||
-    errCode === 'ECONNREFUSED' ||
-    errCode === 'ENOTFOUND' ||
-    errCode === 'EAI_AGAIN' ||
-    errMsg.includes('503') ||
-    errMsg.includes('Broker connection refused') ||
-    errMsg.includes('Service Unavailable') ||
-    errMsg.includes('connection refused')
-  ) {
-    return {
-      retryable: true,
-      reasonCode: ExecutionFailureReason.BROKER_UNAVAILABLE,
-      message: err?.message || 'Broker connection refused (503)',
-    };
-  }
-
-  // Broker / Transport Timeout (Retryable)
-  if (
-    errCode === 'BROKER_TIMEOUT' ||
-    errCode === 'ETIMEDOUT' ||
-    errCode === 'ESOCKETTIMEDOUT' ||
-    errMsg.includes('504') ||
-    errMsg.includes('Gateway Timeout') ||
-    errMsg.includes('network timeout') ||
-    errMsg.includes('timed out') ||
-    errMsg.includes('timeout')
-  ) {
-    return {
-      retryable: true,
-      reasonCode: ExecutionFailureReason.BROKER_TIMEOUT,
-      message: err?.message || 'Broker request timed out',
-    };
-  }
-
-  // Broker Rejected (Non-Retryable)
-  if (
-    errCode === 'BROKER_REJECTED' ||
-    errCode === 'ORDER_REJECTED' ||
-    errMsg.includes('ORDER_REJECTED') ||
-    errMsg.includes('Insufficient margin') ||
-    errMsg.includes('Margin insufficient') ||
-    errMsg.includes('Account balance insufficient')
-  ) {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.BROKER_REJECTED,
-      message: err?.message || 'Broker/Exchange rejected order',
-    };
-  }
-
-  if (errCode === 'POSITION_ALREADY_OPEN') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.POSITION_ALREADY_OPEN,
-      message: err?.message || 'Open position already exists for symbol',
-    };
-  }
-
-  if (errCode === 'INVALID_QUANTITY') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.INVALID_QUANTITY,
-      message: err?.message || 'Invalid order quantity resolved',
-    };
-  }
-
-  if (errCode === 'INVALID_LEVELS') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.INVALID_LEVELS,
-      message: err?.message || 'Invalid trade levels',
-    };
-  }
-
-  if (errCode === 'ORDER_PLACEMENT_FAILED') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.ORDER_PLACEMENT_FAILED,
-      message: err?.message || 'Order placement failed',
-    };
-  }
-
-  if (errCode === 'DATABASE_UNAVAILABLE') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.DATABASE_UNAVAILABLE,
-      message: err?.message || 'Database unavailable',
-    };
-  }
-
-  if (errCode === 'STATE_TRANSITION_FAILED') {
-    return {
-      retryable: false,
-      reasonCode: ExecutionFailureReason.STATE_TRANSITION_FAILED,
-      message: err?.message || 'State transition failed',
-    };
-  }
-
-  return {
-    retryable: false,
-    reasonCode: ExecutionFailureReason.UNKNOWN_EXECUTION_ERROR,
-    message: err?.message || String(err),
-  };
-}
-
-const ALLOWED_STATE_TRANSITIONS: Record<string, string[]> = {
-  RESERVED: ['EXECUTING', 'FAILED_RETRYABLE', 'FAILED_FINAL', 'CANCELLED'],
-  EXECUTING: ['EXECUTED', 'FAILED_RETRYABLE', 'FAILED_FINAL'],
-  FAILED_RETRYABLE: ['RESERVED'],
-  EXECUTED: [],
-  FAILED_FINAL: [],
-  CANCELLED: [],
-};
-
 export interface IAlgoBot {
   id: string;
   name: string;
@@ -222,6 +81,9 @@ export interface IAlgoBot {
   isActive: boolean;
   createdAt: string;
   triggerCount: number;
+  executionInstrument?: string;
+  executionInstrumentType?: string;
+  signalSourceInstrument?: string;
   accountId?: string;
   configVersion?: string;
   lastTriggeredAt?: string;
@@ -247,6 +109,9 @@ export class AlgoBotsService implements OnModuleInit {
       id: 'bot_nifty_smc_pro',
       name: 'NIFTY 15m Institutional Order Flow Scalper',
       symbol: 'NIFTY',
+      executionInstrument: 'NIFTY OPTION',
+      executionInstrumentType: 'OPTION',
+      signalSourceInstrument: 'NIFTY',
       direction: 'ANY',
       timeframe: '15m',
       minScore: 80,
@@ -262,6 +127,9 @@ export class AlgoBotsService implements OnModuleInit {
       id: 'bot_banknifty_fvg',
       name: 'BANKNIFTY 15m Fair Value Gap Hunter',
       symbol: 'BANKNIFTY',
+      executionInstrument: 'BANKNIFTY OPTION',
+      executionInstrumentType: 'OPTION',
+      signalSourceInstrument: 'BANKNIFTY',
       direction: 'BEARISH',
       timeframe: '15m',
       minScore: 85,
@@ -297,9 +165,9 @@ export class AlgoBotsService implements OnModuleInit {
       minScore: 75,
       smcCondition: 'ANY_CONFLUENCE',
       lots: 1,
-      autoExecutePaper: true,
+      autoExecutePaper: false,
       notifyWebhook: false,
-      isActive: true,
+      isActive: false,
       createdAt: new Date().toISOString(),
       triggerCount: 0,
     },
@@ -367,10 +235,11 @@ export class AlgoBotsService implements OnModuleInit {
 
     if (this.prisma) {
       try {
-        const count = await this.prisma.algoBot.count();
-        if (count === 0) {
-          this.logger.log('Seeding initial preset AlgoBots into database...');
-          for (const bot of this.presetBots) {
+        for (const bot of this.presetBots) {
+          const existing = await this.prisma.algoBot.findUnique({
+            where: { id: bot.id },
+          });
+          if (!existing) {
             await this.prisma.algoBot.create({
               data: {
                 id: bot.id,
@@ -385,6 +254,9 @@ export class AlgoBotsService implements OnModuleInit {
                 notifyWebhook: bot.notifyWebhook,
                 isActive: bot.isActive,
                 triggerCount: bot.triggerCount,
+                executionInstrument: bot.executionInstrument || null,
+                executionInstrumentType: (bot as any).executionInstrumentType || null,
+                signalSourceInstrument: (bot as any).signalSourceInstrument || null,
               },
             });
           }
@@ -436,6 +308,9 @@ export class AlgoBotsService implements OnModuleInit {
           isActive: b.isActive,
           createdAt: b.createdAt.toISOString(),
           triggerCount: b.triggerCount,
+          executionInstrument: b.executionInstrument || undefined,
+          executionInstrumentType: b.executionInstrumentType || (b.executionInstrument?.toUpperCase().includes('OPTION') ? 'OPTION' : 'SPOT'),
+          signalSourceInstrument: b.signalSourceInstrument || undefined,
           lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
           lastTriggerDetails: b.lastTriggerDetails || undefined,
         }));
@@ -521,6 +396,11 @@ export class AlgoBotsService implements OnModuleInit {
     const notifyWebhook = dto.notifyWebhook !== false;
     const isActive = dto.isActive === true;
 
+    const isOptBot = isOptionsUnderlying(symbol);
+    const executionInstrumentType = dto.executionInstrumentType || (isOptBot ? 'OPTION' : 'SPOT');
+    const executionInstrument = dto.executionInstrument || (isOptBot ? `${symbol} OPTION` : undefined);
+    const signalSourceInstrument = dto.signalSourceInstrument || symbol;
+
     if (this.prisma) {
       try {
         const created = await this.prisma.algoBot.create({
@@ -537,6 +417,9 @@ export class AlgoBotsService implements OnModuleInit {
             notifyWebhook,
             isActive,
             triggerCount: 0,
+            executionInstrument,
+            executionInstrumentType,
+            signalSourceInstrument,
           },
         });
 
@@ -557,6 +440,8 @@ export class AlgoBotsService implements OnModuleInit {
           isActive: created.isActive,
           createdAt: created.createdAt.toISOString(),
           triggerCount: created.triggerCount,
+          executionInstrument: created.executionInstrument || undefined,
+          signalSourceInstrument: created.signalSourceInstrument || undefined,
         };
       } catch (err: any) {
         this.logger.error(`Database write failed in createBot(): ${err.message}`);
@@ -611,6 +496,8 @@ export class AlgoBotsService implements OnModuleInit {
           isActive: updated.isActive,
           createdAt: updated.createdAt.toISOString(),
           triggerCount: updated.triggerCount,
+          executionInstrument: updated.executionInstrument || undefined,
+          signalSourceInstrument: updated.signalSourceInstrument || undefined,
         };
       } catch (err: any) {
         if (err instanceof NotFoundException) throw err;
@@ -1067,6 +954,10 @@ export class AlgoBotsService implements OnModuleInit {
    *
    * Rejects any transition edge that does not belong to the allowed state graph.
    */
+  /**
+   * P0 #1, #2, #3: Single-Authority Atomic Conditional Execution State Transition Helper
+   * Thin delegation wrapper routing authoritatively through TradeDecisionService.
+   */
   public async transitionExecutionState(
     executionId: string,
     expectedStates:
@@ -1083,92 +974,27 @@ export class AlgoBotsService implements OnModuleInit {
       failureReasonCode?: string | null;
     },
   ): Promise<{ success: boolean; count: number }> {
-    const expectedArray = Array.isArray(expectedStates) ? expectedStates : [expectedStates];
-
-    // 1. Validate finite state machine edge BEFORE database query or unit test mock check
-    for (const exp of expectedArray) {
-      const allowedTargets = ALLOWED_STATE_TRANSITIONS[exp] || [];
-      if (!allowedTargets.includes(targetState)) {
-        this.logger.error(
-          `Invalid state transition edge requested for execution '${executionId}': edge '${exp}' -> '${targetState}' is prohibited by state machine graph`,
-        );
-        throw new InternalServerErrorException(
-          `INVALID_STATE_TRANSITION_EDGE: Transition '${exp}' -> '${targetState}' is prohibited by finite state machine graph`,
-        );
-      }
-    }
-
-    if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) {
-      return { success: true, count: 1 };
-    }
-
-    const data: any = {
-      state: targetState,
-      updatedAt: new Date(),
-    };
-
-    if (targetState === 'EXECUTING') {
-      data.startedAt = new Date();
-    } else if (targetState === 'EXECUTED') {
-      data.completedAt = new Date();
-      if (updateData?.orderPositionId !== undefined) {
-        data.orderPositionId = updateData.orderPositionId;
-      }
-    } else if (targetState === 'FAILED_RETRYABLE' || targetState === 'FAILED_FINAL') {
-      data.failedAt = new Date();
-      data.failureReason = updateData?.failureReason || null;
-      data.failureReasonCode = updateData?.failureReasonCode || null;
-    } else if (targetState === 'RESERVED') {
-      // P0 #4: Clean retry reset invariant — clear all transient failure & execution data
-      data.failureReason = null;
-      data.failureReasonCode = null;
-      data.failedAt = null;
-      data.startedAt = null;
-      data.completedAt = null;
-      data.orderPositionId = null;
-    }
-
-    try {
-      const result = await this.prisma.algoBotExecution.updateMany({
-        where: {
-          id: executionId,
-          state: { in: expectedArray as any },
-        },
-        data,
-      });
-
-      if (result.count === 0) {
-        this.logger.error(
-          `State transition conflict for execution '${executionId}': expected state [${expectedArray.join(', ')}], target '${targetState}'`,
-        );
-        throw new InternalServerErrorException(
-          `STATE_TRANSITION_REJECTED: Execution '${executionId}' is not in expected state [${expectedArray.join(', ')}] for transition to ${targetState}`,
-        );
-      }
-
-      // If transitioning to FAILED_RETRYABLE, purge in-memory lock
+    if (this.tradeDecisionService) {
+      const res = await this.tradeDecisionService.transitionExecutionState(
+        executionId,
+        expectedStates,
+        targetState,
+        updateData,
+      );
       if (targetState === 'FAILED_RETRYABLE') {
-        const execution = await this.prisma.algoBotExecution.findUnique({
-          where: { id: executionId },
-          select: { fingerprint: true },
-        });
-        if (execution?.fingerprint) {
-          this.inMemoryLocks.delete(execution.fingerprint);
+        if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
+          const execution = await this.prisma.algoBotExecution.findUnique({
+            where: { id: executionId },
+            select: { fingerprint: true },
+          });
+          if (execution?.fingerprint) {
+            this.inMemoryLocks.delete(execution.fingerprint);
+          }
         }
       }
-
-      return { success: true, count: result.count };
-    } catch (err: any) {
-      if (err instanceof InternalServerErrorException) {
-        throw err;
-      }
-      this.logger.error(
-        `Database error during state transition for ${executionId}: ${err.message}`,
-      );
-      throw new InternalServerErrorException(
-        `Execution state transition to ${targetState} failed: ${err.message}`,
-      );
+      return res;
     }
+    return { success: true, count: 1 };
   }
 
   /**
@@ -1283,6 +1109,9 @@ export class AlgoBotsService implements OnModuleInit {
    * P0 #1: Atomic Conditional Lifecycle Transition — Mark Executing (RESERVED -> EXECUTING)
    */
   public async markExecutionStarted(executionId: string): Promise<void> {
+    if (this.tradeDecisionService) {
+      return this.tradeDecisionService.markExecutionStarted(executionId);
+    }
     await this.transitionExecutionState(executionId, 'RESERVED', 'EXECUTING');
   }
 
@@ -1290,6 +1119,9 @@ export class AlgoBotsService implements OnModuleInit {
    * P0 #1: Atomic Conditional Lifecycle Transition — Mark Executed (EXECUTING -> EXECUTED)
    */
   public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
+    if (this.tradeDecisionService) {
+      return this.tradeDecisionService.markExecutionExecuted(executionId, orderPositionId);
+    }
     await this.transitionExecutionState(executionId, 'EXECUTING', 'EXECUTED', { orderPositionId });
   }
 
@@ -1301,6 +1133,23 @@ export class AlgoBotsService implements OnModuleInit {
     err: any,
     classificationParam?: IExecutionFailureClassification,
   ): Promise<void> {
+    if (this.tradeDecisionService) {
+      await this.tradeDecisionService.markExecutionFailed(executionId, err, classificationParam);
+      if (this.prisma && executionId && !executionId.startsWith('test_exec_')) {
+        try {
+          const execution = await this.prisma.algoBotExecution.findUnique({
+            where: { id: executionId },
+            select: { fingerprint: true },
+          });
+          if (execution?.fingerprint) {
+            this.inMemoryLocks.delete(execution.fingerprint);
+          }
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+      return;
+    }
     if (!this.prisma || !executionId || executionId.startsWith('test_exec_')) return;
 
     const classification = classificationParam || classifyExecutionFailure(err);
@@ -1820,17 +1669,124 @@ export class AlgoBotsService implements OnModuleInit {
         continue;
       }
 
+      // Option Contract & Premium Resolution for NIFTY / BANKNIFTY Bots
+      const isOptionsBot =
+        bot.executionInstrumentType === 'OPTION' ||
+        Boolean(bot.executionInstrument && bot.executionInstrument.toUpperCase().includes('OPTION')) ||
+        (signal as any).executionInstrumentType === 'OPTION';
+
+      let resolvedContract: ResolvedOptionContract | null = null;
+      let optionLevels: ResolvedOptionLevels | null = null;
+      let optionQuote: { price: number; timestamp: Date } | null = null;
+      let optionQuoteError: any = null;
+
+      if (isOptionsBot) {
+        try {
+          const spotPrice = liveQuote?.price || signal.entryZone?.optimal;
+          resolvedContract = OptionContractResolver.resolveContract({
+            underlyingSymbol: bot.symbol,
+            signalDirection: signal.direction,
+            underlyingSpotPrice: spotPrice,
+            signalTimestamp: signal.canonicalCandleTime,
+          });
+        } catch (err: any) {
+          this.logger.warn(`[OPTION CONTRACT RESOLUTION FAILED] Bot '${bot.id}': ${err.message}`);
+          results.push({
+            botId: bot.id,
+            symbol: bot.symbol,
+            status: 'REJECTED',
+            reasonCode: 'OPTION_CONTRACT_REQUIRED',
+            decision: 'REJECT',
+            lifecycleState: TradeLifecycleState.TRADE_REJECTED,
+            details: err.message,
+          });
+          continue;
+        }
+
+        if (resolvedContract) {
+          try {
+            optionQuote = await this.paperTradingService.getValidatedOptionPrice(resolvedContract.contractSymbol, 5);
+          } catch (err: any) {
+            optionQuoteError = err;
+          }
+
+          if (optionQuote && optionQuote.price > 0) {
+            try {
+              optionLevels = OptionTradeLevelsResolver.resolveLevels({
+                optionEntryPrice: optionQuote.price,
+                slPercent: 30,
+              });
+            } catch (err: any) {
+              this.logger.warn(`[OPTION TRADE LEVELS FAILED] Bot '${bot.id}': ${err.message}`);
+            }
+          }
+        }
+      }
+
+      const executionSignal: any = { ...signal };
+      let executionInstrument =
+        (bot as any).executionInstrument ||
+        (signal as any).contractSymbol ||
+        bot.symbol.toUpperCase();
+      let executionInstrumentType = (bot as any).executionInstrumentType || (isOptionsBot ? 'OPTION' : 'SPOT');
+      let contractSymbol =
+        (signal as any).contractSymbol ||
+        (bot as any).executionInstrument ||
+        bot.symbol.toUpperCase();
+      let strike: number | undefined;
+      let optionType: string | undefined;
+      let expiry: string | undefined;
+      let signalDirection = signal.direction;
+      let orderSide = signal.direction === 'BULLISH' ? 'BUY' : 'SELL';
+
+      if (isOptionsBot && resolvedContract) {
+        executionInstrument = resolvedContract.contractSymbol;
+        executionInstrumentType = 'OPTION';
+        contractSymbol = resolvedContract.contractSymbol;
+        strike = resolvedContract.strike;
+        optionType = resolvedContract.optionType;
+        expiry = resolvedContract.expiry;
+        signalDirection = signal.direction;
+        orderSide = 'BUY'; // Long options only: Buy CE or Buy PE
+
+        executionSignal.executionInstrumentType = 'OPTION';
+        executionSignal.contractSymbol = contractSymbol;
+        executionSignal.strike = strike;
+        executionSignal.optionType = optionType;
+        executionSignal.expiry = expiry;
+        executionSignal.signalDirection = signalDirection;
+        executionSignal.orderSide = 'BUY';
+
+        if (optionLevels) {
+          executionSignal.entryZone = {
+            min: optionLevels.optimalEntry,
+            max: optionLevels.optimalEntry,
+            optimal: optionLevels.optimalEntry,
+          };
+          executionSignal.stopLoss = optionLevels.stopLoss;
+          executionSignal.takeProfits = {
+            tp1: optionLevels.target1,
+            tp2: optionLevels.target2,
+            tp3: optionLevels.target3,
+          };
+          executionSignal.isOptionLevels = true;
+        }
+      }
+
+      const effectiveLiveQuote = isOptionsBot ? optionQuote : liveQuote;
+      const effectiveLiveQuoteError = isOptionsBot ? optionQuoteError : liveQuoteError;
+
       // 1. Authoritative Pre-Trade Decision Evaluation
       const decisionResult = this.tradeDecisionService!.evaluatePreTradeDecision({
         bot,
-        signal,
+        signal: executionSignal,
         portfolio,
         portfolioError,
-        liveQuote,
-        liveQuoteError,
+        liveQuote: effectiveLiveQuote,
+        liveQuoteError: effectiveLiveQuoteError,
       } as any);
 
-      const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, signal, accountId);
+      const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, executionSignal, accountId);
 
       if (decisionResult.decision === TradeDecisionType.REJECT) {
         if (decisionResult.decisionReasonCode === 'AUTO_EXECUTE_DISABLED') {
@@ -1850,14 +1806,27 @@ export class AlgoBotsService implements OnModuleInit {
           continue;
         }
 
+        const signalSourceInstrument =
+          (bot as any).signalSourceInstrument ||
+          signal.symbol.toUpperCase();
+
         // Commit REJECT trade decision to DB
         const commitRes = await this.tradeDecisionService!.commitTradeDecisionAndReservation({
           bot,
-          signal,
+          signal: executionSignal,
           decisionResult,
           fingerprint,
           correlationId: fingerprint,
           accountId,
+          executionInstrument,
+          signalSourceInstrument,
+          executionInstrumentType,
+          contractSymbol,
+          strike,
+          optionType,
+          expiry,
+          signalDirection,
+          orderSide,
         });
 
         this.lastExecutionRejectionReason = decisionResult.decisionReasonCode;
@@ -1891,13 +1860,26 @@ export class AlgoBotsService implements OnModuleInit {
         `[PIPELINE TRACE 5/6] Committing trade decision & reservation: bot=${bot.id}, fingerprint=${fingerprint}`,
       );
 
+      const signalSourceInstrument =
+        (bot as any).signalSourceInstrument ||
+        signal.symbol.toUpperCase();
+
       const commitRes = await this.tradeDecisionService!.commitTradeDecisionAndReservation({
         bot,
-        signal,
+        signal: executionSignal,
         decisionResult,
         fingerprint,
         correlationId: fingerprint,
         accountId,
+        executionInstrument,
+        signalSourceInstrument,
+        executionInstrumentType,
+        contractSymbol,
+        strike,
+        optionType,
+        expiry,
+        signalDirection,
+        orderSide,
       });
 
       this.lastTradeDecisionId = commitRes.tradeDecisionId;
@@ -1930,7 +1912,7 @@ export class AlgoBotsService implements OnModuleInit {
       await this.recordBotTrigger(bot.id, signal);
 
       // 3. Execution State Machine Lifecycle Management
-      const quantity = decisionResult.plannedLevels?.quantity || 1;
+      const quantity = decisionResult.plannedLevels?.quantity || (resolvedContract ? resolvedContract.lotSize * bot.lots : 1);
       try {
         this.lastExecutionAttempt = new Date();
         await this.markExecutionStarted(executionId);
@@ -1938,7 +1920,11 @@ export class AlgoBotsService implements OnModuleInit {
         // Obtain fresh authoritative market quote again at execution time
         let freshExecutionQuote = null;
         try {
-          freshExecutionQuote = await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+          if (isOptionsBot && resolvedContract) {
+            freshExecutionQuote = await this.paperTradingService.getValidatedOptionPrice(resolvedContract.contractSymbol, 5);
+          } else {
+            freshExecutionQuote = await this.paperTradingService.getValidatedMarketPrice(bot.symbol, 5);
+          }
         } catch (quoteErr: any) {
           this.logger.error(
             `[EXECUTION QUOTE FAILED] Cannot execute bot '${bot.id}': fresh market quote unavailable at execution time: ${quoteErr.message}`,
@@ -1963,6 +1949,7 @@ export class AlgoBotsService implements OnModuleInit {
             observedAt,
             receivedAt,
           },
+          TradeLifecycleState.RESERVATION_CREATED,
         );
 
         this.logger.log(
@@ -1970,21 +1957,31 @@ export class AlgoBotsService implements OnModuleInit {
         );
 
         this.logger.log(
-          `[PIPELINE TRACE 5.2/6] Calling PaperTradingService.placeOrder(): symbol=${bot.symbol}, direction=${signal.direction}, qty=${quantity}`,
+          `[PIPELINE TRACE 5.2/6] Calling PaperTradingService.placeOrder(): symbol=${bot.symbol}, contractSymbol=${contractSymbol}, direction=${orderSide}, qty=${quantity}`,
         );
 
         // Place Order via Authoritative PaperTradingService (Obtains Authoritative Execution Quote)
         const orderResult = await this.paperTradingService.placeOrder({
           symbol: bot.symbol,
-          direction: signal.direction === 'BULLISH' ? 'BUY' : 'SELL',
+          executionInstrument,
+          executionInstrumentType,
+          signalSourceInstrument,
+          instrumentType: isOptionsBot ? 'OPTION' : 'SPOT',
+          contractSymbol,
+          strike,
+          optionType: optionType as any,
+          expiry,
+          direction: isOptionsBot ? 'BUY' : (signal.direction === 'BULLISH' ? 'BUY' : 'SELL'),
+          strategyDirection: signal.direction,
+          sourceBotId: bot.id,
           quantity,
           orderType: 'MARKET',
-          signalPrice: signal.entryZone.optimal,
+          signalPrice: executionSignal.entryZone?.optimal,
           signalTime: canonicalCandleFormatted,
-          stopLoss: signal.stopLoss,
-          target1: signal.takeProfits.tp1,
-          target2: signal.takeProfits.tp2,
-          target3: signal.takeProfits.tp3,
+          stopLoss: executionSignal.stopLoss,
+          target1: executionSignal.takeProfits?.tp1,
+          target2: executionSignal.takeProfits?.tp2,
+          target3: executionSignal.takeProfits?.tp3,
           tradeDecisionId,
           idempotencyKey: fingerprint,
           correlationId: fingerprint,
@@ -2002,6 +1999,7 @@ export class AlgoBotsService implements OnModuleInit {
             orderPositionId: orderResult.id,
             fillTime,
           },
+          TradeLifecycleState.ORDER_SUBMITTED,
         );
 
         await this.tradeDecisionService!.updateTradeLifecycleState(
@@ -2011,6 +2009,7 @@ export class AlgoBotsService implements OnModuleInit {
             executionId,
             orderPositionId: orderResult.id,
           },
+          TradeLifecycleState.ORDER_FILLED,
         );
 
         this.lastPositionId = orderResult.id;
@@ -2063,6 +2062,11 @@ export class AlgoBotsService implements OnModuleInit {
           tradeDecisionId,
           TradeLifecycleState.TRADE_FAILED,
           { executionId },
+          [
+            TradeLifecycleState.ORDER_SUBMITTED,
+            TradeLifecycleState.RESERVATION_CREATED,
+            TradeLifecycleState.TRADE_TAKEN,
+          ],
         );
 
         results.push({

@@ -25,14 +25,20 @@ export interface IPaperOrderRequest {
   leverage?: number;
   productType?: 'INTRADAY' | 'DELIVERY';
   instrumentType?: 'SPOT' | 'OPTION';
+  executionInstrumentType?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  expiry?: string;
   contractSymbol?: string;
   signalId?: string;
   featureSnapshotJson?: any;
   tradeDecisionId?: string;
   idempotencyKey?: string;
   correlationId?: string;
+  executionInstrument?: string;
+  signalSourceInstrument?: string;
+  strategyDirection?: string;
+  sourceBotId?: string;
 }
 
 export interface IPaperPosition {
@@ -41,8 +47,14 @@ export interface IPaperPosition {
   symbol: string;
   contractSymbol: string;
   instrumentType: 'SPOT' | 'OPTION';
+  executionInstrument?: string;
+  signalSourceInstrument?: string;
+  executionInstrumentType?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  expiry?: string;
+  strategyDirection?: string;
+  sourceBotId?: string;
   direction: 'BUY' | 'SELL';
   quantity: number;
   signalPrice?: number;

@@ -5,6 +5,9 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 export interface AuthoritativePosition {
   id: string;
   symbol: string;
+  contractSymbol?: string;
+  executionInstrument?: string;
+  signalSourceInstrument?: string;
   direction: 'BUY' | 'SELL';
   quantity: number;
   entryPrice: number;
@@ -59,10 +62,11 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export function isSameSymbol(a?: string, b?: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
-  const normA = a.toUpperCase().replace(/_SPOT$/, '');
-  const normB = b.toUpperCase().replace(/_SPOT$/, '');
+  const normA = a.toUpperCase().replace(/_SPOT$/, '').trim();
+  const normB = b.toUpperCase().replace(/_SPOT$/, '').trim();
   if (normA === normB) return true;
   if ((normA === 'GOLD' || normA === 'XAUUSD') && (normB === 'GOLD' || normB === 'XAUUSD')) return true;
+  if (normA.startsWith(normB + ' ') || normB.startsWith(normA + ' ')) return true;
   return false;
 }
 
@@ -119,7 +123,9 @@ export function usePaperTrading(selectedSymbol: string) {
     return (
       portfolio.openPositions.find(
         (p) =>
-          isSameSymbol(p.symbol, selectedSymbol) &&
+          (isSameSymbol(p.symbol, selectedSymbol) ||
+            isSameSymbol(p.contractSymbol, selectedSymbol) ||
+            isSameSymbol(p.executionInstrument, selectedSymbol)) &&
           (p.status === 'OPEN' || p.status === 'PARTIALLY_CLOSED'),
       ) || null
     );

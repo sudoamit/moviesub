@@ -535,6 +535,24 @@ export function getAuthoritativeInstrument(
     baseInstrument = customInstruments.get(sym);
   } else if (sym in AUTHORITATIVE_INSTRUMENTS) {
     baseInstrument = AUTHORITATIVE_INSTRUMENTS[sym];
+  } else if (sym.startsWith('NIFTY ') && (sym.endsWith(' CE') || sym.endsWith(' PE'))) {
+    const niftyBase = AUTHORITATIVE_INSTRUMENTS['NIFTY'];
+    baseInstrument = {
+      ...niftyBase,
+      id: `inst_${sym.toLowerCase().replace(/\s+/g, '_')}`,
+      symbol: sym,
+      name: `${sym} Option Contract`,
+      assetType: AssetType.INDEX,
+    };
+  } else if (sym.startsWith('BANKNIFTY ') && (sym.endsWith(' CE') || sym.endsWith(' PE'))) {
+    const bnfBase = AUTHORITATIVE_INSTRUMENTS['BANKNIFTY'];
+    baseInstrument = {
+      ...bnfBase,
+      id: `inst_${sym.toLowerCase().replace(/\s+/g, '_')}`,
+      symbol: sym,
+      name: `${sym} Option Contract`,
+      assetType: AssetType.INDEX,
+    };
   }
 
   if (!baseInstrument) {

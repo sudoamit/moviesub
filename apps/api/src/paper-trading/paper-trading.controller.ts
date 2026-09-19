@@ -20,6 +20,16 @@ export class PaperTradingController {
     return this.paperTradingService.closePosition(body.positionId, body.reason);
   }
 
+  @Get('active-positions')
+  async getActivePositions(@Query('accountId') accountId?: string) {
+    return this.paperTradingService.getActivePositions(accountId);
+  }
+
+  @Post('clear-trades')
+  async clearAllCompletedTrades(@Body() body?: { accountId?: string }) {
+    return this.paperTradingService.clearAllCompletedTrades(body?.accountId);
+  }
+
   @Post('reset')
   async resetPortfolio(@Body() body: { initialCapital?: number }) {
     return this.paperTradingService.resetPortfolio(body?.initialCapital);

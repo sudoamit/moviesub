@@ -609,19 +609,35 @@ describe('NIFTY Paper-Trading Lifecycle End-to-End Suite (14 Invariant Tests)', 
       }),
     ).rejects.toThrow('SPOT_SHORT_SELLING_FORBIDDEN');
 
-    // Also verify for legacy symbol 'NIFTY'
+    // Also verify for BANKNIFTY_SPOT
     await expect(
       paperTrading.placeOrder({
-        symbol: 'NIFTY',
+        symbol: 'BANKNIFTY_SPOT',
         direction: 'SELL',
         orderType: 'MARKET',
         quantity: 50,
-        price: 24100.0,
-        stopLoss: 24200.0,
+        price: 51200.0,
+        stopLoss: 51500.0,
+        target1: 50800.0,
         allowPriceOverride: true,
         executionMode: 'TEST' as any,
       }),
     ).rejects.toThrow('SPOT_SHORT_SELLING_FORBIDDEN');
+
+    // Verify explicit derivative NIFTY allows shorting without SPOT_SHORT_SELLING_FORBIDDEN
+    const derivPos = await paperTrading.placeOrder({
+      symbol: 'NIFTY',
+      direction: 'SELL',
+      orderType: 'MARKET',
+      quantity: 50,
+      price: 24100.0,
+      stopLoss: 24200.0,
+      target1: 24000.0,
+      allowPriceOverride: true,
+      executionMode: 'TEST' as any,
+    });
+    expect(derivPos).toBeDefined();
+    expect(derivPos.direction).toBe('SELL');
   });
 
   // ─────────────────────────────────────────────────────────────────────────────

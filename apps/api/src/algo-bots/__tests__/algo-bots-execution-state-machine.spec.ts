@@ -56,8 +56,13 @@ describe('AlgoBotsService Execution State Machine', () => {
           for (const key of tradeDecisionsDb.keys()) {
             const item = tradeDecisionsDb.get(key);
             if (item && (item.id === where.id || item.fingerprint === where.fingerprint)) {
-              if (where.lifecycleState && item.lifecycleState !== where.lifecycleState) {
-                continue;
+              if (where.lifecycleState) {
+                const targetStates = Array.isArray(where.lifecycleState.in)
+                  ? where.lifecycleState.in
+                  : [where.lifecycleState];
+                if (!targetStates.includes(item.lifecycleState)) {
+                  continue;
+                }
               }
               Object.assign(item, data, { updatedAt: new Date() });
               updatedCount++;
