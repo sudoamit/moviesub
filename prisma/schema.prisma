@@ -1033,12 +1033,19 @@ model PaperTrade {
   instrumentType         String        @default("SPOT")
   strike                 Decimal?      @db.Decimal(18, 4)
   optionType             String?
+  expiry                 String?
   direction              Direction
+  strategyDirection      Direction?
+  orderSide              String?       // BUY, SELL
+  sourceBotId            String?
+  executionId            String?
+  tradeDecisionId        String?
   quantity               Decimal       @db.Decimal(18, 4)
   entryPrice             Decimal?      @db.Decimal(18, 6)
   exitPrice              Decimal       @db.Decimal(18, 6)
   realizedPnL            Decimal?      @db.Decimal(18, 2)
   realizedR              Decimal?      @db.Decimal(6, 2)
+  fees                   Decimal?      @db.Decimal(18, 4)
   maxFavorableExcursion  Decimal       @default(0.0) @db.Decimal(18, 6)
   maxAdverseExcursion    Decimal       @default(0.0) @db.Decimal(18, 6)
   holdingDurationSeconds Int?          @default(0)
@@ -1049,12 +1056,16 @@ model PaperTrade {
   signalSnapshotJson     Json?
   featureSnapshotJson    Json?
   outcomeSnapshotJson    Json?
-  outcomeClassification  String?       // WIN_TP1, WIN_TP2, WIN_TP3_RUNNER, LOSS_SL, BREAKEVEN, MANUAL
+  entryFillAggregationJson Json?
+  exitFillAggregationJson  Json?
+  outcomeClassification  String?       // WIN_TP1, WIN_TP2, WIN_TP3_RUNNER, LOSS_SL, BREAKEVEN, MANUAL_EXIT, CANCELLED, FAILED
   correlationId          String
   createdAt              DateTime      @default(now())
 
   @@index([accountId, symbol, exitTime(sort: Desc)])
   @@index([correlationId])
+  @@index([executionId])
+  @@index([tradeDecisionId])
   @@map("paper_trades")
 }
 

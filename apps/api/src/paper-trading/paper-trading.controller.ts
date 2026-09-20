@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Param, Query } from '@nestjs/common';
 import { PaperTradingService, IPaperOrderRequest } from './paper-trading.service';
 
 @Controller('api/paper-trading')
@@ -16,21 +16,58 @@ export class PaperTradingController {
   }
 
   @Post('close-position')
-  async closePosition(@Body() body: { positionId: string; reason?: string }) {
-    return this.paperTradingService.closePosition(body.positionId, body.reason);
+  async closePosition(
+    @Body()
+    body: {
+      positionId: string;
+      reason?: string;
+      exitPrice?: number;
+      exitPriceOverride?: number;
+      allowPriceOverride?: boolean;
+    },
+  ) {
+    return this.paperTradingService.closePosition(body.positionId, body.reason, {
+      exitPriceOverride: body.exitPriceOverride ?? body.exitPrice,
+      allowPriceOverride: body.allowPriceOverride ?? true,
+    });
   }
 
   @Post('positions/:id/close')
   async closePositionById(
     @Param('id') id: string,
-    @Body() body?: { reason?: string },
+    @Body()
+    body?: {
+      reason?: string;
+      exitPrice?: number;
+      exitPriceOverride?: number;
+      allowPriceOverride?: boolean;
+    },
   ) {
-    return this.paperTradingService.closePosition(id, body?.reason);
+    return this.paperTradingService.closePosition(id, body?.reason, {
+      exitPriceOverride: body?.exitPriceOverride ?? body?.exitPrice,
+      allowPriceOverride: body?.allowPriceOverride ?? true,
+    });
   }
 
   @Get('active-positions')
   async getActivePositions(@Query('accountId') accountId?: string) {
     return this.paperTradingService.getActivePositions(accountId);
+  }
+
+  @Get('completed-trades')
+  async getCompletedTrades(
+    @Query('accountId') accountId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.paperTradingService.getCompletedTrades(
+      accountId,
+      limit ? parseInt(limit, 10) : 200,
+    );
+  }
+
+  @Delete('clear-trades')
+  async deleteCompletedTrades(@Query('accountId') accountId?: string) {
+    return this.paperTradingService.clearAllCompletedTrades(accountId);
   }
 
   @Post('clear-trades')

@@ -16,6 +16,7 @@ import {
   resolveMarginModel,
   ExecutionAggregator,
   IFillRecord,
+  TransactionCostScheduleManager,
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { PrismaService } from '../prisma.service';
@@ -158,27 +159,24 @@ export class PositionMonitorProcessor extends WorkerHost {
     }
   }
 
-  private calculateCharges(turnover: number, isCrypto: boolean) {
-    if (isCrypto) {
-      const brokerage = Number((turnover * 0.001).toFixed(2));
-      return {
-        brokerage,
-        stt: 0,
-        exchangeTurnover: 0,
-        gst: 0,
-        sebiTurnover: 0,
-        totalCharges: brokerage,
-      };
-    }
-    const brokerage = 20.0;
-    const stt = Number((turnover * 0.000125).toFixed(2));
-    const exchangeTurnover = Number((turnover * 0.0000345).toFixed(2));
-    const gst = Number(((brokerage + exchangeTurnover) * 0.18).toFixed(2));
-    const sebiTurnover = Number((turnover * 0.000001).toFixed(2));
-    const totalCharges = Number(
-      (brokerage + stt + exchangeTurnover + gst + sebiTurnover).toFixed(2),
+  private calculateCharges(turnover: number, isCrypto: boolean, symbol?: string) {
+    const sym = symbol || (isCrypto ? 'BTCUSDT_SPOT' : 'RELIANCE');
+    const breakdown = TransactionCostScheduleManager.getInstance().calculateCostForSymbol(
+      turnover,
+      sym,
+      1.0,
+      Date.now(),
+      'EXIT',
+      'SELL',
     );
-    return { brokerage, stt, exchangeTurnover, gst, sebiTurnover, totalCharges };
+    return {
+      brokerage: breakdown.brokerage,
+      stt: breakdown.stt,
+      exchangeTurnover: breakdown.exchangeTurnover,
+      gst: breakdown.gst,
+      sebiTurnover: breakdown.sebiTurnover,
+      totalCharges: breakdown.totalChargesAccount,
+    };
   }
 
   private async evaluatePositionTick(

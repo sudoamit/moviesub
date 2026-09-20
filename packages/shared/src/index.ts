@@ -9,5 +9,6 @@ export * from './currency/currency-formatter';
 export * from './instrument/instrument-registry';
 export * from './instrument/instrument-descriptor';
 export * from './instrument/execution-quantity-policy';
+export * from './instrument/transaction-cost-schedule-manager';
 export * from './execution/execution-aggregator';
 export * from './timeframe/timeframe-registry';

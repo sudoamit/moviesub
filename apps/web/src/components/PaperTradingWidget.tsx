@@ -211,7 +211,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
 
     try {
       setIsSubmitting(true);
-      const res = await fetch('http://localhost:3001/api/paper-trading/order', {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      const res = await fetch(`${apiBase}/api/paper-trading/order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -219,6 +220,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           direction: side,
           quantity: totalQuantity,
           orderType: 'MARKET',
+          allowPriceOverride: true,
           price: cmp,
           stopLoss: computedSL,
           target1: computedTP1,

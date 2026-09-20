@@ -1442,33 +1442,8 @@ export class SignalsService implements OnModuleInit {
                 });
                 const pnlAmount = pnlCalc.netPnlAccount;
 
-                await this.recordCompletedTrade({
-                  symbol: 'BTCUSDT',
-                  direction: activeTrade.dir,
-                  state: closedState,
-                  grade: 'A_PLUS',
-                  score: 90,
-                  timeframe: '15m',
-                  entryPrice: activeTrade.entry,
-                  stopLoss: activeTrade.sl,
-                  target1: activeTrade.tp1,
-                  target2: activeTrade.tp2,
-                  target3: activeTrade.tp3,
-                  exitPrice: exitP,
-                  pnlAmount,
-                  pnlRMultiple: rMult,
-                  riskRewardRatio: 2.5,
-                  tradeReason: `⚡ Saiyan OCC ALMA (len=2, sigma=5, offset=0.85) 8x Alternate Resolution ${activeTrade.dir === 'BULLISH' ? 'Crossover' : 'Crossunder'} @ ₹${activeTrade.entry.toFixed(2)}`,
-                  checklist: [
-                    'Saiyan ALMA OCC 8x Alternate Resolution Momentum Cross',
-                    'Dynamic Swing Supply & Demand POI Map',
-                    'ATR-Buffered Break of Structure (BOS) Breakdown',
-                    'Multi-Tier Scaling Targets (TP1 1.5R, TP2 2.5R, TP3 4.0R)',
-                  ],
-                  exitReason: exitNote,
-                  activatedAt: activeTrade.activatedAt,
-                  closedAt: c.timestamp,
-                });
+                // Suppressed: PaperTrade is the sole aggregate for completed trades; do not write duplicate signal completed-trades.
+                this.logger.debug('[DUPLICATE_JOURNAL_WRITER_SUPPRESSED] checkRunningTrades completed trade writing suppressed; PaperTrade is the sole aggregate.');
                 syncedCount++;
                 activeTrade = null;
               }
@@ -1564,33 +1539,8 @@ export class SignalsService implements OnModuleInit {
                       ? Number((priceDiff / riskPerUnit).toFixed(2))
                       : update.pnlRMultiple;
 
-                  await this.recordCompletedTrade({
-                    symbol: sym,
-                    direction: activeSignal.direction as any,
-                    state: update.newState as any,
-                    grade: activeSignal.grade || 'A_PLUS',
-                    score: activeSignal.score || 90,
-                    timeframe: '15m',
-                    entryPrice,
-                    stopLoss: activeSignal.stopLoss,
-                    target1: activeSignal.takeProfits?.tp1 || entryPrice,
-                    target2: activeSignal.takeProfits?.tp2 || entryPrice,
-                    target3: activeSignal.takeProfits?.tp3,
-                    exitPrice,
-                    pnlAmount,
-                    pnlRMultiple,
-                    riskRewardRatio: activeSignal.riskRewardRatios?.rr2 || 2.5,
-                    tradeReason: `🏛️ Institutional SMC ${activeSignal.direction} Order Block Mitigation [${activeSignal.stopLoss} - ${entryPrice}]`,
-                    checklist: [
-                      `Multi-Timeframe Order Flow Bias Alignment (${activeSignal.direction})`,
-                      'Institutional Order Block / Supply-Demand POI Tap',
-                      'Fair Value Gap (FVG) Liquidity Sweep Mitigation',
-                      'Break of Structure (BOS) Volume Confirmation',
-                    ],
-                    exitReason: update.notes || `${update.newState} Executed`,
-                    activatedAt: entryTime,
-                    closedAt: new Date(currentCandle.timestamp),
-                  });
+                  // Suppressed: PaperTrade is the sole aggregate for completed trades; do not write duplicate signal completed-trades.
+                  this.logger.debug('[DUPLICATE_JOURNAL_WRITER_SUPPRESSED] checkRunningTrades completed trade writing suppressed; PaperTrade is the sole aggregate.');
                   syncedCount++;
                 }
                 activeSignal = null;

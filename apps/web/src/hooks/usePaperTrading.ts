@@ -62,11 +62,18 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 export function isSameSymbol(a?: string, b?: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
-  const normA = a.toUpperCase().replace(/_SPOT$/, '').trim();
-  const normB = b.toUpperCase().replace(/_SPOT$/, '').trim();
+  const normA = a.toUpperCase().trim();
+  const normB = b.toUpperCase().trim();
   if (normA === normB) return true;
-  if ((normA === 'GOLD' || normA === 'XAUUSD') && (normB === 'GOLD' || normB === 'XAUUSD')) return true;
-  if (normA.startsWith(normB + ' ') || normB.startsWith(normA + ' ')) return true;
+
+  // Exact canonical alias matching only
+  const canonA = normA.replace(/_SPOT$/, '');
+  const canonB = normB.replace(/_SPOT$/, '');
+  if (canonA === canonB) return true;
+  if ((canonA === 'GOLD' || canonA === 'XAUUSD') && (canonB === 'GOLD' || canonB === 'XAUUSD')) return true;
+  if ((canonA === 'BTC' || canonA === 'BTCUSDT') && (canonB === 'BTC' || canonB === 'BTCUSDT')) return true;
+
+  // Strict: NEVER match option contracts against spot index or other options via startsWith
   return false;
 }
 

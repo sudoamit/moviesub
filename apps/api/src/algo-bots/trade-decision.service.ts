@@ -673,15 +673,20 @@ export class TradeDecisionService {
     }
 
     // Gate 3: Canonical Decision Timestamp
+    const canonicalCandidate =
+      signal.canonicalDecisionTime ||
+      signal.canonicalCandleTime ||
+      (signal as any).barTimestamp ||
+      (signal as any).marketEventTime;
+
     if (
-      !signal.canonicalCandleTime ||
-      typeof signal.canonicalCandleTime !== 'number' ||
-      !Number.isFinite(signal.canonicalCandleTime) ||
-      signal.canonicalCandleTime <= 0
+      canonicalCandidate === undefined ||
+      canonicalCandidate === null ||
+      (typeof canonicalCandidate === 'number' && (!Number.isFinite(canonicalCandidate) || canonicalCandidate <= 0))
     ) {
       reasons.push({
-        code: 'CANONICAL_DECISION_TIMESTAMP_REQUIRED',
-        message: 'Auto-execution requires valid numeric canonicalCandleTime on signal setup',
+        code: 'MISSING_CANONICAL_DECISION_TIME',
+        message: 'Auto-execution requires valid canonical market decision timestamp on signal setup. Date.now() substitution is prohibited.',
       });
     }
 
@@ -1391,10 +1396,19 @@ export class TradeDecisionService {
         //    Step A: Create TradeDecision in TRADE_TAKEN state
         //    Step B: Create AlgoBotExecution (reservation)
         const signalTimeRaw =
+          signal.canonicalDecisionTime ||
           signal.canonicalCandleTime ||
-          (signal as any).timestamp ||
-          (signal as any).createdAt ||
-          now;
+          (signal as any).barTimestamp ||
+          (signal as any).marketEventTime ||
+          (signal as any).timestamp;
+
+        if (!signalTimeRaw) {
+          throw new BadRequestException({
+            code: 'MISSING_CANONICAL_DECISION_TIME',
+            message:
+              'Canonical market decision timestamp required from signal snapshot, bar timestamp, or provider market event time. Synthesizing Date.now() is strictly prohibited.',
+          });
+        }
         const signalTimestamp = new Date(signalTimeRaw);
 
         const initialTradeDecision = await tx.tradeDecision.create({
@@ -1506,24 +1520,31 @@ export class TradeDecisionService {
       });
     } catch (err: any) {
       // Handle Unique Constraint Violation on duplicate concurrent execution
-      if (err?.code === 'P2002') {
+      if (
+        err?.code === 'P2002' ||
+        String(err?.message || '').includes('P2002') ||
+        String(err?.message || '').includes('Unique constraint')
+      ) {
         this.logger.warn(`Duplicate reservation conflict for fingerprint '${fingerprint}'`);
-        const existingDecision = this.prisma?.tradeDecision
-          ? await this.prisma.tradeDecision.findUnique({
-              where: { fingerprint },
-            })
-          : null;
-        if (existingDecision) {
-          return {
-            tradeDecisionId: existingDecision.id,
-            fingerprint,
-            decision: existingDecision.decision as TradeDecisionType,
-            decisionReasonCode: existingDecision.decisionReasonCode,
-            decisionReason: existingDecision.decisionReason || '',
-            lifecycleState: existingDecision.lifecycleState as TradeLifecycleState,
-            executionId: existingDecision.executionId || undefined,
-            isDuplicate: true,
-          };
+        for (let attempt = 0; attempt < 15; attempt++) {
+          const existingDecision = this.prisma?.tradeDecision
+            ? await this.prisma.tradeDecision.findUnique({
+                where: { fingerprint },
+              })
+            : null;
+          if (existingDecision) {
+            return {
+              tradeDecisionId: existingDecision.id,
+              fingerprint,
+              decision: existingDecision.decision as TradeDecisionType,
+              decisionReasonCode: existingDecision.decisionReasonCode,
+              decisionReason: existingDecision.decisionReason || '',
+              lifecycleState: existingDecision.lifecycleState as TradeLifecycleState,
+              executionId: existingDecision.executionId || undefined,
+              isDuplicate: true,
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 30));
         }
       }
 

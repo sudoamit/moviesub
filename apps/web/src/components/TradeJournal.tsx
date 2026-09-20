@@ -110,6 +110,12 @@ const getContractLabel = (symbol: string, direction: string, entryPrice: number)
   return `${strike} ${direction === 'BEARISH' || direction === 'SELL' ? 'PE' : 'CE'}`;
 };
 
+const getApiBase = () => {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  if (typeof window !== 'undefined' && window.location.origin) return window.location.origin;
+  return '';
+};
+
 export const TradeJournal: React.FC<TradeJournalProps> = ({
   currentSymbol = 'NIFTY',
   activeSignal,
@@ -138,12 +144,10 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
   const fetchCompletedTrades = useCallback(
     async (mode?: 'VERIFIED' | 'LEGACY' | 'ALL') => {
-      const targetMode = mode || executionDataFilter;
       setIsLoading(true);
       try {
-        const res = await fetch(
-          `http://localhost:3001/api/signals/completed-trades?executionData=${targetMode}`,
-        );
+        const apiBase = getApiBase();
+        const res = await fetch(`${apiBase}/api/paper-trading/completed-trades`);
         const data = await res.json();
         if (data && data.trades) {
           setTrades(data.trades);
@@ -155,7 +159,7 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
         setIsLoading(false);
       }
     },
-    [executionDataFilter],
+    [],
   );
 
   const handleExecutionFilterChange = (newMode: 'VERIFIED' | 'LEGACY' | 'ALL') => {
@@ -184,15 +188,11 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
     try {
       setIsLoading(true);
-      const resDel = await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'DELETE' });
+      const apiBase = getApiBase();
+      const resDel = await fetch(`${apiBase}/api/paper-trading/clear-trades`, { method: 'DELETE' });
       if (!resDel.ok) {
-        await fetch('http://localhost:3001/api/signals/clear-trades', { method: 'POST' }).catch(() => {});
+        await fetch(`${apiBase}/api/paper-trading/clear-trades`, { method: 'POST' }).catch(() => {});
       }
-      await fetch('http://localhost:3001/api/paper-trading/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initialCapital: 1000000.0 }),
-      }).catch(() => {});
 
       setTrades([]);
       setStats({
@@ -208,20 +208,6 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
       });
 
       if (typeof window !== 'undefined') {
-        const keysToRemove: string[] = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (
-            k &&
-            (k.startsWith('quant_pos_cut_') ||
-              k.startsWith('quant_trade_') ||
-              k.startsWith('quant_pos_closed_') ||
-              k.startsWith('quant_locked_'))
-          ) {
-            keysToRemove.push(k);
-          }
-        }
-        keysToRemove.forEach((k) => localStorage.removeItem(k));
         window.dispatchEvent(new CustomEvent('quant_journal_cleared'));
         window.dispatchEvent(new CustomEvent('quant_trade_closed', { detail: { symbol: 'ALL' } }));
       }
@@ -234,25 +220,14 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
   };
 
   const handleSyncHistoricalTrades = async () => {
-    setIsLoading(true);
-    try {
-      const res = await fetch('http://localhost:3001/api/signals/sync-trades', { method: 'POST' });
-      const data = await res.json();
-      if (data && data.trades) {
-        setTrades(data.trades);
-        setStats(data.stats);
-      }
-    } catch (e) {
-      console.error('Failed to sync historical trades:', e);
-    } finally {
-      setIsLoading(false);
-    }
+    await fetchCompletedTrades();
   };
 
   const handleExportTaxReportCsv = async () => {
     try {
       setIsLoading(true);
-      const res = await fetch('http://localhost:3001/api/signals/export-csv?limit=500');
+      const apiBase = getApiBase();
+      const res = await fetch(`${apiBase}/api/signals/export-csv?limit=500`);
       if (!res.ok) throw new Error('Failed to export CSV');
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -565,13 +540,15 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
               const pnlCurr = (t as any).accountCurrency || 'INR';
               const isOption =
                 t.instrumentType === 'OPTION' ||
-                (Number(t.entryPrice) < 500 && (t.symbol === 'NIFTY' || t.symbol === 'BANKNIFTY'));
+                Boolean(t.strike) ||
+                Boolean(t.optionType) ||
+                Boolean(t.contractSymbol && (t.contractSymbol.includes(' CE') || t.contractSymbol.includes(' PE')));
               const contractLabel =
                 t.contractSymbol && t.contractSymbol !== t.symbol
                   ? t.contractSymbol
                   : isOption && t.strike
                     ? `${t.strike} ${t.optionType || (t.direction === 'BEARISH' || t.direction === 'SELL' ? 'PE' : 'CE')}`
-                    : getContractLabel(t.symbol, t.direction, Number(t.entryPrice));
+                    : null;
 
               const isSaiyan = t.tradeReason?.includes('Saiyan') || t.symbol === 'BTCUSDT';
               const isExecutionComplete =

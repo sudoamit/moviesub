@@ -24,6 +24,7 @@ import {
   Flame,
   Radio,
   Sliders,
+  Bot,
 } from 'lucide-react';
 import { ISignalSetup } from '@quant/shared';
 
@@ -32,7 +33,7 @@ interface LivePositionTrackerProps {
   signal: ISignalSetup | null;
   livePrice: number;
   activePosition?: RunningPaperPosition | any | null;
-  onClosePosition?: (exitPrice: number, pnl: number, r: number, reason: string) => void;
+  onClosePosition?: ((positionId: string) => void) | ((exitPrice: number, pnl: number, r: number, reason: string) => void) | any;
 }
 
 interface RunningPaperPosition {
@@ -125,13 +126,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const nativeCurrency = isCrypto || isGold ? '$' : '₹';
   const currencySymbol = '₹';
 
-  const [isOptionMode, setIsOptionMode] = useState<boolean>(!isCrypto && !isGold);
+  const isOptionsAsset = symbol === 'NIFTY' || symbol === 'BANKNIFTY';
+  const [isOptionMode, setIsOptionMode] = useState<boolean>(isOptionsAsset);
 
   useEffect(() => {
-    setIsOptionMode(!isCrypto && !isGold);
-  }, [isCrypto, isGold]);
+    setIsOptionMode(symbol === 'NIFTY' || symbol === 'BANKNIFTY');
+  }, [symbol]);
 
   const [optionData, setOptionData] = useState<any>(null);
+  const [bot, setBot] = useState<any>(null);
+  const [isTogglingBot, setIsTogglingBot] = useState<boolean>(false);
 
   const [paperPosition, setPaperPosition] = useState<RunningPaperPosition | null>(
     activePosition || null,
@@ -142,6 +146,52 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       setPaperPosition(activePosition || null);
     }
   }, [activePosition]);
+
+  const fetchBot = React.useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/algo-bots`);
+      if (!res.ok) return;
+      const bots = await res.json();
+      const norm = symbol.toUpperCase().replace(/_SPOT$/, '');
+      const match = bots.find(
+        (b: any) =>
+          b.symbol === symbol ||
+          b.symbol === `${symbol}_SPOT` ||
+          b.symbol.toUpperCase().replace(/_SPOT$/, '') === norm ||
+          ((symbol === 'GOLD' || symbol === 'XAUUSD') && (b.symbol === 'XAUUSD' || b.symbol === 'GOLD')),
+      );
+      setBot(match || null);
+    } catch {}
+  }, [symbol]);
+
+  useEffect(() => {
+    fetchBot();
+  }, [fetchBot]);
+
+  const handleToggleBot = async () => {
+    if (!bot || isTogglingBot) return;
+    setIsTogglingBot(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/algo-bots/${bot.id}/toggle`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setBot(updated);
+        setManualCloseToast(
+          updated.isActive
+            ? `🤖 Bot '${updated.name}' ACTIVATED (Auto-Execute: ${updated.autoExecutePaper ? 'ON' : 'OFF'})`
+            : `⏸️ Bot '${updated.name}' DEACTIVATED`,
+        );
+        setTimeout(() => setManualCloseToast(null), 5000);
+      }
+    } catch (err: any) {
+      setManualCloseToast(`Failed to toggle bot: ${err.message}`);
+      setTimeout(() => setManualCloseToast(null), 5000);
+    } finally {
+      setIsTogglingBot(false);
+    }
+  };
 
   const direction = signal?.direction || 'BULLISH';
   const effectiveDirection = paperPosition
@@ -459,7 +509,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
   // Fetch Live Option Smart Strike Data & Locked Entry Premium
   useEffect(() => {
-    if (isCrypto || isGold) return;
+    if (!isOptionsAsset) return;
     let isMounted = true;
 
     const fetchOptionData = async () => {
@@ -496,9 +546,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       isMounted = false;
       clearInterval(interval);
     };
-  }, [symbol, direction, currentCMP, spotEntryPrice, activeStrike, isCrypto, lockStorageKey]);
+  }, [symbol, direction, currentCMP, spotEntryPrice, activeStrike, isOptionsAsset, lockStorageKey]);
 
-  // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY, 0.01 for BTC, 1 oz for Gold
+  // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY, 0.01 for BTC, 1 for Gold/Equities
   const lotSize =
     symbol === 'NIFTY'
       ? 65
@@ -506,9 +556,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? 15
         : isCrypto
           ? 0.01
-          : isGold
-            ? 1
-            : 100;
+          : 1;
   const activeQty = paperPosition
     ? Number(paperPosition.quantity)
     : isAutoScaledOut
@@ -828,12 +876,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     }
 
     try {
-      const res = await fetch(`${API_BASE}/api/paper-trading/close-position`, {
+      const exitPriceVal = exitP || effectiveCurrentPrice;
+      const res = await fetch(`${API_BASE}/api/paper-trading/positions/${(paperPosition as any).id}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           positionId: (paperPosition as any).id,
           reason,
+          exitPrice: exitPriceVal,
+          exitPriceOverride: exitPriceVal,
+          allowPriceOverride: true,
         }),
       });
 
@@ -869,7 +921,13 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       }
 
       if (onClosePosition) {
-        onClosePosition(finalExitPrice, finalPnL, finalR, reason);
+        try {
+          if (typeof (paperPosition as any)?.id === 'string') {
+            onClosePosition((paperPosition as any).id);
+          } else {
+            onClosePosition(finalExitPrice, finalPnL, finalR, reason);
+          }
+        } catch {}
       }
 
       setManualCloseToast(
@@ -888,19 +946,66 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     if (isPlacingOrder) return;
     setIsPlacingOrder(true);
     try {
-      const payload = {
-        symbol,
-        direction: isBull ? 'BUY' : 'SELL',
-        quantity: numericQty,
-        orderType: 'MARKET',
-        price: effectiveCurrentPrice,
-        stopLoss: originalSL,
-        target1: tp1,
-        target2: tp2,
-        target3: tp3,
-        leverage: effectiveLeverage,
-        signalId: signal?.id,
-      };
+      let payload: any;
+
+      if (isOptionsAsset) {
+        // NIFTY and BANKNIFTY Options (Options-Only Execution via OptionContractResolver)
+        // Long options: always BUY (BUY CE for Bullish, BUY PE for Bearish)
+        const optType = isBull ? 'CE' : 'PE';
+        const contractSym =
+          (optionData?.recommendedStrike === activeStrike && optionData?.contractName) ||
+          `${symbol} ${activeStrike} ${optType}`;
+
+        const execPrice =
+          effectiveCurrentPrice > 0
+            ? effectiveCurrentPrice
+            : optionData?.optionLtp > 0
+              ? optionData.optionLtp
+              : 60.0;
+
+        payload = {
+          symbol,
+          contractSymbol: contractSym,
+          instrumentType: 'OPTION',
+          executionInstrumentType: 'OPTION',
+          direction: 'BUY',
+          strike: activeStrike,
+          optionType: optType,
+          quantity: numericQty,
+          orderType: 'MARKET',
+          allowPriceOverride: true,
+          price: execPrice,
+          stopLoss: optionStopLoss,
+          target1: optionTP1,
+          target2: optionTP2,
+          target3: optionTP3,
+          leverage: 1,
+          signalId: signal?.id,
+        };
+      } else {
+        // Spot Equity / Crypto / Commodity (Long-Only)
+        if (!isBull) {
+          throw new Error(
+            `Spot instrument '${symbol}' is long-only. Short selling spot is not permitted by exchange rules. BUY entries only.`,
+          );
+        }
+
+        payload = {
+          symbol,
+          direction: 'BUY',
+          quantity: numericQty,
+          orderType: 'MARKET',
+          allowPriceOverride: true,
+          price: currentCMP,
+          stopLoss: safeInitialSL,
+          target1: tp1,
+          target2: tp2,
+          target3: tp3,
+          leverage: effectiveLeverage,
+          signalId: signal?.id,
+          instrumentType: 'SPOT',
+        };
+      }
 
       const res = await fetch(`${API_BASE}/api/paper-trading/order`, {
         method: 'POST',
@@ -923,13 +1028,17 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
       await fetchPaperPosition();
 
+      const execLabel = isOptionsAsset
+        ? `BUY ${payload.contractSymbol} (${payload.quantity} Qty)`
+        : `BUY ${payload.quantity} ${symbol}`;
+
       setManualCloseToast(
-        `🚀 Executed Paper Position: ${direction} ${totalQuantity} ${symbol} @ ${nativeCurrency}${dp(effectiveCurrentPrice).toFixed(2)} | SL: ${nativeCurrency}${dp(originalSL).toFixed(2)}`,
+        `🚀 Executed Paper Position: ${execLabel} @ ${nativeCurrency}${dp(payload.price).toFixed(2)} | SL: ${nativeCurrency}${dp(payload.stopLoss).toFixed(2)}`,
       );
       setTimeout(() => setManualCloseToast(null), 6000);
     } catch (err: any) {
       setManualCloseToast(`Order Execution Failed: ${err.message}`);
-      setTimeout(() => setManualCloseToast(null), 6000);
+      setTimeout(() => setManualCloseToast(null), 8000);
     } finally {
       setIsPlacingOrder(false);
     }
@@ -1123,7 +1232,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           )}
 
           {/* Mode Switcher Toggle */}
-          {!isCrypto && !isGold && (
+          {isOptionsAsset && (
             <button
               onClick={() => setIsOptionMode(!isOptionMode)}
               className={`text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full border transition-all flex items-center gap-1 shadow-sm ${
@@ -1622,13 +1731,50 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-2">
+            {bot && (
+              <button
+                type="button"
+                onClick={handleToggleBot}
+                disabled={isTogglingBot}
+                className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border flex items-center gap-1.5 transition-all ${
+                  bot.isActive
+                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/60 hover:bg-emerald-900/80'
+                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                }`}
+                title={
+                  bot.isActive
+                    ? 'Bot is ACTIVE: monitoring signals automatically'
+                    : 'Bot is INACTIVE: click to activate auto-monitoring'
+                }
+              >
+                <Bot className="w-3.5 h-3.5" />
+                {isTogglingBot ? 'Updating...' : bot.isActive ? '🤖 Bot: ACTIVE' : '🤖 Bot: OFF (Enable)'}
+              </button>
+            )}
+
             <button
+              type="button"
               onClick={handleExecutePaperOrder}
-              disabled={isPlacingOrder}
-              className="bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-50 text-slate-950 font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 transition-all text-xs"
+              disabled={isPlacingOrder || (!isOptionsAsset && !isBull)}
+              className={`font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg transition-all text-xs ${
+                !isOptionsAsset && !isBull
+                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                  : 'bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-50 text-slate-950 shadow-cyan-500/20'
+              }`}
+              title={
+                !isOptionsAsset && !isBull
+                  ? 'Spot instruments are long-only. Spot short selling is prohibited.'
+                  : 'Execute paper order at current market price'
+              }
             >
               <Zap className="w-4 h-4" />
-              {isPlacingOrder ? 'Executing...' : `Execute Paper Trade @ Market (${nativeCurrency}${dp(currentCMP).toFixed(2)})`}
+              {isPlacingOrder
+                ? 'Executing...'
+                : !isOptionsAsset && !isBull
+                  ? 'Spot Short Selling Forbidden (Long-Only)'
+                  : isOptionsAsset
+                    ? `Execute Option ${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'} @ ₹${dp(effectiveCurrentPrice).toFixed(2)}`
+                    : `Execute Paper Trade @ Market (${nativeCurrency}${dp(currentCMP).toFixed(2)})`}
             </button>
           </div>
         </div>

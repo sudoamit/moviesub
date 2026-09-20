@@ -782,7 +782,7 @@ export class PaperTradingService implements IExecutionProvider {
 
     if (!isMarketOrder && req.price && req.price > 0) {
       executionPrice = req.price;
-    } else if (!isLiveMarket && req.allowPriceOverride && req.price && req.price > 0) {
+    } else if (!isLiveMarket && (req.allowPriceOverride || req.price) && req.price && req.price > 0) {
       executionPrice = req.price;
     }
 
@@ -1635,9 +1635,9 @@ export class PaperTradingService implements IExecutionProvider {
 
     if (
       allowPriceOverride &&
-      (isInternalCall || isTestOrSimulated) &&
       exitPriceOverride &&
-      exitPriceOverride > 0
+      exitPriceOverride > 0 &&
+      !isLiveMode
     ) {
       exitPrice = exitPriceOverride;
       priceSource = ExecutionPriceSource.SIMULATED_FILL;
@@ -1688,14 +1688,48 @@ export class PaperTradingService implements IExecutionProvider {
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
     const isBuy = pos.direction === Direction.BULLISH;
 
-    // Determine outcome classification
-    let outcomeClassification = 'MANUAL';
-    if (exitReason.includes('TP3') || exitReason.includes('Target 3')) outcomeClassification = 'WIN_TP3_RUNNER';
-    else if (exitReason.includes('TP2') || exitReason.includes('Target 2')) outcomeClassification = 'WIN_TP2';
-    else if (exitReason.includes('TP1') || exitReason.includes('Target 1')) outcomeClassification = 'WIN_TP1';
-    else if (exitReason.includes('Breakeven')) outcomeClassification = 'BREAKEVEN';
-    else if (exitReason.includes('Stop Loss') || exitReason.includes('SL'))
-      outcomeClassification = 'LOSS_SL';
+    // Determine outcome classification directly without string heuristics
+    const validOutcomes = new Set([
+      'WIN_TP1',
+      'WIN_TP2',
+      'WIN_TP3_RUNNER',
+      'LOSS_SL',
+      'BREAKEVEN',
+      'MANUAL_EXIT',
+      'CANCELLED',
+      'FAILED',
+    ]);
+
+    let outcomeClassification = 'MANUAL_EXIT';
+    if (
+      options &&
+      typeof options === 'object' &&
+      options.outcomeClassification &&
+      validOutcomes.has(options.outcomeClassification)
+    ) {
+      outcomeClassification = options.outcomeClassification;
+    } else {
+      const existingEvents = (pos.executionEventsJson as any) || {};
+      const hasTP2 = Boolean(existingEvents.tp2FillTime);
+      const hasTP1 = Boolean(existingEvents.tp1FillTime);
+
+      if (hasTP2) {
+        outcomeClassification = 'WIN_TP3_RUNNER';
+      } else if (hasTP1) {
+        outcomeClassification = 'WIN_TP2';
+      } else if (pos.status === PositionState.PARTIALLY_CLOSED) {
+        outcomeClassification = 'WIN_TP1';
+      } else if (
+        exitReason.toLowerCase().includes('stop loss') ||
+        exitReason.toLowerCase().includes('sl')
+      ) {
+        outcomeClassification = 'LOSS_SL';
+      } else if (exitReason.toLowerCase().includes('breakeven')) {
+        outcomeClassification = 'BREAKEVEN';
+      } else {
+        outcomeClassification = 'MANUAL_EXIT';
+      }
+    }
 
     let canonicalRealizedPnLLog = 0;
     let canonicalRealizedRLog = 0;
@@ -2487,7 +2521,98 @@ export class PaperTradingService implements IExecutionProvider {
   }
 
   /**
+   * Retrieves completed canonical PaperTrade records for an account with summary statistics.
+   */
+  async getCompletedTrades(
+    accountId?: string,
+    limit = 200,
+  ): Promise<{ trades: any[]; stats: any }> {
+    let targetAccountId = accountId;
+    if (!targetAccountId) {
+      const account = await this.getOrCreateAccount();
+      targetAccountId = account.id;
+    }
+
+    const paperTrades = await this.prisma.paperTrade.findMany({
+      where: { accountId: targetAccountId },
+      orderBy: { exitTime: 'desc' },
+      take: limit,
+      include: {
+        position: true,
+      },
+    });
+
+    const trades = paperTrades.map((t) => {
+      const charges = (t.chargesJson as any) || {};
+      const outcome = (t.outcomeSnapshotJson as any) || {};
+      return {
+        id: t.id,
+        accountId: t.accountId,
+        positionId: t.positionId,
+        symbol: t.symbol,
+        contractSymbol: t.contractSymbol || t.symbol,
+        instrumentType: t.instrumentType,
+        strike: t.strike ? Number(t.strike) : null,
+        optionType: t.optionType,
+        expiry: t.expiry,
+        direction: t.direction,
+        strategyDirection: t.strategyDirection || t.direction,
+        orderSide: t.orderSide || (t.direction === Direction.BULLISH ? 'BUY' : 'SELL'),
+        quantity: Number(t.quantity),
+        entryPrice: Number(t.entryPrice || 0),
+        exitPrice: Number(t.exitPrice),
+        realizedPnL: Number(t.realizedPnL || 0),
+        realizedR: Number(t.realizedR || 0),
+        pnlAmount: Number(t.realizedPnL || 0),
+        pnlRMultiple: Number(t.realizedR || 0),
+        fees: Number(t.fees ?? charges.totalCharges ?? 0),
+        totalCharges: Number(t.fees ?? charges.totalCharges ?? 0),
+        chargesJson: t.chargesJson,
+        outcomeClassification: t.outcomeClassification || 'MANUAL_EXIT',
+        exitReason: t.exitReason,
+        entryTime: t.entryTime,
+        exitTime: t.exitTime,
+        activatedAt: t.entryTime ? t.entryTime.toISOString() : undefined,
+        closedAt: t.exitTime.toISOString(),
+        holdingDurationSeconds: t.holdingDurationSeconds,
+        durationMinutes: t.holdingDurationSeconds ? Number((t.holdingDurationSeconds / 60).toFixed(1)) : 0,
+        outcomeSnapshotJson: t.outcomeSnapshotJson,
+        sourceBotId: t.sourceBotId,
+        executionId: t.executionId,
+        tradeDecisionId: t.tradeDecisionId,
+        createdAt: t.createdAt,
+      };
+    });
+
+    // Compute canonical stats
+    const totalTrades = trades.length;
+    const winningTrades = trades.filter((t) => t.realizedPnL > 0).length;
+    const losingTrades = trades.filter((t) => t.realizedPnL < 0).length;
+    const winRate = totalTrades > 0 ? Number(((winningTrades / totalTrades) * 100).toFixed(1)) : 0;
+    const totalPnl = Number(trades.reduce((acc, t) => acc + t.realizedPnL, 0).toFixed(2));
+    const grossProfit = trades.filter((t) => t.realizedPnL > 0).reduce((acc, t) => acc + t.realizedPnL, 0);
+    const grossLoss = Math.abs(trades.filter((t) => t.realizedPnL < 0).reduce((acc, t) => acc + t.realizedPnL, 0));
+    const profitFactor = grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? 999 : 0;
+    const averageR = totalTrades > 0 ? Number((trades.reduce((acc, t) => acc + t.realizedR, 0) / totalTrades).toFixed(2)) : 0;
+
+    const stats = {
+      totalTrades,
+      totalVerifiedTrades: totalTrades,
+      legacyTradeCount: 0,
+      winningTrades,
+      losingTrades,
+      winRate,
+      totalPnl,
+      profitFactor,
+      averageR,
+    };
+
+    return { trades, stats };
+  }
+
+  /**
    * Scoped account-level clearing of completed paper trades in atomic transaction.
+   * Does NOT wipe active positions and does NOT reset account cash balance.
    */
   async clearAllCompletedTrades(accountId?: string): Promise<{ success: boolean; count: number }> {
     let targetAccountId = accountId;
@@ -2496,8 +2621,10 @@ export class PaperTradingService implements IExecutionProvider {
       targetAccountId = account.id;
     }
 
-    const result = await this.prisma.paperTrade.deleteMany({
-      where: { accountId: targetAccountId },
+    const result = await this.prisma.$transaction(async (tx) => {
+      return tx.paperTrade.deleteMany({
+        where: { accountId: targetAccountId },
+      });
     });
 
     return {

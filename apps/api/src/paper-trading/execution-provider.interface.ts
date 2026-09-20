@@ -175,6 +175,7 @@ export interface IClosePositionOptions {
   triggerPrice?: number;
   triggerMarketEventTime?: Date | string;
   correlationId?: string;
+  outcomeClassification?: string;
 }
 
 export interface IExecutionProvider {

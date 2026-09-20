@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/quant_test?schema=public"
+      TEST_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/quant_test?schema=public"
       JWT_SECRET: "ci_jwt_secret_test_key_123456789"
       APP_ENV: "test"
 

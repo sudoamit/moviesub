@@ -29,11 +29,11 @@ export interface InstrumentDescriptor {
 }
 
 export const INSTRUMENT_DESCRIPTORS: Record<string, InstrumentDescriptor> = {
-  NIFTY: {
-    instrumentId: 'inst_nifty',
-    canonicalSymbol: 'NIFTY',
+  NIFTY_SPOT: {
+    instrumentId: 'inst_nifty_spot',
+    canonicalSymbol: 'NIFTY_SPOT',
     venue: 'NSE',
-    productType: 'OPTION',
+    productType: 'SPOT',
     assetClass: 'INDEX',
     quoteCurrency: 'INR',
     accountCurrency: 'INR',
@@ -45,11 +45,47 @@ export const INSTRUMENT_DESCRIPTORS: Record<string, InstrumentDescriptor> = {
     supportsShort: false, // Spot shorting strictly prohibited
     supportsOptions: true,
     marginModel: 'SPOT',
+    costScheduleId: 'NSE_CASH_EQUITY',
+  },
+  BANKNIFTY_SPOT: {
+    instrumentId: 'inst_banknifty_spot',
+    canonicalSymbol: 'BANKNIFTY_SPOT',
+    venue: 'NSE',
+    productType: 'SPOT',
+    assetClass: 'INDEX',
+    quoteCurrency: 'INR',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 15,
+    quantityPrecision: 0,
+    priceTickSize: 0.05,
+    supportsLong: true,
+    supportsShort: false,
+    supportsOptions: true,
+    marginModel: 'SPOT',
+    costScheduleId: 'NSE_CASH_EQUITY',
+  },
+  NIFTY_OPTION: {
+    instrumentId: 'inst_nifty_option',
+    canonicalSymbol: 'NIFTY_OPTION',
+    venue: 'NSE',
+    productType: 'OPTION',
+    assetClass: 'INDEX',
+    quoteCurrency: 'INR',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 65,
+    quantityPrecision: 0,
+    priceTickSize: 0.05,
+    supportsLong: true,
+    supportsShort: false,
+    supportsOptions: true,
+    marginModel: 'SPOT',
     costScheduleId: 'NSE_OPTION_DELIVERY',
   },
-  BANKNIFTY: {
-    instrumentId: 'inst_banknifty',
-    canonicalSymbol: 'BANKNIFTY',
+  BANKNIFTY_OPTION: {
+    instrumentId: 'inst_banknifty_option',
+    canonicalSymbol: 'BANKNIFTY_OPTION',
     venue: 'NSE',
     productType: 'OPTION',
     assetClass: 'INDEX',
@@ -64,6 +100,42 @@ export const INSTRUMENT_DESCRIPTORS: Record<string, InstrumentDescriptor> = {
     supportsOptions: true,
     marginModel: 'SPOT',
     costScheduleId: 'NSE_OPTION_DELIVERY',
+  },
+  NIFTY: {
+    instrumentId: 'inst_nifty_spot',
+    canonicalSymbol: 'NIFTY_SPOT',
+    venue: 'NSE',
+    productType: 'SPOT',
+    assetClass: 'INDEX',
+    quoteCurrency: 'INR',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 65,
+    quantityPrecision: 0,
+    priceTickSize: 0.05,
+    supportsLong: true,
+    supportsShort: false,
+    supportsOptions: true,
+    marginModel: 'SPOT',
+    costScheduleId: 'NSE_CASH_EQUITY',
+  },
+  BANKNIFTY: {
+    instrumentId: 'inst_banknifty_spot',
+    canonicalSymbol: 'BANKNIFTY_SPOT',
+    venue: 'NSE',
+    productType: 'SPOT',
+    assetClass: 'INDEX',
+    quoteCurrency: 'INR',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 15,
+    quantityPrecision: 0,
+    priceTickSize: 0.05,
+    supportsLong: true,
+    supportsShort: false,
+    supportsOptions: true,
+    marginModel: 'SPOT',
+    costScheduleId: 'NSE_CASH_EQUITY',
   },
   BTCUSDT_SPOT: {
     instrumentId: 'inst_btcusdt_spot',
@@ -83,10 +155,28 @@ export const INSTRUMENT_DESCRIPTORS: Record<string, InstrumentDescriptor> = {
     marginModel: 'SPOT',
     costScheduleId: 'BINANCE_CRYPTO_SPOT',
   },
+  XAUUSD_SPOT: {
+    instrumentId: 'inst_xauusd_spot',
+    canonicalSymbol: 'XAUUSD_SPOT',
+    venue: 'SPOT_METALS',
+    productType: 'SPOT',
+    assetClass: 'COMMODITY',
+    quoteCurrency: 'USD',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 0.01,
+    quantityPrecision: 2,
+    priceTickSize: 0.01,
+    supportsLong: true,
+    supportsShort: true,
+    supportsOptions: false,
+    marginModel: 'SPOT',
+    costScheduleId: 'COMEX_COMMODITY_SPOT',
+  },
   XAUUSD: {
-    instrumentId: 'inst_xauusd',
-    canonicalSymbol: 'XAUUSD',
-    venue: 'COMEX',
+    instrumentId: 'inst_xauusd_spot',
+    canonicalSymbol: 'XAUUSD_SPOT',
+    venue: 'SPOT_METALS',
     productType: 'SPOT',
     assetClass: 'COMMODITY',
     quoteCurrency: 'USD',
@@ -163,11 +253,11 @@ const CANONICAL_SYMBOL_ALIASES: Record<string, string> = {
   BTCUSD: 'BTCUSDT_SPOT',
   BTC: 'BTCUSDT_SPOT',
   CRYPTO: 'BTCUSDT_SPOT',
-  GOLD: 'XAUUSD',
-  COMMODITY: 'XAUUSD',
-  NIFTY_SPOT: 'NIFTY',
-  BANKNIFTY_SPOT: 'BANKNIFTY',
-  OPTION: 'NIFTY',
+  GOLD: 'XAUUSD_SPOT',
+  XAUUSD: 'XAUUSD_SPOT',
+  COMMODITY: 'XAUUSD_SPOT',
+  NIFTY: 'NIFTY_SPOT',
+  BANKNIFTY: 'BANKNIFTY_SPOT',
   EQUITY: 'RELIANCE',
 };
 
@@ -190,15 +280,33 @@ export function normalizeCanonicalExecutionSymbol(symbol: string): string {
  * Resolves the authoritative InstrumentDescriptor without string matching heuristics.
  */
 export function getAuthoritativeDescriptor(symbol: string): InstrumentDescriptor {
+  const upper = (symbol || '').trim().toUpperCase();
+  const isOption =
+    upper.includes(' CE') ||
+    upper.includes(' PE') ||
+    upper.includes('_OPTION') ||
+    upper.includes(' OPTION');
+
+  if (isOption) {
+    if (upper.startsWith('NIFTY')) {
+      return INSTRUMENT_DESCRIPTORS['NIFTY_OPTION'];
+    }
+    if (upper.startsWith('BANKNIFTY')) {
+      return INSTRUMENT_DESCRIPTORS['BANKNIFTY_OPTION'];
+    }
+  }
+
   const norm = normalizeCanonicalExecutionSymbol(symbol);
-  // If option contract symbol, get base index descriptor
-  const baseKey = norm.split(' ')[0];
-  let descriptor = INSTRUMENT_DESCRIPTORS[norm] || INSTRUMENT_DESCRIPTORS[baseKey];
+  let descriptor = INSTRUMENT_DESCRIPTORS[norm] || INSTRUMENT_DESCRIPTORS[upper];
   if (!descriptor) {
-    if (norm.startsWith('NIFTY')) {
-      descriptor = INSTRUMENT_DESCRIPTORS['NIFTY'];
-    } else if (norm.startsWith('BANKNIFTY')) {
-      descriptor = INSTRUMENT_DESCRIPTORS['BANKNIFTY'];
+    const baseKey = norm.split(' ')[0];
+    descriptor = INSTRUMENT_DESCRIPTORS[baseKey];
+  }
+  if (!descriptor) {
+    if (upper === 'NIFTY' || upper.startsWith('NIFTY_SPOT')) {
+      descriptor = INSTRUMENT_DESCRIPTORS['NIFTY_SPOT'];
+    } else if (upper === 'BANKNIFTY' || upper.startsWith('BANKNIFTY_SPOT')) {
+      descriptor = INSTRUMENT_DESCRIPTORS['BANKNIFTY_SPOT'];
     }
   }
   if (!descriptor) {
