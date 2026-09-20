@@ -5,11 +5,12 @@ import { PaperTradingController } from './paper-trading.controller';
 import { PrismaModule } from '../common/prisma/prisma.module';
 import { CandlesModule } from '../candles/candles.module';
 import { MarketDataModule } from '../market-data/market-data.module';
+import { TradingDomainModule } from '../trading-domain/trading-domain.module';
 
 @Module({
-  imports: [PrismaModule, CandlesModule, MarketDataModule],
+  imports: [PrismaModule, CandlesModule, MarketDataModule, TradingDomainModule],
   controllers: [PaperTradingController],
   providers: [PaperTradingService, PaperPositionMonitorService],
-  exports: [PaperTradingService, PaperPositionMonitorService],
+  exports: [PaperTradingService, PaperPositionMonitorService, TradingDomainModule],
 })
 export class PaperTradingModule {}

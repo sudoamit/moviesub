@@ -24,6 +24,7 @@ import { AccuracyModule } from './accuracy/accuracy.module';
 import { AILearningModule } from './ai-learning/ai-learning.module';
 import { LearningModule } from './learning/learning.module';
 import { ResearchModule } from './research/research.module';
+import { TradingDomainModule } from './trading-domain/trading-domain.module';
 
 @Module({
   imports: [
@@ -59,6 +60,7 @@ import { ResearchModule } from './research/research.module';
     AILearningModule,
     LearningModule,
     ResearchModule,
+    TradingDomainModule,
   ],
   providers: [
     {

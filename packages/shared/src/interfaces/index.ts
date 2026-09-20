@@ -601,4 +601,5 @@ export interface IModelDriftReport {
 }
 
 export * from './trade-journal.interface';
+export * from './financial-domain.interface';
 
