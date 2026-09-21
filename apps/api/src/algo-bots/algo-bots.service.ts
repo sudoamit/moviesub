@@ -12,6 +12,11 @@ import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import {
+  TradeLifecycleService,
+  ExecutionService,
+  ReservationService,
+} from '../trading-domain';
+import {
   Direction,
   getAuthoritativeInstrument,
   hasInstrument,
@@ -190,9 +195,17 @@ export class AlgoBotsService implements OnModuleInit {
     @Optional() private readonly prisma?: PrismaService,
     @Optional() private readonly redis?: RedisService,
     @Optional() private tradeDecisionService?: TradeDecisionService,
+    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private readonly executionService?: ExecutionService,
+    @Optional() private readonly reservationService?: ReservationService,
   ) {
     if (!this.tradeDecisionService) {
-      this.tradeDecisionService = new TradeDecisionService(this.prisma);
+      this.tradeDecisionService = new TradeDecisionService(
+        this.prisma,
+        this.tradeLifecycleService,
+        this.reservationService,
+        this.executionService,
+      );
     }
     this.logger.log('Algo Strategy Studio Service Initialized.');
   }
@@ -646,12 +659,15 @@ export class AlgoBotsService implements OnModuleInit {
     const minQty = Number(instrument.minimumQuantity || lotSize || 1);
     const precision =
       typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 0;
-
     const rawQuantity = bot.lots * lotSize;
-    const clampedQty = Math.max(minQty, rawQuantity);
+    if (rawQuantity < minQty) {
+      throw new Error(
+        `BELOW_MIN_QUANTITY: Computed quantity ${rawQuantity} is below minimum executable quantity ${minQty} for ${instrument.symbol}`,
+      );
+    }
 
     const factor = Math.pow(10, precision);
-    const canonicalQty = Math.round(clampedQty * factor) / factor;
+    const canonicalQty = Math.floor((rawQuantity + 1e-9) * factor) / factor;
 
     if (!Number.isFinite(canonicalQty) || canonicalQty <= 0) {
       throw new Error(

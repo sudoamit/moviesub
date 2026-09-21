@@ -1,11 +1,19 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   Logger,
   Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
+import {
+  TradeLifecycleService,
+  ReservationService,
+  ExecutionService,
+  RiskService,
+  PositionSizingService,
+} from '../trading-domain';
 import {
   Direction,
   getAuthoritativeInstrument,
@@ -416,7 +424,14 @@ export interface ICommitTradeDecisionResult {
 export class TradeDecisionService {
   private readonly logger = new Logger(TradeDecisionService.name);
 
-  constructor(@Optional() private readonly prisma?: PrismaService) {}
+  constructor(
+    @Optional() private readonly prisma?: PrismaService,
+    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private readonly reservationService?: ReservationService,
+    @Optional() private readonly executionService?: ExecutionService,
+    @Optional() private readonly riskService?: RiskService,
+    @Optional() private readonly positionSizingService?: PositionSizingService,
+  ) {}
 
   /**
    * Normalizes timeframe string representation (e.g. 'M15' -> '15m', 'H1' -> '1h')
@@ -541,12 +556,15 @@ export class TradeDecisionService {
     const minQty = Number(instrument.minimumQuantity || lotSize || 1);
     const precision =
       typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 0;
-
     const rawQuantity = bot.lots * lotSize;
-    const clampedQty = Math.max(minQty, rawQuantity);
+    if (rawQuantity < minQty) {
+      throw new Error(
+        `BELOW_MIN_QUANTITY: Computed quantity ${rawQuantity} is below minimum executable quantity ${minQty} for ${instrument.symbol}`,
+      );
+    }
 
     const factor = Math.pow(10, precision);
-    const canonicalQty = Math.round(clampedQty * factor) / factor;
+    const canonicalQty = Math.floor((rawQuantity + 1e-9) * factor) / factor;
 
     if (!Number.isFinite(canonicalQty) || canonicalQty <= 0) {
       throw new Error(
@@ -1295,6 +1313,55 @@ export class TradeDecisionService {
       };
     }
 
+    let domainReservationId: string | undefined;
+    if (this.reservationService && this.prisma && decisionResult.decision === TradeDecisionType.TAKE) {
+      const plannedQty = decisionResult.plannedLevels?.quantity || 1;
+      const plannedEntry = decisionResult.plannedLevels?.optimalEntry || 0;
+      const plannedSL = decisionResult.plannedLevels?.stopLoss || 0;
+      const riskDist = Math.abs(plannedEntry - plannedSL);
+      const riskAmt = decisionResult.plannedLevels?.riskAmount ?? (riskDist * plannedQty);
+      const exposureAmt = (plannedEntry > 0 ? plannedEntry : 1) * plannedQty;
+      const marginAmt = isOption ? exposureAmt : (exposureAmt / ((bot as any).leverage || 1.0));
+
+      try {
+        const reservationRecord = await this.reservationService.reserveResources({
+          accountId,
+          botId: bot.id,
+          tradeDecisionId: `dec_${fingerprint}`,
+          fingerprint,
+          riskAmount: Math.max(0, riskAmt),
+          marginAmount: Math.max(0, marginAmt),
+          exposureAmount: Math.max(0, exposureAmt),
+          currency: 'INR',
+          expiresInSeconds: 60,
+        });
+        domainReservationId = reservationRecord.reservationId;
+      } catch (resErr: any) {
+        this.logger.warn(`Pre-trade reservation declined for fingerprint '${fingerprint}': ${resErr.message}`);
+        if (resErr instanceof ConflictException && resErr.message.includes('RESERVATION_CONFLICT')) {
+          return {
+            tradeDecisionId: `conflict_${fingerprint}`,
+            fingerprint,
+            decision: TradeDecisionType.REJECT,
+            decisionReasonCode: 'DUPLICATE_RESERVATION',
+            decisionReason: resErr.message,
+            lifecycleState: TradeLifecycleState.RESERVATION_FAILED,
+            isDuplicate: true,
+          };
+        }
+        const reasonCode = resErr.message?.includes('INSUFFICIENT_MARGIN') ? 'INSUFFICIENT_MARGIN' : 'RESERVATION_DECLINED';
+        return {
+          tradeDecisionId: `declined_${fingerprint}`,
+          fingerprint,
+          decision: TradeDecisionType.REJECT,
+          decisionReasonCode: reasonCode,
+          decisionReason: resErr.message,
+          lifecycleState: TradeLifecycleState.RESERVATION_FAILED,
+          isDuplicate: false,
+        };
+      }
+    }
+
     const now = new Date();
 
     try {
@@ -1519,6 +1586,13 @@ export class TradeDecisionService {
         };
       });
     } catch (err: any) {
+      if (domainReservationId && this.reservationService) {
+        try {
+          await this.reservationService.releaseReservation(domainReservationId, 'TRANSACTION_ABORTED');
+        } catch {
+          // ignore cleanup errors
+        }
+      }
       // Handle Unique Constraint Violation on duplicate concurrent execution
       if (
         err?.code === 'P2002' ||
@@ -1661,10 +1735,40 @@ export class TradeDecisionService {
 
   public async markExecutionStarted(executionId: string): Promise<void> {
     await this.transitionExecutionState(executionId, 'RESERVED', 'EXECUTING');
+    if (this.executionService && executionId && !executionId.startsWith('test_exec_')) {
+      try {
+        await this.executionService.markStarted(executionId);
+      } catch (err: any) {
+        this.logger.debug(`ExecutionService markStarted note: ${err.message}`);
+      }
+    }
   }
 
   public async markExecutionExecuted(executionId: string, orderPositionId?: string): Promise<void> {
     await this.transitionExecutionState(executionId, 'EXECUTING', 'EXECUTED', { orderPositionId });
+    if (this.executionService && executionId && !executionId.startsWith('test_exec_')) {
+      try {
+        await this.executionService.markExecuted(executionId, orderPositionId);
+      } catch (err: any) {
+        this.logger.debug(`ExecutionService markExecuted note: ${err.message}`);
+      }
+    }
+    if (this.reservationService && executionId && !executionId.startsWith('test_exec_') && this.prisma) {
+      try {
+        const execution = await this.prisma.algoBotExecution.findUnique({
+          where: { id: executionId },
+          select: { fingerprint: true },
+        });
+        if (execution?.fingerprint) {
+          const res = await this.reservationService.getReservationByFingerprint(execution.fingerprint);
+          if (res) {
+            await this.reservationService.consumeReservation(res.reservationId);
+          }
+        }
+      } catch (consumeErr: any) {
+        this.logger.debug(`Reservation consume note: ${consumeErr.message}`);
+      }
+    }
   }
 
   public async markExecutionFailed(
@@ -1681,6 +1785,39 @@ export class TradeDecisionService {
       failureReason: classification.message,
       failureReasonCode: classification.reasonCode,
     });
+
+    if (this.executionService && executionId && !executionId.startsWith('test_exec_')) {
+      try {
+        await this.executionService.markFailed(
+          executionId,
+          classification.reasonCode,
+          classification.message,
+          Boolean(classification.retryable),
+        );
+      } catch (execErr: any) {
+        this.logger.debug(`ExecutionService markFailed note: ${execErr.message}`);
+      }
+    }
+
+    if (this.reservationService && executionId && !executionId.startsWith('test_exec_') && this.prisma) {
+      try {
+        const execution = await this.prisma.algoBotExecution.findUnique({
+          where: { id: executionId },
+          select: { fingerprint: true },
+        });
+        if (execution?.fingerprint) {
+          const res = await this.reservationService.getReservationByFingerprint(execution.fingerprint);
+          if (res) {
+            await this.reservationService.releaseReservation(
+              res.reservationId,
+              classification.reasonCode || 'EXECUTION_FAILED',
+            );
+          }
+        }
+      } catch (releaseErr: any) {
+        this.logger.debug(`Reservation release note: ${releaseErr.message}`);
+      }
+    }
   }
 
   /**
@@ -1724,6 +1861,41 @@ export class TradeDecisionService {
     }
 
     if (tradeDecisionId.startsWith('test_dec_')) return;
+
+    if (this.tradeLifecycleService) {
+      if (this.prisma) {
+        try {
+          const currentDecision = await this.prisma.tradeDecision.findUnique({
+            where: { id: tradeDecisionId },
+            select: { lifecycleState: true },
+          });
+          if (currentDecision) {
+            if (currentDecision.lifecycleState === state) {
+              return;
+            }
+            if (
+              currentDecision.lifecycleState === TradeLifecycleState.POSITION_OPENED &&
+              state === TradeLifecycleState.ORDER_FILLED
+            ) {
+              return;
+            }
+          }
+        } catch {
+          // ignore lookup errors
+        }
+      }
+
+      await this.tradeLifecycleService.transition({
+        tradeDecisionId,
+        expectedState: expectedCurrentState,
+        newState: state,
+        event: String(state),
+        correlationId: updateData?.executionId || tradeDecisionId,
+        metadata: updateData,
+      });
+      return;
+    }
+
     if (!this.prisma || !this.prisma.tradeDecision) {
       throw new Error(
         `[LIFECYCLE_FAIL_CLOSED] Prisma service unavailable to persist lifecycle state '${state}' for decision '${tradeDecisionId}'`,

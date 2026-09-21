@@ -4,6 +4,7 @@ import {
   BadRequestException,
   NotFoundException,
   Optional,
+  OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
@@ -46,19 +47,47 @@ import * as crypto from 'crypto';
 import { isOptionsUnderlying } from '../algo-bots/option-contract-resolver';
 import { TransactionCostScheduleManager, TransactionChargesBreakdown } from './transaction-cost-schedule-manager';
 import { PositionValuationService } from './position-valuation.service';
+import {
+  TradeLifecycleService,
+  AccountingService,
+  PositionService,
+  OrderService,
+  FillService,
+  ReconciliationService,
+  MarginService,
+  JournalService,
+} from '../trading-domain';
 
 export * from './execution-provider.interface';
 
 @Injectable()
-export class PaperTradingService implements IExecutionProvider {
+export class PaperTradingService implements IExecutionProvider, OnModuleInit {
   private readonly logger = new Logger(PaperTradingService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly candlesService: CandlesService,
     @Optional() private readonly realMarketStreamer?: RealMarketStreamerService,
+    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private readonly accountingService?: AccountingService,
+    @Optional() private readonly positionService?: PositionService,
+    @Optional() private readonly orderService?: OrderService,
+    @Optional() private readonly fillService?: FillService,
+    @Optional() private readonly reconciliationService?: ReconciliationService,
+    @Optional() private readonly marginService?: MarginService,
+    @Optional() private readonly journalService?: JournalService,
   ) {
     this.logger.log('Persistent Database-Backed Paper Trading Service Initialized.');
+  }
+
+  async onModuleInit() {
+    if (this.reconciliationService) {
+      try {
+        await this.reconciliationService.runStartupReconciliation();
+      } catch (err: any) {
+        this.logger.warn(`Startup reconciliation non-fatal: ${err.message}`);
+      }
+    }
   }
 
   /**
@@ -1215,6 +1244,14 @@ export class PaperTradingService implements IExecutionProvider {
         throw new BadRequestException('Trading account not found');
       }
 
+      if (this.accountingService) {
+        try {
+          this.accountingService.assertFinancialInvariants(txAccount);
+        } catch (err: any) {
+          this.logger.warn(`Pre-trade financial invariant check: ${err.message}`);
+        }
+      }
+
       const txCash = Number(txAccount.cashBalance);
       // Reconcile used margin directly from active open positions to prevent dirty/stale margin locks
       const activePositions = await tx.paperPosition.findMany({
@@ -1399,6 +1436,17 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
+      if (this.accountingService) {
+        try {
+          const postEntryAccount = await tx.paperAccount.findUnique({ where: { id: account.id } });
+          if (postEntryAccount) {
+            this.accountingService.assertFinancialInvariants(postEntryAccount);
+          }
+        } catch (err: any) {
+          this.logger.warn(`Post-entry financial invariant check: ${err.message}`);
+        }
+      }
+
       // Synchronize TradeDecision if tradeDecisionId provided (fail-closed inside tx)
       if (req.tradeDecisionId) {
         const currentDecision = await tx.tradeDecision.findUnique({
@@ -1422,6 +1470,20 @@ export class PaperTradingService implements IExecutionProvider {
             updatedAt: new Date(),
           },
         });
+
+        if (this.tradeLifecycleService) {
+          try {
+            await this.tradeLifecycleService.transition({
+              tradeDecisionId: req.tradeDecisionId,
+              newState: TradeLifecycleState.POSITION_OPENED,
+              event: 'ORDER_FILLED',
+              correlationId,
+              metadata: { positionId: position.id },
+            });
+          } catch (lifecycleErr: any) {
+            this.logger.debug(`Lifecycle transition note: ${lifecycleErr.message}`);
+          }
+        }
       }
 
       // Create Audit Events with full metadata
@@ -2159,6 +2221,17 @@ export class PaperTradingService implements IExecutionProvider {
         },
       });
 
+      if (this.accountingService) {
+        try {
+          const postCloseAccount = await tx.paperAccount.findUnique({ where: { id: pos.accountId } });
+          if (postCloseAccount) {
+            this.accountingService.assertFinancialInvariants(postCloseAccount);
+          }
+        } catch (err: any) {
+          this.logger.warn(`Post-close financial invariant check: ${err.message}`);
+        }
+      }
+
       // Synchronize TradeDecision lifecycle state if tradeDecisionId exists
       const tradeDecisionId = (pos.executionEventsJson as any)?.tradeDecisionId;
       if (tradeDecisionId) {
@@ -2172,6 +2245,58 @@ export class PaperTradingService implements IExecutionProvider {
             updatedAt: new Date(),
           },
         });
+
+        if (this.tradeLifecycleService) {
+          try {
+            await this.tradeLifecycleService.transition({
+              tradeDecisionId,
+              newState: TradeLifecycleState.TRADE_CLOSED,
+              event: 'POSITION_CLOSED',
+              correlationId,
+              metadata: { tradeId: tradeRecord.id, positionId: pos.id, exitReason },
+            });
+          } catch (lifecycleErr: any) {
+            this.logger.debug(`Lifecycle close transition note: ${lifecycleErr.message}`);
+          }
+        }
+      }
+
+      if (this.journalService) {
+        try {
+          await this.journalService.createJournalEntry({
+            accountId: pos.accountId,
+            positionId: pos.id,
+            symbol: pos.symbol,
+            contractSymbol: pos.contractSymbol,
+            instrumentType: pos.instrumentType,
+            direction: pos.direction as any,
+            quantity: totalPositionQuantity,
+            entryPrice: effectiveEntryPrice,
+            exitPrice: effectiveExitPrice,
+            realizedPnL: canonicalRealizedPnL,
+            realizedR: canonicalRealizedR,
+            fees: totalLifecycleCharges,
+            maxFavorableExcursion: pos.maxFavorableExcursion ? Number(pos.maxFavorableExcursion) : undefined,
+            maxAdverseExcursion: pos.maxAdverseExcursion ? Number(pos.maxAdverseExcursion) : undefined,
+            holdingDurationSeconds:
+              aggregated.durationMs !== null
+                ? Math.max(0, Math.floor(aggregated.durationMs / 1000))
+                : undefined,
+            entryTime:
+              hasAuthoritativeEntryFills && aggregated.entry
+                ? new Date(aggregated.entry.earliestFillTimestamp)
+                : pos.entryTime,
+            exitTime: new Date(aggregated.exit.latestFillTimestamp),
+            exitReason,
+            chargesJson: tradeRecord.chargesJson,
+            featureSnapshotJson: (pos.featureSnapshotJson as any) || undefined,
+            outcomeSnapshotJson: tradeRecord.outcomeSnapshotJson,
+            outcomeClassification,
+            correlationId,
+          });
+        } catch (jErr: any) {
+          this.logger.debug(`Journal entry note: ${jErr.message}`);
+        }
       }
 
       // 9. Audit Logs

@@ -186,13 +186,33 @@ export class TradeLifecycleService implements ITradeLifecycleDomainService {
     ],
     [TradeLifecycleState.POSITION_CLOSED]: [
       TradeLifecycleState.TRADE_CLOSED,
+      TradeLifecycleState.TRADE_FAILED,
     ],
     [TradeLifecycleState.TRADE_CLOSED]: [], // Terminal
     [TradeLifecycleState.TRADE_FAILED]: [], // Terminal
     [TradeLifecycleState.TRADE_CANCELLED]: [], // Terminal
   };
 
+  private readonly TERMINAL_STATES: ReadonlySet<TradeLifecycleState> = new Set([
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_REJECTED,
+    TradeLifecycleState.TRADE_FAILED,
+    TradeLifecycleState.TRADE_CANCELLED,
+  ]);
+
   constructor(private readonly prisma: PrismaService) {}
+
+  public isTerminalState(state: TradeLifecycleState | string): boolean {
+    return this.TERMINAL_STATES.has(state as TradeLifecycleState);
+  }
+
+  public async getLifecycleState(tradeDecisionId: string): Promise<TradeLifecycleState | null> {
+    const decision = await this.prisma.tradeDecision.findUnique({
+      where: { id: tradeDecisionId },
+      select: { lifecycleState: true },
+    });
+    return (decision?.lifecycleState as TradeLifecycleState) ?? null;
+  }
 
   public isValidTransition(fromState: TradeLifecycleState, toState: TradeLifecycleState): boolean {
     if (fromState === toState) return true; // Idempotent same-state
@@ -231,6 +251,20 @@ export class TradeLifecycleService implements ITradeLifecycleDomainService {
       }
     }
 
+    // Idempotent self-transition
+    if (currentState === newState) {
+      this.logger.debug(
+        `[LIFECYCLE IDEMPOTENT] tradeDecisionId=${tradeDecisionId} | already in state '${newState}'`,
+      );
+      return {
+        success: true,
+        tradeDecisionId,
+        previousState: currentState,
+        currentState: newState,
+        transitionTime: new Date(),
+      };
+    }
+
     // Verify FSM transition validity
     if (!this.isValidTransition(currentState, newState)) {
       throw new BadRequestException(
@@ -240,12 +274,23 @@ export class TradeLifecycleService implements ITradeLifecycleDomainService {
 
     const now = new Date();
 
-    // Prepare update payload
+    // Prepare update payload with authoritative milestone timestamps
     const updateData: any = {
       lifecycleState: newState,
     };
 
-    if (newState === TradeLifecycleState.ORDER_SUBMITTED) {
+    if (newState === TradeLifecycleState.SIGNAL_DETECTED) {
+      updateData.observedAt = now;
+      if (!decision.marketEventTime) updateData.marketEventTime = now;
+    } else if (newState === TradeLifecycleState.SIGNAL_VALIDATED) {
+      updateData.canonicalDecisionTime = now;
+    } else if (newState === TradeLifecycleState.TRADE_TAKEN) {
+      updateData.tradeTakenAt = now;
+      updateData.tradeTakenTime = now;
+    } else if (newState === TradeLifecycleState.RESERVATION_CREATED || newState === TradeLifecycleState.RESERVED) {
+      updateData.reservationCreatedAt = now;
+      updateData.reservationTime = now;
+    } else if (newState === TradeLifecycleState.ORDER_SUBMITTED) {
       updateData.orderSubmittedAt = now;
       updateData.orderSubmittedTime = now;
     } else if (newState === TradeLifecycleState.ORDER_FILLED) {
@@ -253,12 +298,24 @@ export class TradeLifecycleService implements ITradeLifecycleDomainService {
       updateData.fillTime = now;
     } else if (newState === TradeLifecycleState.POSITION_OPENED) {
       updateData.positionOpenedAt = now;
+    } else if (newState === TradeLifecycleState.TRADE_CLOSED) {
+      updateData.decisionTime = now;
     }
 
     if (metadata) {
       if (metadata.executionId) updateData.executionId = metadata.executionId;
       if (metadata.orderPositionId) updateData.orderPositionId = metadata.orderPositionId;
       if (metadata.marketEventTime) updateData.marketEventTime = metadata.marketEventTime;
+      if (metadata.canonicalDecisionTime) updateData.canonicalDecisionTime = metadata.canonicalDecisionTime;
+      if (metadata.tradeTakenTime) updateData.tradeTakenTime = metadata.tradeTakenTime;
+      if (metadata.tradeTakenAt) updateData.tradeTakenAt = metadata.tradeTakenAt;
+      if (metadata.reservationCreatedAt) updateData.reservationCreatedAt = metadata.reservationCreatedAt;
+      if (metadata.orderSubmittedAt) updateData.orderSubmittedAt = metadata.orderSubmittedAt;
+      if (metadata.firstFillAt) updateData.firstFillAt = metadata.firstFillAt;
+      if (metadata.positionOpenedAt) updateData.positionOpenedAt = metadata.positionOpenedAt;
+      if (metadata.decisionTime) updateData.decisionTime = metadata.decisionTime;
+      if (metadata.decisionReasonCode) updateData.decisionReasonCode = metadata.decisionReasonCode;
+      if (metadata.decisionReason) updateData.decisionReason = metadata.decisionReason;
     }
 
     await this.prisma.tradeDecision.update({

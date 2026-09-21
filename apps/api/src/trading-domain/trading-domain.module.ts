@@ -13,6 +13,15 @@ import { TradeLifecycleService } from './trade-lifecycle.service';
 import { AccountingService } from './accounting.service';
 import { JournalService } from './journal.service';
 import { ReconciliationService } from './reconciliation.service';
+import { InstrumentMasterService } from './instrument-master.service';
+import { CurrencyConversionService } from './currency-conversion.service';
+import { OutboxService } from './outbox.service';
+import { MarketDataSafetyService } from './market-data-safety.service';
+import { MarketSessionService } from './market-session.service';
+import { CircuitBreakerService } from './circuit-breaker.service';
+import { VolatilityService } from './volatility.service';
+import { SignalAggregationService } from './signal-aggregation.service';
+import { ExecutionCostService } from './execution-cost.service';
 
 const DOMAIN_SERVICES = [
   DomainTradeDecisionService,
@@ -28,6 +37,15 @@ const DOMAIN_SERVICES = [
   AccountingService,
   JournalService,
   ReconciliationService,
+  InstrumentMasterService,
+  CurrencyConversionService,
+  OutboxService,
+  MarketDataSafetyService,
+  MarketSessionService,
+  CircuitBreakerService,
+  VolatilityService,
+  SignalAggregationService,
+  ExecutionCostService,
 ];
 
 @Global()
@@ -37,3 +55,4 @@ const DOMAIN_SERVICES = [
   exports: DOMAIN_SERVICES,
 })
 export class TradingDomainModule {}
+

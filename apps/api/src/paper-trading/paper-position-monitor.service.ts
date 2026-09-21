@@ -20,6 +20,11 @@ import {
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { Decimal } from '@prisma/client/runtime/library';
+import {
+  TradeLifecycleService,
+  PositionService,
+  AccountingService,
+} from '../trading-domain';
 
 @Injectable()
 export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestroy {
@@ -32,6 +37,9 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     private readonly paperTradingService: PaperTradingService,
     private readonly realMarketStreamer: RealMarketStreamerService,
     @Optional() private readonly redis?: RedisService,
+    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private readonly positionService?: PositionService,
+    @Optional() private readonly accountingService?: AccountingService,
   ) {}
 
   onModuleInit() {
@@ -698,6 +706,17 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
           },
         });
 
+        if (this.accountingService) {
+          try {
+            const updatedAcc = await tx.paperAccount.findUnique({ where: { id: pos.accountId } });
+            if (updatedAcc) {
+              this.accountingService.assertFinancialInvariants(updatedAcc);
+            }
+          } catch (err: any) {
+            this.logger.warn(`Partial scale-out financial invariant check: ${err.message}`);
+          }
+        }
+
         // Synchronize TradeDecision if linked
         const tradeDecisionId = existingEvents.tradeDecisionId || pos.tradeDecisionId;
         if (tradeDecisionId) {
@@ -708,6 +727,23 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               updatedAt: new Date(),
             },
           });
+
+          if (this.tradeLifecycleService) {
+            try {
+              await this.tradeLifecycleService.transition({
+                tradeDecisionId,
+                newState:
+                  stage === 'TP1'
+                    ? TradeLifecycleState.TP1_PARTIAL_FILLED
+                    : TradeLifecycleState.TP2_PARTIAL_FILLED,
+                event: `${stage}_FILLED`,
+                correlationId: pos.correlationId,
+                metadata: { positionId: pos.id, fillPrice: livePrice, quantity: partialQty },
+              });
+            } catch (lifecycleErr: any) {
+              this.logger.debug(`Lifecycle partial transition note: ${lifecycleErr.message}`);
+            }
+          }
         }
 
         // Emit Stage Audit Events

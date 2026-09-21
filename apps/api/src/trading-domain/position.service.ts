@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import {
   IPositionDomainService,
@@ -13,7 +13,53 @@ import { Decimal } from '@prisma/client/runtime/library';
 export class PositionService implements IPositionDomainService {
   private readonly logger = new Logger(PositionService.name);
 
+  private static readonly ALLOWED_TRANSITIONS: Record<PositionState, PositionState[]> = {
+    [PositionState.PENDING]: [
+      PositionState.OPEN,
+      PositionState.INVALIDATED,
+    ],
+    [PositionState.OPEN]: [
+      PositionState.PARTIALLY_CLOSED,
+      PositionState.CLOSING,
+      PositionState.EXIT_PENDING,
+      PositionState.CLOSED,
+    ],
+    [PositionState.PARTIALLY_CLOSED]: [
+      PositionState.PARTIALLY_CLOSED,
+      PositionState.CLOSING,
+      PositionState.EXIT_PENDING,
+      PositionState.CLOSED,
+    ],
+    [PositionState.CLOSING]: [
+      PositionState.CLOSED,
+      PositionState.PARTIALLY_CLOSED,
+      PositionState.OPEN,
+    ],
+    [PositionState.EXIT_PENDING]: [
+      PositionState.CLOSED,
+      PositionState.PARTIALLY_CLOSED,
+      PositionState.OPEN,
+    ],
+    [PositionState.CLOSED]: [],
+    [PositionState.INVALIDATED]: [],
+  };
+
   constructor(private readonly prisma: PrismaService) {}
+
+  public canTransition(fromState: string, toState: string): boolean {
+    if (fromState === toState) return true; // Idempotent self-transition
+    const allowed = PositionService.ALLOWED_TRANSITIONS[fromState as PositionState];
+    return allowed ? allowed.includes(toState as PositionState) : false;
+  }
+
+  private validateTransition(current: any, targetState: PositionState): void {
+    if (current.status === targetState) return; // Idempotent
+    if (!this.canTransition(current.status, targetState)) {
+      throw new ConflictException(
+        `INVALID_POSITION_TRANSITION: Cannot transition position '${current.id}' from '${current.status}' to '${targetState}'`,
+      );
+    }
+  }
 
   public async createPosition(params: {
     accountId: string;
@@ -48,6 +94,13 @@ export class PositionService implements IPositionDomainService {
     executionEventsJson?: any;
     correlationId: string;
   }): Promise<PositionRecord> {
+    if (!params.quantity || params.quantity <= 0) {
+      throw new BadRequestException('quantity must be strictly greater than 0');
+    }
+    if (!params.entryPrice || params.entryPrice <= 0) {
+      throw new BadRequestException('entryPrice must be strictly greater than 0');
+    }
+
     const created = await this.prisma.paperPosition.create({
       data: {
         accountId: params.accountId,
@@ -69,13 +122,21 @@ export class PositionService implements IPositionDomainService {
         entryPrice: new Decimal(params.entryPrice),
         currentPrice: new Decimal(params.entryPrice),
         stopLoss: params.stopLoss ? new Decimal(params.stopLoss) : null,
-        initialStopLoss: (params.initialStopLoss ?? params.stopLoss) ? new Decimal((params.initialStopLoss ?? params.stopLoss)!) : null,
+        initialStopLoss: (params.initialStopLoss ?? params.stopLoss)
+          ? new Decimal((params.initialStopLoss ?? params.stopLoss)!)
+          : null,
         target1: params.target1 ? new Decimal(params.target1) : null,
         target2: params.target2 ? new Decimal(params.target2) : null,
         target3: params.target3 ? new Decimal(params.target3) : null,
-        initialTarget1: (params.initialTarget1 ?? params.target1) ? new Decimal((params.initialTarget1 ?? params.target1)!) : null,
-        initialTarget2: (params.initialTarget2 ?? params.target2) ? new Decimal((params.initialTarget2 ?? params.target2)!) : null,
-        initialTarget3: (params.initialTarget3 ?? params.target3) ? new Decimal((params.initialTarget3 ?? params.target3)!) : null,
+        initialTarget1: (params.initialTarget1 ?? params.target1)
+          ? new Decimal((params.initialTarget1 ?? params.target1)!)
+          : null,
+        initialTarget2: (params.initialTarget2 ?? params.target2)
+          ? new Decimal((params.initialTarget2 ?? params.target2)!)
+          : null,
+        initialTarget3: (params.initialTarget3 ?? params.target3)
+          ? new Decimal((params.initialTarget3 ?? params.target3)!)
+          : null,
         leverage: params.leverage ? new Decimal(params.leverage) : new Decimal(1.0),
         usedMargin: params.usedMargin ? new Decimal(params.usedMargin) : new Decimal(0.0),
         unrealizedPnL: new Decimal(0.0),
@@ -88,6 +149,7 @@ export class PositionService implements IPositionDomainService {
       },
     });
 
+    this.logger.log(`[POSITION CREATED] id=${created.id} | symbol=${created.symbol} | qty=${params.quantity}`);
     return this.mapPosition(created);
   }
 
@@ -126,7 +188,10 @@ export class PositionService implements IPositionDomainService {
     }
 
     const projectedQty = Number(Math.max(0, totalEntryQty - totalExitQty).toFixed(4));
-    const weightedEntryPrice = totalEntryQty > 0 ? Number((totalEntryTurnover / totalEntryQty).toFixed(2)) : Number(position.entryPrice);
+    const weightedEntryPrice =
+      totalEntryQty > 0
+        ? Number((totalEntryTurnover / totalEntryQty).toFixed(2))
+        : Number(position.entryPrice);
     const isFullyClosed = projectedQty <= 0;
 
     // Check consistency between projection and cached scalar
@@ -153,11 +218,59 @@ export class PositionService implements IPositionDomainService {
     };
   }
 
+  /**
+   * Synchronizes cached scalar properties on PaperPosition with the authoritative fill projection.
+   */
+  public async syncPositionWithFills(positionId: string): Promise<PositionRecord> {
+    const projection = await this.recalculatePositionFromFills(positionId);
+    const position = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+
+    if (!position) {
+      throw new NotFoundException(`Position '${positionId}' not found`);
+    }
+
+    let targetStatus: PositionState;
+    if (projection.isFullyClosed) {
+      targetStatus = PositionState.CLOSED;
+    } else if (projection.totalExitQuantity > 0) {
+      targetStatus = PositionState.PARTIALLY_CLOSED;
+    } else {
+      targetStatus = PositionState.OPEN;
+    }
+
+    const updated = await this.prisma.paperPosition.update({
+      where: { id: positionId },
+      data: {
+        quantity: new Decimal(projection.currentProjectedQuantity),
+        entryPrice: new Decimal(projection.weightedEntryPrice),
+        status: targetStatus,
+        closedAt: targetStatus === PositionState.CLOSED ? position.closedAt || new Date() : undefined,
+      },
+    });
+
+    this.logger.log(
+      `[POSITION SYNCED] id=${positionId} | qty=${projection.currentProjectedQuantity} | status=${targetStatus}`,
+    );
+
+    return this.mapPosition(updated);
+  }
+
   public async updatePositionStatus(
     positionId: string,
     status: string,
     closedAt?: Date,
   ): Promise<PositionRecord> {
+    const existing = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!existing) {
+      throw new NotFoundException(`Position '${positionId}' not found`);
+    }
+
+    if (existing.status === status) {
+      return this.mapPosition(existing); // Idempotent
+    }
+
+    this.validateTransition(existing, status as PositionState);
+
     const updated = await this.prisma.paperPosition.update({
       where: { id: positionId },
       data: {
@@ -165,6 +278,87 @@ export class PositionService implements IPositionDomainService {
         closedAt: closedAt || (status === PositionState.CLOSED ? new Date() : undefined),
       },
     });
+    return this.mapPosition(updated);
+  }
+
+  public async closePosition(
+    positionId: string,
+    closedAt?: Date,
+    reason = 'NORMAL_CLOSE',
+  ): Promise<PositionRecord> {
+    const existing = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!existing) {
+      throw new NotFoundException(`Position '${positionId}' not found`);
+    }
+
+    if (existing.status === PositionState.CLOSED) {
+      return this.mapPosition(existing); // Idempotent
+    }
+
+    this.validateTransition(existing, PositionState.CLOSED);
+
+    const updated = await this.prisma.paperPosition.update({
+      where: { id: positionId },
+      data: {
+        status: PositionState.CLOSED,
+        closedAt: closedAt || new Date(),
+        quantity: new Decimal(0),
+      },
+    });
+
+    this.logger.log(`[POSITION CLOSED] id=${positionId} | reason=${reason}`);
+    return this.mapPosition(updated);
+  }
+
+  public async updateStopLoss(positionId: string, stopLoss: number): Promise<PositionRecord> {
+    const existing = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!existing) {
+      throw new NotFoundException(`Position '${positionId}' not found`);
+    }
+
+    if (existing.status === PositionState.CLOSED || existing.status === PositionState.INVALIDATED) {
+      throw new ConflictException(`Cannot update stop loss on position in status '${existing.status}'`);
+    }
+
+    if (stopLoss <= 0) {
+      throw new BadRequestException('Stop loss must be strictly positive');
+    }
+
+    const updated = await this.prisma.paperPosition.update({
+      where: { id: positionId },
+      data: {
+        stopLoss: new Decimal(stopLoss),
+      },
+    });
+
+    this.logger.log(`[POSITION STOP_LOSS UPDATED] id=${positionId} | stopLoss=${stopLoss}`);
+    return this.mapPosition(updated);
+  }
+
+  public async updateTargets(
+    positionId: string,
+    targets: { target1?: number; target2?: number; target3?: number },
+  ): Promise<PositionRecord> {
+    const existing = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!existing) {
+      throw new NotFoundException(`Position '${positionId}' not found`);
+    }
+
+    if (existing.status === PositionState.CLOSED || existing.status === PositionState.INVALIDATED) {
+      throw new ConflictException(`Cannot update targets on position in status '${existing.status}'`);
+    }
+
+    const data: any = {};
+    if (targets.target1 !== undefined) data.target1 = new Decimal(targets.target1);
+    if (targets.target2 !== undefined) data.target2 = new Decimal(targets.target2);
+    if (targets.target3 !== undefined) data.target3 = new Decimal(targets.target3);
+
+    const updated = await this.prisma.paperPosition.update({
+      where: { id: positionId },
+      data,
+    });
+
+    this.logger.log(`[POSITION TARGETS UPDATED] id=${positionId}`);
     return this.mapPosition(updated);
   }
 
@@ -182,7 +376,18 @@ export class PositionService implements IPositionDomainService {
       },
       orderBy: { openedAt: 'desc' },
     });
-    return positions.map(this.mapPosition);
+    return positions.map((p) => this.mapPosition(p));
+  }
+
+  public async getPositionsByAccountId(accountId: string, status?: string): Promise<PositionRecord[]> {
+    const positions = await this.prisma.paperPosition.findMany({
+      where: {
+        accountId,
+        ...(status ? { status: status as PositionState } : {}),
+      },
+      orderBy: { openedAt: 'desc' },
+    });
+    return positions.map((p) => this.mapPosition(p));
   }
 
   private mapPosition(p: any): PositionRecord {
@@ -198,8 +403,20 @@ export class PositionService implements IPositionDomainService {
       stopLoss: p.stopLoss ? Number(p.stopLoss) : null,
       initialStopLoss: p.initialStopLoss ? Number(p.initialStopLoss) : null,
       target1: p.target1 ? Number(p.target1) : null,
+      target2: p.target2 ? Number(p.target2) : null,
+      target3: p.target3 ? Number(p.target3) : null,
+      initialTarget1: p.initialTarget1 ? Number(p.initialTarget1) : null,
+      initialTarget2: p.initialTarget2 ? Number(p.initialTarget2) : null,
+      initialTarget3: p.initialTarget3 ? Number(p.initialTarget3) : null,
+      leverage: p.leverage ? Number(p.leverage) : undefined,
+      usedMargin: p.usedMargin ? Number(p.usedMargin) : undefined,
+      unrealizedPnL: p.unrealizedPnL ? Number(p.unrealizedPnL) : undefined,
+      realizedPnL: p.realizedPnL ? Number(p.realizedPnL) : undefined,
       status: p.status,
       correlationId: p.correlationId,
+      openedAt: p.openedAt || undefined,
+      closedAt: p.closedAt || undefined,
+      createdAt: p.createdAt || undefined,
     };
   }
 }
