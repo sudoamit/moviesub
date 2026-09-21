@@ -31,6 +31,8 @@ describe('ReservationService', () => {
     },
   ];
 
+  let mockReservations: any[] = [];
+
   const mockPrisma: any = {
     paperAccount: {
       findUnique: jest.fn(({ where }) => mockAccounts.find((a) => a.id === where.id) || null),
@@ -43,6 +45,52 @@ describe('ReservationService', () => {
         return res;
       }),
     },
+    tradeReservation: {
+      create: jest.fn(({ data }) => {
+        const r = { id: `tr_${Date.now()}_${Math.random()}`, createdAt: new Date(), ...data };
+        mockReservations.push(r);
+        return r;
+      }),
+      findUnique: jest.fn(({ where }) => {
+        return mockReservations.find((r) => r.reservationId === where.reservationId || r.id === where.id) || null;
+      }),
+      findFirst: jest.fn(({ where }) => {
+        let list = [...mockReservations];
+        if (where?.fingerprint) list = list.filter((r) => r.fingerprint === where.fingerprint);
+        if (where?.status) list = list.filter((r) => r.status === where.status);
+        if (where?.expiresAt?.gt) {
+          list = list.filter((r) => r.expiresAt > where.expiresAt.gt);
+        }
+        return list[list.length - 1] || null;
+      }),
+      findMany: jest.fn(({ where }) => {
+        let list = [...mockReservations];
+        if (where?.accountId) list = list.filter((r) => r.accountId === where.accountId);
+        if (where?.status) list = list.filter((r) => r.status === where.status);
+        if (where?.expiresAt?.gt) {
+          list = list.filter((r) => r.expiresAt > where.expiresAt.gt);
+        }
+        return list;
+      }),
+      update: jest.fn(({ where, data }) => {
+        const r = mockReservations.find((res) => res.reservationId === where.reservationId || res.id === where.id);
+        if (r) Object.assign(r, data);
+        return r;
+      }),
+      updateMany: jest.fn(({ where, data }) => {
+        let count = 0;
+        mockReservations.forEach((r) => {
+          let matches = true;
+          if (where?.status && r.status !== where.status) matches = false;
+          if (where?.expiresAt?.lte && !(r.expiresAt <= where.expiresAt.lte)) matches = false;
+          if (matches) {
+            Object.assign(r, data);
+            count++;
+          }
+        });
+        return { count };
+      }),
+    },
     tradeDecision: {
       update: jest.fn(),
     },
@@ -51,6 +99,7 @@ describe('ReservationService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockReservations = [];
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -63,7 +112,7 @@ describe('ReservationService', () => {
   });
 
   describe('Atomic Reservation Creation', () => {
-    it('creates an atomic reservation with finite TTL and initializes audit fields', async () => {
+    it('creates an atomic reservation with finite TTL and initializes audit fields in database', async () => {
       const res = await reservationService.reserveResources({
         accountId: 'acc_res_1',
         botId: 'bot_alpha',
@@ -85,6 +134,9 @@ describe('ReservationService', () => {
       expect(res.exposureAmount).toBe(75000);
       expect(res.riskAmount).toBe(1500);
 
+      // Verify persisted in mock database
+      expect(mockPrisma.tradeReservation.create).toHaveBeenCalled();
+
       // Verify lookup by ID and fingerprint
       const byId = await reservationService.getReservation(res.reservationId);
       expect(byId).toEqual(res);
@@ -93,7 +145,7 @@ describe('ReservationService', () => {
       expect(byFp).toEqual(res);
     });
 
-    it('rejects duplicate concurrent reservation for identical fingerprint', async () => {
+    it('rejects duplicate concurrent reservation for identical fingerprint in DB', async () => {
       await reservationService.reserveResources({
         accountId: 'acc_res_1',
         botId: 'bot_alpha',
@@ -152,7 +204,7 @@ describe('ReservationService', () => {
   });
 
   describe('Multi-Dimensional Aggregations', () => {
-    it('aggregates total reserved margin, exposure, and risk across multiple active reservations', async () => {
+    it('aggregates total reserved margin, exposure, and risk across multiple active reservations from database', async () => {
       await reservationService.reserveResources({
         accountId: 'acc_res_1',
         botId: 'bot_1',
@@ -285,7 +337,7 @@ describe('ReservationService', () => {
 
   describe('Automated Sweep and Expiration', () => {
     it('automatically transitions expired reservations to EXPIRED status and frees resources', async () => {
-      // Create an immediate-expiring reservation (0 seconds TTL)
+      // Create an immediate-expiring reservation (in past)
       const res = await reservationService.reserveResources({
         accountId: 'acc_res_1',
         botId: 'bot_alpha',
@@ -308,6 +360,28 @@ describe('ReservationService', () => {
       // No longer encumbers margin
       const active = await reservationService.getActiveReservationsForAccount('acc_res_1');
       expect(active.find((r) => r.reservationId === res.reservationId)).toBeUndefined();
+    });
+
+    it('sweeps expired reservations automatically onModuleInit (startup recovery)', async () => {
+      const expiredRes = {
+        reservationId: 'res_startup_expired',
+        fingerprint: 'fp_startup_expired',
+        accountId: 'acc_res_1',
+        botId: 'bot_alpha',
+        status: 'RESERVED',
+        expiresAt: new Date(Date.now() - 5000),
+        marginAmount: 10000,
+        exposureAmount: 50000,
+        riskAmount: 1000,
+        consumedMargin: 0,
+        releasedMargin: 0,
+      };
+      mockReservations.push(expiredRes);
+
+      await reservationService.onModuleInit();
+      expect(mockPrisma.tradeReservation.updateMany).toHaveBeenCalled();
+      const check = await reservationService.getReservation('res_startup_expired');
+      expect(check?.status).toBe('EXPIRED');
     });
   });
 });

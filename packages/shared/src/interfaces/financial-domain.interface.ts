@@ -1615,3 +1615,122 @@ export interface IExecutionCostDomainService {
   analyzeExecutionQuality(orderId: string, expectedSlippageBps: number, realizedSlippageBps: number): ExecutionQualityReport;
 }
 
+// ============================================================================
+// SECTION 27: SMART ORDER ROUTING (SOR) & EXECUTION SLICING ALGORITHMS
+// ============================================================================
+
+export type VenueType = 'EXCHANGE' | 'BROKER' | 'DARK_POOL' | 'LIQUIDITY_POOL';
+
+export type RoutingStrategy =
+  | 'BEST_PRICE'
+  | 'LOWEST_COST'
+  | 'LOWEST_LATENCY'
+  | 'PRO_RATA_DEPTH'
+  | 'WATERFALL';
+
+export type SlicingAlgorithmType = 'TWAP' | 'VWAP' | 'ICEBERG' | 'DIRECT';
+
+export interface VenueQuote {
+  venueId: string;
+  venueName?: string;
+  symbol: string;
+  bidPrice: number;
+  bidQuantity: number;
+  askPrice: number;
+  askQuantity: number;
+  makerFeeBps: number;
+  takerFeeBps: number;
+  latencyMs: number;
+  isHealthy: boolean;
+  lastUpdated: number;
+}
+
+export type ChildSliceStatus = 'PENDING' | 'ROUTED' | 'FILLED' | 'CANCELLED' | 'FAILED';
+
+export interface ChildSlice {
+  sliceIndex: number;
+  parentOrderId: string;
+  sliceQuantity: number;
+  targetVenueId?: string;
+  scheduledDelayMs: number;
+  status: ChildSliceStatus;
+  targetPrice?: number;
+  filledQuantity?: number;
+  fillPrice?: number;
+  executionRole?: string;
+}
+
+export interface ParentOrder {
+  parentOrderId: string;
+  symbol: string;
+  direction: Direction | 'BUY' | 'SELL';
+  totalQuantity: number;
+  remainingQuantity: number;
+  slicingAlgorithm: SlicingAlgorithmType;
+  routingStrategy: RoutingStrategy;
+  slices: ChildSlice[];
+  status: 'ACTIVE' | 'COMPLETED' | 'CANCELLED' | 'PAUSED' | 'FAILED';
+  createdAt: number;
+}
+
+export interface SlicingPlanParams {
+  parentOrderId: string;
+  symbol: string;
+  direction: Direction | 'BUY' | 'SELL';
+  totalQuantity: number;
+  slicingAlgorithm: SlicingAlgorithmType;
+  durationSeconds?: number;
+  numberOfSlices?: number;
+  displayQuantity?: number;
+  volumeProfile?: number[];
+  minSliceQuantity?: number;
+  randomizeJitterPercent?: number;
+}
+
+export interface SlicingPlanResult {
+  parentOrderId: string;
+  algorithm: SlicingAlgorithmType;
+  totalQuantity: number;
+  slices: ChildSlice[];
+  estimatedDurationSeconds: number;
+  isValid: boolean;
+  error?: string;
+}
+
+export interface RouteOrderParams {
+  parentOrderId: string;
+  sliceIndex: number;
+  symbol: string;
+  direction: Direction | 'BUY' | 'SELL';
+  quantity: number;
+  routingStrategy: RoutingStrategy;
+  availableVenues: VenueQuote[];
+  maxAllowedLatencyMs?: number;
+}
+
+export interface VenueAllocation {
+  venueId: string;
+  allocatedQuantity: number;
+  price: number;
+  estimatedFeeBps: number;
+}
+
+export interface RouteOrderResult {
+  parentOrderId: string;
+  sliceIndex: number;
+  selectedVenueId: string;
+  routingStrategy: RoutingStrategy;
+  estimatedPrice: number;
+  estimatedCostBps: number;
+  routedQuantity: number;
+  allocations?: VenueAllocation[];
+  reason: string;
+}
+
+export interface ISmartOrderRoutingDomainService {
+  generateSlicingPlan(params: SlicingPlanParams): SlicingPlanResult;
+  routeOrder(params: RouteOrderParams): RouteOrderResult;
+  assertRoutingHealthy(venues: VenueQuote[], maxAllowedLatencyMs?: number): void;
+  calculateVwapVolumeProfile(historicalBuckets: number[]): number[];
+}
+

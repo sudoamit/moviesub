@@ -22,6 +22,7 @@ import { CircuitBreakerService } from './circuit-breaker.service';
 import { VolatilityService } from './volatility.service';
 import { SignalAggregationService } from './signal-aggregation.service';
 import { ExecutionCostService } from './execution-cost.service';
+import { SmartOrderRoutingService } from './smart-order-routing.service';
 
 const DOMAIN_SERVICES = [
   DomainTradeDecisionService,
@@ -46,6 +47,7 @@ const DOMAIN_SERVICES = [
   VolatilityService,
   SignalAggregationService,
   ExecutionCostService,
+  SmartOrderRoutingService,
 ];
 
 @Global()

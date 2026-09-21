@@ -883,6 +883,7 @@ model PaperAccount {
   positions        PaperPosition[]
   trades           PaperTrade[]
   snapshots        PortfolioSnapshot[]
+  reservations     TradeReservation[]
 
   @@map("paper_accounts")
 }
@@ -1341,5 +1342,49 @@ model TradeDecision {
   @@index([correlationId])
   @@index([decision, decisionReasonCode])
   @@map("trade_decisions")
+}
+
+enum ReservationStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+  EXPIRED
+  CANCELLED
+}
+
+model TradeReservation {
+  id               String            @id @default(uuid())
+  reservationId    String            @unique
+  fingerprint      String            @unique
+  accountId        String
+  account          PaperAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  botId            String
+  symbol           String?
+  currency         String            @default("INR")
+  riskAmount       Decimal           @db.Decimal(18, 2)
+  marginAmount     Decimal           @db.Decimal(18, 2)
+  exposureAmount   Decimal           @db.Decimal(18, 2)
+  reservedQuantity Decimal?          @default(0.0) @db.Decimal(18, 4)
+  consumedMargin   Decimal           @default(0.0) @db.Decimal(18, 2)
+  releasedMargin   Decimal           @default(0.0) @db.Decimal(18, 2)
+  status           ReservationStatus @default(RESERVED)
+  tradeDecisionId  String?
+  executionId      String?
+  correlationId    String?
+  reason           String?
+  metadataJson     Json?
+  reservedAt       DateTime          @default(now())
+  expiresAt        DateTime
+  consumedAt       DateTime?
+  releasedAt       DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@index([accountId, status])
+  @@index([status, expiresAt])
+  @@index([botId, symbol])
+  @@index([tradeDecisionId])
+  @@index([executionId])
+  @@map("trade_reservations")
 }
 

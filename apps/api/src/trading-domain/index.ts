@@ -21,3 +21,4 @@ export * from './circuit-breaker.service';
 export * from './volatility.service';
 export * from './signal-aggregation.service';
 export * from './execution-cost.service';
+export * from './smart-order-routing.service';

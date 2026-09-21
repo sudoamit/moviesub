@@ -44,6 +44,7 @@ describe('Phase 1 — Financial Domain Services Suite', () => {
   const mockTrades: any[] = [];
   const mockDecisions: any[] = [];
   const mockExecutions: any[] = [];
+  const mockReservations: any[] = [];
   const mockAccounts: any[] = [
     {
       id: 'acc_test_1',
@@ -172,6 +173,50 @@ describe('Phase 1 — Financial Domain Services Suite', () => {
         const e = mockExecutions.find((ex) => ex.id === where.id);
         if (e) Object.assign(e, data);
         return e;
+      }),
+    },
+    tradeReservation: {
+      create: jest.fn(({ data }) => {
+        const r = { id: `tr_${Date.now()}_${Math.random()}`, createdAt: new Date(), ...data };
+        mockReservations.push(r);
+        return r;
+      }),
+      findUnique: jest.fn(({ where }) => mockReservations.find((r) => r.reservationId === where.reservationId || r.id === where.id) || null),
+      findFirst: jest.fn(({ where }) => {
+        let list = [...mockReservations];
+        if (where?.fingerprint) list = list.filter((r) => r.fingerprint === where.fingerprint);
+        if (where?.status) list = list.filter((r) => r.status === where.status);
+        if (where?.expiresAt?.gt) {
+          list = list.filter((r) => r.expiresAt > where.expiresAt.gt);
+        }
+        return list[list.length - 1] || null;
+      }),
+      findMany: jest.fn(({ where }) => {
+        let list = [...mockReservations];
+        if (where?.accountId) list = list.filter((r) => r.accountId === where.accountId);
+        if (where?.status) list = list.filter((r) => r.status === where.status);
+        if (where?.expiresAt?.gt) {
+          list = list.filter((r) => r.expiresAt > where.expiresAt.gt);
+        }
+        return list;
+      }),
+      update: jest.fn(({ where, data }) => {
+        const r = mockReservations.find((res) => res.reservationId === where.reservationId || res.id === where.id);
+        if (r) Object.assign(r, data);
+        return r;
+      }),
+      updateMany: jest.fn(({ where, data }) => {
+        let count = 0;
+        mockReservations.forEach((r) => {
+          let matches = true;
+          if (where?.status && r.status !== where.status) matches = false;
+          if (where?.expiresAt?.lte && !(r.expiresAt <= where.expiresAt.lte)) matches = false;
+          if (matches) {
+            Object.assign(r, data);
+            count++;
+          }
+        });
+        return { count };
       }),
     },
     tradingSystemConfig: {
