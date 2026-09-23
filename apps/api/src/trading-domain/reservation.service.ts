@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import {
@@ -7,14 +7,19 @@ import {
   ReservationRecord,
   ReservationStatus,
   PositionState,
+  TradeLifecycleState,
 } from '@quant/shared';
 import * as crypto from 'crypto';
+import { TradeLifecycleService } from './trade-lifecycle.service';
 
 @Injectable()
 export class ReservationService implements IReservationDomainService, OnModuleInit {
   private readonly logger = new Logger(ReservationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+  ) {}
 
   /**
    * On application startup / restart, recover durability by sweeping any reservations that expired
@@ -124,12 +129,17 @@ export class ReservationService implements IReservationDomainService, OnModuleIn
       const availableCash = Number(account.cashBalance) - totalCommittedMargin;
 
       if (availableCash < marginAmount) {
-        if (tradeDecisionId && tx.tradeDecision?.update) {
+        if (tradeDecisionId && this.tradeLifecycleService) {
           try {
-            await tx.tradeDecision.update({
-              where: { id: tradeDecisionId },
-              data: { lifecycleState: 'RESERVATION_FAILED' as any },
-            });
+            await this.tradeLifecycleService.transition(
+              {
+                tradeDecisionId,
+                newState: TradeLifecycleState.RESERVATION_FAILED,
+                event: 'INSUFFICIENT_MARGIN',
+                correlationId: fingerprint || tradeDecisionId,
+              },
+              tx,
+            );
           } catch {
             // Ignore if decision does not exist in mock/DB
           }
@@ -162,16 +172,21 @@ export class ReservationService implements IReservationDomainService, OnModuleIn
         },
       });
 
-      if (tradeDecisionId && tx.tradeDecision?.update) {
+      if (tradeDecisionId && this.tradeLifecycleService) {
         try {
-          await tx.tradeDecision.update({
-            where: { id: tradeDecisionId },
-            data: {
-              lifecycleState: 'RESERVATION_CREATED' as any,
-              reservationCreatedAt: now,
-              reservationTime: now,
+          await this.tradeLifecycleService.transition(
+            {
+              tradeDecisionId,
+              newState: TradeLifecycleState.RESERVATION_CREATED,
+              event: 'RESERVATION_CREATED',
+              correlationId: fingerprint || tradeDecisionId,
+              metadata: {
+                reservationCreatedAt: now,
+                reservationTime: now,
+              },
             },
-          });
+            tx,
+          );
         } catch {
           // Ignore if decision does not exist in mock/DB
         }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import {
   IReconciliationDomainService,
@@ -16,12 +16,20 @@ import {
   Direction,
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
+import { TradeLifecycleService } from './trade-lifecycle.service';
 
 @Injectable()
 export class ReconciliationService implements IReconciliationDomainService {
   private readonly logger = new Logger(ReconciliationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private tradeLifecycleService?: TradeLifecycleService,
+  ) {
+    if (!this.tradeLifecycleService && this.prisma) {
+      this.tradeLifecycleService = new TradeLifecycleService(this.prisma);
+    }
+  }
 
   public async reconcilePosition(positionId: string): Promise<PositionReconciliationResult> {
     const pos = await this.prisma.paperPosition.findUnique({
@@ -702,10 +710,25 @@ export class ReconciliationService implements IReconciliationDomainService {
 
         // 5. Update TradeDecision lifecycle state
         if (order.tradeDecisionId) {
+          if (this.tradeLifecycleService) {
+            try {
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId: order.tradeDecisionId,
+                  newState: TradeLifecycleState.POSITION_OPENED,
+                  event: 'BROKER_FILL_RECONCILED',
+                  correlationId: order.tradeDecisionId,
+                  metadata: { fillTime },
+                },
+                tx,
+              );
+            } catch (err: any) {
+              this.logger.warn(`Lifecycle transition error during reconciliation: ${err.message}`);
+            }
+          }
           await tx.tradeDecision.updateMany({
             where: { id: order.tradeDecisionId },
             data: {
-              lifecycleState: TradeLifecycleState.POSITION_OPENED,
               fillTime,
               updatedAt: new Date(),
             },

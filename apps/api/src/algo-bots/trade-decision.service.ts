@@ -381,6 +381,15 @@ export const ALLOWED_LIFECYCLE_TRANSITIONS: Record<TradeLifecycleState, TradeLif
   [TradeLifecycleState.POSITION_CLOSED]: [
     TradeLifecycleState.TRADE_CLOSED,
   ],
+  [TradeLifecycleState.RECONCILIATION_REQUIRED]: [
+    TradeLifecycleState.POSITION_OPENED,
+    TradeLifecycleState.POSITION_PARTIALLY_CLOSED,
+    TradeLifecycleState.POSITION_CLOSED,
+    TradeLifecycleState.ORDER_FILLED,
+    TradeLifecycleState.ORDER_PARTIALLY_FILLED,
+    TradeLifecycleState.TRADE_CLOSED,
+    TradeLifecycleState.TRADE_FAILED,
+  ],
   [TradeLifecycleState.TRADE_CLOSED]: [],
   [TradeLifecycleState.TRADE_FAILED]: [],
   [TradeLifecycleState.TRADE_CANCELLED]: [],
@@ -426,12 +435,16 @@ export class TradeDecisionService {
 
   constructor(
     @Optional() private readonly prisma?: PrismaService,
-    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private tradeLifecycleService?: TradeLifecycleService,
     @Optional() private readonly reservationService?: ReservationService,
     @Optional() private readonly executionService?: ExecutionService,
     @Optional() private readonly riskService?: RiskService,
     @Optional() private readonly positionSizingService?: PositionSizingService,
-  ) {}
+  ) {
+    if (!this.tradeLifecycleService && this.prisma) {
+      this.tradeLifecycleService = new TradeLifecycleService(this.prisma);
+    }
+  }
 
   /**
    * Normalizes timeframe string representation (e.g. 'M15' -> '15m', 'H1' -> '1h')
@@ -1562,18 +1575,34 @@ export class TradeDecisionService {
           },
         });
 
-        // Link executionId 1:1 and advance lifecycle to RESERVATION_CREATED
+        // Link executionId 1:1 and advance lifecycle to RESERVATION_CREATED via authoritative FSM
         const reservationTime = new Date();
-        await tx.tradeDecision.update({
-          where: { id: initialTradeDecision.id },
-          data: {
-            executionId: execution.id,
-            lifecycleState: TradeLifecycleState.RESERVATION_CREATED,
-            reservationTime,
-            reservationCreatedAt: reservationTime,
-            updatedAt: reservationTime,
-          },
-        });
+        if (this.tradeLifecycleService) {
+          await this.tradeLifecycleService.transition(
+            {
+              tradeDecisionId: initialTradeDecision.id,
+              newState: TradeLifecycleState.RESERVATION_CREATED,
+              event: 'RESERVATION_CREATED',
+              correlationId,
+              metadata: {
+                executionId: execution.id,
+                reservationCreatedAt: reservationTime,
+                reservationTime,
+              },
+            },
+            tx,
+          );
+        } else {
+          await tx.tradeDecision.update({
+            where: { id: initialTradeDecision.id },
+            data: {
+              executionId: execution.id,
+              reservationTime,
+              reservationCreatedAt: reservationTime,
+              updatedAt: reservationTime,
+            },
+          });
+        }
 
         return {
           tradeDecisionId: initialTradeDecision.id,
@@ -1896,89 +1925,9 @@ export class TradeDecisionService {
       return;
     }
 
-    if (!this.prisma || !this.prisma.tradeDecision) {
-      throw new Error(
-        `[LIFECYCLE_FAIL_CLOSED] Prisma service unavailable to persist lifecycle state '${state}' for decision '${tradeDecisionId}'`,
-      );
-    }
-
-    const whereClause: any = { id: tradeDecisionId };
-    if (expectedCurrentState) {
-      const expectedArr = Array.isArray(expectedCurrentState)
-        ? expectedCurrentState
-        : [expectedCurrentState];
-      whereClause.lifecycleState = expectedArr.length === 1 ? expectedArr[0] : { in: expectedArr };
-    } else {
-      const allowedSourceStates = (Object.keys(ALLOWED_LIFECYCLE_TRANSITIONS) as TradeLifecycleState[]).filter(
-        (src) => ALLOWED_LIFECYCLE_TRANSITIONS[src]?.includes(state),
-      );
-      if (allowedSourceStates.length > 0) {
-        whereClause.lifecycleState = { in: allowedSourceStates };
-      }
-    }
-
-    let updatedCount = 0;
-    const nowTime = new Date();
-    const explicitTimestamps: any = {};
-    if (state === TradeLifecycleState.ORDER_SUBMITTED) {
-      explicitTimestamps.orderSubmittedAt = updateData?.orderSubmittedTime || nowTime;
-    }
-    if (state === TradeLifecycleState.ORDER_FILLED) {
-      explicitTimestamps.firstFillAt = updateData?.fillTime || nowTime;
-    }
-    if (state === TradeLifecycleState.POSITION_OPENED) {
-      explicitTimestamps.positionOpenedAt = nowTime;
-    }
-
-    if (typeof this.prisma.tradeDecision.updateMany === 'function') {
-      const updated = await this.prisma.tradeDecision.updateMany({
-        where: whereClause,
-        data: {
-          lifecycleState: state,
-          executionId: updateData?.executionId,
-          orderPositionId: updateData?.orderPositionId,
-          orderSubmittedTime: updateData?.orderSubmittedTime,
-          fillTime: updateData?.fillTime,
-          marketEventTime: updateData?.marketEventTime,
-          observedAt: updateData?.observedAt,
-          receivedAt: updateData?.receivedAt,
-          ...explicitTimestamps,
-          updatedAt: nowTime,
-        },
-      });
-      updatedCount = updated?.count ?? 0;
-    } else if (typeof this.prisma.tradeDecision.update === 'function') {
-      try {
-        await this.prisma.tradeDecision.update({
-          where: { id: tradeDecisionId },
-          data: {
-            lifecycleState: state,
-            executionId: updateData?.executionId,
-            orderPositionId: updateData?.orderPositionId,
-            orderSubmittedTime: updateData?.orderSubmittedTime,
-            fillTime: updateData?.fillTime,
-            marketEventTime: updateData?.marketEventTime,
-            observedAt: updateData?.observedAt,
-            receivedAt: updateData?.receivedAt,
-            ...explicitTimestamps,
-            updatedAt: nowTime,
-          },
-        });
-        updatedCount = 1;
-      } catch (err: any) {
-        updatedCount = 0;
-      }
-    }
-
-    if (updatedCount === 0) {
-      throw new Error(
-        `[LIFECYCLE_TRANSITION_FAILED] TradeDecision '${tradeDecisionId}' could not transition to state '${state}'${
-          expectedCurrentState
-            ? ` (expected current state '${Array.isArray(expectedCurrentState) ? expectedCurrentState.join(', ') : expectedCurrentState}')`
-            : ''
-        }. Record not found or state mismatch.`,
-      );
-    }
+    throw new Error(
+      `[LIFECYCLE_FAIL_CLOSED] TradeLifecycleService unavailable to persist lifecycle state '${state}' for decision '${tradeDecisionId}'`,
+    );
   }
 
   /**

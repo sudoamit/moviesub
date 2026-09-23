@@ -1158,6 +1158,7 @@ model AIRetrainJob {
 enum AlgoBotExecutionState {
   RESERVED
   EXECUTING
+  RECONCILIATION_REQUIRED
   EXECUTED
   FAILED_RETRYABLE
   FAILED_FINAL
@@ -1228,6 +1229,9 @@ model AlgoBotExecution {
   failureReason     String?
   failureReasonCode String?
   orderPositionId   String?
+  reconciliationMetadataJson Json?
+  reconciledAt               DateTime?
+  reconciledBy               String?
   tradeDecision   TradeDecision?
   orders          PaperOrder[]
   positions       PaperPosition[]
@@ -1276,6 +1280,7 @@ enum TradeLifecycleState {
   TRADE_CLOSED
   TRADE_FAILED
   TRADE_CANCELLED
+  RECONCILIATION_REQUIRED
 }
 
 model TradeDecision {
@@ -1334,6 +1339,7 @@ model TradeDecision {
   orders                PaperOrder[]
   positions             PaperPosition[]
   correlationId         String
+  version               Int                 @default(0)
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
 

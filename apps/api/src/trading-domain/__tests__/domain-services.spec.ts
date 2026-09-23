@@ -453,9 +453,9 @@ describe('Phase 1 — Financial Domain Services Suite', () => {
       let updated = await executionService.getExecutionById(exec.id);
       expect(updated?.state).toBe('EXECUTING');
 
-      // Critical invariant: uncertain execution must flag RECONCILIATION_REQUIRED
       await executionService.markReconciliationRequired(exec.id, 'Broker socket dropped after submission');
       updated = await executionService.getExecutionById(exec.id);
+      expect(updated?.state).toBe('RECONCILIATION_REQUIRED');
       expect(updated?.failureReasonCode).toBe('RECONCILIATION_REQUIRED');
     });
   });

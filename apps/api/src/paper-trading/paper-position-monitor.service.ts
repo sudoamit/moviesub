@@ -37,10 +37,14 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     private readonly paperTradingService: PaperTradingService,
     private readonly realMarketStreamer: RealMarketStreamerService,
     @Optional() private readonly redis?: RedisService,
-    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private tradeLifecycleService?: TradeLifecycleService,
     @Optional() private readonly positionService?: PositionService,
     @Optional() private readonly accountingService?: AccountingService,
-  ) {}
+  ) {
+    if (!this.tradeLifecycleService && this.prisma) {
+      this.tradeLifecycleService = new TradeLifecycleService(this.prisma);
+    }
+  }
 
   onModuleInit() {
     this.logger.log('Starting Independent Backend Paper Position Monitor Service...');
@@ -720,30 +724,32 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         // Synchronize TradeDecision if linked
         const tradeDecisionId = existingEvents.tradeDecisionId || pos.tradeDecisionId;
         if (tradeDecisionId) {
-          await tx.tradeDecision.updateMany({
-            where: { id: tradeDecisionId },
-            data: {
-              lifecycleState: stageMetadata.currentLifecycleState,
-              updatedAt: new Date(),
-            },
-          });
-
           if (this.tradeLifecycleService) {
             try {
-              await this.tradeLifecycleService.transition({
-                tradeDecisionId,
-                newState:
-                  stage === 'TP1'
-                    ? TradeLifecycleState.TP1_PARTIAL_FILLED
-                    : TradeLifecycleState.TP2_PARTIAL_FILLED,
-                event: `${stage}_FILLED`,
-                correlationId: pos.correlationId,
-                metadata: { positionId: pos.id, fillPrice: livePrice, quantity: partialQty },
-              });
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId,
+                  newState:
+                    stage === 'TP1'
+                      ? TradeLifecycleState.TP1_PARTIAL_FILLED
+                      : TradeLifecycleState.TP2_PARTIAL_FILLED,
+                  event: `${stage}_FILLED`,
+                  correlationId: pos.correlationId,
+                  metadata: { positionId: pos.id, fillPrice: livePrice, quantity: partialQty },
+                },
+                tx,
+              );
             } catch (lifecycleErr: any) {
               this.logger.debug(`Lifecycle partial transition note: ${lifecycleErr.message}`);
             }
           }
+
+          await tx.tradeDecision.updateMany({
+            where: { id: tradeDecisionId },
+            data: {
+              updatedAt: new Date(),
+            },
+          });
         }
 
         // Emit Stage Audit Events

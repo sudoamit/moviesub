@@ -1567,7 +1567,9 @@ export class AlgoBotsService implements OnModuleInit {
     const paperAlgoExecutionEnabled = this.isPaperAlgoExecutionEnabled();
 
     for (const bot of bots) {
-      if (bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+      const botNorm = bot.symbol.toUpperCase().replace(/_SPOT$/, '');
+      const sigNorm = signal.symbol.toUpperCase().replace(/_SPOT$/, '');
+      if (botNorm !== sigNorm && bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
         continue;
       }
 

@@ -68,7 +68,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly candlesService: CandlesService,
     @Optional() private readonly realMarketStreamer?: RealMarketStreamerService,
-    @Optional() private readonly tradeLifecycleService?: TradeLifecycleService,
+    @Optional() private tradeLifecycleService?: TradeLifecycleService,
     @Optional() private readonly accountingService?: AccountingService,
     @Optional() private readonly positionService?: PositionService,
     @Optional() private readonly orderService?: OrderService,
@@ -77,6 +77,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     @Optional() private readonly marginService?: MarginService,
     @Optional() private readonly journalService?: JournalService,
   ) {
+    if (!this.tradeLifecycleService && this.prisma) {
+      this.tradeLifecycleService = new TradeLifecycleService(this.prisma);
+    }
     this.logger.log('Persistent Database-Backed Paper Trading Service Initialized.');
   }
 
@@ -1457,10 +1460,91 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           currentDecision?.lifecycleState === TradeLifecycleState.ORDER_SUBMITTED ||
           currentDecision?.lifecycleState === TradeLifecycleState.RESERVATION_CREATED;
 
+        if (!isBotManaged && this.tradeLifecycleService && currentDecision) {
+          try {
+            const curState = currentDecision.lifecycleState;
+            if (curState === TradeLifecycleState.PRE_TRADE_APPROVED) {
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId: req.tradeDecisionId,
+                  newState: TradeLifecycleState.TRADE_TAKEN,
+                  event: 'TRADE_TAKEN',
+                  correlationId,
+                },
+                tx,
+              );
+            }
+            const midState = (await tx.tradeDecision.findUnique({
+              where: { id: req.tradeDecisionId },
+              select: { lifecycleState: true },
+            }))?.lifecycleState;
+            if (midState === TradeLifecycleState.TRADE_TAKEN) {
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId: req.tradeDecisionId,
+                  newState: TradeLifecycleState.RESERVATION_CREATED,
+                  event: 'RESERVATION_CREATED',
+                  correlationId,
+                },
+                tx,
+              );
+            }
+            const resState = (await tx.tradeDecision.findUnique({
+              where: { id: req.tradeDecisionId },
+              select: { lifecycleState: true },
+            }))?.lifecycleState;
+            if (resState === TradeLifecycleState.RESERVATION_CREATED || resState === TradeLifecycleState.RESERVED) {
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId: req.tradeDecisionId,
+                  newState: TradeLifecycleState.ORDER_SUBMITTED,
+                  event: 'ORDER_SUBMITTED',
+                  correlationId,
+                },
+                tx,
+              );
+            }
+            const subState = (await tx.tradeDecision.findUnique({
+              where: { id: req.tradeDecisionId },
+              select: { lifecycleState: true },
+            }))?.lifecycleState;
+            if (subState === TradeLifecycleState.ORDER_SUBMITTED) {
+              await this.tradeLifecycleService.transition(
+                {
+                  tradeDecisionId: req.tradeDecisionId,
+                  newState: TradeLifecycleState.ORDER_FILLED,
+                  event: 'ORDER_FILLED',
+                  correlationId,
+                },
+                tx,
+              );
+            }
+            await this.tradeLifecycleService.transition(
+              {
+                tradeDecisionId: req.tradeDecisionId,
+                newState: TradeLifecycleState.POSITION_OPENED,
+                event: 'ORDER_FILLED',
+                correlationId,
+                metadata: {
+                  positionId: position.id,
+                  orderPositionId: position.id,
+                  orderSubmittedTime: orderSubmittedAt,
+                  fillTime: fillExecutionTime,
+                  marketEventTime: sourceTimestamp,
+                  observedAt: orderSubmittedAt,
+                  receivedAt: fillExecutionTime,
+                },
+              },
+              tx,
+            );
+          } catch (lifecycleErr: any) {
+            this.logger.debug(`Lifecycle transition note: ${lifecycleErr.message}`);
+          }
+        }
+
         await tx.tradeDecision.updateMany({
           where: { id: req.tradeDecisionId },
           data: {
-            ...(isBotManaged ? {} : { lifecycleState: TradeLifecycleState.POSITION_OPENED }),
             orderPositionId: position.id,
             orderSubmittedTime: orderSubmittedAt,
             fillTime: fillExecutionTime,
@@ -1470,20 +1554,6 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
             updatedAt: new Date(),
           },
         });
-
-        if (this.tradeLifecycleService) {
-          try {
-            await this.tradeLifecycleService.transition({
-              tradeDecisionId: req.tradeDecisionId,
-              newState: TradeLifecycleState.POSITION_OPENED,
-              event: 'ORDER_FILLED',
-              correlationId,
-              metadata: { positionId: position.id },
-            });
-          } catch (lifecycleErr: any) {
-            this.logger.debug(`Lifecycle transition note: ${lifecycleErr.message}`);
-          }
-        }
       }
 
       // Create Audit Events with full metadata
@@ -2235,30 +2305,39 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       // Synchronize TradeDecision lifecycle state if tradeDecisionId exists
       const tradeDecisionId = (pos.executionEventsJson as any)?.tradeDecisionId;
       if (tradeDecisionId) {
+        if (this.tradeLifecycleService) {
+          try {
+            await this.tradeLifecycleService.transition(
+              {
+                tradeDecisionId,
+                newState: TradeLifecycleState.TRADE_CLOSED,
+                event: 'POSITION_CLOSED',
+                correlationId,
+                metadata: {
+                  tradeId: tradeRecord.id,
+                  positionId: pos.id,
+                  orderPositionId: pos.id,
+                  fillTime: exitTime,
+                  marketEventTime: sourceTimestamp,
+                  exitReason,
+                },
+              },
+              tx,
+            );
+          } catch (lifecycleErr: any) {
+            this.logger.debug(`Lifecycle close transition note: ${lifecycleErr.message}`);
+          }
+        }
+
         await tx.tradeDecision.updateMany({
           where: { id: tradeDecisionId },
           data: {
-            lifecycleState: TradeLifecycleState.TRADE_CLOSED,
             orderPositionId: pos.id,
             fillTime: exitTime,
             marketEventTime: sourceTimestamp,
             updatedAt: new Date(),
           },
         });
-
-        if (this.tradeLifecycleService) {
-          try {
-            await this.tradeLifecycleService.transition({
-              tradeDecisionId,
-              newState: TradeLifecycleState.TRADE_CLOSED,
-              event: 'POSITION_CLOSED',
-              correlationId,
-              metadata: { tradeId: tradeRecord.id, positionId: pos.id, exitReason },
-            });
-          } catch (lifecycleErr: any) {
-            this.logger.debug(`Lifecycle close transition note: ${lifecycleErr.message}`);
-          }
-        }
       }
 
       if (this.journalService) {

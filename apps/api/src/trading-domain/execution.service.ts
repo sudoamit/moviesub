@@ -1,9 +1,10 @@
-import { Injectable, Logger, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { AlgoBotExecutionState } from '@prisma/client';
 import {
   IExecutionDomainService,
   ExecutionRecord,
+  ExecutionReconciliationEvidence,
   Direction,
 } from '@quant/shared';
 
@@ -20,9 +21,14 @@ export class ExecutionService implements IExecutionDomainService {
     ],
     [AlgoBotExecutionState.EXECUTING]: [
       AlgoBotExecutionState.EXECUTED,
+      AlgoBotExecutionState.RECONCILIATION_REQUIRED,
       AlgoBotExecutionState.CANCELLED,
       AlgoBotExecutionState.FAILED_FINAL,
       AlgoBotExecutionState.FAILED_RETRYABLE,
+    ],
+    [AlgoBotExecutionState.RECONCILIATION_REQUIRED]: [
+      AlgoBotExecutionState.EXECUTED,
+      AlgoBotExecutionState.FAILED_FINAL,
     ],
     [AlgoBotExecutionState.FAILED_RETRYABLE]: [
       AlgoBotExecutionState.EXECUTING,
@@ -208,13 +214,24 @@ export class ExecutionService implements IExecutionDomainService {
 
   /**
    * CRITICAL INVARIANT: If an external order may have executed but the database cannot establish
-   * the definitive result, flag RECONCILIATION_REQUIRED. Never retry an uncertain order blindly.
+   * the definitive result, flag first-class RECONCILIATION_REQUIRED. Never retry an uncertain order blindly.
    */
   public async markReconciliationRequired(executionId: string, message: string): Promise<ExecutionRecord | void> {
+    const existing = await this.prisma.algoBotExecution.findUnique({ where: { id: executionId } });
+    if (!existing) {
+      throw new NotFoundException(`Execution '${executionId}' not found`);
+    }
+
+    if (existing.state === AlgoBotExecutionState.RECONCILIATION_REQUIRED) {
+      return this.mapToRecord(existing); // Idempotent
+    }
+
+    this.validateTransition(existing, AlgoBotExecutionState.RECONCILIATION_REQUIRED);
+
     const updated = await this.prisma.algoBotExecution.update({
       where: { id: executionId },
       data: {
-        state: AlgoBotExecutionState.FAILED_FINAL,
+        state: AlgoBotExecutionState.RECONCILIATION_REQUIRED,
         failedAt: new Date(),
         failureReason: `[RECONCILIATION_REQUIRED] ${message}`,
         failureReasonCode: 'RECONCILIATION_REQUIRED',
@@ -225,13 +242,12 @@ export class ExecutionService implements IExecutionDomainService {
   }
 
   /**
-   * Authoritatively resolves an execution flagged as RECONCILIATION_REQUIRED following
-   * broker sync / operational reconciliation.
+   * Authoritatively resolves an execution flagged as RECONCILIATION_REQUIRED as EXECUTED
+   * based on verified broker order/fill evidence.
    */
-  public async resolveReconciliation(
+  public async resolveExecutionAsExecuted(
     executionId: string,
-    outcome: 'EXECUTED' | 'FAILED_FINAL',
-    resolutionNotes: string,
+    evidence: ExecutionReconciliationEvidence,
     orderPositionId?: string,
   ): Promise<ExecutionRecord> {
     const existing = await this.prisma.algoBotExecution.findUnique({ where: { id: executionId } });
@@ -239,39 +255,150 @@ export class ExecutionService implements IExecutionDomainService {
       throw new NotFoundException(`Execution '${executionId}' not found`);
     }
 
-    if (existing.failureReasonCode !== 'RECONCILIATION_REQUIRED') {
+    if (!evidence) {
+      throw new BadRequestException('Reconciliation evidence is strictly required');
+    }
+    if (!evidence.reconciliationActor) {
+      throw new BadRequestException('Reconciliation actor must be specified in evidence');
+    }
+    if (!evidence.reason) {
+      throw new BadRequestException('Reconciliation reason must be specified in evidence');
+    }
+
+    if (
+      existing.state !== AlgoBotExecutionState.RECONCILIATION_REQUIRED &&
+      existing.failureReasonCode !== 'RECONCILIATION_REQUIRED'
+    ) {
       throw new ConflictException(
-        `CANNOT_RESOLVE_RECONCILIATION: Execution '${executionId}' is not flagged as RECONCILIATION_REQUIRED (current code='${existing.failureReasonCode}')`,
+        `CANNOT_RESOLVE_RECONCILIATION: Execution '${executionId}' is in state '${existing.state}', expected '${AlgoBotExecutionState.RECONCILIATION_REQUIRED}'`,
       );
     }
 
+    this.validateTransition(existing, AlgoBotExecutionState.EXECUTED);
+
     const now = new Date();
-    const updateData: any =
-      outcome === 'EXECUTED'
-        ? {
-            state: AlgoBotExecutionState.EXECUTED,
-            completedAt: now,
-            orderPositionId: orderPositionId || undefined,
-            failureReason: `[RESOLVED_EXECUTED] ${resolutionNotes}`,
-            failureReasonCode: 'RECONCILIATION_RESOLVED',
-          }
-        : {
-            state: AlgoBotExecutionState.FAILED_FINAL,
-            failedAt: now,
-            failureReason: `[RESOLVED_FAILED] ${resolutionNotes}`,
-            failureReasonCode: 'RECONCILIATION_RESOLVED',
-          };
+    const evidencePayload = {
+      brokerOrderId: evidence.brokerOrderId ?? null,
+      brokerStatus: evidence.brokerStatus ?? 'FILLED',
+      brokerFilledQuantity: evidence.brokerFilledQuantity ?? null,
+      brokerAveragePrice: evidence.brokerAveragePrice ?? null,
+      brokerFills: evidence.brokerFills ?? [],
+      timestamp: evidence.timestamp ? new Date(evidence.timestamp) : now,
+      reconciliationActor: evidence.reconciliationActor,
+      reason: evidence.reason,
+      evidenceSnapshot: evidence.evidenceSnapshot ?? {},
+    };
 
     const updated = await this.prisma.algoBotExecution.update({
       where: { id: executionId },
-      data: updateData,
+      data: {
+        state: AlgoBotExecutionState.EXECUTED,
+        completedAt: now,
+        orderPositionId: orderPositionId || undefined,
+        failureReason: `[RESOLVED_EXECUTED] ${evidence.reason} (Actor: ${evidence.reconciliationActor})`,
+        failureReasonCode: 'RECONCILIATION_RESOLVED',
+        reconciliationMetadataJson: evidencePayload as any,
+        reconciledAt: now,
+        reconciledBy: evidence.reconciliationActor,
+      },
     });
 
     this.logger.log(
-      `[RECONCILIATION RESOLVED] id=${executionId} | outcome=${outcome} | notes=${resolutionNotes}`,
+      `[RECONCILIATION RESOLVED EXECUTED] id=${executionId} | actor=${evidence.reconciliationActor} | reason=${evidence.reason}`,
     );
 
     return this.mapToRecord(updated);
+  }
+
+  /**
+   * Authoritatively resolves an execution flagged as RECONCILIATION_REQUIRED as FAILED_FINAL
+   * based on verified broker order/fill rejection or non-existence evidence.
+   */
+  public async resolveExecutionAsFailed(
+    executionId: string,
+    evidence: ExecutionReconciliationEvidence,
+  ): Promise<ExecutionRecord> {
+    const existing = await this.prisma.algoBotExecution.findUnique({ where: { id: executionId } });
+    if (!existing) {
+      throw new NotFoundException(`Execution '${executionId}' not found`);
+    }
+
+    if (!evidence) {
+      throw new BadRequestException('Reconciliation evidence is strictly required');
+    }
+    if (!evidence.reconciliationActor) {
+      throw new BadRequestException('Reconciliation actor must be specified in evidence');
+    }
+    if (!evidence.reason) {
+      throw new BadRequestException('Reconciliation reason must be specified in evidence');
+    }
+
+    if (
+      existing.state !== AlgoBotExecutionState.RECONCILIATION_REQUIRED &&
+      existing.failureReasonCode !== 'RECONCILIATION_REQUIRED'
+    ) {
+      throw new ConflictException(
+        `CANNOT_RESOLVE_RECONCILIATION: Execution '${executionId}' is in state '${existing.state}', expected '${AlgoBotExecutionState.RECONCILIATION_REQUIRED}'`,
+      );
+    }
+
+    this.validateTransition(existing, AlgoBotExecutionState.FAILED_FINAL);
+
+    const now = new Date();
+    const evidencePayload = {
+      brokerOrderId: evidence.brokerOrderId ?? null,
+      brokerStatus: evidence.brokerStatus ?? 'REJECTED',
+      brokerFilledQuantity: evidence.brokerFilledQuantity ?? 0,
+      brokerAveragePrice: evidence.brokerAveragePrice ?? null,
+      brokerFills: evidence.brokerFills ?? [],
+      timestamp: evidence.timestamp ? new Date(evidence.timestamp) : now,
+      reconciliationActor: evidence.reconciliationActor,
+      reason: evidence.reason,
+      evidenceSnapshot: evidence.evidenceSnapshot ?? {},
+    };
+
+    const updated = await this.prisma.algoBotExecution.update({
+      where: { id: executionId },
+      data: {
+        state: AlgoBotExecutionState.FAILED_FINAL,
+        failedAt: now,
+        failureReason: `[RESOLVED_FAILED] ${evidence.reason} (Actor: ${evidence.reconciliationActor})`,
+        failureReasonCode: 'RECONCILIATION_RESOLVED',
+        reconciliationMetadataJson: evidencePayload as any,
+        reconciledAt: now,
+        reconciledBy: evidence.reconciliationActor,
+      },
+    });
+
+    this.logger.log(
+      `[RECONCILIATION RESOLVED FAILED] id=${executionId} | actor=${evidence.reconciliationActor} | reason=${evidence.reason}`,
+    );
+
+    return this.mapToRecord(updated);
+  }
+
+  /**
+   * Backward-compatible bridge resolving an execution flagged as RECONCILIATION_REQUIRED.
+   */
+  public async resolveReconciliation(
+    executionId: string,
+    outcome: 'EXECUTED' | 'FAILED_FINAL',
+    resolutionNotes: string,
+    orderPositionId?: string,
+    evidence?: ExecutionReconciliationEvidence,
+  ): Promise<ExecutionRecord> {
+    const resolvedEvidence: ExecutionReconciliationEvidence = evidence || {
+      timestamp: new Date(),
+      reconciliationActor: 'RECONCILIATION_SERVICE',
+      reason: resolutionNotes,
+      evidenceSnapshot: { outcome, orderPositionId },
+    };
+
+    if (outcome === 'EXECUTED') {
+      return this.resolveExecutionAsExecuted(executionId, resolvedEvidence, orderPositionId);
+    } else {
+      return this.resolveExecutionAsFailed(executionId, resolvedEvidence);
+    }
   }
 
   public async getExecutionById(executionId: string): Promise<ExecutionRecord | null> {
@@ -297,7 +424,12 @@ export class ExecutionService implements IExecutionDomainService {
 
   public async getPendingReconciliations(): Promise<ExecutionRecord[]> {
     const records = await this.prisma.algoBotExecution.findMany({
-      where: { failureReasonCode: 'RECONCILIATION_REQUIRED' },
+      where: {
+        OR: [
+          { state: AlgoBotExecutionState.RECONCILIATION_REQUIRED },
+          { failureReasonCode: 'RECONCILIATION_REQUIRED' },
+        ],
+      },
       orderBy: { failedAt: 'desc' },
     });
     return records.map((r) => this.mapToRecord(r));
@@ -321,6 +453,9 @@ export class ExecutionService implements IExecutionDomainService {
       startedAt: exec.startedAt || undefined,
       completedAt: exec.completedAt || undefined,
       failedAt: exec.failedAt || undefined,
+      reconciliationMetadataJson: exec.reconciliationMetadataJson || undefined,
+      reconciledAt: exec.reconciledAt || undefined,
+      reconciledBy: exec.reconciledBy || undefined,
     };
   }
 }

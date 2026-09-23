@@ -30,7 +30,17 @@ describe('ExecutionService', () => {
       findMany: jest.fn(({ where }) => {
         let list = [...mockExecutions];
         if (where?.botId) list = list.filter((e) => e.botId === where.botId);
+        if (where?.state) list = list.filter((e) => e.state === where.state);
         if (where?.failureReasonCode) list = list.filter((e) => e.failureReasonCode === where.failureReasonCode);
+        if (where?.OR) {
+          list = list.filter((e) =>
+            where.OR.some((clause: any) => {
+              if (clause.state && e.state === clause.state) return true;
+              if (clause.failureReasonCode && e.failureReasonCode === clause.failureReasonCode) return true;
+              return false;
+            }),
+          );
+        }
         return list;
       }),
       update: jest.fn(({ where, data }) => {
@@ -207,7 +217,7 @@ describe('ExecutionService', () => {
   });
 
   describe('Reconciliation Protocol', () => {
-    it('flags RECONCILIATION_REQUIRED on broker disconnect without blind retry', async () => {
+    it('flags first-class RECONCILIATION_REQUIRED on broker disconnect without blind retry', async () => {
       const exec = await executionService.createExecution({
         fingerprint: 'fp_recon',
         botId: 'bot_alpha',
@@ -223,39 +233,152 @@ describe('ExecutionService', () => {
 
       const pending = await executionService.getPendingReconciliations();
       expect(pending.length).toBe(1);
+      expect(pending[0].state).toBe(AlgoBotExecutionState.RECONCILIATION_REQUIRED);
       expect(pending[0].failureReasonCode).toBe('RECONCILIATION_REQUIRED');
       expect(pending[0].failureReason).toContain('Broker socket dropped after submission');
     });
 
-    it('authoritatively resolves reconciliation to EXECUTED or FAILED_FINAL', async () => {
+    it('strictly blocks automatic retry or transition to EXECUTING from RECONCILIATION_REQUIRED', async () => {
       const exec = await executionService.createExecution({
-        fingerprint: 'fp_recon_resolve',
+        fingerprint: 'fp_recon_retry_block',
         botId: 'bot_alpha',
         symbol: 'BTCUSDT',
         timeframe: '15m',
         direction: Direction.BULLISH,
         signalTimestamp: new Date(),
-        correlationId: 'corr_rr',
+        correlationId: 'corr_rrb',
       });
 
       await executionService.markStarted(exec.id);
       await executionService.markReconciliationRequired(exec.id, 'Broker timeout');
 
-      // Resolve as EXECUTED following exchange trade log discovery
-      const resolved = await executionService.resolveReconciliation(
+      // Attempting to retry automatically must be rejected by FSM
+      await expect(
+        executionService.markFailed(exec.id, 'AUTO_RETRY', 'Attempting retry', true),
+      ).rejects.toThrow(ConflictException);
+
+      await expect(
+        executionService.markStarted(exec.id),
+      ).rejects.toThrow(ConflictException);
+
+      expect(executionService.canTransition(AlgoBotExecutionState.RECONCILIATION_REQUIRED, AlgoBotExecutionState.FAILED_RETRYABLE)).toBe(false);
+      expect(executionService.canTransition(AlgoBotExecutionState.RECONCILIATION_REQUIRED, AlgoBotExecutionState.EXECUTING)).toBe(false);
+    });
+
+    it('resolves execution as EXECUTED with required reconciliation evidence', async () => {
+      const exec = await executionService.createExecution({
+        fingerprint: 'fp_recon_resolve_exec',
+        botId: 'bot_alpha',
+        symbol: 'BTCUSDT',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        signalTimestamp: new Date(),
+        correlationId: 'corr_rr_exec',
+      });
+
+      await executionService.markStarted(exec.id);
+      await executionService.markReconciliationRequired(exec.id, 'Gateway 504 timeout during order submission');
+
+      const evidence = {
+        brokerOrderId: 'broker_ord_9981',
+        brokerStatus: 'FILLED',
+        brokerFilledQuantity: 1.0,
+        brokerAveragePrice: 50120.5,
+        brokerFills: [{ fillId: 'bf_1', qty: 1.0, price: 50120.5 }],
+        timestamp: new Date(),
+        reconciliationActor: 'RECONCILIATION_WORKER_1',
+        reason: 'Order confirmed filled in broker trade report',
+        evidenceSnapshot: { verifiedByAuditLog: true },
+      };
+
+      const resolved = await executionService.resolveExecutionAsExecuted(
         exec.id,
-        'EXECUTED',
-        'Order fill found in broker historical logs',
-        'pos_recovered_99',
+        evidence,
+        'pos_recovered_101',
       );
 
       expect(resolved.state).toBe(AlgoBotExecutionState.EXECUTED);
-      expect(resolved.orderPositionId).toBe('pos_recovered_99');
+      expect(resolved.orderPositionId).toBe('pos_recovered_101');
       expect(resolved.failureReasonCode).toBe('RECONCILIATION_RESOLVED');
+      expect(resolved.reconciledBy).toBe('RECONCILIATION_WORKER_1');
+      expect(resolved.reconciliationMetadataJson?.brokerOrderId).toBe('broker_ord_9981');
 
       // No longer in pending reconciliations
       const pending = await executionService.getPendingReconciliations();
-      expect(pending.length).toBe(0);
+      expect(pending.find((p) => p.id === exec.id)).toBeUndefined();
+    });
+
+    it('resolves execution as FAILED_FINAL with required reconciliation evidence', async () => {
+      const exec = await executionService.createExecution({
+        fingerprint: 'fp_recon_resolve_failed',
+        botId: 'bot_alpha',
+        symbol: 'BTCUSDT',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        signalTimestamp: new Date(),
+        correlationId: 'corr_rr_fail',
+      });
+
+      await executionService.markStarted(exec.id);
+      await executionService.markReconciliationRequired(exec.id, 'Broker socket dropped');
+
+      const evidence = {
+        brokerOrderId: 'broker_ord_none',
+        brokerStatus: 'REJECTED',
+        brokerFilledQuantity: 0,
+        brokerAveragePrice: 0,
+        brokerFills: [],
+        timestamp: new Date(),
+        reconciliationActor: 'OPS_ADMIN_ALICE',
+        reason: 'Exchange audit confirmed order never received by matching engine',
+        evidenceSnapshot: { verifiedByBrokerRestApi: true },
+      };
+
+      const resolved = await executionService.resolveExecutionAsFailed(exec.id, evidence);
+
+      expect(resolved.state).toBe(AlgoBotExecutionState.FAILED_FINAL);
+      expect(resolved.failureReasonCode).toBe('RECONCILIATION_RESOLVED');
+      expect(resolved.reconciledBy).toBe('OPS_ADMIN_ALICE');
+      expect(resolved.reconciliationMetadataJson?.brokerStatus).toBe('REJECTED');
+
+      // No longer in pending reconciliations
+      const pending = await executionService.getPendingReconciliations();
+      expect(pending.find((p) => p.id === exec.id)).toBeUndefined();
+    });
+
+    it('rejects resolution if reconciliation actor or reason is missing in evidence', async () => {
+      const exec = await executionService.createExecution({
+        fingerprint: 'fp_recon_missing_ev',
+        botId: 'bot_alpha',
+        symbol: 'BTCUSDT',
+        timeframe: '15m',
+        direction: Direction.BULLISH,
+        signalTimestamp: new Date(),
+        correlationId: 'corr_rme',
+      });
+
+      await executionService.markStarted(exec.id);
+      await executionService.markReconciliationRequired(exec.id, 'Broker timeout');
+
+      await expect(
+        executionService.resolveExecutionAsExecuted(exec.id, null as any),
+      ).rejects.toThrow();
+
+      await expect(
+        executionService.resolveExecutionAsExecuted(exec.id, {
+          timestamp: new Date(),
+          reconciliationActor: '',
+          reason: 'Valid reason',
+        } as any),
+      ).rejects.toThrow();
+
+      await expect(
+        executionService.resolveExecutionAsFailed(exec.id, {
+          timestamp: new Date(),
+          reconciliationActor: 'OPS_ADMIN',
+          reason: '',
+        } as any),
+      ).rejects.toThrow();
     });
 
     it('rejects resolveReconciliation if execution is not in RECONCILIATION_REQUIRED status', async () => {

@@ -437,6 +437,18 @@ export interface IReservationDomainService {
 // 6. Execution Domain
 // ---------------------------------------------------------------------------
 
+export interface ExecutionReconciliationEvidence {
+  brokerOrderId?: string;
+  brokerStatus?: string;
+  brokerFilledQuantity?: number;
+  brokerAveragePrice?: number;
+  brokerFills?: any[];
+  timestamp: Date | string | number;
+  reconciliationActor: string;
+  reason: string;
+  evidenceSnapshot?: Record<string, any>;
+}
+
 export interface ExecutionRecord {
   id: string;
   fingerprint: string;
@@ -454,6 +466,9 @@ export interface ExecutionRecord {
   startedAt?: Date;
   completedAt?: Date;
   failedAt?: Date;
+  reconciliationMetadataJson?: any;
+  reconciledAt?: Date;
+  reconciledBy?: string;
 }
 
 export interface IExecutionDomainService {
@@ -463,11 +478,21 @@ export interface IExecutionDomainService {
   markFailed(executionId: string, reasonCode: string, message: string, retryable: boolean): Promise<ExecutionRecord | void>;
   markCancelled(executionId: string, reason?: string): Promise<ExecutionRecord | void>;
   markReconciliationRequired(executionId: string, message: string): Promise<ExecutionRecord | void>;
+  resolveExecutionAsExecuted(
+    executionId: string,
+    evidence: ExecutionReconciliationEvidence,
+    orderPositionId?: string,
+  ): Promise<ExecutionRecord>;
+  resolveExecutionAsFailed(
+    executionId: string,
+    evidence: ExecutionReconciliationEvidence,
+  ): Promise<ExecutionRecord>;
   resolveReconciliation(
     executionId: string,
     outcome: 'EXECUTED' | 'FAILED_FINAL',
     resolutionNotes: string,
     orderPositionId?: string,
+    evidence?: ExecutionReconciliationEvidence,
   ): Promise<ExecutionRecord>;
   getExecutionById(executionId: string): Promise<ExecutionRecord | null>;
   getExecutionByFingerprint(fingerprint: string): Promise<ExecutionRecord | null>;
@@ -670,6 +695,7 @@ export interface IPositionDomainService {
 export interface LifecycleTransitionRequest {
   tradeDecisionId: string;
   expectedState?: TradeLifecycleState | TradeLifecycleState[];
+  expectedVersion?: number;
   newState: TradeLifecycleState;
   event: string;
   correlationId: string;
@@ -682,15 +708,16 @@ export interface LifecycleTransitionResponse {
   previousState: TradeLifecycleState;
   currentState: TradeLifecycleState;
   transitionTime: Date;
+  version?: number;
   error?: string;
 }
 
 export interface ITradeLifecycleDomainService {
-  transition(request: LifecycleTransitionRequest): Promise<LifecycleTransitionResponse>;
+  transition(request: LifecycleTransitionRequest, txClient?: any): Promise<LifecycleTransitionResponse>;
   isValidTransition(fromState: TradeLifecycleState, toState: TradeLifecycleState): boolean;
   getAllowedNextStates(state: TradeLifecycleState): TradeLifecycleState[];
   isTerminalState(state: TradeLifecycleState | string): boolean;
-  getLifecycleState(tradeDecisionId: string): Promise<TradeLifecycleState | null>;
+  getLifecycleState(tradeDecisionId: string, txClient?: any): Promise<TradeLifecycleState | null>;
 }
 
 // ---------------------------------------------------------------------------
