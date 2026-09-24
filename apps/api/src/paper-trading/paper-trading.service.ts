@@ -575,6 +575,17 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           : '(entry - exit) * qty * contractSize * fxRate - fees',
         targetProgressPercent,
         highestTargetReached,
+        accounting: {
+          priceMove: pnlCalc.priceMove ?? Number((isBuy ? livePrice - entryPrice : entryPrice - livePrice).toFixed(4)),
+          grossPnlQuote: pnlCalc.grossPnlQuote,
+          grossPnlAccount: pnlCalc.grossPnlAccount,
+          fees: safeFees,
+          slippage: 0,
+          netPnlAccount: pnlCalc.netPnlAccount,
+          fxRate,
+          quoteCurrency,
+          accountCurrency: 'INR',
+        },
       });
 
       totalUnrealized += unrealizedPnL;
@@ -1299,8 +1310,11 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
       // Invariant: requiredMargin <= availableCash before fill
       const txAvailable = txCash - reconciledUsedMargin;
+      const effectiveCapital = req.accountBalance !== undefined && req.accountBalance > 0
+        ? Math.min(txAvailable, Number(req.accountBalance))
+        : txAvailable;
       const totalCashRequired = requiredMargin + charges.totalCharges;
-      if (txAvailable < totalCashRequired || requiredMargin > txAvailable || requiredMargin > txCash) {
+      if (effectiveCapital < totalCashRequired || requiredMargin > effectiveCapital || requiredMargin > txCash) {
         await this.rejectOrder(
           account.id,
           symbol,
@@ -1310,13 +1324,37 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           req.orderType,
           req.quantity,
           RiskRejectionReason.INSUFFICIENT_MARGIN,
-          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${totalCashRequired.toFixed(2)} (Margin: ₹${requiredMargin.toFixed(2)} + Fees: ₹${charges.totalCharges.toFixed(2)}), Available: ₹${txAvailable.toFixed(2)}`,
+          `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${totalCashRequired.toFixed(2)} (Margin: ₹${requiredMargin.toFixed(2)} + Fees: ₹${charges.totalCharges.toFixed(2)}), Available: ₹${effectiveCapital.toFixed(2)}`,
           idempotencyKey,
           correlationId,
         );
         throw new BadRequestException(
-          `Order Rejected [INSUFFICIENT_MARGIN]: Available cash (₹${txAvailable.toFixed(2)}) is insufficient for required margin (₹${requiredMargin.toFixed(2)}) and fees (₹${charges.totalCharges.toFixed(2)}).`,
+          `Order Rejected [INSUFFICIENT_MARGIN]: Available cash (₹${effectiveCapital.toFixed(2)}) is insufficient for required margin (₹${requiredMargin.toFixed(2)}) and fees (₹${charges.totalCharges.toFixed(2)}).`,
         );
+      }
+
+      // Hard Sizing Invariant for Spot: Max affordable quantity by cash
+      if (openingInst.marginMode === 'SPOT') {
+        const unitPriceINR = finalFillPrice * contractSize * fxRate;
+        const maxAffordableQuantity = unitPriceINR > 0 ? effectiveCapital / unitPriceINR : 0;
+        if (req.quantity > maxAffordableQuantity + 1e-6) {
+          await this.rejectOrder(
+            account.id,
+            symbol,
+            contractSymbol,
+            instrumentType,
+            req.direction,
+            req.orderType,
+            req.quantity,
+            RiskRejectionReason.INSUFFICIENT_MARGIN,
+            `[INSUFFICIENT_MARGIN] Spot order quantity (${req.quantity}) exceeds maximum affordable quantity (${maxAffordableQuantity.toFixed(4)}) for available cash ₹${effectiveCapital.toFixed(2)}`,
+            idempotencyKey,
+            correlationId,
+          );
+          throw new BadRequestException(
+            `Order Rejected [INSUFFICIENT_MARGIN]: Spot order quantity (${req.quantity}) exceeds maximum affordable quantity (${maxAffordableQuantity.toFixed(4)}) for available cash ₹${effectiveCapital.toFixed(2)}.`,
+          );
+        }
       }
 
       // Check portfolio exposure limit
@@ -1338,6 +1376,40 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         throw new BadRequestException(
           `Order Rejected [MAX_PORTFOLIO_RISK_EXCEEDED]: Position requires ₹${requiredMargin.toFixed(2)} margin, which pushes portfolio exposure to ₹${projectedTotalExposure.toFixed(2)} (Limit: ₹${maxExposureAllowed.toFixed(2)}).`,
         );
+      }
+
+      // HARD DATABASE & FINANCIAL INVARIANTS BEFORE FILL PERSISTENCE
+      if (!req.quantity || req.quantity <= 0 || !Number.isFinite(req.quantity)) {
+        throw new BadRequestException('Order Rejected: Quantity must be a positive finite number.');
+      }
+      if (finalFillPrice <= 0 || !Number.isFinite(finalFillPrice)) {
+        throw new BadRequestException('Order Rejected: Fill price must be positive and finite.');
+      }
+      if (requiredMargin <= 0 || !Number.isFinite(requiredMargin)) {
+        throw new BadRequestException('Order Rejected: Required margin must be positive and finite.');
+      }
+      if (requiredMargin > effectiveCapital || requiredMargin > txCash) {
+        throw new BadRequestException(
+          `Order Rejected [INSUFFICIENT_MARGIN]: Required margin (₹${requiredMargin.toFixed(2)}) exceeds available cash (₹${effectiveCapital.toFixed(2)}).`,
+        );
+      }
+      if (isBuy && stopLoss >= finalFillPrice) {
+        throw new BadRequestException(
+          `Order Rejected [INVALID_STOP_LOSS]: Stop loss (${stopLoss}) must be strictly below fill price (${finalFillPrice}) for BUY.`,
+        );
+      }
+      if (!isBuy && stopLoss <= finalFillPrice) {
+        throw new BadRequestException(
+          `Order Rejected [INVALID_STOP_LOSS]: Stop loss (${stopLoss}) must be strictly above fill price (${finalFillPrice}) for SELL.`,
+        );
+      }
+      if (effLeverage > maxInstLeverage) {
+        throw new BadRequestException(
+          `Order Rejected [LEVERAGE_EXCEEDS_MAX]: Leverage ${effLeverage}x exceeds maximum allowable ${maxInstLeverage}x for ${openingInst.symbol}.`,
+        );
+      }
+      if (turnoverAccount <= 0 || !Number.isFinite(turnoverAccount)) {
+        throw new BadRequestException('Order Rejected: Position notional must be positive and finite.');
       }
 
       // Create PaperOrder (FILLED)
@@ -1431,7 +1503,27 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           chargesJson: charges as any,
           featureSnapshotJson: (req.featureSnapshotJson as any) || undefined,
           executionEventsJson: {
-            accountingSnapshot: openingAccountingSnapshot as any,
+            accountingSnapshot: {
+              ...openingAccountingSnapshot,
+              instrument: openingInst.symbol,
+              quoteCurrency: openingQuoteCurrency,
+              accountCurrency: 'INR',
+              fxRate,
+              fxTimestamp: fillExecutionTime.getTime(),
+              contractSize,
+              lotSize: Number(req.quantity),
+              marginMode: openingMarginModel.marginMode,
+              effectiveLeverage: effLeverage,
+              initialMarginRate: openingMarginModel.initialMarginRate,
+              maintenanceMarginRate: openingMarginModel.maintenanceMarginRate,
+              liquidationModel: openingMarginModel.liquidationModel,
+              quantity: Number(req.quantity),
+              entryPrice: finalFillPrice,
+              stopLoss: Number(stopLoss),
+              riskAmount: Number((Math.abs(finalFillPrice - stopLoss) * req.quantity * contractSize * fxRate).toFixed(2)),
+              riskPercentage: initialCapital > 0 ? Number(((Math.abs(finalFillPrice - stopLoss) * req.quantity * contractSize * fxRate / initialCapital) * 100).toFixed(2)) : 1.0,
+              initialMarginRequired: requiredMargin,
+            } as any,
             accountingSnapshotHash: openingAccountingSnapshot.snapshotHash,
             tradeDecisionId: req.tradeDecisionId,
             managedBy: 'API_MONITOR',

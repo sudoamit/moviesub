@@ -1033,12 +1033,9 @@ export class TradeDecisionService {
           typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 4;
         resolvedQuantity = Number((Math.floor(resolvedQuantity / effLot) * effLot).toFixed(effPrec));
       }
-    } else if (instrument) {
-      try {
-        resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
-      } catch {
-        resolvedQuantity = 1;
-      }
+    } else {
+      // When sizing is invalid or rejected by risk engine, fail closed: resolvedQuantity must be 0
+      resolvedQuantity = 0;
     }
 
     const quoteCurrency = instrument?.currency || 'INR';

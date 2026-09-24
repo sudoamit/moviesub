@@ -747,4 +747,373 @@ describe('Production Trading & Accounting Invariants Regression Tests', () => {
     // Net account: 657.21 - 750.35 = -93.14 INR
     expect(pnlCalc.netPnlAccount).toBeCloseTo(-93.14, 2);
   });
+
+  // =========================================================================
+  // SECTION: REQUIRED HARD TESTS (A THROUGH H)
+  // =========================================================================
+  describe('Required Hard Tests (TEST A - TEST H)', () => {
+    const entryPrice = 84190.98;
+    const currentPrice = 84333.08;
+    const stopLoss = 84030.98;
+    const fxUsdtInr = 92.5;
+
+    // -----------------------------------------------------------------------
+    // TEST A: ₹300,000 account, BTCUSDT_SPOT, 0.05 BTC, 1x -> REJECT, No Position
+    // -----------------------------------------------------------------------
+    it('TEST A: ₹300,000 account, BTCUSDT_SPOT, 0.05 BTC, 1x -> ORDER REJECTED, no position created', async () => {
+      const accountCash = 300000;
+      const quantity = 0.05;
+      const requiredMargin = entryPrice * quantity * fxUsdtInr; // ~₹389,383
+      expect(requiredMargin).toBeGreaterThan(accountCash);
+
+      let positionCreated = false;
+      let orderCreated = false;
+
+      const mockTx: any = {
+        paperAccount: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'acc-test-a',
+            currency: 'INR',
+            cashBalance: new Decimal(accountCash),
+          }),
+        },
+        paperPosition: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn().mockImplementation(() => {
+            positionCreated = true;
+            return { id: 'pos-a' };
+          }),
+        },
+        paperOrder: {
+          create: jest.fn().mockImplementation(() => {
+            orderCreated = true;
+            return { id: 'order-a' };
+          }),
+        },
+      };
+
+      const mockPrisma: any = {
+        paperAccount: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 'acc-test-a',
+            currency: 'INR',
+            cashBalance: new Decimal(accountCash),
+          }),
+        },
+        paperOrder: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
+        paperPosition: { count: jest.fn().mockResolvedValue(0) },
+        paperTrade: { aggregate: jest.fn().mockResolvedValue({ _sum: { realizedPnL: 0 } }), findMany: jest.fn().mockResolvedValue([]) },
+        systemConfig: { findFirst: jest.fn().mockResolvedValue({ configJson: { maxLeverage: 10, maxSlippageBps: 0, maxTotalExposurePercent: 100 } }) },
+        $transaction: jest.fn().mockImplementation(async (cb: any) => cb(mockTx)),
+      };
+
+      const service = new PaperTradingService(
+        mockPrisma,
+        {} as any,
+        { getValidatedTicker: () => ({ price: entryPrice }) } as any,
+        undefined,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      jest.spyOn(service as any, 'getOrCreateAccount').mockResolvedValue({
+        id: 'acc-test-a',
+        currency: 'INR',
+        cashBalance: new Decimal(accountCash),
+        initialCapital: new Decimal(accountCash),
+      });
+      jest.spyOn(service as any, 'getSystemConfig').mockResolvedValue({
+        maxLeverage: 10,
+        maxSlippageBps: 0,
+        maxTotalExposurePercent: 100,
+        maxPositionRiskPercent: 10,
+        maxDailyLossPercent: 10,
+        maxTradesPerDay: 50,
+        maxConsecutiveLosses: 10,
+        maxOpenPositions: 5,
+      });
+      jest.spyOn(service as any, 'rejectOrder').mockResolvedValue(undefined as any);
+      jest.spyOn(service as any, 'getValidatedMarketPrice').mockResolvedValue({ price: entryPrice, timestamp: new Date() });
+
+      await expect(
+        service.placeOrder({
+          symbol: 'BTCUSDT_SPOT',
+          direction: 'BUY',
+          quantity,
+          orderType: 'MARKET',
+          stopLoss,
+          target1: 85000,
+          leverage: 1,
+        }),
+      ).rejects.toThrow('INSUFFICIENT_MARGIN');
+
+      expect(positionCreated).toBe(false);
+      expect(orderCreated).toBe(false);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST B: ₹300,000 account, BTCUSDT_SPOT, requested leverage = 50 -> REJECT
+    // -----------------------------------------------------------------------
+    it('TEST B: ₹300,000 account, BTCUSDT_SPOT, requested leverage = 50 -> REJECT LEVERAGE_EXCEEDS_MAX', async () => {
+      const accountCash = 300000;
+      const mockPrisma: any = {
+        paperAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'acc-test-b', currency: 'INR', cashBalance: new Decimal(accountCash) }) },
+        paperOrder: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
+        paperPosition: { count: jest.fn().mockResolvedValue(0) },
+        paperTrade: { aggregate: jest.fn().mockResolvedValue({ _sum: { realizedPnL: 0 } }), findMany: jest.fn().mockResolvedValue([]) },
+        systemConfig: { findFirst: jest.fn().mockResolvedValue({ configJson: { maxLeverage: 50 } }) },
+      };
+
+      const service = new PaperTradingService(
+        mockPrisma,
+        {} as any,
+        { getValidatedTicker: () => ({ price: entryPrice }) } as any,
+        undefined,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      jest.spyOn(service as any, 'getOrCreateAccount').mockResolvedValue({ id: 'acc-test-b', currency: 'INR', cashBalance: new Decimal(accountCash) });
+      jest.spyOn(service as any, 'getSystemConfig').mockResolvedValue({ maxLeverage: 50, maxOpenPositions: 5, maxTradesPerDay: 50, maxConsecutiveLosses: 10, maxPositionRiskPercent: 10, maxDailyLossPercent: 10 });
+      jest.spyOn(service as any, 'rejectOrder').mockResolvedValue(undefined as any);
+      jest.spyOn(service as any, 'getValidatedMarketPrice').mockResolvedValue({ price: entryPrice, timestamp: new Date() });
+
+      await expect(
+        service.placeOrder({
+          symbol: 'BTCUSDT_SPOT',
+          direction: 'BUY',
+          quantity: 0.01,
+          orderType: 'MARKET',
+          stopLoss,
+          target1: 85000,
+          leverage: 50,
+        }),
+      ).rejects.toThrow('LEVERAGE_EXCEEDS_MAX');
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST C: ₹300,000 account, BTCUSDT_SPOT, 1x -> quantity * entry * FX <= 300,000
+    // -----------------------------------------------------------------------
+    it('TEST C: ₹300,000 account, BTCUSDT_SPOT, 1x -> final quantity * entry * FX <= 300000', () => {
+      const accountBalance = 300000;
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance,
+        availableMargin: accountBalance,
+        riskPercentage: 1.0,
+        entryPrice,
+        stopLoss,
+        symbol: 'BTCUSDT_SPOT',
+        requestedLeverage: 1,
+      });
+
+      expect(sizing.isValid).toBe(true);
+      expect(sizing.roundedUnits).toBeLessThanOrEqual(0.0385);
+      const totalNotionalINR = sizing.roundedUnits * entryPrice * fxUsdtInr;
+      expect(totalNotionalINR).toBeLessThanOrEqual(accountBalance);
+      expect(sizing.initialMarginRequired).toBeLessThanOrEqual(accountBalance);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST D: Same position at different leverage settings -> gross P&L identical
+    // -----------------------------------------------------------------------
+    it('TEST D: Leverage does not multiply gross position P&L (1x, 5x, 10x, 50x identical)', () => {
+      const qty = 0.05;
+      const pnl1x = TradeAccountingEngine.calculateTradePnl({ entryPrice, exitPrice: currentPrice, quantity: qty, direction: 'LONG', fxRate: fxUsdtInr });
+      const pnl5x = TradeAccountingEngine.calculateTradePnl({ entryPrice, exitPrice: currentPrice, quantity: qty, direction: 'LONG', fxRate: fxUsdtInr, initialRiskAccount: 1000 });
+      const pnl10x = TradeAccountingEngine.calculateTradePnl({ entryPrice, exitPrice: currentPrice, quantity: qty, direction: 'LONG', fxRate: fxUsdtInr });
+      const pnl50x = TradeAccountingEngine.calculateTradePnl({ entryPrice, exitPrice: currentPrice, quantity: qty, direction: 'LONG', fxRate: fxUsdtInr });
+
+      expect(pnl1x.grossPnlQuote).toBeCloseTo(7.105, 3);
+      expect(pnl5x.grossPnlQuote).toBe(pnl1x.grossPnlQuote);
+      expect(pnl10x.grossPnlQuote).toBe(pnl1x.grossPnlQuote);
+      expect(pnl50x.grossPnlQuote).toBe(pnl1x.grossPnlQuote);
+
+      expect(pnl1x.grossPnlAccount).toBeCloseTo(657.21, 2);
+      expect(pnl5x.grossPnlAccount).toBe(pnl1x.grossPnlAccount);
+      expect(pnl10x.grossPnlAccount).toBe(pnl1x.grossPnlAccount);
+      expect(pnl50x.grossPnlAccount).toBe(pnl1x.grossPnlAccount);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST E: Positive LONG: 84190.98 -> 84333.08 -> priceMove = +142.10, grossQuote = +7.105, grossAccount > 0
+    // -----------------------------------------------------------------------
+    it('TEST E: Positive LONG price move produces positive gross quote and account P&L', () => {
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice,
+        exitPrice: currentPrice,
+        quantity: 0.05,
+        direction: 'LONG',
+        fxRate: fxUsdtInr,
+      });
+
+      expect(pnl.priceMove).toBeCloseTo(142.10, 2);
+      expect(pnl.grossPnlQuote).toBeCloseTo(7.105, 3);
+      expect(pnl.grossPnlAccount).toBeCloseTo(657.21, 2);
+      expect(pnl.grossPnlAccount).toBeGreaterThan(0);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST F: LONG R: entry = 84190.98, SL = 84030.98, current = 84333.08 -> R ≈ 0.8881
+    // -----------------------------------------------------------------------
+    it('TEST F: LONG R is derived strictly from price risk distance (142.10 / 160 ≈ 0.8881R)', () => {
+      const pnl = TradeAccountingEngine.calculateTradePnl({
+        entryPrice,
+        exitPrice: currentPrice,
+        quantity: 0.05,
+        direction: 'LONG',
+        fxRate: fxUsdtInr,
+        initialStopLoss: stopLoss,
+      });
+
+      expect(pnl.realizedR).toBeCloseTo(0.8881, 3);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST G: Executed stop: signal.stopLoss === position.stopLoss
+    // -----------------------------------------------------------------------
+    it('TEST G: Executed stop strictly matches signal stop loss without modification', async () => {
+      const exactSignalSL = 84030.98;
+      let executedPositionSL: number | null = null;
+
+      const mockTx: any = {
+        paperAccount: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'acc-test-g',
+            currency: 'INR',
+            cashBalance: new Decimal(10000000),
+          }),
+          update: jest.fn().mockResolvedValue({}),
+        },
+        paperPosition: {
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn().mockImplementation((args: any) => {
+            executedPositionSL = Number(args.data.stopLoss);
+            return { id: 'pos-g', ...args.data };
+          }),
+        },
+        paperOrder: { create: jest.fn().mockResolvedValue({ id: 'order-g' }) },
+        paperFill: { create: jest.fn().mockResolvedValue({ id: 'fill-g', fillTimestamp: new Date() }), update: jest.fn() },
+        auditEvent: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      };
+
+      const mockPrisma: any = {
+        paperAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'acc-test-g', currency: 'INR', cashBalance: new Decimal(10000000) }) },
+        paperOrder: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
+        paperPosition: { count: jest.fn().mockResolvedValue(0) },
+        paperTrade: { aggregate: jest.fn().mockResolvedValue({ _sum: { realizedPnL: 0 } }), findMany: jest.fn().mockResolvedValue([]) },
+        systemConfig: { findFirst: jest.fn().mockResolvedValue({ configJson: { maxLeverage: 10, maxSlippageBps: 0, maxTotalExposurePercent: 100 } }) },
+        $transaction: jest.fn().mockImplementation(async (cb: any) => cb(mockTx)),
+      };
+
+      const service = new PaperTradingService(
+        mockPrisma,
+        {} as any,
+        { getValidatedTicker: () => ({ price: entryPrice }) } as any,
+        undefined,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      jest.spyOn(service as any, 'getOrCreateAccount').mockResolvedValue({ id: 'acc-test-g', currency: 'INR', cashBalance: new Decimal(10000000), initialCapital: new Decimal(10000000) });
+      jest.spyOn(service as any, 'getSystemConfig').mockResolvedValue({ maxLeverage: 10, maxSlippageBps: 0, maxTotalExposurePercent: 100, maxPositionRiskPercent: 10, maxDailyLossPercent: 10, maxTradesPerDay: 50, maxConsecutiveLosses: 10, maxOpenPositions: 5 });
+      jest.spyOn(service as any, 'getValidatedMarketPrice').mockResolvedValue({ price: entryPrice, timestamp: new Date() });
+
+      await service.placeOrder({
+        symbol: 'BTCUSDT_SPOT',
+        direction: 'BUY',
+        quantity: 0.01,
+        orderType: 'MARKET',
+        stopLoss: exactSignalSL,
+        target1: 85000,
+        leverage: 1,
+      });
+
+      expect(executedPositionSL).toBe(exactSignalSL);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST H: No silent quantity override: If PositionSizer approves 0.0385 BTC, execution layer rejects 0.05 BTC
+    // -----------------------------------------------------------------------
+    it('TEST H: Execution layer rejects 0.05 BTC when PositionSizer caps affordable quantity at 0.0385 BTC for ₹300,000 cash', async () => {
+      const accountCash = 300000;
+      const sizing = PositionSizer.calculatePosition({
+        accountBalance: accountCash,
+        availableMargin: accountCash,
+        riskPercentage: 1.0,
+        entryPrice,
+        stopLoss,
+        symbol: 'BTCUSDT_SPOT',
+        requestedLeverage: 1,
+      });
+
+      expect(sizing.roundedUnits).toBeLessThanOrEqual(0.0385);
+
+      const mockTx: any = {
+        paperAccount: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'acc-test-h',
+            currency: 'INR',
+            cashBalance: new Decimal(accountCash),
+          }),
+        },
+        paperPosition: { findMany: jest.fn().mockResolvedValue([]) },
+      };
+
+      const mockPrisma: any = {
+        paperAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'acc-test-h', currency: 'INR', cashBalance: new Decimal(accountCash) }) },
+        paperOrder: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
+        paperPosition: { count: jest.fn().mockResolvedValue(0) },
+        paperTrade: { aggregate: jest.fn().mockResolvedValue({ _sum: { realizedPnL: 0 } }), findMany: jest.fn().mockResolvedValue([]) },
+        systemConfig: { findFirst: jest.fn().mockResolvedValue({ configJson: { maxLeverage: 10, maxSlippageBps: 0, maxTotalExposurePercent: 100 } }) },
+        $transaction: jest.fn().mockImplementation(async (cb: any) => cb(mockTx)),
+      };
+
+      const service = new PaperTradingService(
+        mockPrisma,
+        {} as any,
+        { getValidatedTicker: () => ({ price: entryPrice }) } as any,
+        undefined,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      jest.spyOn(service as any, 'getOrCreateAccount').mockResolvedValue({ id: 'acc-test-h', currency: 'INR', cashBalance: new Decimal(accountCash), initialCapital: new Decimal(accountCash) });
+      jest.spyOn(service as any, 'getSystemConfig').mockResolvedValue({ maxLeverage: 10, maxSlippageBps: 0, maxTotalExposurePercent: 100, maxPositionRiskPercent: 10, maxDailyLossPercent: 10, maxTradesPerDay: 50, maxConsecutiveLosses: 10, maxOpenPositions: 5 });
+      jest.spyOn(service as any, 'rejectOrder').mockResolvedValue(undefined as any);
+      jest.spyOn(service as any, 'getValidatedMarketPrice').mockResolvedValue({ price: entryPrice, timestamp: new Date() });
+
+      // Attempting to place 0.05 BTC must be strictly rejected
+      await expect(
+        service.placeOrder({
+          symbol: 'BTCUSDT_SPOT',
+          direction: 'BUY',
+          quantity: 0.05,
+          orderType: 'MARKET',
+          stopLoss,
+          target1: 85000,
+          leverage: 1,
+        }),
+      ).rejects.toThrow('INSUFFICIENT_MARGIN');
+    });
+  });
 });

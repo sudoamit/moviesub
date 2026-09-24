@@ -1929,8 +1929,12 @@ export class AlgoBotsService implements OnModuleInit {
       const tradeDecisionId = commitRes.tradeDecisionId;
       await this.recordBotTrigger(bot.id, signal);
 
-      // 3. Execution State Machine Lifecycle Management
-      const quantity = decisionResult.plannedLevels?.quantity || (resolvedContract ? resolvedContract.lotSize * bot.lots : 1);
+      const quantity = decisionResult.plannedLevels?.quantity;
+      if (!quantity || quantity <= 0) {
+        throw new Error(
+          `[EXECUTION ABORTED] Authoritative planned quantity is non-positive (${quantity}) for bot '${bot.id}'. Execution cannot proceed with unvalidated fallback.`,
+        );
+      }
       try {
         this.lastExecutionAttempt = new Date();
         await this.markExecutionStarted(executionId);

@@ -178,6 +178,14 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   // Unit / Quantity sizing
   const inrRiskPerUnit = riskPerUnit * cryptoInrRate;
   let calculatedUnits = inrRiskPerUnit > 0 ? plannedRiskAmount / inrRiskPerUnit : 0;
+
+  // CASH MARGIN CONSTRAINT: For true spot, position quantity must not exceed available cash
+  const unitPriceAccount = entryPrice * cryptoInrRate;
+  const maxUnitsByCash = unitPriceAccount > 0 ? accountBalance / unitPriceAccount : 0;
+  if (isSpot) {
+    calculatedUnits = Math.min(calculatedUnits, maxUnitsByCash);
+  }
+
   let finalUnits = 0;
   let lotsCount = 0;
 

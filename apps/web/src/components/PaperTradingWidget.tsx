@@ -170,44 +170,45 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       }
     }
 
-    // Dynamic, mathematically guaranteed directional SL & TP relative to execution CMP
-    const defaultRisk = isCrypto ? 250 : isGold ? 20 : 25;
-    const computedSL =
-      side === 'BUY'
-        ? activeSignal?.stopLoss && Number(activeSignal.stopLoss) < cmp
-          ? Number(activeSignal.stopLoss)
-          : Number((cmp - defaultRisk).toFixed(2))
-        : activeSignal?.stopLoss && Number(activeSignal.stopLoss) > cmp
-          ? Number(activeSignal.stopLoss)
-          : Number((cmp + defaultRisk).toFixed(2));
+    if (isSpotInstrument && requestedLeverage > 1) {
+      setStatusMessage('❌ Spot instruments support maximum 1x leverage. Leveraged trading is strictly prohibited on Spot.');
+      setTimeout(() => setStatusMessage(null), 5000);
+      return;
+    }
 
-    const riskDist = Math.abs(cmp - computedSL);
-    const computedTP1 =
-      side === 'BUY'
-        ? activeSignal?.takeProfits?.tp1 && Number(activeSignal.takeProfits.tp1) > cmp
-          ? Number(activeSignal.takeProfits.tp1)
-          : Number((cmp + riskDist * 1.5).toFixed(2))
-        : activeSignal?.takeProfits?.tp1 && Number(activeSignal.takeProfits.tp1) < cmp
-          ? Number(activeSignal.takeProfits.tp1)
-          : Number((cmp - riskDist * 1.5).toFixed(2));
+    // Authoritative Stop Loss and Take Profit strictly sourced from strategy signal
+    const strategySL = activeSignal?.stopLoss ? Number(activeSignal.stopLoss) : null;
+    if (!strategySL || strategySL <= 0) {
+      setStatusMessage('❌ Strategy signal missing authoritative stop loss. Execution blocked.');
+      setTimeout(() => setStatusMessage(null), 5000);
+      return;
+    }
 
-    const computedTP2 =
-      side === 'BUY'
-        ? activeSignal?.takeProfits?.tp2 && Number(activeSignal.takeProfits.tp2) > computedTP1
-          ? Number(activeSignal.takeProfits.tp2)
-          : Number((cmp + riskDist * 2.5).toFixed(2))
-        : activeSignal?.takeProfits?.tp2 && Number(activeSignal.takeProfits.tp2) < computedTP1
-          ? Number(activeSignal.takeProfits.tp2)
-          : Number((cmp - riskDist * 2.5).toFixed(2));
+    if (side === 'BUY' && strategySL >= cmp) {
+      setStatusMessage(`❌ Invalid stop loss geometry: SL (${strategySL}) must be strictly below CMP (${cmp}) for BUY.`);
+      setTimeout(() => setStatusMessage(null), 5000);
+      return;
+    }
 
-    const computedTP3 =
-      side === 'BUY'
-        ? activeSignal?.takeProfits?.tp3 && Number(activeSignal.takeProfits.tp3) > computedTP2
-          ? Number(activeSignal.takeProfits.tp3)
-          : Number((cmp + riskDist * 4.0).toFixed(2))
-        : activeSignal?.takeProfits?.tp3 && Number(activeSignal.takeProfits.tp3) < computedTP2
-          ? Number(activeSignal.takeProfits.tp3)
-          : Number((cmp - riskDist * 4.0).toFixed(2));
+    if (side === 'SELL' && strategySL <= cmp) {
+      setStatusMessage(`❌ Invalid stop loss geometry: SL (${strategySL}) must be strictly above CMP (${cmp}) for SELL.`);
+      setTimeout(() => setStatusMessage(null), 5000);
+      return;
+    }
+
+    const finalSL = strategySL;
+    const finalTP1 = activeSignal?.takeProfits?.tp1 ? Number(activeSignal.takeProfits.tp1) : null;
+    const finalTP2 = activeSignal?.takeProfits?.tp2 ? Number(activeSignal.takeProfits.tp2) : null;
+    const finalTP3 = activeSignal?.takeProfits?.tp3 ? Number(activeSignal.takeProfits.tp3) : null;
+
+    if (!finalTP1 || (side === 'BUY' && finalTP1 <= cmp) || (side === 'SELL' && finalTP1 >= cmp)) {
+      setStatusMessage('❌ Invalid take profit (TP1) geometry relative to CMP. Execution blocked.');
+      setTimeout(() => setStatusMessage(null), 5000);
+      return;
+    }
+
+    const savedBalanceStr = typeof window !== 'undefined' ? localStorage.getItem('quant_account_balance') : null;
+    const clientAccountBalance = savedBalanceStr && !isNaN(Number(savedBalanceStr)) ? Number(savedBalanceStr) : undefined;
 
     try {
       setIsSubmitting(true);
@@ -222,11 +223,12 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           orderType: 'MARKET',
           allowPriceOverride: true,
           price: cmp,
-          stopLoss: computedSL,
-          target1: computedTP1,
-          target2: computedTP2,
-          target3: computedTP3,
+          stopLoss: finalSL,
+          target1: finalTP1,
+          target2: finalTP2,
+          target3: finalTP3,
           leverage: requestedLeverage,
+          accountBalance: clientAccountBalance,
         }),
       });
 

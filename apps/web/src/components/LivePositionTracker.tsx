@@ -809,6 +809,25 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? Number(((priceDifference / effectiveEntryPrice) * 100).toFixed(2))
         : 0;
 
+  // Development-only reconciliation check between frontend fallback and backend authoritative accounting
+  React.useEffect(() => {
+    if (process.env.NODE_ENV !== 'production' && acct) {
+      if (acct.netPnlAccount !== undefined && Math.abs(fallbackPnL - Number(acct.netPnlAccount)) > 5.0) {
+        console.warn(
+          `[FINANCIAL TRUTH RECONCILIATION] Backend net PnL (₹${acct.netPnlAccount}) differs from frontend fallback (₹${fallbackPnL}). Consuming authoritative backend value.`,
+        );
+      }
+      if (
+        (paperPosition as any)?.usedMargin !== undefined &&
+        Math.abs(fallbackMargin - Number((paperPosition as any).usedMargin)) > 5.0
+      ) {
+        console.warn(
+          `[FINANCIAL TRUTH RECONCILIATION] Backend margin used (₹${(paperPosition as any).usedMargin}) differs from frontend fallback (₹${fallbackMargin}). Consuming authoritative backend value.`,
+        );
+      }
+    }
+  }, [acct, fallbackPnL, fallbackMargin, paperPosition]);
+
   // Progress towards Targets
   const totalTargetDistance = Math.abs(tp2 - effectiveEntryPrice);
   const currentProgressDistance = Math.max(0, priceDifference);
