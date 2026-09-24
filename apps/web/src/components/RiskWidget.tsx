@@ -27,17 +27,22 @@ interface RiskWidgetProps {
 }
 
 export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
-  const isCrypto = selectedSignal?.symbol === 'BTCUSDT';
-  const isGold = selectedSignal?.symbol === 'XAUUSD' || selectedSignal?.symbol === 'GOLD';
+  const isCrypto = Boolean(selectedSignal?.symbol === 'BTCUSDT' || selectedSignal?.symbol === 'BTCUSDT_SPOT' || selectedSignal?.symbol?.includes('BTC'));
+  const isGold = Boolean(selectedSignal?.symbol === 'XAUUSD' || selectedSignal?.symbol === 'GOLD');
+  const isSpot = Boolean(selectedSignal?.symbol === 'BTCUSDT_SPOT' || selectedSignal?.symbol === 'BTCUSDT' || selectedSignal?.symbol === 'NIFTY_SPOT' || selectedSignal?.symbol === 'BANKNIFTY_SPOT');
   const currencySymbol = '₹'; // All values displayed in INR regardless of instrument
 
   // Persistent States with localStorage fallback
   const [accountBalance, setAccountBalance] = useState<number>(1000000);
   const [riskPercent, setRiskPercent] = useState<number>(1.0);
-  const [leverage, setLeverage] = useState<number>(5);
+  const [leverage, setLeverage] = useState<number>(isSpot ? 1 : 5);
   const [tradeMode, setTradeMode] = useState<'FO' | 'CASH'>('FO');
 
   useEffect(() => {
+    if (isSpot) {
+      setLeverage(1);
+      return;
+    }
     if (typeof window !== 'undefined') {
       const savedBal = localStorage.getItem('quant_account_balance');
       if (savedBal && !isNaN(Number(savedBal))) setAccountBalance(Number(savedBal));
@@ -51,7 +56,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
       const savedMode = localStorage.getItem('quant_sizing_mode');
       if (savedMode === 'FO' || savedMode === 'CASH') setTradeMode(savedMode);
     }
-  }, []);
+  }, [isSpot]);
 
   const [entryPrice, setEntryPrice] = useState<number>(24175.65);
   const [stopLoss, setStopLoss] = useState<number>(24086.6);
@@ -62,9 +67,9 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
 
   // Save leverage changes immediately to localStorage
   const handleLeverageChange = (newLev: number) => {
-    const val = Math.max(1, Math.min(125, newLev));
+    const val = isSpot ? 1 : Math.max(1, Math.min(125, newLev));
     setLeverage(val);
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && !isSpot) {
       localStorage.setItem('quant_risk_leverage', String(val));
     }
     showSavedToast(`⚡ Leverage set to ${val}x (Saved to Profile)`);
@@ -198,7 +203,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const rewardToRiskRatio =
     riskPerUnit > 0 ? Number((target2Distance / riskPerUnit).toFixed(2)) : 0;
 
-  const marginRequired = totalPositionValue / leverage;
+  const effectiveLeverage = isSpot ? 1 : leverage;
+  const marginRequired = isSpot ? totalPositionValue : totalPositionValue / effectiveLeverage;
   const freeMargin = Math.max(0, accountBalance - marginRequired);
   const marginUsagePercent =
     accountBalance > 0 ? Math.min(100, (marginRequired / accountBalance) * 100) : 0;
@@ -207,7 +213,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   // Quick Account Balance Presets (INR)
   const currentPresets = [50000, 100000, 200000, 500000, 1000000, 2500000, 5000000];
 
-  const leveragePresets = isCrypto ? [1, 5, 10, 20, 50, 100] : [1, 2, 4, 5, 10];
+  const leveragePresets = isSpot ? [1] : isGold ? [1, 2, 5] : [1, 2, 4, 5, 10];
 
   return (
     <div className="bg-[#0B0F19] border border-slate-800 rounded-xl p-4 sm:p-6 shadow-2xl font-mono space-y-5 relative overflow-hidden">

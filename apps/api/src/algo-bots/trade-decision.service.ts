@@ -15,6 +15,7 @@ import {
   PositionSizingService,
 } from '../trading-domain';
 import {
+  buildAccountingSnapshot,
   Direction,
   getAuthoritativeInstrument,
   hasInstrument,
@@ -22,6 +23,8 @@ import {
   IPositionSizing,
   ISignalSetup,
   MarketDataUnavailableError,
+  PointInTimeCurrencyConverter,
+  resolveMarginModel,
   SignalGrade,
   SignalState,
   StaleMarketDataError,
@@ -29,7 +32,7 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
 } from '@quant/shared';
-import { PortfolioRiskManager } from '@quant/risk-engine';
+import { PortfolioRiskManager, PositionSizer, TradeAccountingEngine } from '@quant/risk-engine';
 import { IAlgoBot } from './algo-bots.service';
 import { IPaperPortfolio } from '../paper-trading/execution-provider.interface';
 import { OptionContractResolver, isOptionsUnderlying } from './option-contract-resolver';
@@ -935,21 +938,24 @@ export class TradeDecisionService {
       }
     }
 
-    // Gate 13: Instrument-Aware Quantity & Risk Sizing Resolution
+    // Gate 13: Instrument-Aware Quantity & Risk Sizing Resolution via Canonical Risk Engine
     let resolvedQuantity = 1;
     let contractSize = 1;
     let instrument: IInstrument | null = null;
+    const initialCapital = portfolio ? Number(portfolio.initialCapital || 1000000) : 1000000;
+    const availableCash = portfolio
+      ? Number(portfolio.availableMargin ?? portfolio.cashBalance ?? initialCapital)
+      : initialCapital;
+
     try {
       const lookupSymbol =
         (signal as any).contractSymbol ||
         bot.symbol;
       instrument = getAuthoritativeInstrument(lookupSymbol);
-      resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
       contractSize = Number(instrument.contractSize || 1);
     } catch (err: any) {
       try {
         instrument = getAuthoritativeInstrument(bot.symbol);
-        resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
         contractSize = Number(instrument.contractSize || 1);
       } catch (innerErr: any) {
         reasons.push({
@@ -959,11 +965,90 @@ export class TradeDecisionService {
       }
     }
 
+    const requestedLeverage =
+      (bot as any).leverage ??
+      (bot as any).requestedLeverage ??
+      (signal as any).leverage ??
+      (instrument?.defaultLeverage ?? 1.0);
+
+    let sizing: IPositionSizing | null = null;
+    if (instrument && isLevelsValid && optEntry && sl) {
+      const botRiskPct =
+        typeof (bot as any).riskPercentage === 'number' && (bot as any).riskPercentage > 0
+          ? (bot as any).riskPercentage
+          : 1.0;
+
+      try {
+        sizing = PositionSizer.calculatePosition({
+          accountBalance: initialCapital,
+          availableMargin: availableCash,
+          riskPercentage: botRiskPct,
+          entryPrice: optEntry,
+          stopLoss: sl,
+          symbol: instrument.symbol,
+          instrument,
+          direction: signal.direction === 'BULLISH' ? 'BUY' : 'SELL',
+          requestedLeverage,
+        });
+
+        if (!sizing.isValid) {
+          let errCode = 'INVALID_QUANTITY';
+          if (sizing.rejectionReason?.includes('LEVERAGE_EXCEEDS_MAX')) {
+            errCode = 'LEVERAGE_EXCEEDS_MAX';
+          } else if (
+            sizing.rejectionReason?.includes('INSUFFICIENT_MARGIN') ||
+            sizing.rejectionReason?.includes('margin')
+          ) {
+            errCode = 'INSUFFICIENT_MARGIN';
+          }
+          reasons.push({
+            code: errCode,
+            message: sizing.rejectionReason || 'Position sizing rejected by risk engine',
+          });
+        }
+      } catch (sizingErr: any) {
+        reasons.push({
+          code: 'INVALID_QUANTITY',
+          message: sizingErr?.message || 'Position sizing failed',
+        });
+      }
+    }
+
+    const isOptionsBot =
+      (signal as any).executionInstrumentType === 'OPTION' ||
+      (bot as any).executionInstrumentType === 'OPTION';
+
+    if (sizing && sizing.isValid && instrument) {
+      if (isOptionsBot) {
+        const optionLotsQty = this.resolveOrderQuantity(bot, instrument);
+        const maxUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
+        resolvedQuantity = Math.min(maxUnits, optionLotsQty);
+      } else {
+        const rawBotQty = this.resolveOrderQuantity(bot, instrument);
+        const maxAuthoritativeUnits =
+          sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
+        resolvedQuantity = Math.min(rawBotQty, maxAuthoritativeUnits);
+        const effLot = Number(instrument.lotSize || 1);
+        const effPrec =
+          typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 4;
+        resolvedQuantity = Number((Math.floor(resolvedQuantity / effLot) * effLot).toFixed(effPrec));
+      }
+    } else if (instrument) {
+      try {
+        resolvedQuantity = this.resolveOrderQuantity(bot, instrument);
+      } catch {
+        resolvedQuantity = 1;
+      }
+    }
+
+    const quoteCurrency = instrument?.currency || 'INR';
+    const pitConverter = PointInTimeCurrencyConverter.getInstance();
+    const fxRate = quoteCurrency === 'INR' ? 1.0 : pitConverter.getRate(quoteCurrency, 'INR', Date.now()).fxRate;
+
     const riskDistance = isLevelsValid && optEntry && sl ? Math.abs(optEntry - sl) : 0;
     const riskAmount = isLevelsValid
-      ? Number((riskDistance * resolvedQuantity * contractSize).toFixed(2))
+      ? Number((riskDistance * resolvedQuantity * contractSize * fxRate).toFixed(2))
       : 0;
-    const initialCapital = portfolio ? Number(portfolio.initialCapital || 1000000) : 1000000;
     const riskPercent =
       initialCapital > 0 ? Number(((riskAmount / initialCapital) * 100).toFixed(2)) : 1.0;
 
@@ -1045,8 +1130,35 @@ export class TradeDecisionService {
           ? 'CRYPTO'
           : 'EQUITY');
 
-      const totalPosVal = (optEntry || 0) * resolvedQuantity * contractSize;
-      const proposedPosition: IPositionSizing = {
+      const totalPosValQuote = (optEntry || 0) * resolvedQuantity * contractSize;
+      const totalPosValINR = Number((totalPosValQuote * fxRate).toFixed(2));
+      const requiredMarginINR =
+        instMarginMode === 'SPOT'
+          ? totalPosValINR
+          : Number((totalPosValINR * instInitialMarginRate).toFixed(2));
+
+      // Explicit Invariant: requiredMargin <= availableCash
+      if (requiredMarginINR > availableCash) {
+        reasons.push({
+          code: 'INSUFFICIENT_MARGIN',
+          message: `Required margin (₹${requiredMarginINR.toFixed(2)}) exceeds available cash (₹${availableCash.toFixed(2)})`,
+        });
+      }
+
+      const proposedPosition: IPositionSizing = sizing && sizing.isValid ? {
+        ...sizing,
+        accountBalance: initialCapital,
+        riskPercentage: riskPercent,
+        riskAmount,
+        entryPrice: optEntry || 0,
+        stopLoss: sl || 0,
+        calculatedUnits: resolvedQuantity,
+        roundedUnits: resolvedQuantity,
+        totalPositionValue: totalPosValINR,
+        maximumLoss: riskAmount,
+        initialMarginRequired: requiredMarginINR,
+        isValid: isLevelsValid,
+      } : {
         accountBalance: initialCapital,
         riskPercentage: riskPercent,
         riskAmount,
@@ -1056,23 +1168,20 @@ export class TradeDecisionService {
         calculatedUnits: resolvedQuantity,
         lotSize: contractSize,
         roundedUnits: resolvedQuantity,
-        totalPositionValue: totalPosVal,
+        totalPositionValue: totalPosValINR,
         maximumLoss: riskAmount,
         leverage: instLeverage,
-        initialMarginRequired:
-          instMarginMode === 'SPOT'
-            ? totalPosVal
-            : totalPosVal * instInitialMarginRate,
-        maintenanceMarginRequired: totalPosVal * instMaintenanceMarginRate,
+        initialMarginRequired: requiredMarginINR,
+        maintenanceMarginRequired: totalPosValINR * instMaintenanceMarginRate,
         isValid: isLevelsValid,
         accountingSnapshot: {
           assetClass: instAssetType,
           contractSize,
           lotSize: 1,
           accountCurrency: 'INR',
-          quoteCurrency: 'INR',
+          quoteCurrency,
           fxPair: bot.symbol.includes('BTC') ? 'BTC/USDT' : `${bot.symbol}/INR`,
-          fxRate: 1.0,
+          fxRate,
           fxTimestamp: Date.now(),
           fxSource: 'PORTFOLIO_RISK_AUTH',
           fxSnapshotHash: 'hash',
@@ -1202,6 +1311,8 @@ export class TradeDecisionService {
         }
       : null;
 
+    const effectiveLev = sizing?.leverage ?? sizing?.resolvedMarginModel?.effectiveLeverage ?? (instrument?.marginMode === 'SPOT' ? 1.0 : (requestedLeverage || 1.0));
+
     const plannedLevels: IPlannedTradeLevels = {
       optimalEntry: optEntry || 0,
       stopLoss: sl || 0,
@@ -1209,7 +1320,7 @@ export class TradeDecisionService {
       target2: tp2,
       target3: tp3,
       quantity: resolvedQuantity,
-      leverage: 1.0,
+      leverage: effectiveLev,
       riskAmount,
       riskPercent,
     };
@@ -1221,6 +1332,9 @@ export class TradeDecisionService {
       resolvedQuantity,
       contractSize,
       initialCapital,
+      availableCash,
+      leverage: effectiveLev,
+      fxRate,
     };
 
     if (reasons.length > 0) {
@@ -1449,6 +1563,9 @@ export class TradeDecisionService {
               riskPercent: decisionResult.plannedLevels?.riskPercent
                 ? new Decimal(decisionResult.plannedLevels.riskPercent)
                 : null,
+              leverage: decisionResult.plannedLevels?.leverage
+                ? new Decimal(decisionResult.plannedLevels.leverage)
+                : new Decimal(1.0),
               signalSnapshotJson: decisionResult.signalSnapshotJson || null,
               marketSnapshotJson: decisionResult.marketSnapshotJson || null,
               riskSnapshotJson: decisionResult.riskSnapshotJson || null,
@@ -1541,6 +1658,9 @@ export class TradeDecisionService {
             riskPercent: decisionResult.plannedLevels?.riskPercent
               ? new Decimal(decisionResult.plannedLevels.riskPercent)
               : null,
+            leverage: decisionResult.plannedLevels?.leverage
+              ? new Decimal(decisionResult.plannedLevels.leverage)
+              : new Decimal(1.0),
             signalSnapshotJson: decisionResult.signalSnapshotJson || null,
             marketSnapshotJson: decisionResult.marketSnapshotJson || null,
             riskSnapshotJson: decisionResult.riskSnapshotJson || null,

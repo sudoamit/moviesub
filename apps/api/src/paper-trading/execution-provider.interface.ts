@@ -113,6 +113,22 @@ export interface IPaperPosition {
   pnlFormula?: string;
   targetProgressPercent?: number;
   highestTargetReached?: string;
+  priceMove?: number;
+  grossPnlQuote?: number;
+  grossPnlAccount?: number;
+  fees?: number;
+  slippage?: number;
+  accounting?: {
+    priceMove: number;
+    grossPnlQuote: number;
+    grossPnlAccount: number;
+    fees: number;
+    slippage: number;
+    netPnlAccount: number;
+    fxRate: number;
+    quoteCurrency: string;
+    accountCurrency: string;
+  };
 }
 
 export interface IPaperTradeHistory {

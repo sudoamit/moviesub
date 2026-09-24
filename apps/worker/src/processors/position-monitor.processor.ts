@@ -7,6 +7,7 @@ import {
   PositionState,
   OrderState,
   WS_EVENTS,
+  isLongPosition,
   ExecutionPriceResolver,
   ExecutionPriceSource,
   ValidatedLiveTickerResult,
@@ -187,7 +188,7 @@ export class PositionMonitorProcessor extends WorkerHost {
   ): Promise<boolean> {
     const entryPrice = Number(pos.entryPrice);
     const quantity = Number(pos.quantity);
-    const isBuy = pos.direction === Direction.BULLISH;
+    const isBuy = isLongPosition(pos.direction);
     const priceDiff = isBuy ? livePrice - entryPrice : entryPrice - livePrice;
 
     // Use ONLY persisted position values (never invent synthetic risk levels)

@@ -150,7 +150,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
 
   const handlePlaceOrder = async (overrideSide?: 'BUY' | 'SELL') => {
     const side = overrideSide || orderSide;
-    const effectiveLeverage = isCrypto ? 1 : leverage;
+    const requestedLeverage = leverage;
 
     if (isSpotInstrument && side === 'SELL') {
       const openPos = portfolio?.openPositions?.find(
@@ -226,7 +226,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           target1: computedTP1,
           target2: computedTP2,
           target3: computedTP3,
-          leverage: effectiveLeverage,
+          leverage: requestedLeverage,
         }),
       });
 
@@ -236,7 +236,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       }
 
       setStatusMessage(
-        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmpINR.toFixed(2)} (${leverage}x)`,
+        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmpINR.toFixed(2)} (${data?.leverage || requestedLeverage}x)`,
       );
       setTimeout(() => setStatusMessage(null), 5000);
       if (typeof window !== 'undefined') {

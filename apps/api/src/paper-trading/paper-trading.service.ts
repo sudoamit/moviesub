@@ -15,6 +15,7 @@ import {
   ExecutionPriceResolver,
   ExecutionPriceSource,
   MarketDataUnavailableError,
+  isLongPosition,
   OrderState,
   PositionState,
   RiskRejectionReason,
@@ -412,8 +413,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
       const entryPrice = Number(pos.entryPrice);
       const quantity = Number(pos.quantity);
-      const isBuy = pos.direction === Direction.BULLISH;
+      const isBuy = isLongPosition(pos.direction);
       const charges = (pos.chargesJson as any) || { totalCharges: 0 };
+      const safeFees = charges.totalChargesAccount ?? charges.totalCharges ?? 0;
       // Quote-currency conversion via point-in-time FX rate
       const targetSymbol = (pos.contractSymbol && pos.contractSymbol.trim().length > 0)
         ? pos.contractSymbol.trim().toUpperCase()
@@ -440,8 +442,10 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         quantity,
         direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
         fxRate,
-        fees: charges.totalCharges,
+        fees: safeFees,
         accountingSnapshot: openingSnapshot ?? undefined,
+        stopLoss: pos.stopLoss ? Number(pos.stopLoss) : undefined,
+        initialStopLoss: pos.initialStopLoss ? Number(pos.initialStopLoss) : undefined,
       });
       const unrealizedPnL = pnlCalc.netPnlAccount;
       const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : undefined;
@@ -1201,6 +1205,30 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     const baseLookupSymbol = symbol.includes(' ') ? symbol.split(' ')[0] : symbol;
     const openingInst = getAuthoritativeInstrument(baseLookupSymbol);
     const maxInstLeverage = openingInst.marginMode === 'SPOT' ? 1 : Number(config.maxLeverage || 5);
+    if (req.leverage !== undefined && req.leverage !== null) {
+      const requestedNum = Number(req.leverage);
+      if (requestedNum < 1) {
+        throw new BadRequestException('Requested leverage must be at least 1x.');
+      }
+      if (requestedNum > maxInstLeverage) {
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.MAX_LEVERAGE,
+          `[LEVERAGE_EXCEEDS_MAX] Instrument ${openingInst.symbol} (${openingInst.marginMode}) does not support ${req.leverage}x leverage. Maximum allowable leverage is ${maxInstLeverage}x.`,
+          idempotencyKey,
+          correlationId,
+        );
+        throw new BadRequestException(
+          `Order Rejected [LEVERAGE_EXCEEDS_MAX]: Instrument ${openingInst.symbol} (${openingInst.marginMode}) does not support ${req.leverage}x leverage. Maximum allowable leverage is ${maxInstLeverage}x.`,
+        );
+      }
+    }
     const requestedLeverage = req.leverage ?? (openingInst.marginMode === 'SPOT' ? 1 : Math.min(5, maxInstLeverage));
     const effLeverage = Math.max(1, Math.min(requestedLeverage, maxInstLeverage));
     const openingQuoteCurrency = openingInst.currency;
@@ -1269,10 +1297,10 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         0,
       );
 
-      // Check available cash balance against required margin + entry charges
+      // Invariant: requiredMargin <= availableCash before fill
       const txAvailable = txCash - reconciledUsedMargin;
       const totalCashRequired = requiredMargin + charges.totalCharges;
-      if (txAvailable < totalCashRequired) {
+      if (txAvailable < totalCashRequired || requiredMargin > txAvailable || requiredMargin > txCash) {
         await this.rejectOrder(
           account.id,
           symbol,
@@ -1798,7 +1826,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     // Apply exit slippage simulation
     const exitSlippage = ExecutionPriceResolver.calculateSlippage(
       exitPrice,
-      pos.direction === Direction.BULLISH ? 'SELL' : 'BUY',
+      isLongPosition(pos.direction) ? 'SELL' : 'BUY',
       config.maxSlippageBps ?? 50,
     );
     const finalExitPrice = Number(exitSlippage.fillPrice.toFixed(2));
@@ -1817,8 +1845,10 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       pos.contractSymbol || pos.symbol,
     );
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
-    const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
-    const isBuy = pos.direction === Direction.BULLISH;
+    const entryChargesAmt = Number(entryCharges.totalChargesAccount ?? entryCharges.totalCharges ?? 0);
+    const exitChargesAmt = Number(exitCharges.totalChargesAccount ?? exitCharges.totalCharges ?? 0);
+    const totalCharges = Number((entryChargesAmt + exitChargesAmt).toFixed(2));
+    const isBuy = isLongPosition(pos.direction);
 
     // Determine outcome classification directly without string heuristics
     const validOutcomes = new Set([
@@ -2669,21 +2699,61 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
         const entryPrice = Number(pos.entryPrice);
         const quantity = Number(pos.quantity);
-        const isBuy = pos.direction === Direction.BULLISH;
+        const isBuy = isLongPosition(pos.direction);
         const charges = (pos.chargesJson as any) || { totalCharges: 0 };
         const snapshot =
           (pos.executionEventsJson as any)?.accountingSnapshot ??
           (pos.featureSnapshotJson as any)?.accountingSnapshot;
+
+        const baseSym = pos.symbol.includes(' ') ? pos.symbol.split(' ')[0] : pos.symbol;
+        let quoteCurrency = snapshot?.quoteCurrency;
+        if (!quoteCurrency) {
+          try {
+            const inst = getAuthoritativeInstrument(baseSym);
+            quoteCurrency = inst.currency;
+          } catch {
+            quoteCurrency = 'INR';
+          }
+        }
+        const accountCurrency = 'INR';
+        const effectiveFx =
+          snapshot?.fxRate ??
+          (quoteCurrency === accountCurrency
+            ? 1.0
+            : PointInTimeCurrencyConverter.getInstance().getRate(quoteCurrency, accountCurrency, Date.now()).fxRate);
+
+        const safeFees = charges.totalChargesAccount ?? charges.totalCharges ?? 0;
+        const stopLoss = pos.stopLoss ? Number(pos.stopLoss) : (pos.initialStopLoss ? Number(pos.initialStopLoss) : undefined);
+        const initialStopLoss = pos.initialStopLoss ? Number(pos.initialStopLoss) : stopLoss;
 
         const pnlCalc = TradeAccountingEngine.calculateTradePnl({
           entryPrice,
           exitPrice: livePrice,
           quantity,
           direction: isBuy ? Direction.BULLISH : Direction.BEARISH,
-          fxRate: snapshot?.fxRate ?? 1.0,
-          fees: charges.totalCharges,
+          fxRate: effectiveFx,
+          fees: safeFees,
           accountingSnapshot: snapshot,
+          stopLoss,
+          initialStopLoss,
         });
+
+        const priceMove = Number((isBuy ? livePrice - entryPrice : entryPrice - livePrice).toFixed(4));
+        const riskAnchor = initialStopLoss ?? stopLoss;
+        const riskDistance = riskAnchor ? Math.abs(entryPrice - riskAnchor) : 0;
+        const unrealizedR = riskDistance > 0 ? Number((priceMove / riskDistance).toFixed(4)) : pnlCalc.realizedR;
+
+        const accounting = {
+          priceMove,
+          grossPnlQuote: pnlCalc.grossPnlQuote,
+          grossPnlAccount: pnlCalc.grossPnlAccount,
+          fees: pnlCalc.fees,
+          slippage: pnlCalc.slippage,
+          netPnlAccount: pnlCalc.netPnlAccount,
+          fxRate: effectiveFx,
+          quoteCurrency,
+          accountCurrency,
+        };
 
         return {
           id: pos.id,
@@ -2704,7 +2774,12 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           currentPrice: livePrice,
           livePrice,
           unrealizedPnL: pnlCalc.netPnlAccount,
-          unrealizedR: pnlCalc.realizedR,
+          unrealizedR,
+          priceMove,
+          grossPnlQuote: pnlCalc.grossPnlQuote,
+          grossPnlAccount: pnlCalc.grossPnlAccount,
+          fees: pnlCalc.fees,
+          slippage: pnlCalc.slippage,
           stopLoss: pos.stopLoss ? Number(pos.stopLoss) : null,
           initialStopLoss: pos.initialStopLoss ? Number(pos.initialStopLoss) : null,
           target1: pos.target1 ? Number(pos.target1) : null,
@@ -2717,6 +2792,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           tradeDecision: pos.tradeDecision,
           execution: pos.execution,
           fills: pos.fills,
+          accounting,
         };
       }),
     );

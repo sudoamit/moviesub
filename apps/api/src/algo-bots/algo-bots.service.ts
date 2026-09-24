@@ -1993,6 +1993,7 @@ export class AlgoBotsService implements OnModuleInit {
           strategyDirection: signal.direction,
           sourceBotId: bot.id,
           quantity,
+          leverage: decisionResult.plannedLevels?.leverage,
           orderType: 'MARKET',
           signalPrice: executionSignal.entryZone?.optimal,
           signalTime: canonicalCandleFormatted,

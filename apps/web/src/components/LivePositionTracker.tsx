@@ -194,10 +194,11 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   };
 
   const direction = signal?.direction || 'BULLISH';
+  const rawPosDir = (paperPosition as any)?.direction;
   const effectiveDirection = paperPosition
-    ? paperPosition.direction === 'BUY'
-      ? 'BULLISH'
-      : 'BEARISH'
+    ? (rawPosDir === 'BUY' || rawPosDir === 'BULLISH' || rawPosDir === 'LONG'
+        ? 'BULLISH'
+        : 'BEARISH')
     : direction;
   const isBull = effectiveDirection === 'BULLISH';
   const hasActiveTrade = Boolean(paperPosition);
@@ -673,22 +674,23 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // FX rates from backend running position (Gold: USD/INR 87.5, BTC: USDT/INR 92.5)
   const cryptoFxRate = (paperPosition as any)?.fxRateUsed ?? (isGold ? 87.5 : isCrypto ? 92.5 : 1.0);
 
-  // Read leverage from localStorage or default (5x for Gold/Crypto CFD, 1x for Indian indices)
-  const defaultLeverage = isCrypto || isGold ? 5 : 1;
+  // Read leverage from localStorage or default (1x for BTC spot & Indian indices, 5x for Gold CFD)
+  const defaultLeverage = isGold ? 5 : 1;
   const [activeLeverage, setActiveLeverage] = React.useState<number>(defaultLeverage);
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('quant_risk_leverage');
-      if (saved && !isNaN(Number(saved)) && Number(saved) > 1) {
+      if (saved && !isNaN(Number(saved)) && Number(saved) > 1 && !isCrypto) {
         setActiveLeverage(Number(saved));
       } else {
         setActiveLeverage(defaultLeverage);
       }
     }
-  }, [defaultLeverage]);
+  }, [defaultLeverage, isCrypto]);
 
-  const effectiveLeverage =
-    (paperPosition as any)?.leverage || (activeLeverage > 1 ? activeLeverage : defaultLeverage);
+  const effectiveLeverage = isCrypto
+    ? 1
+    : ((paperPosition as any)?.leverage ? Number((paperPosition as any).leverage) : (activeLeverage > 1 ? activeLeverage : defaultLeverage));
 
   const rawLockedProfit = isProfitLocked
     ? Math.abs(effectiveEntryPrice - currentSL) * numericQty
@@ -749,31 +751,50 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? effectiveCurrentPrice - effectiveEntryPrice
         : effectiveEntryPrice - effectiveCurrentPrice;
 
-  // Margin used: consume backend authoritative usedMargin or calculate fallback
+  // Margin used: consume backend authoritative usedMargin or calculate fallback (SPOT = 100% notional)
   const fallbackMargin =
     isOptionMode && !isCrypto && !isGold
       ? Number((effectiveEntryPrice * numericQty).toFixed(2))
-      : Number(
-          (
-            (effectiveEntryPrice * numericQty * (isCrypto || isGold ? cryptoFxRate : 1)) /
-            (effectiveLeverage || 1)
-          ).toFixed(2),
-        );
+      : isCrypto
+        ? Number((effectiveEntryPrice * numericQty * cryptoFxRate).toFixed(2))
+        : Number(
+            (
+              (effectiveEntryPrice * numericQty * (isGold ? cryptoFxRate : 1)) /
+              (effectiveLeverage || 1)
+            ).toFixed(2),
+          );
 
   const totalMarginUsed =
     (paperPosition as any)?.usedMargin !== undefined
       ? Number((paperPosition as any).usedMargin)
       : fallbackMargin;
 
-  // Presentation-only Running P&L: consume backend authoritative unrealized P&L or fallback to live calculated P&L
+  // Presentation-only Running P&L: consume backend authoritative accounting breakdown or fallback
+  const acct = (paperPosition as any)?.accounting;
+  const canonicalPriceMove = acct?.priceMove !== undefined
+    ? Number(acct.priceMove)
+    : Number(priceDifference.toFixed(2));
   const fallbackPnL = Number(
     (priceDifference * numericQty * (isCrypto || isGold ? cryptoFxRate : 1)).toFixed(2),
   );
+  const canonicalGrossPnlAccount = acct?.grossPnlAccount !== undefined
+    ? Number(acct.grossPnlAccount)
+    : fallbackPnL;
+  const canonicalGrossPnlQuote = acct?.grossPnlQuote !== undefined
+    ? Number(acct.grossPnlQuote)
+    : Number((priceDifference * numericQty).toFixed(4));
+  const canonicalFees = acct?.fees !== undefined
+    ? Number(acct.fees)
+    : ((paperPosition as any)?.charges?.totalCharges !== undefined
+        ? Number((paperPosition as any).charges.totalCharges)
+        : 0);
 
   const runningPnL =
-    (paperPosition as any)?.unrealizedPnL !== undefined
-      ? Number((paperPosition as any).unrealizedPnL)
-      : fallbackPnL;
+    acct?.netPnlAccount !== undefined
+      ? Number(acct.netPnlAccount)
+      : (paperPosition as any)?.unrealizedPnL !== undefined
+        ? Number((paperPosition as any).unrealizedPnL)
+        : fallbackPnL;
 
   const runningRMultiple =
     (paperPosition as any)?.unrealizedR !== undefined
@@ -1405,7 +1426,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                     ? `POSITION CLOSED • ${closedTradeSummary?.reason?.toUpperCase() || 'STOP LOSS HIT'}`
                     : isOptionMode && !isCrypto && !isGold
                       ? 'UNREALIZED RUNNING OPTION P&L'
-                      : 'UNREALIZED RUNNING SPOT P&L'}
+                      : 'NET UNREALIZED RUNNING P&L'}
                 </span>
                 <div className="flex items-center gap-1.5">
                   <span
@@ -1443,7 +1464,31 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                   {returnPercentage}% {isCrypto ? 'ROE' : ''})
                 </span>
               </div>
-              <span className="text-[10px] text-slate-300 block mt-1.5 font-bold">
+
+              {/* Accounting Breakdown: Price Move, Gross P&L, Fees */}
+              <div className="grid grid-cols-3 gap-2 mt-2 pt-2 border-t border-slate-800/80 text-[10px]">
+                <div>
+                  <span className="text-slate-400 block font-medium">PRICE MOVE</span>
+                  <span className={`font-bold ${canonicalPriceMove >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {canonicalPriceMove >= 0 ? '+' : ''}{canonicalPriceMove.toFixed(2)} pts
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-medium">GROSS P&L</span>
+                  <span className={`font-bold ${canonicalGrossPnlAccount >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {canonicalGrossPnlAccount >= 0 ? '+' : ''}{currencySymbol}{canonicalGrossPnlAccount.toFixed(2)}
+                    {isCrypto ? ` ($${canonicalGrossPnlQuote >= 0 ? '+' : ''}${canonicalGrossPnlQuote.toFixed(2)})` : ''}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-medium">FEES / CHARGES</span>
+                  <span className="font-bold text-amber-400">
+                    -{currencySymbol}{canonicalFees.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              <span className="text-[10px] text-slate-300 block mt-2 font-bold">
                 {isClosed ? (
                   <span className="text-slate-400 block mt-0.5">
                     Exited @ {nativeCurrency}
@@ -1468,16 +1513,20 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                   </>
                 ) : (
                   <>
-                    <span className={priceDifference >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    <span className={canonicalPriceMove >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
                       {isBull ? '🟢 LONG / BULLISH' : '🔻 SHORT / BEARISH'}:{' '}
-                      {priceDifference >= 0 ? '+' : ''}
-                      {dp(priceDifference).toFixed(2)} pts
+                      {canonicalPriceMove >= 0 ? '+' : ''}
+                      {dp(canonicalPriceMove).toFixed(2)} pts
                     </span>
                     <span className="text-slate-500 mx-1">•</span>
                     <span className="text-slate-400">
                       CMP: {nativeCurrency}
                       {dp(currentCMP).toFixed(2)} (Entry: {nativeCurrency}
                       {dp(spotEntryPrice).toFixed(2)})
+                    </span>
+                    <span className="text-slate-500 mx-1">•</span>
+                    <span className="text-cyan-400">
+                      Margin: {currencySymbol}{totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} ({effectiveLeverage}x)
                     </span>
                   </>
                 )}

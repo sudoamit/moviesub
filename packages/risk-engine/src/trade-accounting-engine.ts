@@ -21,6 +21,7 @@ export interface ITradeMarginCalculation {
 }
 
 export interface ITradePnlCalculation {
+  priceMove?: number;
   grossPnlQuote: number;
   quotePnl?: number;
   grossPnlAccount: number; // in INR
@@ -57,6 +58,8 @@ export interface ITradePnlParams {
   slippage?: number;
   slippageIncludedInPrices?: boolean;
   initialRiskAccount?: number;
+  stopLoss?: number;
+  initialStopLoss?: number;
   fxSnapshot?: IFxConversionResult;
   accountingSnapshot?: ITradeAccountingSnapshot;
 }
@@ -439,7 +442,8 @@ export class TradeAccountingEngine {
     }
 
     const isLong = isLongPosition(dir as any);
-    const priceDiff = isLong ? pExit - pEntry : pEntry - pExit;
+    const priceMove = Number((isLong ? pExit - pEntry : pEntry - pExit).toFixed(4));
+    const priceDiff = priceMove;
     const grossPnlQuote = Number((priceDiff * qty * cSize).toFixed(4));
     const grossPnlAccount = Number((grossPnlQuote * effectiveFx).toFixed(2));
 
@@ -448,11 +452,21 @@ export class TradeAccountingEngine {
     const slippageAccountCost = slipIncluded ? 0 : Number((safeSlippage * effectiveFx).toFixed(2));
     const netPnlAccount = Number((grossPnlAccount - safeFees - slippageAccountCost).toFixed(2));
 
-    const effRisk = Math.max(1, riskAcct > 0 && Number.isFinite(riskAcct) ? riskAcct : Math.abs(grossPnlAccount));
-    const rNumerator = riskAcct > 0 && Number.isFinite(riskAcct) ? grossPnlAccount : netPnlAccount;
-    const realizedR = Number((rNumerator / effRisk).toFixed(2));
+    let realizedR = 0;
+    if (typeof paramsOrEntryPrice === 'object' && (paramsOrEntryPrice.initialStopLoss || paramsOrEntryPrice.stopLoss)) {
+      const sl = paramsOrEntryPrice.initialStopLoss ?? paramsOrEntryPrice.stopLoss!;
+      const riskPoints = Math.abs(pEntry - sl);
+      realizedR = riskPoints > 0 ? Number((priceMove / riskPoints).toFixed(4)) : 0;
+    } else if (riskAcct > 0 && Number.isFinite(riskAcct)) {
+      realizedR = Number((grossPnlAccount / riskAcct).toFixed(2));
+    } else {
+      const effRisk = Math.max(1, Math.abs(grossPnlAccount));
+      const rNumerator = riskAcct > 0 && Number.isFinite(riskAcct) ? grossPnlAccount : netPnlAccount;
+      realizedR = Number((rNumerator / effRisk).toFixed(2));
+    }
 
     return {
+      priceMove,
       grossPnlQuote,
       quotePnl: grossPnlQuote,
       grossPnlAccount,
