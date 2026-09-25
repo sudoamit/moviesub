@@ -37,6 +37,9 @@ import {
 
 interface LivePositionTrackerProps {
   symbol: string;
+  timeframe?: string;
+  selectedStrategy?: string;
+  onSelectStrategy?: (strategy: any) => void;
   signal: ISignalSetup | null;
   livePrice: number;
   activePosition?: RunningPaperPosition | any | null;
@@ -120,6 +123,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   symbol,
+  timeframe = '15m',
+  selectedStrategy = 'SMC',
+  onSelectStrategy,
   signal,
   livePrice,
   activePosition,
@@ -139,6 +145,10 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   useEffect(() => {
     setIsOptionMode(symbol === 'NIFTY' || symbol === 'BANKNIFTY');
   }, [symbol]);
+
+  const effectiveStrategy = (signal?.strategy || signal?.strategyMode || selectedStrategy || 'SMC').toUpperCase();
+  const isSaiyanStrategy = effectiveStrategy.includes('SAIYAN');
+  const activeStrategyLabel = isSaiyanStrategy ? 'Saiyan OCC' : 'SMC';
 
   const [optionData, setOptionData] = useState<any>(null);
   const [bot, setBot] = useState<any>(null);
@@ -160,7 +170,15 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       if (!res.ok) return;
       const bots = await res.json();
       const norm = symbol.toUpperCase().replace(/_SPOT$/, '');
+      const currentStrat = (selectedStrategy || signal?.strategy || 'SMC').toUpperCase();
       const match = bots.find(
+        (b: any) =>
+          ((b.symbol === symbol ||
+            b.symbol === `${symbol}_SPOT` ||
+            b.symbol.toUpperCase().replace(/_SPOT$/, '') === norm ||
+            ((symbol === 'GOLD' || symbol === 'XAUUSD') && (b.symbol === 'XAUUSD' || b.symbol === 'GOLD'))) &&
+          (b.strategy?.toUpperCase() === currentStrat || (currentStrat.includes('SAIYAN') && b.strategy?.toUpperCase().includes('SAIYAN')))),
+      ) || bots.find(
         (b: any) =>
           b.symbol === symbol ||
           b.symbol === `${symbol}_SPOT` ||
@@ -169,11 +187,34 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       );
       setBot(match || null);
     } catch {}
-  }, [symbol]);
+  }, [symbol, selectedStrategy, signal?.strategy]);
 
   useEffect(() => {
     fetchBot();
   }, [fetchBot]);
+
+  const handleUpdateBotStrategy = async (newStrat: string) => {
+    if (!bot) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/algo-bots/${bot.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy: newStrat }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setBot(updated);
+        if (onSelectStrategy && (newStrat === 'SAIYAN_OCC' || newStrat === 'SMC' || newStrat === 'HYBRID')) {
+          onSelectStrategy(newStrat as any);
+        }
+        setManualCloseToast(`✓ Bot '${updated.name}' strategy updated to ${updated.strategy}`);
+        setTimeout(() => setManualCloseToast(null), 5000);
+      }
+    } catch (err: any) {
+      setManualCloseToast(`Failed to update bot strategy: ${err.message}`);
+      setTimeout(() => setManualCloseToast(null), 5000);
+    }
+  };
 
   const handleToggleBot = async () => {
     if (!bot || isTogglingBot) return;
@@ -187,7 +228,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         setBot(updated);
         setManualCloseToast(
           updated.isActive
-            ? `🤖 Bot '${updated.name}' ACTIVATED (Auto-Execute: ${updated.autoExecutePaper ? 'ON' : 'OFF'})`
+            ? `🤖 Bot '${updated.name}' ACTIVATED (Strategy: ${updated.strategy || 'SMC'}, Auto-Execute: ${updated.autoExecutePaper ? 'ON' : 'OFF'})`
             : `⏸️ Bot '${updated.name}' DEACTIVATED`,
         );
         setTimeout(() => setManualCloseToast(null), 5000);
@@ -1326,7 +1367,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               ) : (
                 <>
                   <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
-                  SMC TRADE SETUP RADAR (STANDBY)
+                  {activeStrategyLabel.toUpperCase()} TRADE SETUP RADAR (STANDBY)
                 </>
               )}
             </h3>
@@ -1957,35 +1998,46 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             <span>
               {isOptionMode && !isCrypto && !isGold ? (
                 <>
-                  SMC Option Setup Armed • Underlying Trigger: <strong className="text-white">₹{dp(spotEntryPrice).toFixed(2)}</strong> | Option Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2.toFixed(1)}R</strong> | Planned Stop Risk: <strong className="text-rose-400">₹{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> | Premium Outlay: <strong className="text-amber-300">₹{totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                  {activeStrategyLabel} Option Setup Armed • Underlying Trigger: <strong className="text-white">₹{dp(spotEntryPrice).toFixed(2)}</strong> | Option Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2.toFixed(1)}R</strong> | Planned Stop Risk: <strong className="text-rose-400">₹{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> | Premium Outlay: <strong className="text-amber-300">₹{totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
                 </>
               ) : (
                 <>
-                  SMC Setup Armed • Optimal Entry: <strong className="text-white">{nativeCurrency}{dp(spotEntryPrice).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2}R</strong> | Max Risk: <strong className="text-rose-400">{currencySymbol}{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                  {activeStrategyLabel} Setup Armed • Optimal Entry: <strong className="text-white">{nativeCurrency}{dp(spotEntryPrice).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2}R</strong> | Max Risk: <strong className="text-rose-400">{currencySymbol}{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
                 </>
               )}
             </span>
           </div>
           <div className="flex items-center gap-2">
             {bot && (
-              <button
-                type="button"
-                onClick={handleToggleBot}
-                disabled={isTogglingBot}
-                className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border flex items-center gap-1.5 transition-all ${
-                  bot.isActive
-                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/60 hover:bg-emerald-900/80'
-                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
-                }`}
-                title={
-                  bot.isActive
-                    ? 'Bot is ACTIVE: monitoring signals automatically'
-                    : 'Bot is INACTIVE: click to activate auto-monitoring'
-                }
-              >
-                <Bot className="w-3.5 h-3.5" />
-                {isTogglingBot ? 'Updating...' : bot.isActive ? '🤖 Bot: ACTIVE' : '🤖 Bot: OFF (Enable)'}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={bot.strategy?.toUpperCase().includes('SAIYAN') ? 'SAIYAN_OCC' : 'SMC'}
+                  onChange={(e) => handleUpdateBotStrategy(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 text-cyan-300 text-[11px] font-bold rounded px-2 py-1 focus:outline-none focus:border-cyan-500 cursor-pointer"
+                  title="Change bot strategy (SMC vs Saiyan OCC)"
+                >
+                  <option value="SMC">Bot: SMC</option>
+                  <option value="SAIYAN_OCC">Bot: Saiyan</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={handleToggleBot}
+                  disabled={isTogglingBot}
+                  className={`px-3 py-1.5 rounded-lg font-mono text-xs font-bold border flex items-center gap-1.5 transition-all ${
+                    bot.isActive
+                      ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/60 hover:bg-emerald-900/80'
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                  }`}
+                  title={
+                    bot.isActive
+                      ? 'Bot is ACTIVE: monitoring signals automatically'
+                      : 'Bot is INACTIVE: click to activate auto-monitoring'
+                  }
+                >
+                  <Bot className="w-3.5 h-3.5" />
+                  {isTogglingBot ? 'Updating...' : bot.isActive ? 'Active' : 'Off'}
+                </button>
+              </div>
             )}
 
             <button

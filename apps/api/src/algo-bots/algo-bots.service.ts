@@ -76,6 +76,7 @@ export interface IAlgoBot {
   id: string;
   name: string;
   symbol: string;
+  strategy?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string;
   direction: 'BULLISH' | 'BEARISH' | 'ANY';
   timeframe: string;
   minScore: number;
@@ -114,6 +115,7 @@ export class AlgoBotsService implements OnModuleInit {
       id: 'bot_nifty_smc_pro',
       name: 'NIFTY 15m Institutional Order Flow Scalper',
       symbol: 'NIFTY',
+      strategy: 'SMC',
       executionInstrument: 'NIFTY OPTION',
       executionInstrumentType: 'OPTION',
       signalSourceInstrument: 'NIFTY',
@@ -132,6 +134,7 @@ export class AlgoBotsService implements OnModuleInit {
       id: 'bot_banknifty_fvg',
       name: 'BANKNIFTY 15m Fair Value Gap Hunter',
       symbol: 'BANKNIFTY',
+      strategy: 'SMC',
       executionInstrument: 'BANKNIFTY OPTION',
       executionInstrumentType: 'OPTION',
       signalSourceInstrument: 'BANKNIFTY',
@@ -150,6 +153,7 @@ export class AlgoBotsService implements OnModuleInit {
       id: 'bot_btc_liquidity_sweep',
       name: 'BTCUSDT 15m Liquidity Pool Sweeper',
       symbol: 'BTCUSDT',
+      strategy: 'SMC',
       direction: 'BULLISH',
       timeframe: '15m',
       minScore: 75,
@@ -162,9 +166,26 @@ export class AlgoBotsService implements OnModuleInit {
       triggerCount: 0,
     },
     {
+      id: 'bot_btc_saiyan_occ',
+      name: 'BTCUSDT 15m Saiyan OCC Momentum Hunter',
+      symbol: 'BTCUSDT',
+      strategy: 'SAIYAN_OCC',
+      direction: 'ANY',
+      timeframe: '15m',
+      minScore: 80,
+      smcCondition: 'ANY_CONFLUENCE',
+      lots: 1,
+      autoExecutePaper: false,
+      notifyWebhook: false,
+      isActive: false,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    },
+    {
       id: 'bot_gold_order_flow',
       name: 'XAUUSD 15m Institutional Order Flow Scalper',
       symbol: 'XAUUSD',
+      strategy: 'SMC',
       direction: 'ANY',
       timeframe: '15m',
       minScore: 75,
@@ -258,6 +279,7 @@ export class AlgoBotsService implements OnModuleInit {
                 id: bot.id,
                 name: bot.name,
                 symbol: bot.symbol,
+                strategy: bot.strategy || 'SMC',
                 direction: bot.direction as any,
                 timeframe: bot.timeframe,
                 minScore: bot.minScore,
@@ -286,6 +308,7 @@ export class AlgoBotsService implements OnModuleInit {
           `[ALGO BOT CONFIG]\n` +
             `id: ${bot.id}\n` +
             `symbol: ${bot.symbol}\n` +
+            `strategy: ${bot.strategy}\n` +
             `isActive: ${bot.isActive}\n` +
             `autoExecutePaper: ${bot.autoExecutePaper}\n` +
             `timeframe: ${bot.timeframe}\n` +
@@ -298,6 +321,26 @@ export class AlgoBotsService implements OnModuleInit {
     }
   }
 
+  public normalizeStrategy(raw?: string): 'SMC' | 'SAIYAN_OCC' | 'HYBRID' {
+    if (!raw) return 'SMC';
+    const upper = String(raw).trim().toUpperCase();
+    if (upper === 'SAIYAN' || upper === 'SAIYAN_OCC' || upper.includes('SAIYAN')) return 'SAIYAN_OCC';
+    if (upper === 'HYBRID' || upper.includes('HYBRID')) return 'HYBRID';
+    return 'SMC';
+  }
+
+  public matchesSaiyanCondition(signal: ISignalSetup): boolean {
+    if (!signal) return false;
+    const strat = this.normalizeStrategy((signal as any).strategy || (signal as any).strategyMode);
+    if (strat === 'SAIYAN_OCC') return true;
+    const summary = signal.reasoning?.summary || '';
+    const htf = signal.reasoning?.htfStructure || '';
+    if (summary.includes('Saiyan') || htf.includes('Saiyan') || (signal.id && signal.id.startsWith('saiyan_'))) {
+      return true;
+    }
+    return false;
+  }
+
   /**
    * P1 #15 & P1 #11: Persistent Database Bot Configuration Read with Strict DB Error Handling
    */
@@ -307,10 +350,52 @@ export class AlgoBotsService implements OnModuleInit {
         const dbBots = await this.prisma.algoBot.findMany({
           orderBy: { createdAt: 'desc' },
         });
-        return dbBots.map((b) => ({
+        return dbBots.map((b) => {
+          const storedStrategy = b.strategy || 'SMC';
+          this.logger.log(`[BOT LOAD] botId=${b.id} storedStrategy=${storedStrategy}`);
+          return {
+            id: b.id,
+            name: b.name,
+            symbol: b.symbol,
+            strategy: storedStrategy,
+            direction: b.direction as any,
+            timeframe: b.timeframe,
+            minScore: b.minScore,
+            smcCondition: b.smcCondition as any,
+            lots: b.lots,
+            autoExecutePaper: b.autoExecutePaper,
+            notifyWebhook: b.notifyWebhook,
+            isActive: b.isActive,
+            createdAt: b.createdAt.toISOString(),
+            triggerCount: b.triggerCount,
+            executionInstrument: b.executionInstrument || undefined,
+            executionInstrumentType: b.executionInstrumentType || (b.executionInstrument?.toUpperCase().includes('OPTION') ? 'OPTION' : 'SPOT'),
+            signalSourceInstrument: b.signalSourceInstrument || undefined,
+            lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
+            lastTriggerDetails: b.lastTriggerDetails || undefined,
+          };
+        });
+      } catch (err: any) {
+        this.logger.error(`Database query failed in listBots(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration retrieval: ${err.message}`,
+        );
+      }
+    }
+    return this.presetBots;
+  }
+
+  async getBot(id: string): Promise<IAlgoBot | null> {
+    if (this.prisma) {
+      try {
+        const b = await this.prisma.algoBot.findUnique({ where: { id } });
+        if (!b) return null;
+        const storedStrategy = b.strategy || 'SMC';
+        return {
           id: b.id,
           name: b.name,
           symbol: b.symbol,
+          strategy: storedStrategy,
           direction: b.direction as any,
           timeframe: b.timeframe,
           minScore: b.minScore,
@@ -322,19 +407,21 @@ export class AlgoBotsService implements OnModuleInit {
           createdAt: b.createdAt.toISOString(),
           triggerCount: b.triggerCount,
           executionInstrument: b.executionInstrument || undefined,
-          executionInstrumentType: b.executionInstrumentType || (b.executionInstrument?.toUpperCase().includes('OPTION') ? 'OPTION' : 'SPOT'),
+          executionInstrumentType:
+            b.executionInstrumentType ||
+            (b.executionInstrument?.toUpperCase().includes('OPTION') ? 'OPTION' : 'SPOT'),
           signalSourceInstrument: b.signalSourceInstrument || undefined,
           lastTriggeredAt: b.lastTriggeredAt ? b.lastTriggeredAt.toISOString() : undefined,
           lastTriggerDetails: b.lastTriggerDetails || undefined,
-        }));
+        };
       } catch (err: any) {
-        this.logger.error(`Database query failed in listBots(): ${err.message}`);
+        this.logger.error(`Database query failed in getBot(): ${err.message}`);
         throw new InternalServerErrorException(
           `Database unavailable for bot configuration retrieval: ${err.message}`,
         );
       }
     }
-    return this.presetBots;
+    return this.presetBots.find((b) => b.id === id) || null;
   }
 
   async listExecutions(limit = 20) {
@@ -400,6 +487,7 @@ export class AlgoBotsService implements OnModuleInit {
 
     const newBotId = `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const name = dto.name || `${symbol} Custom SMC Bot`;
+    const strategy = this.normalizeStrategy(dto.strategy);
     const direction = dto.direction || 'ANY';
     const timeframe = this.normalizeTimeframe(dto.timeframe);
     const minScore = Number(dto.minScore || 80);
@@ -421,6 +509,7 @@ export class AlgoBotsService implements OnModuleInit {
             id: newBotId,
             name,
             symbol,
+            strategy,
             direction: direction as any,
             timeframe,
             minScore,
@@ -437,12 +526,13 @@ export class AlgoBotsService implements OnModuleInit {
         });
 
         this.logger.log(
-          `✓ [ALGO BOT CREATED] '${created.name}' (${created.symbol} ${created.direction})`,
+          `✓ [ALGO BOT CREATED] '${created.name}' (${created.symbol} ${created.direction}, strategy: ${created.strategy})`,
         );
         return {
           id: created.id,
           name: created.name,
           symbol: created.symbol,
+          strategy: created.strategy || strategy,
           direction: created.direction as any,
           timeframe: created.timeframe,
           minScore: created.minScore,
@@ -468,6 +558,7 @@ export class AlgoBotsService implements OnModuleInit {
       id: newBotId,
       name,
       symbol,
+      strategy,
       direction,
       timeframe,
       minScore,
@@ -481,6 +572,82 @@ export class AlgoBotsService implements OnModuleInit {
     };
     this.presetBots.unshift(fallbackBot);
     return fallbackBot;
+  }
+
+  async updateBot(id: string, dto: Partial<IAlgoBot>): Promise<IAlgoBot> {
+    if (this.prisma) {
+      try {
+        const existing = await this.prisma.algoBot.findUnique({ where: { id } });
+        if (!existing) {
+          throw new NotFoundException(`Bot '${id}' not found`);
+        }
+
+        const oldStrategy = existing.strategy || 'SMC';
+        let newStrategy = oldStrategy;
+        if (dto.strategy !== undefined && dto.strategy !== null) {
+          newStrategy = this.normalizeStrategy(dto.strategy);
+        }
+
+        this.logger.log(
+          `[STRATEGY UPDATE] botId=${id} oldStrategy=${oldStrategy} newStrategy=${newStrategy}`,
+        );
+
+        const updateData: any = {};
+        if (dto.name !== undefined) updateData.name = dto.name;
+        if (dto.symbol !== undefined) updateData.symbol = dto.symbol;
+        if (dto.direction !== undefined) updateData.direction = dto.direction as any;
+        if (dto.timeframe !== undefined) updateData.timeframe = this.normalizeTimeframe(dto.timeframe);
+        if (dto.minScore !== undefined) updateData.minScore = Number(dto.minScore);
+        if (dto.smcCondition !== undefined) updateData.smcCondition = dto.smcCondition as any;
+        if (dto.lots !== undefined) updateData.lots = Number(dto.lots);
+        if (dto.autoExecutePaper !== undefined) updateData.autoExecutePaper = Boolean(dto.autoExecutePaper);
+        if (dto.notifyWebhook !== undefined) updateData.notifyWebhook = Boolean(dto.notifyWebhook);
+        if (dto.isActive !== undefined) updateData.isActive = Boolean(dto.isActive);
+        if (dto.strategy !== undefined) updateData.strategy = newStrategy;
+
+        const updated = await this.prisma.algoBot.update({
+          where: { id },
+          data: updateData,
+        });
+
+        return {
+          id: updated.id,
+          name: updated.name,
+          symbol: updated.symbol,
+          strategy: updated.strategy || 'SMC',
+          direction: updated.direction as any,
+          timeframe: updated.timeframe,
+          minScore: updated.minScore,
+          smcCondition: updated.smcCondition as any,
+          lots: updated.lots,
+          autoExecutePaper: updated.autoExecutePaper,
+          notifyWebhook: updated.notifyWebhook,
+          isActive: updated.isActive,
+          createdAt: updated.createdAt.toISOString(),
+          triggerCount: updated.triggerCount,
+          executionInstrument: updated.executionInstrument || undefined,
+          signalSourceInstrument: updated.signalSourceInstrument || undefined,
+        };
+      } catch (err: any) {
+        if (err instanceof NotFoundException) throw err;
+        this.logger.error(`Database update failed in updateBot(): ${err.message}`);
+        throw new InternalServerErrorException(
+          `Database unavailable for bot configuration update: ${err.message}`,
+        );
+      }
+    }
+
+    const bot = this.presetBots.find((b) => b.id === id);
+    if (!bot) throw new NotFoundException(`Bot '${id}' not found`);
+    const oldStrategy = bot.strategy || 'SMC';
+    if (dto.strategy !== undefined && dto.strategy !== null) {
+      bot.strategy = this.normalizeStrategy(dto.strategy);
+    }
+    this.logger.log(
+      `[STRATEGY UPDATE] botId=${id} oldStrategy=${oldStrategy} newStrategy=${bot.strategy}`,
+    );
+    Object.assign(bot, dto);
+    return bot;
   }
 
   async toggleBot(id: string): Promise<IAlgoBot> {
@@ -499,6 +666,7 @@ export class AlgoBotsService implements OnModuleInit {
           id: updated.id,
           name: updated.name,
           symbol: updated.symbol,
+          strategy: updated.strategy || 'SMC',
           direction: updated.direction as any,
           timeframe: updated.timeframe,
           minScore: updated.minScore,
@@ -754,6 +922,17 @@ export class AlgoBotsService implements OnModuleInit {
       return { matches: false, reasonCode: 'INVALID_SIGNAL', details: 'Bot or signal is missing' };
     }
 
+    // 0. Authoritative Strategy Matching
+    const botStrat = this.normalizeStrategy(bot.strategy || 'SMC');
+    const sigStrat = this.normalizeStrategy(signal.strategy || signal.strategyMode || 'SMC');
+    if (botStrat !== sigStrat) {
+      return {
+        matches: false,
+        reasonCode: 'STRATEGY_MISMATCH',
+        details: `Bot strategy '${botStrat}' !== signal strategy '${sigStrat}'`,
+      };
+    }
+
     // 1. Symbol Match
     if (!signal.symbol || bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
       return {
@@ -792,13 +971,23 @@ export class AlgoBotsService implements OnModuleInit {
       };
     }
 
-    // 5. Canonical SMC Condition Evidence Match
-    if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
-      return {
-        matches: false,
-        reasonCode: 'SMC_CONDITION_MISMATCH',
-        details: `Signal does not satisfy canonical SMC trigger evidence for '${bot.smcCondition}'`,
-      };
+    // 5. Strategy Condition Evidence Match
+    if (botStrat === 'SMC') {
+      if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
+        return {
+          matches: false,
+          reasonCode: 'SMC_CONDITION_MISMATCH',
+          details: `Signal does not satisfy canonical SMC trigger evidence for '${bot.smcCondition}'`,
+        };
+      }
+    } else if (botStrat === 'SAIYAN_OCC') {
+      if (!this.matchesSaiyanCondition(signal)) {
+        return {
+          matches: false,
+          reasonCode: 'SAIYAN_CONDITION_MISMATCH',
+          details: `Signal does not satisfy Saiyan OCC momentum trigger evidence`,
+        };
+      }
     }
 
     return { matches: true };
@@ -1573,9 +1762,19 @@ export class AlgoBotsService implements OnModuleInit {
         continue;
       }
 
+      const botStrat = this.normalizeStrategy(bot.strategy || 'SMC');
+      const sigStrat = this.normalizeStrategy(signal.strategy || signal.strategyMode || 'SMC');
+      if (botStrat !== sigStrat) {
+        this.logger.debug(
+          `[STRATEGY SKIP] Bot '${bot.id}' strategy (${botStrat}) !== signal strategy (${sigStrat})`,
+        );
+        continue;
+      }
+
       this.logger.log(
-        `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
+        `[PIPELINE TRACE 4/6] AlgoBotsService.evaluateSignalForBots() checking bot '${bot.id}' (strategy=${botStrat}) for ${signal.symbol} (${signal.timeframe}, score=${signal.score}, canonicalCandleTime=${signal.canonicalCandleTime})`,
       );
+      this.logger.log(`[TRADE DECISION] botId=${bot.id} resolvedStrategy=${botStrat}`);
 
       // Gate 1: Global Paper Trading Engine Available
       if (!paperTradingEnabled) {

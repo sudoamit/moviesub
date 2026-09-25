@@ -162,6 +162,8 @@ function DashboardContent() {
           <TerminalWorkspace
             selectedSymbol={selectedSymbol}
             selectedTimeframe={selectedTimeframe}
+            selectedStrategy={selectedStrategy}
+            onSelectStrategy={handleSelectStrategy}
             chartSnapshot={chartSnapshot}
             isDataUnavailable={isDataUnavailable}
             signals={signals}

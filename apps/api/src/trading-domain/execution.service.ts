@@ -81,6 +81,7 @@ export class ExecutionService implements IExecutionDomainService {
         fingerprint: params.fingerprint,
         botId: params.botId,
         symbol: params.symbol,
+        strategy: (params as any).strategy || 'SMC',
         contractSymbol: params.contractSymbol,
         executionInstrument: params.executionInstrument,
         executionInstrumentType: params.executionInstrumentType,

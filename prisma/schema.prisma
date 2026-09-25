@@ -1182,6 +1182,7 @@ model AlgoBot {
   id                 String              @id @default(uuid())
   name               String
   symbol             String
+  strategy           String              @default("SMC")
   executionInstrument String?
   executionInstrumentType String?
   signalSourceInstrument String?
@@ -1210,6 +1211,7 @@ model AlgoBotExecution {
   botId           String
   bot             AlgoBot               @relation(fields: [botId], references: [id], onDelete: Cascade)
   symbol          String
+  strategy        String?               @default("SMC")
   executionInstrument String?
   executionInstrumentType String?
   contractSymbol  String?

@@ -684,6 +684,8 @@ export class SignalGenerator {
       grade,
       scoreBreakdown: breakdown,
       triggerEvidence,
+      strategy: strategyMode || 'SMC',
+      strategyMode: strategyMode || 'SMC',
       timeframe: executionTf as Timeframe,
       htfBias: mtf.htfBias,
       entryZone: levels.entryZone,
@@ -723,6 +725,8 @@ export class SignalGenerator {
   ): ISignalSetup {
     return {
       symbol,
+      strategy: 'SMC',
+      strategyMode: 'SMC',
       direction: Direction.NEUTRAL,
       score: 0,
       grade: SignalGrade.NO_TRADE,

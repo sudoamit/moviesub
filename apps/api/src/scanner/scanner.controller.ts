@@ -7,8 +7,11 @@ export class ScannerController {
   constructor(private readonly scannerService: ScannerService) {}
 
   @Post('scan')
-  async triggerScan(@Query('timeframe') timeframe: Timeframe = Timeframe.M15) {
-    return this.scannerService.triggerScan(timeframe);
+  async triggerScan(
+    @Query('timeframe') timeframe: Timeframe = Timeframe.M15,
+    @Query('strategy') strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+  ) {
+    return this.scannerService.triggerScan(timeframe, strategy);
   }
 
   @Get('status')

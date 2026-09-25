@@ -25,7 +25,7 @@ interface MarketStreamContextType {
   isScanning: boolean;
   activeToast: ToastInfo | null;
   subscribeToSymbol: (symbol: string) => void;
-  triggerScan: () => Promise<void>;
+  triggerScan: (strategy?: string) => Promise<void>;
   dismissToast: () => void;
   showToast: (toast: ToastInfo) => void;
 }
@@ -151,36 +151,43 @@ export const MarketStreamProvider: React.FC<{ children: ReactNode }> = ({ childr
     [socket],
   );
 
-  const triggerScan = useCallback(async () => {
-    setIsScanning(true);
-    showToast({
-      title: '📡 Institutional Scanner Active',
-      message:
-        'Scanning multi-timeframe 15m/1h/4h order blocks and liquidity across all markets...',
-      type: 'info',
-    });
-
-    try {
-      const res = await fetch('http://localhost:3001/api/scanner/scan', { method: 'POST' });
-      const data = await res.json();
-      if (data && data.signals) {
-        setSignals(data.signals);
-        showToast({
-          title: '✅ SMC Scan Complete',
-          message: `Identified ${data.signals.length} high-probability institutional trading setups.`,
-          type: 'success',
-        });
-      }
-    } catch (err: any) {
+  const triggerScan = useCallback(
+    async (strategy: string = 'SMC') => {
+      setIsScanning(true);
+      const isSaiyan = strategy === 'SAIYAN_OCC' || strategy === 'SAIYAN';
+      const stratName = isSaiyan ? 'Saiyan OCC Flow' : 'SMC Core Engine';
       showToast({
-        title: 'Scanner Error',
-        message: err.message || 'Failed to complete scan',
-        type: 'error',
+        title: `📡 ${stratName} Scanner Active`,
+        message: `Scanning multi-timeframe 15m/1h/4h setups across all markets using ${stratName}...`,
+        type: 'info',
       });
-    } finally {
-      setIsScanning(false);
-    }
-  }, [showToast]);
+
+      try {
+        const stratParam = encodeURIComponent(strategy);
+        const res = await fetch(`http://localhost:3001/api/scanner/scan?strategy=${stratParam}`, {
+          method: 'POST',
+        });
+        const data = await res.json();
+        if (data && data.signals) {
+          setSignals(data.signals);
+          showToast({
+            title: `✅ ${stratName} Scan Complete`,
+            message: `Identified ${data.signals.length} high-probability ${stratName} setups.`,
+            type: 'success',
+          });
+        }
+      } catch (err: any) {
+        showToast({
+          title: 'Scanner Error',
+          message: err.message || 'Failed to complete scan',
+          type: 'error',
+        });
+      } finally {
+        setIsScanning(false);
+      }
+    },
+    [showToast],
+  );
 
   // Fetch Authoritative Snapshot on mount
   useEffect(() => {

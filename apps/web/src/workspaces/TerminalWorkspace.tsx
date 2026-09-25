@@ -29,9 +29,13 @@ const TradingChart = dynamic(
   },
 );
 
+import { StrategyMode } from '../components/Header';
+
 interface TerminalWorkspaceProps {
   selectedSymbol: string;
   selectedTimeframe: string;
+  selectedStrategy?: StrategyMode;
+  onSelectStrategy?: (strategy: StrategyMode) => void;
   chartSnapshot: ChartMarketSnapshot | null;
   isDataUnavailable: boolean;
   signals: ISignalSetup[];
@@ -48,6 +52,8 @@ interface TerminalWorkspaceProps {
 export const TerminalWorkspace: React.FC<TerminalWorkspaceProps> = ({
   selectedSymbol,
   selectedTimeframe,
+  selectedStrategy = 'SMC',
+  onSelectStrategy,
   chartSnapshot,
   isDataUnavailable,
   signals,
@@ -124,6 +130,9 @@ export const TerminalWorkspace: React.FC<TerminalWorkspaceProps> = ({
       {/* Live Position Tracker (Historical & Portfolio Metrics) */}
       <LivePositionTracker
         symbol={selectedSymbol}
+        timeframe={selectedTimeframe}
+        selectedStrategy={selectedStrategy}
+        onSelectStrategy={onSelectStrategy}
         signal={selectedSignal}
         livePrice={currentTicker.price ?? 0}
         activePosition={activePosition}

@@ -465,6 +465,26 @@ export class TradeDecisionService {
     return str;
   }
 
+  public normalizeStrategy(raw?: string): 'SMC' | 'SAIYAN_OCC' | 'HYBRID' {
+    if (!raw) return 'SMC';
+    const upper = String(raw).trim().toUpperCase();
+    if (upper === 'SAIYAN' || upper === 'SAIYAN_OCC' || upper.includes('SAIYAN')) return 'SAIYAN_OCC';
+    if (upper === 'HYBRID' || upper.includes('HYBRID')) return 'HYBRID';
+    return 'SMC';
+  }
+
+  public matchesSaiyanCondition(signal: ISignalSetup): boolean {
+    if (!signal) return false;
+    const strat = this.normalizeStrategy((signal as any).strategy || (signal as any).strategyMode);
+    if (strat === 'SAIYAN_OCC') return true;
+    const summary = signal.reasoning?.summary || '';
+    const htf = signal.reasoning?.htfStructure || '';
+    if (summary.includes('Saiyan') || htf.includes('Saiyan') || (signal.id && signal.id.startsWith('saiyan_'))) {
+      return true;
+    }
+    return false;
+  }
+
   /**
    * Maximum signal age allowed for decision making per timeframe
    */
@@ -874,6 +894,16 @@ export class TradeDecisionService {
       });
     }
 
+    // Gate 9.3: Authoritative Strategy Match Gate
+    const botStrat = this.normalizeStrategy(bot.strategy || 'SMC');
+    const sigStrat = this.normalizeStrategy((signal as any).strategy || (signal as any).strategyMode || 'SMC');
+    if (botStrat !== sigStrat) {
+      reasons.push({
+        code: 'STRATEGY_MISMATCH',
+        message: `Bot strategy '${bot.strategy || 'SMC'}' !== signal strategy '${(signal as any).strategy || (signal as any).strategyMode || 'SMC'}'`,
+      });
+    }
+
     // Gate 10: Score Threshold
     if (typeof signal.score !== 'number' || signal.score < bot.minScore) {
       reasons.push({
@@ -882,12 +912,21 @@ export class TradeDecisionService {
       });
     }
 
-    // Gate 11: SMC Condition Evidence
-    if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
-      reasons.push({
-        code: 'SMC_CONDITION_MISMATCH',
-        message: `Signal does not satisfy canonical SMC trigger evidence for '${bot.smcCondition}'`,
-      });
+    // Gate 11: Strategy Condition Evidence
+    if (botStrat === 'SMC') {
+      if (!this.matchesSmcCondition(bot.smcCondition, signal)) {
+        reasons.push({
+          code: 'SMC_CONDITION_MISMATCH',
+          message: `Signal does not satisfy canonical SMC trigger evidence for '${bot.smcCondition}'`,
+        });
+      }
+    } else if (botStrat === 'SAIYAN_OCC') {
+      if (!this.matchesSaiyanCondition(signal)) {
+        reasons.push({
+          code: 'SAIYAN_CONDITION_MISMATCH',
+          message: `Signal does not satisfy Saiyan OCC momentum trigger evidence`,
+        });
+      }
     }
 
     // Gate 12: Price Levels Geometry
@@ -1692,6 +1731,7 @@ export class TradeDecisionService {
             fingerprint,
             botId: bot.id,
             symbol: bot.symbol.toUpperCase(),
+            strategy: bot.strategy || 'SMC',
             executionInstrument,
             executionInstrumentType,
             contractSymbol,

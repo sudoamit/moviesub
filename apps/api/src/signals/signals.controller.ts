@@ -45,6 +45,10 @@ export class EvaluateTradeDto {
 
   @IsOptional()
   timeframe?: Timeframe;
+
+  @IsOptional()
+  @IsString()
+  strategy?: string;
 }
 
 @Controller('api/signals')
@@ -113,6 +117,7 @@ export class SignalsController {
       body.symbol,
       body.livePrice,
       body.timeframe || Timeframe.M15,
+      body.strategy || 'SMC',
     );
   }
 
@@ -125,8 +130,9 @@ export class SignalsController {
   async getSignalForSymbol(
     @Param('symbol') symbol: string,
     @Query('timeframe') timeframe: Timeframe = Timeframe.M15,
+    @Query('strategy') strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
   ) {
-    return this.signalsService.generateSignalForSymbol(symbol, timeframe);
+    return this.signalsService.generateSignalForSymbol(symbol, timeframe, strategy);
   }
 
   @Post('position-size')

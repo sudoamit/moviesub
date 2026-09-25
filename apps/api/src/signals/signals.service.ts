@@ -74,13 +74,25 @@ export class SignalsService implements OnModuleInit {
     this.logger.log('SignalsService initialized without synthetic trade seeding.');
   }
 
+  private normalizeStrategy(raw?: string): 'SMC' | 'SAIYAN_OCC' | 'HYBRID' {
+    if (!raw) return 'SMC';
+    const upper = String(raw).trim().toUpperCase();
+    if (upper === 'SAIYAN' || upper === 'SAIYAN_OCC' || upper.includes('SAIYAN')) return 'SAIYAN_OCC';
+    if (upper === 'HYBRID' || upper.includes('HYBRID')) return 'HYBRID';
+    return 'SMC';
+  }
+
   async generateSignalForSymbol(
     symbol: string,
     executionTimeframe: Timeframe = Timeframe.M15,
-    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string = 'SMC',
     options?: { strategyConfig?: Record<string, any> },
   ): Promise<ISignalSetup> {
     const sym = symbol.toUpperCase();
+    const resolvedStrategy = this.normalizeStrategy(strategy);
+    this.logger.log(
+      `[SIGNAL GENERATION] symbol=${sym} requestedStrategy=${strategy} resolvedStrategy=${resolvedStrategy}`,
+    );
 
     const inst =
       (await this.prisma.instrument.findUnique({
@@ -153,7 +165,7 @@ export class SignalsService implements OnModuleInit {
       executionSnapshot: execSnapshot,
       htf1Snapshot,
       htf2Snapshot,
-      strategyMode: strategy,
+      strategyMode: resolvedStrategy,
       strategyConfig: options?.strategyConfig,
     });
 
@@ -172,6 +184,7 @@ export class SignalsService implements OnModuleInit {
       `[PIPELINE TRACE 2/6] SignalsService.generateSignalForSymbol() produced signal setup:\n` +
         `  symbol: ${signal.symbol}\n` +
         `  timeframe: ${signal.timeframe}\n` +
+        `  strategy: ${signal.strategy || signal.strategyMode}\n` +
         `  direction: ${signal.direction}\n` +
         `  state: ${signal.state}\n` +
         `  score: ${signal.score} (${signal.grade})\n` +
@@ -185,17 +198,18 @@ export class SignalsService implements OnModuleInit {
 
   async getAllSignals(
     timeframe: Timeframe = Timeframe.M15,
-    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' = 'SMC',
+    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string = 'SMC',
     options?: { strategyConfig?: Record<string, any> },
   ): Promise<ISignalSetup[]> {
     const instruments = await this.prisma.instrument.findMany({
       where: { isActive: true },
     });
 
+    const resolvedStrategy = this.normalizeStrategy(strategy);
     const signals: ISignalSetup[] = [];
     for (const inst of instruments) {
       try {
-        const sig = await this.generateSignalForSymbol(inst.symbol, timeframe, strategy, options);
+        const sig = await this.generateSignalForSymbol(inst.symbol, timeframe, resolvedStrategy, options);
         signals.push(sig);
       } catch (err) {
         this.logger.warn(`Failed to generate signal for ${inst.symbol}: ${(err as Error).message}`);
@@ -211,8 +225,13 @@ export class SignalsService implements OnModuleInit {
    * This endpoint intentionally does not persist journal rows. Journal writes must come
    * from an executed position close path, where entry price/time are already immutable.
    */
-  async evaluateTrade(symbol: string, livePrice: number, timeframe: Timeframe = Timeframe.M15) {
-    const signal = await this.generateSignalForSymbol(symbol, timeframe);
+  async evaluateTrade(
+    symbol: string,
+    livePrice: number,
+    timeframe: Timeframe = Timeframe.M15,
+    strategy: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string = 'SMC',
+  ) {
+    const signal = await this.generateSignalForSymbol(symbol, timeframe, strategy);
     const entry = signal.entryZone.optimal;
     const sl = signal.stopLoss;
     const tp1 = signal.takeProfits.tp1;

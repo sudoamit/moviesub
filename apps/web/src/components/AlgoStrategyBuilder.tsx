@@ -26,6 +26,7 @@ export const AlgoStrategyBuilder: React.FC = () => {
   // Form State
   const [botName, setBotName] = useState<string>('');
   const [symbol, setSymbol] = useState<string>('NIFTY');
+  const [strategy, setStrategy] = useState<string>('SMC');
   const [direction, setDirection] = useState<'ANY' | 'BULLISH' | 'BEARISH'>('ANY');
   const [timeframe, setTimeframe] = useState<string>('15m');
   const [minScore, setMinScore] = useState<number>(80);
@@ -60,8 +61,9 @@ export const AlgoStrategyBuilder: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: botName || `${symbol} ${timeframe} ${direction} ${smcCondition} Bot`,
+          name: botName || `${symbol} ${timeframe} ${direction} ${strategy === 'SAIYAN_OCC' ? 'Saiyan' : 'SMC'} Bot`,
           symbol,
+          strategy,
           direction,
           timeframe,
           minScore: Number(minScore),
@@ -81,6 +83,19 @@ export const AlgoStrategyBuilder: React.FC = () => {
       setStatusMsg(`❌ Failed to deploy strategy: ${err.message}`);
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  const handleUpdateBotStrategy = async (id: string, newStrategy: string) => {
+    try {
+      await fetch(`http://localhost:3001/api/algo-bots/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy: newStrategy }),
+      });
+      fetchBots();
+    } catch (e) {
+      console.error('Failed to update bot strategy:', e);
     }
   };
 
@@ -142,7 +157,7 @@ export const AlgoStrategyBuilder: React.FC = () => {
             <span>COMPOSE NEW ALGORITHMIC EXECUTION RULE:</span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 text-xs">
             <div>
               <label className="block text-[10px] text-slate-400 font-bold mb-1">
                 STRATEGY NAME (OPTIONAL):
@@ -176,6 +191,22 @@ export const AlgoStrategyBuilder: React.FC = () => {
             </div>
 
             <div>
+              <label className="block text-[10px] text-amber-400 font-bold mb-1 flex items-center gap-1">
+                <Sliders className="w-3 h-3" />
+                EXECUTION STRATEGY:
+              </label>
+              <select
+                value={strategy}
+                onChange={(e) => setStrategy(e.target.value)}
+                className="w-full bg-slate-950 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-amber-300 font-bold focus:outline-none focus:border-amber-400"
+              >
+                <option value="SMC">Smart Money Concepts (SMC)</option>
+                <option value="SAIYAN_OCC">Saiyan OCC Flow</option>
+                <option value="HYBRID">Hybrid SMC + Saiyan</option>
+              </select>
+            </div>
+
+            <div>
               <label className="block text-[10px] text-slate-400 font-bold mb-1">
                 DIRECTION BIAS:
               </label>
@@ -192,17 +223,26 @@ export const AlgoStrategyBuilder: React.FC = () => {
 
             <div>
               <label className="block text-[10px] text-slate-400 font-bold mb-1">
-                SMC TRIGGER REQUIREMENT:
+                {strategy === 'SAIYAN_OCC' ? 'SAIYAN TRIGGER REQUIREMENT:' : 'SMC TRIGGER REQUIREMENT:'}
               </label>
               <select
                 value={smcCondition}
                 onChange={(e) => setSmcCondition(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-cyan-500"
               >
-                <option value="ORDER_BLOCK">Institutional Order Block</option>
-                <option value="FVG">Fair Value Gap Inversion</option>
-                <option value="LIQUIDITY_SWEEP">High/Low Liquidity Sweep</option>
-                <option value="ANY_CONFLUENCE">Any Multi-Confluence</option>
+                {strategy === 'SAIYAN_OCC' ? (
+                  <>
+                    <option value="MOMENTUM_CONFIRMED">Saiyan Momentum Confirmed</option>
+                    <option value="ANY_CONFLUENCE">Any Saiyan Trend Signal</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="ORDER_BLOCK">Institutional Order Block</option>
+                    <option value="FVG">Fair Value Gap Inversion</option>
+                    <option value="LIQUIDITY_SWEEP">High/Low Liquidity Sweep</option>
+                    <option value="ANY_CONFLUENCE">Any Multi-Confluence</option>
+                  </>
+                )}
               </select>
             </div>
           </div>
@@ -300,6 +340,13 @@ export const AlgoStrategyBuilder: React.FC = () => {
                       <span className="bg-slate-800 text-slate-300 text-[9px] px-1.5 py-0.5 rounded">
                         {bot.timeframe}
                       </span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold border ${
+                        bot.strategy === 'SAIYAN_OCC'
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                          : 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+                      }`}>
+                        {bot.strategy === 'SAIYAN_OCC' ? '⚡ SAIYAN' : '🏛️ SMC'}
+                      </span>
                     </div>
                   </div>
 
@@ -321,6 +368,18 @@ export const AlgoStrategyBuilder: React.FC = () => {
                 </div>
 
                 <div className="py-2.5 space-y-1.5 text-xs text-slate-300">
+                  <div className="flex justify-between items-center text-[11px]">
+                    <span className="text-slate-500">Strategy Engine:</span>
+                    <select
+                      value={bot.strategy || 'SMC'}
+                      onChange={(e) => handleUpdateBotStrategy(bot.id, e.target.value)}
+                      className="bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] text-cyan-300 font-bold focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="SMC">SMC Engine</option>
+                      <option value="SAIYAN_OCC">Saiyan OCC</option>
+                      <option value="HYBRID">Hybrid</option>
+                    </select>
+                  </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="text-slate-500">Condition:</span>
                     <strong className="text-white">{bot.smcCondition}</strong>

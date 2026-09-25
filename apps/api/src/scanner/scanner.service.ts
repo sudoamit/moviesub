@@ -28,11 +28,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Initial market scan failed: ${err.message}`);
     });
 
-    this.autoScanTimer = setInterval(() => {
-      this.triggerScan(Timeframe.M15).catch((err) => {
+    this.autoScanTimer = setInterval(async () => {
+      try {
+        await this.triggerScan(Timeframe.M15, 'SMC');
+        await this.triggerScan(Timeframe.M15, 'SAIYAN_OCC');
+      } catch (err: any) {
         this.logger.warn(`Auto market scan failed: ${err.message}`);
-      });
-    }, 10000);
+      }
+    }, 15000);
   }
 
   onModuleDestroy() {
@@ -44,8 +47,22 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
   async triggerScan(
     timeframe: Timeframe = Timeframe.M15,
-    options?: { strategyConfig?: Record<string, any> },
+    strategyOrOptions?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string | { strategyConfig?: Record<string, any> },
+    maybeOptions?: { strategyConfig?: Record<string, any> },
   ) {
+    let strategy: string = 'SMC';
+    let options: { strategyConfig?: Record<string, any> } | undefined = undefined;
+
+    if (typeof strategyOrOptions === 'object' && strategyOrOptions !== null) {
+      options = strategyOrOptions;
+      if (options.strategyConfig?.strategy) {
+        strategy = options.strategyConfig.strategy;
+      }
+    } else if (typeof strategyOrOptions === 'string') {
+      strategy = strategyOrOptions;
+      options = maybeOptions;
+    }
+
     if (this.isScanning) {
       this.logger.debug(
         `[SCANNER_LOCKED] Previous market scan is still executing. Skipping overlapping scan trigger.`,
@@ -98,7 +115,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const startTime = Date.now();
-      const signals = await this.signalsService.getAllSignals(timeframe, 'SMC', options);
+      const signals = await this.signalsService.getAllSignals(timeframe, strategy as any, options);
 
       let noTradeCount = 0;
       let neutralCount = 0;

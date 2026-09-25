@@ -268,6 +268,8 @@ export interface ISignalSetup {
   id?: string;
   instrumentId?: string;
   symbol: string;
+  strategy?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string;
+  strategyMode?: 'SMC' | 'SAIYAN_OCC' | 'HYBRID' | string;
   timeframe: Timeframe | string;
   direction: Direction;
   state: SignalState;

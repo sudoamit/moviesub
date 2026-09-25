@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ISignalSetup } from '@quant/shared';
 import { StrategyMode } from '../components/Header';
 import { useMarketStream } from '../context/MarketStreamContext';
@@ -26,14 +26,21 @@ export function useSignals(
   const [signals, setSignals] = useState<ISignalSetup[]>([]);
   const [selectedSignal, setSelectedSignal] = useState<ISignalSetup | null>(null);
   const [isLoadingSignals, setIsLoadingSignals] = useState<boolean>(false);
+  const latestRequestIdRef = useRef<number>(0);
 
   const fetchSignals = useCallback(
     async (tf: string = selectedTimeframe, strat: StrategyMode = selectedStrategy) => {
+      const requestId = ++latestRequestIdRef.current;
       setIsLoadingSignals(true);
       try {
+        const apiBase = typeof window !== 'undefined' ? '' : 'http://localhost:3001';
         const res = await fetch(
-          `http://localhost:3001/api/signals?timeframe=${tf}&strategy=${strat}`,
+          `${apiBase}/api/signals?timeframe=${tf}&strategy=${strat}`,
         );
+        if (requestId !== latestRequestIdRef.current) {
+          // Outdated in-flight response discarded to prevent race condition
+          return;
+        }
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data)) {
@@ -45,7 +52,9 @@ export function useSignals(
       } catch (e) {
         console.error('Failed to fetch signals:', e);
       } finally {
-        setIsLoadingSignals(false);
+        if (requestId === latestRequestIdRef.current) {
+          setIsLoadingSignals(false);
+        }
       }
     },
     [selectedSymbol, selectedTimeframe, selectedStrategy],
@@ -62,7 +71,7 @@ export function useSignals(
   }, [selectedSymbol, signals]);
 
   const handleTriggerScan = useCallback(async () => {
-    await contextTriggerScan();
+    await contextTriggerScan(selectedStrategy);
     await fetchSignals(selectedTimeframe, selectedStrategy);
   }, [contextTriggerScan, fetchSignals, selectedTimeframe, selectedStrategy]);
 

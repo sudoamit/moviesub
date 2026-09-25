@@ -502,6 +502,8 @@ export class SaiyanOCCEngine {
     return {
       id: `saiyan_${symbol}_${timeframe}_${timestamp.getTime()}`,
       symbol,
+      strategy: 'SAIYAN_OCC',
+      strategyMode: 'SAIYAN_OCC',
       direction: analysis.direction,
       score: analysis.signalScore,
       grade: analysis.signalGrade,
