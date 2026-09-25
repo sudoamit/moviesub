@@ -69,11 +69,18 @@ export interface ISmartOptionRecommendation {
   optionStopLoss: number;
   optionTarget1: number;
   optionTarget2: number;
+  optionTarget3: number;
+  rr1: number;
+  rr2: number;
+  rr3: number;
+  maxPotentialR: number;
+  primaryTargetR: number;
   delta: number;
   theta: number;
   iv: number;
   lotSize: number;
   riskAmountPerLot: number;
+  premiumOutlayPerLot: number;
   expectedProfitPerLot: number;
   roiPercent: number;
 }
@@ -261,12 +268,17 @@ export class OptionsService {
     const referenceCurrentSpot =
       exchangeImpliedSpot || (latestCandle ? Number(latestCandle.close) : null);
 
-    // If spotPriceOverride differs from current exchange spot, live exchange quotes (from current spot) do not apply.
+    const spotDiffersFromExchange = Boolean(
+      exchangeImpliedSpot && Math.abs(spotPrice - exchangeImpliedSpot) > 40,
+    );
+
+    // If spotPrice differs from current exchange spot, live exchange quotes (from current spot) do not apply.
     const isHistoricalSpotOverride = Boolean(
-      spotPriceOverride &&
+      (spotPriceOverride &&
         spotPriceOverride > 0 &&
         referenceCurrentSpot &&
-        Math.abs(spotPriceOverride - referenceCurrentSpot) > 40,
+        Math.abs(spotPriceOverride - referenceCurrentSpot) > 40) ||
+        spotDiffersFromExchange,
     );
 
     for (const strikePrice of sortedStrikes) {
@@ -311,13 +323,19 @@ export class OptionsService {
         'PE',
       );
 
-      // Sourced from live exchange only when matching current spot price, otherwise use Black-Scholes price
+      // Sanity guard: an ATM / near-money contract on NIFTY/BANKNIFTY with daysToExpiry >= 1 cannot be < 10 rupees.
+      // Deep OTM quotes from external scrapers at a divergent spot must never contaminate target spot pricing.
+      const isNearMoney = Math.abs(strikePrice - spotPrice) <= 100;
+      const isCallUnphysical = isNearMoney && daysToExpiry >= 1 && callLtp !== undefined && callLtp < 10.0;
+      const isPutUnphysical = isNearMoney && daysToExpiry >= 1 && putLtp !== undefined && putLtp < 10.0;
+
+      // Sourced from live exchange only when matching current spot price and physically valid, otherwise use Black-Scholes price
       const finalCallLtp =
-        !isHistoricalSpotOverride && callLtp && callLtp > 0
+        !isHistoricalSpotOverride && !isCallUnphysical && callLtp && callLtp > 0
           ? Number(callLtp.toFixed(2))
           : bsCall.price;
       const finalPutLtp =
-        !isHistoricalSpotOverride && putLtp && putLtp > 0
+        !isHistoricalSpotOverride && !isPutUnphysical && putLtp && putLtp > 0
           ? Number(putLtp.toFixed(2))
           : bsPut.price;
 
@@ -515,14 +533,22 @@ export class OptionsService {
 
     const optionLtp = contract.ltp;
     const optionStopLoss = Math.max(1.0, Number((optionLtp - calculatedRiskPts).toFixed(2)));
-    const optionRiskDistance = Math.abs(optionLtp - optionStopLoss);
+    const optionRiskDistance = Number(Math.abs(optionLtp - optionStopLoss).toFixed(2));
 
-    const optionTarget1 = Number((optionLtp + optionRiskDistance * 1.5).toFixed(2));
-    const optionTarget2 = Number((optionLtp + optionRiskDistance * 2.5).toFixed(2));
+    const rr1 = 1.5;
+    const rr2 = 2.5;
+    const rr3 = 4.0;
+    const maxPotentialR = 4.0;
+    const primaryTargetR = 2.5;
+
+    const optionTarget1 = Number((optionLtp + optionRiskDistance * rr1).toFixed(2));
+    const optionTarget2 = Number((optionLtp + optionRiskDistance * rr2).toFixed(2));
+    const optionTarget3 = Number((optionLtp + optionRiskDistance * rr3).toFixed(2));
 
     const riskPerLot = Number((optionRiskDistance * chain.lotSize).toFixed(2));
+    const premiumOutlayPerLot = Number((optionLtp * chain.lotSize).toFixed(2));
     const profitPerLot = Number(((optionTarget1 - optionLtp) * chain.lotSize).toFixed(2));
-    const roi = Number(((profitPerLot / (optionLtp * chain.lotSize || 1)) * 100).toFixed(1));
+    const roi = Number(((profitPerLot / (premiumOutlayPerLot || 1)) * 100).toFixed(1));
 
     return {
       underlyingSymbol: chain.symbol,
@@ -538,11 +564,18 @@ export class OptionsService {
       optionStopLoss,
       optionTarget1,
       optionTarget2,
+      optionTarget3,
+      rr1,
+      rr2,
+      rr3,
+      maxPotentialR,
+      primaryTargetR,
       delta: contract.delta,
       theta: contract.theta,
       iv: contract.iv,
       lotSize: chain.lotSize,
       riskAmountPerLot: riskPerLot,
+      premiumOutlayPerLot,
       expectedProfitPerLot: profitPerLot,
       roiPercent: roi,
     };

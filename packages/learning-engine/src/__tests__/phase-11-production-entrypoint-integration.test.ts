@@ -387,9 +387,15 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
     const testDir = path.join(__dirname, 'temp_prod_fork_test');
     const testFile = path.join(testDir, 'fork-shadow.json');
     const liveOrdersLogFile = path.join(testDir, 'live_orders.log');
-    const workerScript = fs.existsSync(path.join(__dirname, 'helpers/fork-pipeline-worker.js'))
-      ? path.join(__dirname, 'helpers/fork-pipeline-worker.js')
-      : path.join(__dirname, '../../../dist/__tests__/helpers/fork-pipeline-worker.js');
+    const tsWorker = path.join(__dirname, 'helpers/fork-pipeline-worker.ts');
+    const jsWorker = path.join(__dirname, 'helpers/fork-pipeline-worker.js');
+    const distJsWorker = path.join(__dirname, '../../../dist/__tests__/helpers/fork-pipeline-worker.js');
+    const isTs = !fs.existsSync(jsWorker) && fs.existsSync(tsWorker);
+    const workerScript = fs.existsSync(jsWorker)
+      ? jsWorker
+      : fs.existsSync(distJsWorker)
+      ? distJsWorker
+      : tsWorker;
 
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     fs.mkdirSync(testDir, { recursive: true });
@@ -429,7 +435,8 @@ describe('Phase 11 — Production Entrypoint Integration & Real Runtime Verifica
 
       const runProcess = (): Promise<{ success: boolean; pid: number; isConcurrentLock?: boolean; decisionId?: string; clientOrderId?: string }> => {
         return new Promise((resolve, reject) => {
-          const child = fork(workerScript, [], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+          const execArgv = isTs ? ['-r', 'ts-node/register'] : [];
+          const child = fork(workerScript, [], { execArgv, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
           let response: any = null;
 
           child.on('message', (msg) => {

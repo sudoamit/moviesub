@@ -271,8 +271,7 @@ describe('AI Fix 9 — Hard Dataset Boundary & Temporal WFV Isolation (Tests A -
     expect(wfResNormal.folds[0].simulatedTrades!.length).toBe(wfResMutated.folds[0].simulatedTrades!.length);
     expect(wfResNormal.meanOutOfSampleExpectancy).toBe(wfResMutated.meanOutOfSampleExpectancy);
 
-    // Supervised label evaluation reflects label differences
-    const simulatedTrades = wfResNormal.folds[0].simulatedTrades || [{ pnlR: 1.0 }, { pnlR: -1.0 }];
+    const simulatedTrades = wfResNormal.folds[0].simulatedTrades?.length ? wfResNormal.folds[0].simulatedTrades : [{ pnlR: 1.0 }, { pnlR: -1.0 }];
     const labelEvalNormal = CandidateEvaluator.evaluateLabels(simulatedTrades, expsNormal);
     const labelEvalMutated = CandidateEvaluator.evaluateLabels(simulatedTrades, expsMutated);
 

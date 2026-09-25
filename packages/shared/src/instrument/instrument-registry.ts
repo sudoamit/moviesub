@@ -543,6 +543,10 @@ export function getAuthoritativeInstrument(
       symbol: sym,
       name: `${sym} Option Contract`,
       assetType: AssetType.INDEX,
+      defaultLeverage: 1,
+      maxLeverage: 1,
+      initialMarginRate: 1.0,
+      maintenanceMarginRate: 1.0,
     };
   } else if (sym.startsWith('BANKNIFTY ') && (sym.endsWith(' CE') || sym.endsWith(' PE'))) {
     const bnfBase = AUTHORITATIVE_INSTRUMENTS['BANKNIFTY'];
@@ -552,6 +556,10 @@ export function getAuthoritativeInstrument(
       symbol: sym,
       name: `${sym} Option Contract`,
       assetType: AssetType.INDEX,
+      defaultLeverage: 1,
+      maxLeverage: 1,
+      initialMarginRate: 1.0,
+      maintenanceMarginRate: 1.0,
     };
   }
 

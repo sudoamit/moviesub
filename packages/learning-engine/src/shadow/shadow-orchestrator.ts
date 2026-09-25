@@ -120,7 +120,7 @@ export class ShadowOrchestrator {
       regimeThresholds: DEFAULT_REGIME_DRIFT_THRESHOLDS,
       executionThresholds: DEFAULT_EXECUTION_DRIFT_THRESHOLDS,
       healthConfig: DEFAULT_HEALTH_MACHINE_CONFIG,
-      enableAutomaticPaperRollback: true,
+      enableAutomaticPaperRollback: false,
       ...options,
     };
   }
@@ -493,6 +493,25 @@ export class ShadowOrchestrator {
       );
     }
 
+    // Authoritatively restore highest tradeCounter index from persisted ledger records
+    let maxTradeIndex = 0;
+    const allTradeIds: (string | undefined)[] = [
+      recoveredActiveLot?.tradeId,
+      ...ledger.getTrades().map((t) => t.id),
+      ...ledger.getOrders().map((o) => o.tradeId),
+      ...ledger.getFills().map((f) => f.tradeId),
+      ...Array.from(ledger.getPendingEntrySignals().keys()),
+    ];
+    const tradePrefix = `shadow_trade_${candidateId}_`;
+    for (const tid of allTradeIds) {
+      if (tid && tid.startsWith(tradePrefix)) {
+        const num = parseInt(tid.slice(tradePrefix.length), 10);
+        if (Number.isFinite(num) && num > maxTradeIndex) {
+          maxTradeIndex = num;
+        }
+      }
+    }
+
     // Register Active Candidate Context
     const ctx: ActiveCandidateContext = {
       candidateId,
@@ -512,7 +531,7 @@ export class ShadowOrchestrator {
       regimeHistory: recoveredRegimeHistory,
       featureVectors: recoveredFeatureVectors,
       activeLot: recoveredActiveLot,
-      tradeCounter: recoveredActiveLot ? 1 : 0,
+      tradeCounter: maxTradeIndex,
     };
 
     this.activeCandidates.set(candidateId, ctx);
@@ -601,6 +620,14 @@ export class ShadowOrchestrator {
         const actualSignal = ctx.pendingEntrySignals.get(order.tradeId);
         if (!actualSignal) {
           throw new Error(`MISSING_ENTRY_SIGNAL: Actual SignalGenerator output for trade '${order.tradeId}' not found`);
+        }
+
+        const isLong = actualSignal.direction === Direction.BULLISH || (actualSignal as any).direction === 'LONG';
+        if ((isLong && actualSignal.stopLoss >= fill.price) || (!isLong && actualSignal.stopLoss <= fill.price)) {
+          // Market gapped through protective stop loss; drop signal and cancel trade orders fail-closed
+          ctx.execSim.cancelTradeOrders(order.tradeId);
+          ctx.pendingEntrySignals.delete(order.tradeId);
+          continue;
         }
 
         // Initialize authoritative PositionLot directly from actual signal setup output
@@ -769,6 +796,9 @@ export class ShadowOrchestrator {
         side,
         orderType: 'MARKET',
         price: entryPrice,
+        referencePrice: entryPrice,
+        stopLoss: stopPrice,
+        maxRiskDrift: 0.25,
         quantity: initialQty,
         timestamp: candleTime,
         exitTarget: 'ENTRY',
@@ -1373,7 +1403,7 @@ export class ShadowOrchestrator {
       }
       if (candleTime < prevTime) {
         throw new Error(
-          `TIMESTAMP_REGRESSION: Out-of-order candle timestamp ${candleTime} < previous timestamp ${prevTime}`,
+          `TIMESTAMP_REGRESSION / CHRONOLOGICAL_REGRESSION: Out-of-order candle timestamp ${candleTime} < previous timestamp ${prevTime}`,
         );
       }
       if (this.options.maxAllowedGapMs) {

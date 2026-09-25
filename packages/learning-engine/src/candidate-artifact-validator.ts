@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { TradeLifecycleManager } from '@quant/risk-engine';
 import {
   CandidateArtifact,
@@ -379,7 +380,9 @@ export class CandidateArtifactValidator {
         `ARTIFACT_HASH_MISMATCH: Candidate '${candidateId}' expected ${computedArtifactHash}, got ${art.artifactHash}`,
       );
     }
-    if (art.symbol !== executionContext.symbol || art.timeframe !== executionContext.timeframe || art.strategyVersion !== executionContext.strategyVersion) {
+    const artSym = typeof art.symbol === 'string' && art.symbol in LEGACY_SPOT_ALIASES ? LEGACY_SPOT_ALIASES[art.symbol as keyof typeof LEGACY_SPOT_ALIASES] : art.symbol;
+    const ctxSym = typeof executionContext.symbol === 'string' && executionContext.symbol in LEGACY_SPOT_ALIASES ? LEGACY_SPOT_ALIASES[executionContext.symbol as keyof typeof LEGACY_SPOT_ALIASES] : executionContext.symbol;
+    if (artSym !== ctxSym || art.timeframe !== executionContext.timeframe || art.strategyVersion !== executionContext.strategyVersion) {
       throw new Error(`EXECUTION_CONTEXT_BINDING_MISMATCH: Candidate '${candidateId}' identity does not match execution context`);
     }
 

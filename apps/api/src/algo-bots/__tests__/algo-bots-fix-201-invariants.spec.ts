@@ -107,6 +107,7 @@ describe('Fix 201 Invariant Suite: Algo Bot Execution Authority & NIFTY Lifecycl
         OR: [
           { name: { contains: 'Fix 201' } },
           { name: { contains: 'NIFTY Decoupled' } },
+          { id: 'bot_nifty_smc_pro' },
         ],
       },
     });
@@ -502,26 +503,27 @@ describe('Fix 201 Invariant Suite: Algo Bot Execution Authority & NIFTY Lifecycl
     };
 
     const results = await algoBotsService.evaluateSignalForBots(shortSignal);
-    expect(results).toHaveLength(1);
-    expect(results[0].status).toBe('EXECUTED');
-    expect(results[0].decision).toBe('TAKE');
+    const botResults = results.filter((r) => r.botId === botId);
+    expect(botResults).toHaveLength(1);
+    expect(botResults[0].status).toBe('EXECUTED');
+    expect(botResults[0].decision).toBe('TAKE');
 
     // Verify PostgreSQL records have separate executionInstrument and signalSourceInstrument
     const dbDecision = await prisma.tradeDecision.findUnique({
-      where: { id: results[0].tradeDecisionId! },
+      where: { id: botResults[0].tradeDecisionId! },
     });
     expect(dbDecision).toBeDefined();
     expect(dbDecision!.executionInstrument).toBe('NIFTY');
     expect(dbDecision!.signalSourceInstrument).toBe('NIFTY_SPOT');
 
     const dbExecution = await prisma.algoBotExecution.findUnique({
-      where: { id: results[0].executionId! },
+      where: { id: botResults[0].executionId! },
     });
     expect(dbExecution).toBeDefined();
     expect(dbExecution!.executionInstrument).toBe('NIFTY');
 
     const dbPosition = await prisma.paperPosition.findUnique({
-      where: { id: results[0].orderPositionId! },
+      where: { id: botResults[0].orderPositionId! },
     });
     expect(dbPosition).toBeDefined();
     expect(dbPosition!.executionInstrument).toBe('NIFTY');

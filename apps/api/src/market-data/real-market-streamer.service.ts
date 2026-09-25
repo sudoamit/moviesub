@@ -1275,36 +1275,46 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       return null;
     }
 
-    if (!Number.isFinite(marketEventTime) || marketEventTime <= 0) {
+    const markDegraded = () => {
       if (existing) {
         existing.provenance = 'DEGRADED';
       }
+      if (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' || sym === 'BTC') {
+        const spot = this.tickers.get('BTCUSDT_SPOT');
+        if (spot) spot.provenance = 'DEGRADED';
+        const usdt = this.tickers.get('BTCUSDT');
+        if (usdt) usdt.provenance = 'DEGRADED';
+      }
+      if (sym === 'GOLD' || sym === 'XAUUSD') {
+        const gold = this.tickers.get('GOLD');
+        if (gold) gold.provenance = 'DEGRADED';
+        const xau = this.tickers.get('XAUUSD');
+        if (xau) xau.provenance = 'DEGRADED';
+      }
+    };
+
+    if (!Number.isFinite(marketEventTime) || marketEventTime <= 0) {
+      markDegraded();
       return null;
     }
 
     const now = Date.now();
     const maxClockSkewMs = 5000;
     if (marketEventTime > now + maxClockSkewMs) {
-      if (existing) {
-        existing.provenance = 'DEGRADED';
-      }
+      markDegraded();
       return null;
     }
 
     const rawProvenance = data.provenance;
     if (rawProvenance && rawProvenance !== 'LIVE_PROVIDER') {
-      if (existing) {
-        existing.provenance = 'DEGRADED';
-      }
+      markDegraded();
       return null;
     }
 
     const rawPrice = data.lastPrice ?? data.c ?? data.price;
     const livePrice = rawPrice !== undefined && rawPrice !== null ? parseFloat(rawPrice) : NaN;
     if (!Number.isFinite(livePrice) || livePrice <= 0) {
-      if (existing) {
-        existing.provenance = 'DEGRADED';
-      }
+      markDegraded();
       return null;
     }
 
@@ -1335,7 +1345,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       if (inst && inst.tickSize) tickSize = inst.tickSize;
     } catch {}
 
-    const isStream = data.providerTransport === 'WEBSOCKET_STREAM' || data.isWebSocketStream === true;
+    const isStream = data.providerTransport ? data.providerTransport === 'WEBSOCKET_STREAM' : true;
     const adapter = isStream ? BINANCE_SPOT_PROVIDER_ADAPTER : BINANCE_REST_SPOT_PROVIDER_ADAPTER;
     const activeConn = isStream
       ? this.getCurrentProviderConnection('BINANCE_DIRECT', 'WEBSOCKET_STREAM')

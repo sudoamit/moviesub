@@ -418,7 +418,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
   /**
    * Backend Real Partial Scale-Out at TP1 or TP2 (Creates Execution Leg ONLY — NO duplicate PaperTrade row)
    */
-  private async executePartialScaleOut(
+  public async executePartialScaleOut(
     pos: any,
     stageOrExitPrice: 'TP1' | 'TP2' | number,
     targetPriceOrTriggerPrice?: number,

@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { ICandle, IBacktestTrade } from '@quant/shared';
+import { ICandle, IBacktestTrade, LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { CandidateArtifact, CandidateMarketDataset, StrategyCandidate, TradingExperience, CandidateRiskConfig, CandidateExecutionConfig, ICandidateMeasurementOptions, CandidateMeasurementResult } from './types';
 import { CandidateBacktestRunner } from './candidate-backtest-runner';
 import { canonicalJsonStringify } from './canonical-serializer';
@@ -167,7 +167,7 @@ export class CandidateEvaluator {
     }
 
     // Strict symbol requirement (FAIL CLOSED)
-    const resolvedSymbol =
+    let resolvedSymbol =
       options?.symbol ||
       dataset?.symbol ||
       (candidate as any).symbol ||
@@ -176,6 +176,10 @@ export class CandidateEvaluator {
 
     if (!resolvedSymbol || typeof resolvedSymbol !== 'string' || resolvedSymbol.trim() === '') {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidateId}' is missing authoritative trading symbol in evaluation`);
+    }
+
+    if (resolvedSymbol in LEGACY_SPOT_ALIASES) {
+      resolvedSymbol = LEGACY_SPOT_ALIASES[resolvedSymbol as keyof typeof LEGACY_SPOT_ALIASES];
     }
 
     // Strict candidate riskConfig requirement (FAIL CLOSED)
@@ -461,15 +465,18 @@ export class CandidateEvaluator {
       stopLossAtrMultiplier: 1.5,
       sizingMultiplier: 1.0,
     };
-    const fixtureSymbol =
+    let fixtureSymbol =
       options?.symbol ||
       (candidate as any).symbol ||
       (candidate as any).executionConfig?.symbol ||
       (candidate as any).change?.symbol ||
-      'BTCUSDT';
+      'BTCUSDT_SPOT';
     if (!fixtureSymbol || typeof fixtureSymbol !== 'string' || fixtureSymbol.trim() === '') {
       const candId = (candidate as any).id || (candidate as any).candidateId || 'unknown';
       throw new Error(`MISSING_SYMBOL: Candidate '${candId}' is missing authoritative trading symbol`);
+    }
+    if (fixtureSymbol in LEGACY_SPOT_ALIASES) {
+      fixtureSymbol = LEGACY_SPOT_ALIASES[fixtureSymbol as keyof typeof LEGACY_SPOT_ALIASES];
     }
     const baselineCandidate =
       options?.baselineCandidate ||
@@ -480,7 +487,7 @@ export class CandidateEvaluator {
       signals: options?.signals,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
-      symbol: options?.symbol,
+      symbol: fixtureSymbol,
       timeframe: options?.timeframe,
     });
 
@@ -495,7 +502,7 @@ export class CandidateEvaluator {
       signals: options?.signals,
       minimumCandles: options?.minimumCandles,
       warmupBars: options?.warmupBars,
-      symbol: options?.symbol,
+      symbol: fixtureSymbol,
       timeframe: options?.timeframe,
     });
 

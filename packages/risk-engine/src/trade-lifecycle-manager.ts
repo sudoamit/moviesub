@@ -117,7 +117,7 @@ export class TradeLifecycleManager {
     let tp1: number;
     if (typeof rawTp1 === 'number' && Number.isFinite(rawTp1) && (isLong ? rawTp1 > executionPrice : rawTp1 < executionPrice)) {
       tp1 = rawTp1;
-    } else if (policy.autoDeriveTargets) {
+    } else if (policy.autoDeriveTargets !== false) {
       tp1 = isLong
         ? Number((executionPrice + riskDistance * r1Mult).toFixed(2))
         : Number(Math.max(0.01, executionPrice - riskDistance * r1Mult).toFixed(2));
@@ -130,7 +130,7 @@ export class TradeLifecycleManager {
     let tp2: number;
     if (typeof rawTp2 === 'number' && Number.isFinite(rawTp2) && (isLong ? rawTp2 > executionPrice : rawTp2 < executionPrice)) {
       tp2 = rawTp2;
-    } else if (policy.autoDeriveTargets) {
+    } else if (policy.autoDeriveTargets !== false) {
       tp2 = isLong
         ? Number((executionPrice + riskDistance * r2Mult).toFixed(2))
         : Number(Math.max(0.01, executionPrice - riskDistance * r2Mult).toFixed(2));
@@ -141,7 +141,7 @@ export class TradeLifecycleManager {
     let tp3: number;
     if (typeof rawTp3 === 'number' && Number.isFinite(rawTp3) && (isLong ? rawTp3 > executionPrice : rawTp3 < executionPrice)) {
       tp3 = rawTp3;
-    } else if (policy.autoDeriveTargets) {
+    } else if (policy.autoDeriveTargets !== false) {
       tp3 = isLong
         ? Number((executionPrice + riskDistance * r3Mult).toFixed(2))
         : Number(Math.max(0.01, executionPrice - riskDistance * r3Mult).toFixed(2));
@@ -413,6 +413,14 @@ export class TradeLifecycleManager {
       lot.initialQuantity,
       accountingSnapshot,
     );
+    const initialRiskQuote =
+      Math.abs(lot.entryPrice - lot.initialStopLoss) *
+      lot.initialQuantity *
+      (accountingSnapshot.contractSize || 1);
+    const effectiveRisk =
+      accountingSnapshot.quoteCurrency === accountingSnapshot.accountCurrency
+        ? Math.max(1, initialRisk)
+        : Math.max(0.0001, initialRiskQuote);
     const netPnl = Number((lot.realizedPnl - totalFees).toFixed(2));
 
     return {
@@ -441,7 +449,7 @@ export class TradeLifecycleManager {
       marginMode,
       riskAmount: Number(initialRisk.toFixed(2)),
       pnl: netPnl,
-      pnlRMultiple: Number((netPnl / Math.max(1, initialRisk)).toFixed(2)),
+      pnlRMultiple: Number((netPnl / effectiveRisk).toFixed(4)),
       exitReason,
       signalTimestamp: new Date(lot.entrySnapshot?.signalTimestamp || lot.openedAt),
       orderCreatedAt: new Date(lot.entrySnapshot?.orderCreatedAt || lot.openedAt),
@@ -461,7 +469,7 @@ export class TradeLifecycleManager {
       exitSlippage: totalSlippage - (firstFill?.slippage || 0),
       grossPnL: lot.realizedPnl,
       netPnL: netPnl,
-      realizedR: Number((netPnl / Math.max(1, initialRisk)).toFixed(2)),
+      realizedR: Number((netPnl / effectiveRisk).toFixed(2)),
       fillModel,
       ambiguityMode,
       entrySnapshot: lot.entrySnapshot,
@@ -556,7 +564,10 @@ export class TradeLifecycleManager {
       const exitReason =
         (lastFill?.targetType as string) === 'SL' ||
         (lastFill?.targetType as string) === 'STOP' ||
-        lastFill?.targetType === 'STOP_LOSS'
+        (lastFill?.targetType as string) === 'STOP_LOSS' ||
+        (lastFill?.targetType as string) === 'TRAILING_STOP' ||
+        (lastFill?.targetType as string) === 'BREAKEVEN' ||
+        (lastFill?.targetType as string) === 'SL_HIT'
           ? SignalState.SL_HIT
           : (lastFill?.targetType as string) === 'TP1'
           ? SignalState.TP1_HIT

@@ -217,8 +217,12 @@ export class SignalsService implements OnModuleInit {
     const sl = signal.stopLoss;
     const tp1 = signal.takeProfits.tp1;
     const tp2 = signal.takeProfits.tp2;
-    const tp3 = signal.takeProfits.tp3 || tp2 * 1.05;
+    const tp3 = signal.takeProfits.tp3 || (signal.direction === 'BULLISH' ? tp2 * 1.05 : tp2 * 0.95);
     const isBullish = signal.direction === 'BULLISH';
+    const riskDist = Math.abs(entry - sl);
+    const rr1 = signal.riskRewardRatios?.rr1 ?? (signal.rr1 ?? (riskDist > 0 ? Number((Math.abs(tp1 - entry) / riskDist).toFixed(2)) : 2.0));
+    const rr2 = signal.riskRewardRatios?.rr2 ?? (signal.rr2 ?? (riskDist > 0 ? Number((Math.abs(tp2 - entry) / riskDist).toFixed(2)) : 3.5));
+    const rr3 = signal.riskRewardRatios?.rr3 ?? (signal.rr3 ?? (riskDist > 0 ? Number((Math.abs(tp3 - entry) / riskDist).toFixed(2)) : 6.0));
 
     let completedState: 'TP1_HIT' | 'TP2_HIT' | 'TP3_HIT' | 'SL_HIT' | null = null;
     let exitPrice = livePrice;
@@ -229,18 +233,18 @@ export class SignalsService implements OnModuleInit {
       if (livePrice >= tp3) {
         completedState = 'TP3_HIT';
         exitPrice = tp3;
-        exitReason = 'Target 3 Completed (4.0R Runner)';
-        pnlRMultiple = 4.0;
+        exitReason = `Target 3 Completed (${rr3}R Runner)`;
+        pnlRMultiple = rr3;
       } else if (livePrice >= tp2) {
         completedState = 'TP2_HIT';
         exitPrice = tp2;
-        exitReason = 'Target 2 Completed (2.5R Full TP)';
-        pnlRMultiple = 2.5;
+        exitReason = `Target 2 Completed (${rr2}R Full TP)`;
+        pnlRMultiple = rr2;
       } else if (livePrice >= tp1) {
         completedState = 'TP1_HIT';
         exitPrice = tp1;
-        exitReason = 'Target 1 Completed (1.5R Scale Out)';
-        pnlRMultiple = 1.5;
+        exitReason = `Target 1 Completed (${rr1}R Scale Out)`;
+        pnlRMultiple = rr1;
       } else if (livePrice <= sl) {
         completedState = 'SL_HIT';
         exitPrice = sl;
@@ -252,18 +256,18 @@ export class SignalsService implements OnModuleInit {
       if (livePrice <= tp3) {
         completedState = 'TP3_HIT';
         exitPrice = tp3;
-        exitReason = 'Target 3 Completed (4.0R Runner)';
-        pnlRMultiple = 4.0;
+        exitReason = `Target 3 Completed (${rr3}R Runner)`;
+        pnlRMultiple = rr3;
       } else if (livePrice <= tp2) {
         completedState = 'TP2_HIT';
         exitPrice = tp2;
-        exitReason = 'Target 2 Completed (2.5R Full TP)';
-        pnlRMultiple = 2.5;
+        exitReason = `Target 2 Completed (${rr2}R Full TP)`;
+        pnlRMultiple = rr2;
       } else if (livePrice <= tp1) {
         completedState = 'TP1_HIT';
         exitPrice = tp1;
-        exitReason = 'Target 1 Completed (1.5R Scale Out)';
-        pnlRMultiple = 1.5;
+        exitReason = `Target 1 Completed (${rr1}R Scale Out)`;
+        pnlRMultiple = rr1;
       } else if (livePrice >= sl) {
         completedState = 'SL_HIT';
         exitPrice = sl;

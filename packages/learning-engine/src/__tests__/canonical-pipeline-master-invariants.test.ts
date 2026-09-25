@@ -568,7 +568,7 @@ describe('MASTER ENGINEERING FIX — Canonical Trading Pipeline & Global Invaria
     const tCutoff = CandleNormalizer.getCandleCloseTimestamp(candles[30], '15m');
 
     const simResult = BacktestSimulator.runSimulation({
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       candles,
       asOfTimestamp: tCutoff,
       fillModel: FillModel.NEXT_BAR_MARKET,

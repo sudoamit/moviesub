@@ -796,11 +796,16 @@ export class TradeDecisionService {
       (bot as any).executionInstrument ||
       (signal as any).contractSymbol ||
       bot.symbol.toUpperCase();
-    const SPOT_SHORT_FORBIDDEN_SET = new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']);
-    if (SPOT_SHORT_FORBIDDEN_SET.has(effectiveExecutionInstrument) && signal.direction === 'BEARISH') {
+    const SPOT_SHORT_FORBIDDEN_SET = new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']);
+    const isSpotShort =
+      (SPOT_SHORT_FORBIDDEN_SET.has(effectiveExecutionInstrument) ||
+       SPOT_SHORT_FORBIDDEN_SET.has(bot.symbol.toUpperCase()) ||
+       SPOT_SHORT_FORBIDDEN_SET.has(signal.symbol.toUpperCase())) &&
+      signal.direction === 'BEARISH';
+    if (isSpotShort) {
       reasons.push({
         code: 'SPOT_SHORT_SELLING_FORBIDDEN',
-        message: `Spot short selling is forbidden for spot instrument '${effectiveExecutionInstrument}'. To short index or spot assets, trade derivatives (e.g. NIFTY futures or PE options).`,
+        message: `Spot short selling is forbidden for spot instrument '${effectiveExecutionInstrument}'. Spot instruments are long-only. Short selling is prohibited by exchange rules.`,
       });
     }
 
@@ -938,6 +943,35 @@ export class TradeDecisionService {
       }
     }
 
+    // Gate 12.5: Live Market Quote Health
+    if (liveQuoteError) {
+      const isOpt =
+        (signal as any).executionInstrumentType === 'OPTION' ||
+        (bot as any).executionInstrumentType === 'OPTION';
+      const isStale =
+        liveQuoteError?.name === 'StaleMarketDataError' ||
+        liveQuoteError?.code === 'STALE_MARKET_DATA' ||
+        liveQuoteError?.reasonCode === 'STALE_MARKET_DATA' ||
+        liveQuoteError?.code === 'OPTION_QUOTE_STALE';
+      const code = isOpt
+        ? (isStale ? 'OPTION_QUOTE_STALE' : 'OPTION_QUOTE_UNAVAILABLE')
+        : (isStale ? 'STALE_MARKET_DATA' : 'MARKET_DATA_UNAVAILABLE');
+      reasons.push({
+        code,
+        message: liveQuoteError?.message || `Live market quote for '${bot.symbol}' is unavailable`,
+      });
+    } else if (liveQuote) {
+      if (!liveQuote.price || liveQuote.price <= 0) {
+        const isOpt =
+          (signal as any).executionInstrumentType === 'OPTION' ||
+          (bot as any).executionInstrumentType === 'OPTION';
+        reasons.push({
+          code: isOpt ? 'OPTION_QUOTE_UNAVAILABLE' : 'MARKET_DATA_UNAVAILABLE',
+          message: `Live market quote for '${bot.symbol}' is unavailable or non-positive`,
+        });
+      }
+    }
+
     // Gate 13: Instrument-Aware Quantity & Risk Sizing Resolution via Canonical Risk Engine
     let resolvedQuantity = 1;
     let contractSize = 1;
@@ -948,14 +982,22 @@ export class TradeDecisionService {
       : initialCapital;
 
     try {
-      const lookupSymbol =
+      let lookupSymbol =
         (signal as any).contractSymbol ||
+        (bot as any).executionInstrument ||
         bot.symbol;
+      if (lookupSymbol && typeof lookupSymbol === 'string' && lookupSymbol.endsWith(' OPTION')) {
+        lookupSymbol = lookupSymbol.replace(' OPTION', '');
+      }
       instrument = getAuthoritativeInstrument(lookupSymbol);
       contractSize = Number(instrument.contractSize || 1);
     } catch (err: any) {
       try {
-        instrument = getAuthoritativeInstrument(bot.symbol);
+        let fallbackSym = (bot as any).executionInstrument || bot.symbol;
+        if (fallbackSym && typeof fallbackSym === 'string' && fallbackSym.endsWith(' OPTION')) {
+          fallbackSym = fallbackSym.replace(' OPTION', '');
+        }
+        instrument = getAuthoritativeInstrument(fallbackSym);
         contractSize = Number(instrument.contractSize || 1);
       } catch (innerErr: any) {
         reasons.push({
@@ -965,11 +1007,12 @@ export class TradeDecisionService {
       }
     }
 
-    const requestedLeverage =
-      (bot as any).leverage ??
-      (bot as any).requestedLeverage ??
-      (signal as any).leverage ??
-      (instrument?.defaultLeverage ?? 1.0);
+    const requestedLeverage = (isOptionBotOrSignal || Boolean((signal as any).contractSymbol))
+      ? 1.0
+      : ((bot as any).leverage ??
+         (bot as any).requestedLeverage ??
+         (signal as any).leverage ??
+         (instrument?.defaultLeverage ?? 1.0));
 
     let sizing: IPositionSizing | null = null;
     if (instrument && isLevelsValid && optEntry && sl) {
@@ -1024,13 +1067,14 @@ export class TradeDecisionService {
         const maxUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
         resolvedQuantity = Math.min(maxUnits, optionLotsQty);
       } else {
-        const rawBotQty = this.resolveOrderQuantity(bot, instrument);
+        const botInst = hasInstrument(bot.symbol) ? getAuthoritativeInstrument(bot.symbol) : instrument;
+        const rawBotQty = this.resolveOrderQuantity(bot, botInst);
         const maxAuthoritativeUnits =
-          sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
+          sizing.calculatedUnits > 0 ? sizing.calculatedUnits : (sizing.roundedUnits > 0 ? sizing.roundedUnits : rawBotQty);
         resolvedQuantity = Math.min(rawBotQty, maxAuthoritativeUnits);
-        const effLot = Number(instrument.lotSize || 1);
+        const effLot = Number(botInst.lotSize || 1);
         const effPrec =
-          typeof instrument.quantityPrecision === 'number' ? instrument.quantityPrecision : 4;
+          typeof botInst.quantityPrecision === 'number' ? botInst.quantityPrecision : 4;
         resolvedQuantity = Number((Math.floor(resolvedQuantity / effLot) * effLot).toFixed(effPrec));
       }
     } else {
@@ -1071,34 +1115,6 @@ export class TradeDecisionService {
       }
     }
 
-    // Gate 15: Live Market Quote Health
-    if (liveQuoteError) {
-      const isOpt =
-        (signal as any).executionInstrumentType === 'OPTION' ||
-        (bot as any).executionInstrumentType === 'OPTION';
-      const isStale =
-        liveQuoteError?.name === 'StaleMarketDataError' ||
-        liveQuoteError?.code === 'STALE_MARKET_DATA' ||
-        liveQuoteError?.reasonCode === 'STALE_MARKET_DATA' ||
-        liveQuoteError?.code === 'OPTION_QUOTE_STALE';
-      const code = isOpt
-        ? (isStale ? 'OPTION_QUOTE_STALE' : 'OPTION_QUOTE_UNAVAILABLE')
-        : (isStale ? 'STALE_MARKET_DATA' : 'MARKET_DATA_UNAVAILABLE');
-      reasons.push({
-        code,
-        message: liveQuoteError?.message || `Live market quote for '${bot.symbol}' is unavailable`,
-      });
-    } else if (liveQuote) {
-      if (!liveQuote.price || liveQuote.price <= 0) {
-        const isOpt =
-          (signal as any).executionInstrumentType === 'OPTION' ||
-          (bot as any).executionInstrumentType === 'OPTION';
-        reasons.push({
-          code: isOpt ? 'OPTION_QUOTE_UNAVAILABLE' : 'MARKET_DATA_UNAVAILABLE',
-          message: `Live market quote for '${bot.symbol}' is unavailable or non-positive`,
-        });
-      }
-    }
 
     // Gate 16: Comprehensive Multi-Constraint Risk Evaluation via Authoritative Risk Engine
     if (systemConfig?.emergencyStop) {
@@ -2211,7 +2227,9 @@ export class TradeDecisionService {
       (signal as any).contractSymbol ||
       bot.symbol.toUpperCase();
     const isSpotShortForbidden =
-      new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']).has(execInst) &&
+      (new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(execInst) ||
+       new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(bot.symbol.toUpperCase()) ||
+       new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(signal.symbol.toUpperCase())) &&
       signal.direction === 'BEARISH';
     gateResults.push({
       code: 'SPOT_SHORT_SELLING_FORBIDDEN',

@@ -163,7 +163,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         return;
       } else {
         setStatusMessage(
-          '❌ Spot instruments (BTC, NIFTY) are long-only. Short selling is not permitted on Spot.',
+          `❌ EXECUTION BLOCKED: Spot instrument '${currentSymbol}' is long-only. Spot short selling is strictly prohibited.`,
         );
         setTimeout(() => setStatusMessage(null), 5000);
         return;
@@ -171,7 +171,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
     }
 
     if (isSpotInstrument && requestedLeverage > 1) {
-      setStatusMessage('❌ Spot instruments support maximum 1x leverage. Leveraged trading is strictly prohibited on Spot.');
+      setStatusMessage(
+        `❌ Order Rejected [LEVERAGE_EXCEEDS_MAX]: Instrument ${currentSymbol} does not support ${requestedLeverage}x leverage. Maximum allowable leverage is 1x.`,
+      );
       setTimeout(() => setStatusMessage(null), 5000);
       return;
     }
@@ -532,7 +534,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
               className="bg-slate-800 hover:bg-slate-700 text-slate-400 font-bold py-3 rounded-xl flex items-center justify-center gap-2 text-xs border border-slate-700 transition-all"
             >
               <Shield className="w-4 h-4 text-slate-500" />
-              SPOT IS LONG-ONLY (SHORT FORBIDDEN)
+              EXECUTION BLOCKED (SPOT SHORT FORBIDDEN)
             </button>
           ) : (
             <button

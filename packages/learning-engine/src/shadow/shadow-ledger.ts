@@ -345,7 +345,7 @@ export class ShadowLedger {
    */
   public recordCandle(candle: ICandle): void {
     const ts = candle.timestamp instanceof Date ? candle.timestamp.getTime() : new Date(candle.timestamp).getTime();
-    const prev = this.cumulativeMarketHash || `genesis_${this.symbol}_${this.candidateId}`;
+    const prev = this.cumulativeMarketHash || `genesis_${this.symbol}`;
     const payload = {
       previousHash: prev,
       timestamp: ts,
@@ -363,7 +363,7 @@ export class ShadowLedger {
   public getShadowMarketDatasetHash(): string {
     return (
       this.cumulativeMarketHash ||
-      createHash('sha256').update(`empty_market_${this.symbol}_${this.candidateId}`).digest('hex')
+      createHash('sha256').update(`empty_market_${this.symbol}`).digest('hex')
     );
   }
 
@@ -618,7 +618,7 @@ export class ShadowLedger {
     }
 
     const tempPath = `${targetPath}.tmp.${Date.now()}.${randomUUID()}`;
-    fs.writeFileSync(tempPath, canonicalJsonStringify(data), 'utf-8');
+    fs.writeFileSync(tempPath, JSON.stringify(data), 'utf-8');
     fs.renameSync(tempPath, targetPath);
   }
 
@@ -703,42 +703,44 @@ export class ShadowLedger {
       // Deep semantic validation of orders
       const orderIds = new Set<string>();
       for (const order of data.orders) {
-        if (!order || typeof order !== 'object' || typeof order.id !== 'string' || order.id.trim() === '') {
+        const orderId = (order as any).orderId || (order as any).id;
+        if (!order || typeof order !== 'object' || typeof orderId !== 'string' || orderId.trim() === '') {
           throw new Error('Corrupted order in shadow ledger file (missing or invalid id)');
         }
-        if (orderIds.has(order.id)) {
-          throw new Error(`Duplicate order ID '${order.id}' in persisted shadow ledger`);
+        if (orderIds.has(orderId)) {
+          throw new Error(`Duplicate order ID '${orderId}' in persisted shadow ledger`);
         }
-        orderIds.add(order.id);
+        orderIds.add(orderId);
         if (typeof order.quantity !== 'number' || !Number.isFinite(order.quantity) || order.quantity <= 0) {
-          throw new Error(`Corrupted order quantity '${order.quantity}' for order '${order.id}'`);
+          throw new Error(`Corrupted order quantity '${order.quantity}' for order '${orderId}'`);
         }
         if (!['BUY', 'SELL'].includes(order.side)) {
-          throw new Error(`Corrupted order side '${order.side}' for order '${order.id}'`);
+          throw new Error(`Corrupted order side '${order.side}' for order '${orderId}'`);
         }
       }
 
       // Deep semantic validation of fills
       const fillIds = new Set<string>();
       for (const fill of data.fills) {
-        if (!fill || typeof fill !== 'object' || typeof fill.id !== 'string' || fill.id.trim() === '') {
+        const fillId = (fill as any).fillId || (fill as any).id;
+        if (!fill || typeof fill !== 'object' || typeof fillId !== 'string' || fillId.trim() === '') {
           throw new Error('Corrupted fill in shadow ledger file (missing or invalid id)');
         }
-        if (fillIds.has(fill.id)) {
-          throw new Error(`Duplicate fill ID '${fill.id}' in persisted shadow ledger`);
+        if (fillIds.has(fillId)) {
+          throw new Error(`Duplicate fill ID '${fillId}' in persisted shadow ledger`);
         }
-        fillIds.add(fill.id);
+        fillIds.add(fillId);
         if (typeof fill.price !== 'number' || !Number.isFinite(fill.price) || fill.price <= 0) {
-          throw new Error(`Corrupted fill price '${fill.price}' for fill '${fill.id}'`);
+          throw new Error(`Corrupted fill price '${fill.price}' for fill '${fillId}'`);
         }
         if (typeof fill.quantity !== 'number' || !Number.isFinite(fill.quantity) || fill.quantity <= 0) {
-          throw new Error(`Corrupted fill quantity '${fill.quantity}' for fill '${fill.id}'`);
+          throw new Error(`Corrupted fill quantity '${fill.quantity}' for fill '${fillId}'`);
         }
         if (typeof fill.fee === 'number' && (!Number.isFinite(fill.fee) || fill.fee < 0)) {
-          throw new Error(`Corrupted fill fee for fill '${fill.id}'`);
+          throw new Error(`Corrupted fill fee for fill '${fillId}'`);
         }
         if (typeof fill.slippage === 'number' && (!Number.isFinite(fill.slippage) || fill.slippage < 0)) {
-          throw new Error(`Corrupted fill slippage for fill '${fill.id}'`);
+          throw new Error(`Corrupted fill slippage for fill '${fillId}'`);
         }
       }
 
@@ -764,7 +766,8 @@ export class ShadowLedger {
       // Deep semantic validation of activeLot if present
       if (data.activeLot) {
         const lot = data.activeLot;
-        if (typeof lot !== 'object' || typeof lot.id !== 'string' || lot.id.trim() === '') {
+        const lotId = (lot as any).id || (lot as any).tradeId;
+        if (typeof lot !== 'object' || typeof lotId !== 'string' || lotId.trim() === '') {
           throw new Error('Corrupted activeLot in shadow ledger file');
         }
         if (typeof lot.entryPrice !== 'number' || !Number.isFinite(lot.entryPrice) || lot.entryPrice <= 0) {

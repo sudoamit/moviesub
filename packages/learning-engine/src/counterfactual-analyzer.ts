@@ -1,4 +1,5 @@
 import { BacktestSimulator } from '@quant/backtesting';
+import { LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { TradingExperience } from './types';
 
 export interface CounterfactualExitScenario {
@@ -53,9 +54,12 @@ export class CounterfactualAnalyzer {
       throw new Error('INSUFFICIENT_MARKET_DATA_FOR_COUNTERFACTUAL_ANALYSIS');
     }
 
-    const symbol = exp.instrument?.symbol;
+    let symbol = exp.instrument?.symbol;
     if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
       throw new Error(`MISSING_SYMBOL: Experience '${exp.id}' is missing authoritative trading symbol in counterfactual analysis`);
+    }
+    if (symbol in LEGACY_SPOT_ALIASES) {
+      symbol = LEGACY_SPOT_ALIASES[symbol as keyof typeof LEGACY_SPOT_ALIASES];
     }
     const timeframe = exp.timeframe || '15m';
 

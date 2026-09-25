@@ -1,4 +1,4 @@
-import { ICandle } from '@quant/shared';
+import { ICandle, LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { BacktestSimulator, IBacktestOptions } from '@quant/backtesting';
 import { CandidateExecutionResult, IDeterministicTestFixtureOptions } from './candidate-backtest-runner';
 import { CandidateArtifact, StrategyCandidate, TradingExperience } from './types';
@@ -17,12 +17,14 @@ export class DeterministicTestStrategyAdapter {
     const change = (candidate as any).change || {};
     const candles = fixture.candles || [];
 
-    const symbol =
+    const rawSymbol =
       fixture.experiences?.[0]?.instrument?.symbol ||
       fixture.symbol ||
       (candidate as any).symbol ||
       change.symbol ||
       'BTCUSDT';
+
+    const symbol = rawSymbol in LEGACY_SPOT_ALIASES ? LEGACY_SPOT_ALIASES[rawSymbol as keyof typeof LEGACY_SPOT_ALIASES] : rawSymbol;
 
     const initialCapital =
       fixture.initialCapital ??

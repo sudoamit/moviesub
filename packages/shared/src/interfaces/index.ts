@@ -279,17 +279,25 @@ export interface ISignalSetup {
     max: number;
     optimal: number;
   };
+  entry?: number;
   stopLoss: number;
   takeProfits: {
     tp1: number;
     tp2: number;
     tp3: number;
   };
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
   riskRewardRatios: {
     rr1: number;
     rr2: number;
     rr3: number;
   };
+  rr1?: number;
+  rr2?: number;
+  rr3?: number;
+  maxPotentialR?: number;
   reasoning: ISignalReasoning;
   reasons?: string[];
   risks?: string[];

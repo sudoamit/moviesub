@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { LEGACY_SPOT_ALIASES } from '@quant/shared';
 import { TradeLifecycleManager } from '@quant/risk-engine';
 import {
   CandidateArtifact,
@@ -119,6 +120,25 @@ export class CandidateArtifactBuilder {
       throw new Error(`CANDIDATE_SYMBOL_MISSING: Candidate '${candidate.id}' is missing authoritative symbol`);
     }
 
+    const execConf = (candidate.executionConfig || options?.executionConfig) as Record<string, unknown> | undefined;
+    if (execConf) {
+      if (!execConf.fillModel || typeof execConf.fillModel !== 'string' || (execConf.fillModel as string).trim() === '') {
+        throw new Error(`MISSING_FILL_MODEL: Candidate '${candidate.id}' is missing authoritative fillModel`);
+      }
+      if (!execConf.ambiguityMode || typeof execConf.ambiguityMode !== 'string' || (execConf.ambiguityMode as string).trim() === '') {
+        throw new Error(`MISSING_AMBIGUITY_MODE: Candidate '${candidate.id}' is missing authoritative ambiguityMode`);
+      }
+      if (
+        execConf.latencyMs === undefined ||
+        execConf.latencyMs === null ||
+        typeof execConf.latencyMs !== 'number' ||
+        !Number.isFinite(execConf.latencyMs) ||
+        (execConf.latencyMs as number) < 0
+      ) {
+        throw new Error(`MISSING_LATENCY_MS: Candidate '${candidate.id}' must specify valid non-negative latencyMs`);
+      }
+    }
+
     const fillModel =
       ((candidate.executionConfig as Record<string, unknown>)?.fillModel as string) ||
       ((options?.executionConfig as Record<string, unknown>)?.fillModel as string) ||
@@ -148,6 +168,7 @@ export class CandidateArtifactBuilder {
       ((candidate.riskConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((rawCandidate.executionConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.executionConfig as Record<string, unknown>)?.ambiguityMode as string ||
+      ((rawCandidate.strategyConfig as Record<string, unknown>)?.strategyConfig as Record<string, unknown>)?.ambiguityMode as string ||
       ((rawCandidate.strategyConfig as Record<string, unknown>)?.ambiguityMode as string) ||
       ((options?.provenance as any)?.executionConfig?.ambiguityMode as string) ||
       (rawCandidate.ambiguityMode as string) ||
@@ -208,7 +229,7 @@ export class CandidateArtifactBuilder {
       throw new Error(`INVALID_MIN_MTF_SCORE: Candidate '${candidate.id}' minMtfScore must be in range [0, 100], got ${minMtfScore}`);
     }
 
-    const stopLossAtrMultiplier =
+    const stopLossAtrMultiplierRaw =
       typeof change.stopLossAtrMultiplier === 'number'
         ? change.stopLossAtrMultiplier
         : change.parameter === 'stopLossAtrMultiplier' && typeof change.value === 'number'
@@ -223,11 +244,22 @@ export class CandidateArtifactBuilder {
                   ? ((options?.executionConfig as Record<string, unknown>).stopLossAtrMultiplier as number)
                   : undefined;
 
+    const hasExecutionConfig = Boolean(
+      candidate.executionConfig ||
+      options?.executionConfig ||
+      (candidate as unknown as Record<string, unknown>).executionConfig,
+    );
+
+    const stopLossAtrMultiplier =
+      stopLossAtrMultiplierRaw !== undefined
+        ? stopLossAtrMultiplierRaw
+        : (hasExecutionConfig ? undefined : 1.0);
+
     if (stopLossAtrMultiplier === undefined || !Number.isFinite(stopLossAtrMultiplier) || stopLossAtrMultiplier <= 0) {
       throw new Error(`MISSING_STOP_LOSS_ATR_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive stopLossAtrMultiplier`);
     }
 
-    const sizingMultiplier =
+    const sizingMultiplierRaw =
       typeof change.sizingMultiplier === 'number'
         ? change.sizingMultiplier
         : change.parameter === 'sizingMultiplier' && typeof change.value === 'number'
@@ -241,6 +273,11 @@ export class CandidateArtifactBuilder {
                 : typeof (options?.executionConfig as Record<string, unknown>)?.sizingMultiplier === 'number'
                   ? ((options?.executionConfig as Record<string, unknown>).sizingMultiplier as number)
                   : undefined;
+
+    const sizingMultiplier =
+      sizingMultiplierRaw !== undefined
+        ? sizingMultiplierRaw
+        : (hasExecutionConfig ? undefined : 1.0);
 
     if (sizingMultiplier === undefined || !Number.isFinite(sizingMultiplier) || sizingMultiplier <= 0) {
       throw new Error(`MISSING_SIZING_MULTIPLIER: Candidate '${candidate.id}' must specify valid positive sizingMultiplier`);
@@ -491,7 +528,15 @@ export class CandidateArtifactBuilder {
       },
       contextMode,
     );
-    if (productionExecutionContext.symbol !== config.symbol) {
+    const canonicalContextSymbol =
+      productionExecutionContext.symbol in LEGACY_SPOT_ALIASES
+        ? LEGACY_SPOT_ALIASES[productionExecutionContext.symbol as keyof typeof LEGACY_SPOT_ALIASES]
+        : productionExecutionContext.symbol;
+    const canonicalConfigSymbol =
+      config.symbol in LEGACY_SPOT_ALIASES
+        ? LEGACY_SPOT_ALIASES[config.symbol as keyof typeof LEGACY_SPOT_ALIASES]
+        : config.symbol;
+    if (canonicalContextSymbol !== canonicalConfigSymbol) {
       throw new Error(`EXECUTION_CONTEXT_SYMBOL_MISMATCH: Candidate '${candidate.id}' context symbol does not match artifact symbol`);
     }
     if (productionExecutionContext.timeframe !== timeframe) {
@@ -572,10 +617,14 @@ export class CandidateArtifactBuilder {
         modelHash = candidateChange.modelHash as string;
       } else if (modelArtifact?.modelHash && typeof modelArtifact.modelHash === 'string') {
         modelHash = modelArtifact.modelHash as string;
+      } else if (candidate.type !== 'MODEL') {
+        modelHash = 'none';
       }
 
-      if (!modelHash || modelHash === 'none' || typeof modelHash !== 'string' || modelHash.trim() === '') {
-        throw new Error(`MODEL_HASH_MISSING: ML candidate '${candidate.id}' must specify valid non-empty modelHash`);
+      if (candidate.type === 'MODEL') {
+        if (!modelHash || modelHash === 'none' || typeof modelHash !== 'string' || modelHash.trim() === '') {
+          throw new Error(`MODEL_HASH_MISSING: ML candidate '${candidate.id}' must specify valid non-empty modelHash`);
+        }
       }
 
       const mId = modelArtifact?.modelId || (candidateChange?.modelId as string | undefined);

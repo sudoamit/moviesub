@@ -26,7 +26,14 @@ import {
   Sliders,
   Bot,
 } from 'lucide-react';
-import { ISignalSetup } from '@quant/shared';
+import {
+  ISignalSetup,
+  calculateRiskDistance,
+  calculateTargetR,
+  validateTargetGeometry,
+  DEFAULT_STRATEGY_RR_RATIOS,
+  DEFAULT_OPTION_RR_RATIOS,
+} from '@quant/shared';
 
 interface LivePositionTrackerProps {
   symbol: string;
@@ -201,6 +208,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         : 'BEARISH')
     : direction;
   const isBull = effectiveDirection === 'BULLISH';
+  const isSpotInstrument =
+    symbol === 'BTCUSDT_SPOT' ||
+    symbol.endsWith('_SPOT') ||
+    (signal as any)?.instrumentType === 'SPOT' ||
+    ((isCrypto || symbol === 'NIFTY' || symbol === 'BANKNIFTY') && !isOptionMode);
+  const isExecutionBlocked = !isOptionMode && !isBull && isSpotInstrument;
   const hasActiveTrade = Boolean(paperPosition);
   const [isPlacingOrder, setIsPlacingOrder] = useState<boolean>(false);
   const positionLockKey = `${symbol}_${effectiveDirection}`;
@@ -487,8 +500,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
       const savedOpt = localStorage.getItem(lockStorageKey);
       let initialOpt = savedOpt ? Number(savedOpt) : 0;
-      // Sanity check: If NIFTY entry premium is corrupted with inflated ITM value (> 350) from previous bug
-      if (symbol === 'NIFTY' && initialOpt > 350) {
+      // Sanity check: If NIFTY entry premium is corrupted with inflated ITM value (> 350) or stale scraper quote (< 10)
+      if (symbol === 'NIFTY' && (initialOpt > 350 || (initialOpt > 0 && initialOpt < 10.0))) {
         initialOpt = 0;
         localStorage.removeItem(lockStorageKey);
       }
@@ -530,11 +543,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             `${API_BASE}/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotEntryPrice}&strike=${activeStrike}`,
           );
           const dataEntry = await resEntry.json();
-          if (isMounted && dataEntry && dataEntry.optionLtp > 0) {
-            lockedEntryRef.current = dataEntry.optionLtp;
-            setLockedEntryPremium(dataEntry.optionLtp);
+          const candidateEntry = dataEntry?.optionEntryPremium || dataEntry?.optionLtp;
+          if (isMounted && candidateEntry > 0) {
+            lockedEntryRef.current = candidateEntry;
+            setLockedEntryPremium(candidateEntry);
             if (typeof window !== 'undefined') {
-              localStorage.setItem(lockStorageKey, String(dataEntry.optionLtp));
+              localStorage.setItem(lockStorageKey, String(candidateEntry));
             }
           }
         }
@@ -572,22 +586,44 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       ? lockedEntryRef.current
       : lockedEntryPremium > 0
         ? lockedEntryPremium
-        : optionData?.optionLtp || 45.35;
+        : optionData?.optionEntryPremium || optionData?.optionLtp || 56.63;
 
   const liveOptionPremium = optionData?.optionLtp || optionEntryPremium;
 
-  // Max 20 to 30 points Stop Loss in NIFTY Option Premium
-  const maxOptionRiskPts = symbol === 'NIFTY' ? 25.0 : symbol === 'BANKNIFTY' ? 60.0 : 25.0;
-  const rawOptionRiskPts =
-    optionEntryPremium > 40
-      ? Math.min(maxOptionRiskPts, Math.max(18.0, optionEntryPremium * 0.35))
-      : Math.min(20.0, Math.max(10.0, optionEntryPremium * 0.4));
-  const optionStopLoss = Number(Math.max(1.0, optionEntryPremium - rawOptionRiskPts).toFixed(2));
+  // Authoritative strategy target configuration and R-multiples strictly sourced from strategy/backend
+  const authoritativeRR1 = isOptionMode && !isCrypto && !isGold
+    ? (optionData?.rr1 ?? signal?.rr1 ?? DEFAULT_OPTION_RR_RATIOS.rr1)
+    : (signal?.rr1 ?? signal?.riskRewardRatios?.rr1 ?? DEFAULT_STRATEGY_RR_RATIOS.rr1);
+  const authoritativeRR2 = isOptionMode && !isCrypto && !isGold
+    ? (optionData?.rr2 ?? signal?.rr2 ?? DEFAULT_OPTION_RR_RATIOS.rr2)
+    : (signal?.rr2 ?? signal?.riskRewardRatios?.rr2 ?? DEFAULT_STRATEGY_RR_RATIOS.rr2);
+  const authoritativeRR3 = isOptionMode && !isCrypto && !isGold
+    ? (optionData?.rr3 ?? signal?.rr3 ?? DEFAULT_OPTION_RR_RATIOS.rr3)
+    : (signal?.rr3 ?? signal?.riskRewardRatios?.rr3 ?? DEFAULT_STRATEGY_RR_RATIOS.rr3);
+  const authoritativeMaxR = isOptionMode && !isCrypto && !isGold
+    ? (optionData?.maxPotentialR ?? signal?.maxPotentialR ?? DEFAULT_OPTION_RR_RATIOS.maxPotentialR)
+    : (signal?.maxPotentialR ?? DEFAULT_STRATEGY_RR_RATIOS.maxPotentialR);
+
+  // Stop Loss & Targets in NIFTY/BANKNIFTY Option Premium
+  const optionStopLoss =
+    optionData?.optionStopLoss && optionData.optionStopLoss < optionEntryPremium
+      ? optionData.optionStopLoss
+      : Number(
+          Math.max(
+            1.0,
+            optionEntryPremium -
+              (symbol === 'NIFTY'
+                ? Math.min(25.0, Math.max(18.0, optionEntryPremium * 0.35))
+                : symbol === 'BANKNIFTY'
+                  ? Math.min(60.0, Math.max(30.0, optionEntryPremium * 0.35))
+                  : 20.0),
+          ).toFixed(2),
+        );
   const optionRiskDistance = Math.abs(optionEntryPremium - optionStopLoss);
 
-  const optionTP1 = Number((optionEntryPremium + optionRiskDistance * 1.5).toFixed(2)); // 1.5R (e.g. +37.5 pts)
-  const optionTP2 = Number((optionEntryPremium + optionRiskDistance * 2.5).toFixed(2)); // 2.5R (e.g. +62.5 pts)
-  const optionTP3 = Number((optionEntryPremium + optionRiskDistance * 4.0).toFixed(2)); // 4.0R (e.g. +100.0 pts)
+  const optionTP1 = optionData?.optionTarget1 ?? Number((optionEntryPremium + optionRiskDistance * authoritativeRR1).toFixed(2));
+  const optionTP2 = optionData?.optionTarget2 ?? Number((optionEntryPremium + optionRiskDistance * authoritativeRR2).toFixed(2));
+  const optionTP3 = optionData?.optionTarget3 ?? Number((optionEntryPremium + optionRiskDistance * authoritativeRR3).toFixed(2));
   // Active Effective Parameters (Option Mode vs Spot Mode)
   const effectiveEntryPrice = isOptionMode && !isCrypto && !isGold ? optionEntryPremium : spotEntryPrice;
   const effectiveCurrentPrice = isOptionMode && !isCrypto && !isGold ? liveOptionPremium : currentCMP;
@@ -707,37 +743,34 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // Display price helper: preserves native instrument quote currency for display
   const dp = React.useCallback((price: number) => price, []);
 
-  // Guaranteed Directional Take Profit Roadmap (Strictly < Entry for BEARISH, > Entry for BULLISH)
+  // Single authoritative source of truth for targets: consume backend strategy prices
   const minTargetDist = isGold ? 12.0 : isCrypto ? 120.0 : 15.0;
   const targetRisk = Math.max(minTargetDist, riskPerUnit);
 
-  const rawTP1 = Number(signal?.takeProfits?.tp1);
-  const rawTP2 = Number(signal?.takeProfits?.tp2);
-  const rawTP3 = Number(signal?.takeProfits?.tp3);
+  const rawTP1 = Number(signal?.tp1 ?? signal?.takeProfits?.tp1);
+  const rawTP2 = Number(signal?.tp2 ?? signal?.takeProfits?.tp2);
+  const rawTP3 = Number(signal?.tp3 ?? signal?.takeProfits?.tp3);
 
-  const validTP1 = isBull
-    ? rawTP1 > spotEntryPrice && (rawTP1 - spotEntryPrice) >= minTargetDist * 0.8
+  const validTP1 =
+    rawTP1 > 0
       ? rawTP1
-      : Number((spotEntryPrice + targetRisk * 1.5).toFixed(2))
-    : rawTP1 < spotEntryPrice && rawTP1 > 0 && (spotEntryPrice - rawTP1) >= minTargetDist * 0.8
-      ? rawTP1
-      : Number((spotEntryPrice - targetRisk * 1.5).toFixed(2));
+      : isBull
+        ? Number((spotEntryPrice + targetRisk * authoritativeRR1).toFixed(2))
+        : Number((spotEntryPrice - targetRisk * authoritativeRR1).toFixed(2));
 
-  const validTP2 = isBull
-    ? rawTP2 > spotEntryPrice && (rawTP2 - spotEntryPrice) >= minTargetDist * 1.5
+  const validTP2 =
+    rawTP2 > 0
       ? rawTP2
-      : Number((spotEntryPrice + targetRisk * 2.5).toFixed(2))
-    : rawTP2 < spotEntryPrice && rawTP2 > 0 && (spotEntryPrice - rawTP2) >= minTargetDist * 1.5
-      ? rawTP2
-      : Number((spotEntryPrice - targetRisk * 2.5).toFixed(2));
+      : isBull
+        ? Number((spotEntryPrice + targetRisk * authoritativeRR2).toFixed(2))
+        : Number((spotEntryPrice - targetRisk * authoritativeRR2).toFixed(2));
 
-  const validTP3 = isBull
-    ? rawTP3 > spotEntryPrice && (rawTP3 - spotEntryPrice) >= minTargetDist * 2.5
+  const validTP3 =
+    rawTP3 > 0
       ? rawTP3
-      : Number((spotEntryPrice + targetRisk * 4.0).toFixed(2))
-    : rawTP3 < spotEntryPrice && rawTP3 > 0 && (spotEntryPrice - rawTP3) >= minTargetDist * 2.5
-      ? rawTP3
-      : Number((spotEntryPrice - targetRisk * 4.0).toFixed(2));
+      : isBull
+        ? Number((spotEntryPrice + targetRisk * authoritativeRR3).toFixed(2))
+        : Number((spotEntryPrice - targetRisk * authoritativeRR3).toFixed(2));
 
   const tp1 = isOptionMode && !isCrypto && !isGold ? optionTP1 : validTP1;
   const tp2 = isOptionMode && !isCrypto && !isGold ? optionTP2 : validTP2;
@@ -915,13 +948,72 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       return;
     }
 
+    const posId = (paperPosition as any).id;
+    const exitPriceVal = exitP || effectiveCurrentPrice;
+
+    // Partial Scale-Out Cut (< 1.0)
+    if (partialRatio < 1.0) {
+      try {
+        let res = await fetch(`${API_BASE}/api/paper-trading/positions/${posId}/scale-out`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ratio: partialRatio,
+            exitPrice: exitPriceVal,
+            reason,
+          }),
+        });
+
+        if (!res.ok) {
+          // Fallback to /close with partialRatio
+          res = await fetch(`${API_BASE}/api/paper-trading/positions/${posId}/close`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              positionId: posId,
+              reason,
+              exitPrice: exitPriceVal,
+              exitPriceOverride: exitPriceVal,
+              allowPriceOverride: true,
+              partialRatio,
+            }),
+          });
+        }
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.message || 'Scale out request failed');
+        }
+
+        setIsAutoScaledOut(true);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(scaleoutStorageKey, 'true');
+          window.dispatchEvent(
+            new CustomEvent('quant_trade_scaleout', {
+              detail: { symbol, positionId: posId, ratio: partialRatio, exitPrice: exitPriceVal },
+            }),
+          );
+        }
+
+        setManualCloseToast(
+          `✨ Scaled out ${(partialRatio * 100).toFixed(0)}% @ ${currencySymbol}${exitPriceVal.toFixed(2)}. Remaining 50% runner active!`,
+        );
+        setTimeout(() => setManualCloseToast(null), 6000);
+        return;
+      } catch (err: any) {
+        setManualCloseToast(`SCALE OUT FAILED: ${err.message}`);
+        setTimeout(() => setManualCloseToast(null), 8000);
+        return;
+      }
+    }
+
+    // Full Market Cut / Exit (100%)
     try {
-      const exitPriceVal = exitP || effectiveCurrentPrice;
-      const res = await fetch(`${API_BASE}/api/paper-trading/positions/${(paperPosition as any).id}/close`, {
+      const res = await fetch(`${API_BASE}/api/paper-trading/positions/${posId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          positionId: (paperPosition as any).id,
+          positionId: posId,
           reason,
           exitPrice: exitPriceVal,
           exitPriceOverride: exitPriceVal,
@@ -956,7 +1048,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         localStorage.setItem(symbolCutKey, 'true');
         localStorage.setItem(cutSummaryStorageKey, JSON.stringify(summary));
         window.dispatchEvent(
-          new CustomEvent('quant_trade_closed', { detail: { ...summary, symbol } }),
+          new CustomEvent('quant_trade_closed', {
+            detail: { ...summary, symbol, positionId: posId },
+          }),
         );
       }
 
@@ -982,6 +1076,21 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     }
   };
 
+  // Auto-Cut Effect: Trigger auto-cut when Stop Loss or Target 3 Runner is reached
+  React.useEffect(() => {
+    if (!hasActiveTrade || isPositionCut || !(paperPosition as any)?.id) {
+      return;
+    }
+
+    if (isSLReached && autoCutExecutedRef.current !== 'SL') {
+      autoCutExecutedRef.current = 'SL';
+      handleCutTrade('Auto Stop Loss Cut', currentSL);
+    } else if (isTP3Reached && autoCutExecutedRef.current !== 'TP3') {
+      autoCutExecutedRef.current = 'TP3';
+      handleCutTrade('Auto TP3 Runner Target Cut', validTP3);
+    }
+  }, [hasActiveTrade, isPositionCut, isSLReached, isTP3Reached, currentSL, validTP3, paperPosition]);
+
   const handleExecutePaperOrder = async () => {
     if (isPlacingOrder) return;
     setIsPlacingOrder(true);
@@ -996,12 +1105,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           (optionData?.recommendedStrike === activeStrike && optionData?.contractName) ||
           `${symbol} ${activeStrike} ${optType}`;
 
-        const execPrice =
-          effectiveCurrentPrice > 0
-            ? effectiveCurrentPrice
-            : optionData?.optionLtp > 0
-              ? optionData.optionLtp
-              : 60.0;
+        // Authoritative execution premium is strictly the canonical optionEntryPremium
+        const execPrice = optionEntryPremium;
 
         payload = {
           symbol,
@@ -1024,9 +1129,15 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         };
       } else {
         // Spot Equity / Crypto / Commodity (Long-Only)
-        if (!isBull) {
+        if (!isBull || isExecutionBlocked) {
           throw new Error(
-            `Spot instrument '${symbol}' is long-only. Short selling spot is not permitted by exchange rules. BUY entries only.`,
+            `EXECUTION BLOCKED: Spot instrument '${symbol}' is long-only. Short selling spot is not permitted by exchange rules. BUY entries only.`,
+          );
+        }
+
+        if (isSpotInstrument && effectiveLeverage > 1) {
+          throw new Error(
+            `Order Rejected [LEVERAGE_EXCEEDS_MAX]: Instrument ${symbol} does not support ${effectiveLeverage}x leverage. Maximum allowable leverage is 1x.`,
           );
         }
 
@@ -1260,9 +1371,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           )}
 
           {!hasActiveTrade && (
-            <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold">
-              READY FOR EXECUTION
-            </span>
+            isExecutionBlocked ? (
+              <span className="bg-rose-950/90 text-rose-300 border border-rose-700/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-1 animate-pulse">
+                <ShieldAlert className="w-3 h-3 text-rose-400" />
+                EXECUTION BLOCKED (Spot Short Forbidden)
+              </span>
+            ) : (
+              <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold">
+                READY FOR EXECUTION
+              </span>
+            )
           )}
 
           {isAutoScaledOut && (
@@ -1359,8 +1477,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               <span className="text-slate-600">•</span>
               <span className="text-emerald-400 font-bold flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                Margin: {currencySymbol}
-                {totalMarginUsed.toLocaleString()} ({isCrypto ? 'No Cap' : '≤ ₹50k'})
+                {isOptionMode ? 'Premium Outlay' : 'Margin'}: {currencySymbol}
+                {totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({isCrypto ? 'No Cap' : '≤ ₹50k'})
               </span>
             </div>
           </div>
@@ -1386,40 +1504,76 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           const isClosed = isPositionCut && !!closedTradeSummary;
           if (!hasActiveTrade && !isClosed) {
             const spreadToCMP = currentCMP - spotEntryPrice;
-            const plannedRisk = Math.abs(spotEntryPrice - originalSL);
-            const projectedReward = Math.abs(tp2 - spotEntryPrice);
-            const rrRatio = plannedRisk > 0 ? (projectedReward / plannedRisk).toFixed(1) : '2.5';
+            const plannedRisk = Math.abs(effectiveEntryPrice - originalSL);
+            const projectedReward = Math.abs(tp2 - effectiveEntryPrice);
+            const rrRatio = plannedRisk > 0 ? (projectedReward / plannedRisk).toFixed(1) : authoritativeRR2.toFixed(1);
 
             return (
-              <div className="bg-slate-900/90 border border-cyan-500/30 p-3.5 rounded-xl col-span-2 sm:col-span-2 relative overflow-hidden">
+              <div className={`p-3.5 rounded-xl col-span-2 sm:col-span-2 relative overflow-hidden ${
+                isExecutionBlocked
+                  ? 'bg-slate-900/90 border border-rose-500/40 shadow-rose-950/20 shadow-lg'
+                  : 'bg-slate-900/90 border border-cyan-500/30'
+              }`}>
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-cyan-400 uppercase tracking-wider block font-bold flex items-center gap-1">
-                    <Radio className="w-3 h-3 text-cyan-400" /> SMC SETUP ASYMMETRY (STANDBY)
+                  <span className={`text-[10px] uppercase tracking-wider block font-bold flex items-center gap-1 ${
+                    isExecutionBlocked ? 'text-rose-400' : 'text-cyan-400'
+                  }`}>
+                    {isExecutionBlocked ? (
+                      <>
+                        <ShieldAlert className="w-3 h-3 text-rose-400" />
+                        SMC SETUP BLOCKED (LONG-ONLY INSTRUMENT)
+                      </>
+                    ) : (
+                      <>
+                        <Radio className="w-3 h-3 text-cyan-400" />
+                        {isOptionMode ? 'SMC OPTION RADAR (STANDBY)' : 'SMC SETUP ASYMMETRY (STANDBY)'}
+                      </>
+                    )}
                   </span>
                   <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-black px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                    <span className={`text-xs font-black px-2 py-0.5 rounded border ${
+                      isExecutionBlocked
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                    }`}>
                       1 : {rrRatio} R (Target R:R)
                     </span>
                   </div>
                 </div>
 
                 <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-2xl sm:text-3xl font-black tracking-tight text-cyan-300">
-                    +2.5R POTENTIAL
+                  <span className={`text-2xl sm:text-3xl font-black tracking-tight ${
+                    isExecutionBlocked ? 'text-rose-300' : 'text-cyan-300'
+                  }`}>
+                    +{authoritativeMaxR.toFixed(1)}R POTENTIAL
                   </span>
-                  <span className="text-sm font-bold text-slate-400">
-                    (Ready to Execute)
+                  <span className={`text-sm font-bold ${isExecutionBlocked ? 'text-rose-400' : 'text-slate-400'}`}>
+                    {isExecutionBlocked ? '(EXECUTION BLOCKED - Spot Short Forbidden)' : `(Primary: ${authoritativeRR2.toFixed(1)}R • Ready)`}
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-300 block mt-1.5 font-bold">
-                  <span className="text-slate-400">
-                    Live CMP: {nativeCurrency}{dp(currentCMP).toFixed(2)}
-                  </span>
-                  <span className="text-slate-500 mx-1">•</span>
-                  <span className="text-cyan-300">
-                    Optimal Entry: {nativeCurrency}{dp(spotEntryPrice).toFixed(2)}
-                    {Math.abs(spreadToCMP) > 0.01 && ` (${spreadToCMP >= 0 ? '+' : ''}${dp(spreadToCMP).toFixed(2)} pts)`}
-                  </span>
+                  {isOptionMode && !isCrypto && !isGold ? (
+                    <>
+                      <span className="text-slate-400">
+                        Underlying Trigger: {nativeCurrency}{dp(spotEntryPrice).toFixed(2)}
+                      </span>
+                      <span className="text-slate-500 mx-1">•</span>
+                      <span className="text-cyan-300">
+                        Contract: {symbol} {activeStrike} {isBull ? 'CE' : 'PE'} @ {nativeCurrency}{dp(optionEntryPremium).toFixed(2)}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-slate-400">
+                        Live CMP: {nativeCurrency}{dp(currentCMP).toFixed(2)}
+                      </span>
+                      <span className="text-slate-500 mx-1">•</span>
+                      <span className="text-cyan-300">
+                        Optimal Entry: {nativeCurrency}{dp(spotEntryPrice).toFixed(2)}
+                        {Math.abs(spreadToCMP) > 0.01 && ` (${spreadToCMP >= 0 ? '+' : ''}${dp(spreadToCMP).toFixed(2)} pts)`}
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
             );
@@ -1584,7 +1738,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               ? isOptionMode && !isCrypto && !isGold
                 ? 'ENTRY PREMIUM (LOCKED)'
                 : 'SPOT ENTRY (LOCKED)'
-              : 'OPTIMAL ENTRY ZONE'}
+              : isOptionMode && !isCrypto && !isGold
+                ? 'OPTION ENTRY PREMIUM'
+                : 'OPTIMAL ENTRY ZONE'}
           </span>
           <span className="text-xl font-black text-white block mt-1">
             {nativeCurrency}
@@ -1592,7 +1748,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           </span>
           <span className="text-[9px] text-slate-400 block mt-0.5">
             {isOptionMode && !isCrypto && !isGold
-              ? `Spot: ${nativeCurrency}${dp(spotEntryPrice).toFixed(2)} | Margin: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+              ? `Underlying: ${nativeCurrency}${dp(spotEntryPrice).toFixed(2)} | Outlay: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
               : `${hasActiveTrade ? 'Margin Used' : 'Projected Margin'}: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto || isGold ? ` (${effectiveLeverage}x Leverage)` : ''}`}
           </span>
         </div>
@@ -1602,7 +1758,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
               {!hasActiveTrade
-                ? 'PLANNED STOP LOSS'
+                ? isOptionMode && !isCrypto && !isGold
+                  ? 'PLANNED STOP LOSS'
+                  : 'PLANNED STOP LOSS'
                 : isProfitLocked
                   ? 'TRAILING SL (PROFIT LOCKED)'
                   : isOptionMode && !isCrypto && !isGold
@@ -1636,7 +1794,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               ? `Locked Profit: +${currencySymbol}${lockedProfitAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (Risk Free)`
               : hasActiveTrade && isBreakevenActive
                 ? `Max Risk: ${currencySymbol}0.00 (Risk Free)`
-                : `Max Risk: -${currencySymbol}${maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                : isOptionMode && !isCrypto && !isGold
+                  ? `Planned Stop Risk: ${currencySymbol}${maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} | Outlay: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  : `Max Risk: -${currencySymbol}${maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
           </span>
         </div>
       </div>
@@ -1653,17 +1813,17 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <div className="flex items-center gap-3 text-[10px]">
             <span className={isTP1Reached ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
               TP1: {nativeCurrency}
-              {dp(tp1).toFixed(2)} ({isTP1Reached ? '✅ HIT' : '+100%'})
+              {dp(tp1).toFixed(2)} ({isTP1Reached ? '✅ HIT' : `+${authoritativeRR1.toFixed(1)}R`})
             </span>
             <span className="text-slate-600">•</span>
             <span className={isTP2Reached ? 'text-teal-300 font-bold' : 'text-slate-400'}>
               TP2: {nativeCurrency}
-              {dp(tp2).toFixed(2)} ({isTP2Reached ? '🎯 HIT' : '+250%'})
+              {dp(tp2).toFixed(2)} ({isTP2Reached ? '🎯 HIT' : `+${authoritativeRR2.toFixed(1)}R`})
             </span>
             <span className="text-slate-600">•</span>
             <span className={isTP3Reached ? 'text-purple-300 font-bold' : 'text-slate-400'}>
               TP3: {nativeCurrency}
-              {dp(tp3).toFixed(2)} ({isTP3Reached ? '🏆 HIT' : '+400%'})
+              {dp(tp3).toFixed(2)} ({isTP3Reached ? '🏆 HIT' : `+${authoritativeRR3.toFixed(1)}R`})
             </span>
           </div>
         </div>
@@ -1795,7 +1955,15 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <div className="flex items-center gap-2 text-slate-300">
             <Radio className="w-4 h-4 text-cyan-400 shrink-0 animate-pulse" />
             <span>
-              SMC Setup Armed • Optimal Entry: <strong className="text-white">{nativeCurrency}{dp(spotEntryPrice).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:2.5R</strong> | Max Risk: <strong className="text-rose-400">{currencySymbol}{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+              {isOptionMode && !isCrypto && !isGold ? (
+                <>
+                  SMC Option Setup Armed • Underlying Trigger: <strong className="text-white">₹{dp(spotEntryPrice).toFixed(2)}</strong> | Option Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2.toFixed(1)}R</strong> | Planned Stop Risk: <strong className="text-rose-400">₹{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> | Premium Outlay: <strong className="text-amber-300">₹{totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                </>
+              ) : (
+                <>
+                  SMC Setup Armed • Optimal Entry: <strong className="text-white">{nativeCurrency}{dp(spotEntryPrice).toFixed(2)}</strong> | Target R:R: <strong className="text-cyan-300">1:{authoritativeRR2}R</strong> | Max Risk: <strong className="text-rose-400">{currencySymbol}{maxRiskAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                </>
+              )}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -1823,25 +1991,25 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             <button
               type="button"
               onClick={handleExecutePaperOrder}
-              disabled={isPlacingOrder || (!isOptionsAsset && !isBull)}
+              disabled={isPlacingOrder || isExecutionBlocked || (!isOptionsAsset && !isBull)}
               className={`font-black px-4 py-1.5 rounded-lg font-mono flex items-center gap-1.5 shadow-lg transition-all text-xs ${
-                !isOptionsAsset && !isBull
-                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                isExecutionBlocked || (!isOptionsAsset && !isBull)
+                  ? 'bg-rose-950/60 text-rose-400 border border-rose-800/80 cursor-not-allowed'
                   : 'bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-400 hover:to-emerald-400 disabled:opacity-50 text-slate-950 shadow-cyan-500/20'
               }`}
               title={
-                !isOptionsAsset && !isBull
-                  ? 'Spot instruments are long-only. Spot short selling is prohibited.'
+                isExecutionBlocked || (!isOptionsAsset && !isBull)
+                  ? 'Spot instruments are long-only. Spot short selling is strictly prohibited.'
                   : 'Execute paper order at current market price'
               }
             >
               <Zap className="w-4 h-4" />
               {isPlacingOrder
                 ? 'Executing...'
-                : !isOptionsAsset && !isBull
-                  ? 'Spot Short Selling Forbidden (Long-Only)'
+                : isExecutionBlocked || (!isOptionsAsset && !isBull)
+                  ? 'EXECUTION BLOCKED (Spot Short Forbidden)'
                   : isOptionsAsset
-                    ? `Execute Option ${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'} @ ₹${dp(effectiveCurrentPrice).toFixed(2)}`
+                    ? `Execute Option ${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'} @ ₹${dp(optionEntryPremium).toFixed(2)}`
                     : `Execute Paper Trade @ Market (${nativeCurrency}${dp(currentCMP).toFixed(2)})`}
             </button>
           </div>

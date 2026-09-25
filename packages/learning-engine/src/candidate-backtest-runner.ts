@@ -318,6 +318,10 @@ export class CandidateBacktestRunner {
       timeframe: productionContext.executionContext === 'PRODUCTION' ? productionContext.timeframe : dataset?.timeframe || options?.timeframe || '15m',
       candles,
       initialCapital: options?.initialCapital ?? riskConfig.initialCapital,
+      riskPerTradePercent:
+        (riskConfig as any)?.maxRiskPerTrade !== undefined
+          ? ((riskConfig as any).maxRiskPerTrade <= 1 ? (riskConfig as any).maxRiskPerTrade * 100 : (riskConfig as any).maxRiskPerTrade)
+          : undefined,
       minimumCandles,
       warmupBars,
       feeConfig,
@@ -405,7 +409,7 @@ export class CandidateBacktestRunner {
       grossProfit,
       grossLoss,
       winRate: Number(winRate.toFixed(1)),
-      expectancyR: Number(expectancyR.toFixed(2)),
+      expectancyR: Number(expectancyR.toFixed(4)),
       profitFactor,
       maxDrawdownR: Number(maxDrawdownR.toFixed(2)),
     };

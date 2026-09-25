@@ -195,7 +195,14 @@ export class BacktestSimulator {
     const timeframe =
       (options.timeframe as string) || (options.executionTimeframe as string) || Timeframe.M15;
     const initialCapital = options.initialCapital || 100000;
-    const riskPercent = options.riskPerTradePercent || 1.0;
+    const riskPercent =
+      options.riskPerTradePercent ??
+      (options.candidateArtifact?.riskConfig?.maxRiskPerTrade !== undefined
+        ? (options.candidateArtifact.riskConfig.maxRiskPerTrade <= 1
+            ? options.candidateArtifact.riskConfig.maxRiskPerTrade * 100
+            : options.candidateArtifact.riskConfig.maxRiskPerTrade)
+        : undefined) ??
+      1.0;
     const minScore =
       options.minScore !== undefined
         ? options.minScore
@@ -409,10 +416,10 @@ export class BacktestSimulator {
             pendingEntrySignal = null;
           }
         }
-      } else if (
-        pendingEntryOrder &&
-        (pendingEntryOrder.status === 'REJECTED' || pendingEntryOrder.status === 'CANCELLED')
-      ) {
+      } else if (pendingEntryOrder) {
+        if (pendingEntryOrder.status === 'PENDING' || pendingEntryOrder.status === 'PARTIALLY_FILLED') {
+          execSim.cancelOrder(pendingEntryOrder.orderId);
+        }
         pendingEntryOrder = null;
         pendingEntrySignal = null;
       }
@@ -863,8 +870,9 @@ export class BacktestSimulator {
               signal.direction === Direction.BULLISH ||
               (signal.direction as any) === 'LONG' ||
               (signal.direction as any) === 'BUY';
+            const isNextBarFill = String(fillModel) === 'NEXT_BAR_MARKET' || String(fillModel) === 'NEXT_BAR_OPEN';
             const decisionPrice =
-              fillModel === FillModel.NEXT_BAR_MARKET
+              isNextBarFill
                 ? currentCandle.close
                 : signal.entryZone.optimal;
 
@@ -880,33 +888,54 @@ export class BacktestSimulator {
                 timestamp: candleTime,
               });
 
+              const spotInst = getAuthoritativeSpotInstrument(symbol);
               let finalQuantity = spotSizing.roundedQuantity;
+              const effLot = spotInst.lotSize || 1;
+              const effPrec = typeof spotInst.quantityPrecision === 'number' ? spotInst.quantityPrecision : 4;
+
               if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
-                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
+                const rawScaled = finalQuantity * effectiveSizingMultiplier;
+                finalQuantity = effLot < 1
+                  ? Number((Math.floor((rawScaled + 1e-9) / effLot) * effLot).toFixed(effPrec))
+                  : Math.max(effLot, Math.round(rawScaled));
               }
               if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
                 const isHighVol =
                   (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
                   (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
                 if (isHighVol) {
-                  finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
+                  const rawScaled = finalQuantity * effectiveHighVolMultiplier;
+                  finalQuantity = effLot < 1
+                    ? Number((Math.floor((rawScaled + 1e-9) / effLot) * effLot).toFixed(effPrec))
+                    : Math.max(effLot, Math.round(rawScaled));
                 }
               }
 
-              // Spot Invariant: Final notional must never exceed available cash
-              const spotInst = getAuthoritativeSpotInstrument(symbol);
+              // Spot Invariant: Final notional must never exceed available cash (with buffer for fees and slippage)
               let fxRate = 1.0;
               if (spotInst.quoteCurrency !== 'INR') {
                 fxRate = PointInTimeCurrencyConverter.getInstance().getRate(spotInst.quoteCurrency, 'INR', candleTime).fxRate;
               }
+              const costStressMultiplier =
+                options.costStressConfig?.mode === 'MULTIPLIER' && typeof options.costStressConfig.multiplier === 'number'
+                  ? options.costStressConfig.multiplier
+                  : 1.0;
+              const feeBufferRatio = Math.min(0.10, 0.005 * costStressMultiplier + 0.015);
+              const maxSpendableCash = currentCash * (1 - feeBufferRatio);
               const unitPriceINR = decisionPrice * spotInst.contractMultiplier * fxRate;
-              if (finalQuantity * unitPriceINR > currentCash) {
-                finalQuantity = Math.floor(currentCash / (unitPriceINR * spotInst.lotSize)) * spotInst.lotSize;
+              if (finalQuantity * unitPriceINR > maxSpendableCash) {
+                finalQuantity = Math.floor(maxSpendableCash / (unitPriceINR * spotInst.lotSize)) * spotInst.lotSize;
                 finalQuantity = Number(finalQuantity.toFixed(spotInst.quantityPrecision));
               }
 
               if (spotSizing.isValid && finalQuantity >= spotInst.minimumQuantity) {
-                const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
+                const orderType = isNextBarFill ? 'MARKET' : 'LIMIT';
+                const costStressMultiplier =
+                  options.costStressConfig?.mode === 'MULTIPLIER' && typeof options.costStressConfig.multiplier === 'number'
+                    ? options.costStressConfig.multiplier
+                    : 1.0;
+                const effectiveMaxRiskDrift = 0.25 * Math.max(1.0, costStressMultiplier);
+
                 pendingEntryOrder = execSim.submitOrder({
                   tradeId: signal.id || `trade_${candleTime}`,
                   symbol,
@@ -918,7 +947,7 @@ export class BacktestSimulator {
                   timestamp: candleTime,
                   referencePrice: decisionPrice,
                   stopLoss: signal.stopLoss,
-                  maxRiskDrift: 0.25,
+                  maxRiskDrift: effectiveMaxRiskDrift,
                   signalTimestamp: candleTime,
                   ambiguityMode,
                   exitTarget: 'ENTRY',
@@ -936,20 +965,26 @@ export class BacktestSimulator {
 
               let finalQuantity = sizing.roundedUnits;
               if (effectiveSizingMultiplier && effectiveSizingMultiplier > 0) {
-                finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveSizingMultiplier));
+                finalQuantity = Math.max(lotSize, Math.round((finalQuantity * effectiveSizingMultiplier) / lotSize) * lotSize);
               }
               if (effectiveHighVolMultiplier && effectiveHighVolMultiplier > 0) {
                 const isHighVol =
                   (signal as any)?.marketContext?.regime === 'HIGH_VOLATILITY' ||
                   (mtfData.currentCandle as any)?.regime === 'HIGH_VOLATILITY';
                 if (isHighVol) {
-                  finalQuantity = Math.max(1, Math.round(finalQuantity * effectiveHighVolMultiplier));
+                  finalQuantity = Math.max(lotSize, Math.round((finalQuantity * effectiveHighVolMultiplier) / lotSize) * lotSize);
                 }
               }
 
               if (sizing.isValid && finalQuantity > 0) {
                 const side = isLong ? 'BUY' : 'SELL';
-                const orderType = fillModel === FillModel.NEXT_BAR_MARKET ? 'MARKET' : 'LIMIT';
+                const orderType = isNextBarFill ? 'MARKET' : 'LIMIT';
+                const costStressMultiplier =
+                  options.costStressConfig?.mode === 'MULTIPLIER' && typeof options.costStressConfig.multiplier === 'number'
+                    ? options.costStressConfig.multiplier
+                    : 1.0;
+                const effectiveMaxRiskDrift = 0.25 * Math.max(1.0, costStressMultiplier);
+
                 pendingEntryOrder = execSim.submitOrder({
                   tradeId: signal.id || `trade_${candleTime}`,
                   symbol,
@@ -961,7 +996,7 @@ export class BacktestSimulator {
                   timestamp: candleTime,
                   referencePrice: decisionPrice,
                   stopLoss: signal.stopLoss,
-                  maxRiskDrift: 0.25,
+                  maxRiskDrift: effectiveMaxRiskDrift,
                   signalTimestamp: candleTime,
                   ambiguityMode,
                   exitTarget: 'ENTRY',
@@ -1090,7 +1125,7 @@ export class BacktestSimulator {
           marginMode: 'SPOT',
           riskAmount: termRisk,
           pnl: netPnl,
-          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(2)),
+          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(4)),
           exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
           signalTimestamp: new Date(activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt),
           orderCreatedAt: new Date(activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt),
@@ -1110,7 +1145,7 @@ export class BacktestSimulator {
           exitSlippage: activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) - (firstFill?.slippage || 0),
           grossPnL: activeLot.realizedPnl,
           netPnL: netPnl,
-          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2)),
+          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(4)),
           fillModel: String(fillModel),
           ambiguityMode: String(ambiguityMode),
           entrySnapshot: activeLot.entrySnapshot,
@@ -1169,7 +1204,7 @@ export class BacktestSimulator {
           marginMode: termMarginMode,
           riskAmount: termRisk,
           pnl: netPnl,
-          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(2)),
+          pnlRMultiple: Number((netPnl / Math.max(0.0001, initialRiskDist * activeLot.initialQuantity * termContractSize)).toFixed(4)),
           exitReason: (lastFill?.targetType as any) || SignalState.TP1_HIT,
           signalTimestamp: new Date(activeLot.entrySnapshot?.signalTimestamp || activeLot.openedAt),
           orderCreatedAt: new Date(activeLot.entrySnapshot?.orderCreatedAt || activeLot.openedAt),
@@ -1189,7 +1224,7 @@ export class BacktestSimulator {
           exitSlippage: activeLot.partialFills.reduce((sum, fill) => sum + fill.slippage, 0) - (firstFill?.slippage || 0),
           grossPnL: activeLot.realizedPnl,
           netPnL: netPnl,
-          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(2)),
+          realizedR: Number((netPnl / Math.max(1, initialRiskDist * activeLot.initialQuantity)).toFixed(4)),
           fillModel: String(fillModel),
           ambiguityMode: String(ambiguityMode),
           entrySnapshot: activeLot.entrySnapshot,

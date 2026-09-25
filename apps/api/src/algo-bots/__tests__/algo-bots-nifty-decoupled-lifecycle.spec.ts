@@ -135,9 +135,9 @@ describe('Fix 193 Requirements 28-35: NIFTY Bearish -> Bullish Signal Decoupled 
       data: { status: PositionState.CLOSED },
     });
 
-    // Clean any prior NIFTY_SPOT bots for test isolation
+    // Clean any prior NIFTY_SPOT and NIFTY bots for test isolation
     await prisma.algoBot.deleteMany({
-      where: { symbol: 'NIFTY_SPOT' },
+      where: { symbol: { in: ['NIFTY_SPOT', 'NIFTY'] } },
     });
   });
 

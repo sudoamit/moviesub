@@ -241,24 +241,29 @@ export class SignalGenerator {
           det.stopLoss ||
           (det.direction === Direction.BEARISH ? entryPrice * 1.05 : entryPrice * 0.95);
         const baseStopDist = Math.abs(entryPrice - baseStopPrice);
+        const rr1 = det.riskRewardRatios?.rr1 ?? (det.rr1 ?? 2.0);
+        const rr2 = det.riskRewardRatios?.rr2 ?? (det.rr2 ?? 3.5);
+        const rr3 = det.riskRewardRatios?.rr3 ?? (det.rr3 ?? 6.0);
+        const maxPotentialR = det.maxPotentialR ?? rr3;
+
         const target1 =
           det.takeProfits?.tp1 ??
           det.tp1 ??
           (det.direction === Direction.BEARISH
-            ? entryPrice - baseStopDist * 1.5
-            : entryPrice + baseStopDist * 1.5);
+            ? entryPrice - baseStopDist * rr1
+            : entryPrice + baseStopDist * rr1);
         const target2 =
           det.takeProfits?.tp2 ??
           det.tp2 ??
           (det.direction === Direction.BEARISH
-            ? entryPrice - baseStopDist * 2.5
-            : entryPrice + baseStopDist * 2.5);
+            ? entryPrice - baseStopDist * rr2
+            : entryPrice + baseStopDist * rr2);
         const target3 =
           det.takeProfits?.tp3 ??
           det.tp3 ??
           (det.direction === Direction.BEARISH
-            ? entryPrice - baseStopDist * 4.0
-            : entryPrice + baseStopDist * 4.0);
+            ? entryPrice - baseStopDist * rr3
+            : entryPrice + baseStopDist * rr3);
 
         const sigScore = det.score ?? 80;
         const configMinScore =
@@ -284,17 +289,25 @@ export class SignalGenerator {
             max: entryPrice,
             optimal: entryPrice,
           },
+          entry: entryPrice,
           stopLoss: baseStopPrice,
           takeProfits: {
             tp1: target1,
             tp2: target2,
             tp3: target3,
           },
+          tp1: target1,
+          tp2: target2,
+          tp3: target3,
           riskRewardRatios: {
-            rr1: 1.5,
-            rr2: 2.5,
-            rr3: 4.0,
+            rr1,
+            rr2,
+            rr3,
           },
+          rr1,
+          rr2,
+          rr3,
+          maxPotentialR,
           reasoning: det.reasoning || ({} as any),
           scoreBreakdown: {} as any,
           triggerEvidence: det.triggerEvidence || {
@@ -674,9 +687,17 @@ export class SignalGenerator {
       timeframe: executionTf as Timeframe,
       htfBias: mtf.htfBias,
       entryZone: levels.entryZone,
+      entry: levels.entry,
       stopLoss: levels.stopLoss,
       takeProfits: levels.takeProfits,
+      tp1: levels.tp1,
+      tp2: levels.tp2,
+      tp3: levels.tp3,
       riskRewardRatios: levels.riskRewardRatios,
+      rr1: levels.rr1,
+      rr2: levels.rr2,
+      rr3: levels.rr3,
+      maxPotentialR: levels.maxPotentialR,
       reasoning,
       reasons: explicitReasons,
       state: SignalState.ACTIVE,
@@ -722,9 +743,17 @@ export class SignalGenerator {
       timeframe: timeframe as Timeframe,
       htfBias: Direction.NEUTRAL,
       entryZone: { min: 0, max: 0, optimal: 0 },
+      entry: 0,
       stopLoss: 0,
       takeProfits: { tp1: 0, tp2: 0, tp3: 0 },
+      tp1: 0,
+      tp2: 0,
+      tp3: 0,
       riskRewardRatios: { rr1: 0, rr2: 0, rr3: 0 },
+      rr1: 0,
+      rr2: 0,
+      rr3: 0,
+      maxPotentialR: 0,
       reasoning: {
         htfStructure: reason,
         liquidityReason: 'N/A',

@@ -24,7 +24,29 @@ export class JournalService implements IJournalDomainService {
     });
 
     if (existing) {
-      this.logger.warn(
+      const needsEnrichment =
+        (existing.fees === null && payload.fees !== undefined) ||
+        (existing.sourceBotId === null && payload.sourceBotId) ||
+        (existing.executionId === null && payload.executionId) ||
+        (existing.tradeDecisionId === null && payload.tradeDecisionId) ||
+        (existing.orderSide === null && payload.orderSide) ||
+        (existing.strategyDirection === null && payload.strategyDirection);
+
+      if (needsEnrichment) {
+        return this.prisma.paperTrade.update({
+          where: { id: existing.id },
+          data: {
+            fees: existing.fees === null && payload.fees !== undefined ? new Decimal(payload.fees) : undefined,
+            sourceBotId: existing.sourceBotId === null && payload.sourceBotId ? payload.sourceBotId : undefined,
+            executionId: existing.executionId === null && payload.executionId ? payload.executionId : undefined,
+            tradeDecisionId: existing.tradeDecisionId === null && payload.tradeDecisionId ? payload.tradeDecisionId : undefined,
+            orderSide: existing.orderSide === null && payload.orderSide ? payload.orderSide : undefined,
+            strategyDirection: existing.strategyDirection === null && payload.strategyDirection ? payload.strategyDirection : undefined,
+          },
+        });
+      }
+
+      this.logger.debug(
         `[DUPLICATE JOURNAL PREVENTED] Journal for positionId '${payload.positionId}' already exists: id=${existing.id}`,
       );
       return existing;

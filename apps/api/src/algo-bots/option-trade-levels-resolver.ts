@@ -1,9 +1,9 @@
 export interface ResolveOptionLevelsParams {
   optionEntryPrice: number;
   slPercent?: number; // e.g. 30 for 30% stop loss below premium. Default 30.
-  tp1Ratio?: number;  // Default 1.0 (1R)
-  tp2Ratio?: number;  // Default 2.0 (2R)
-  tp3Ratio?: number;  // Default 3.0 (3R)
+  tp1Ratio?: number;  // Default 1.5 (1.5R)
+  tp2Ratio?: number;  // Default 2.5 (2.5R)
+  tp3Ratio?: number;  // Default 4.0 (4.0R)
 }
 
 export interface ResolvedOptionLevels {
@@ -13,6 +13,10 @@ export interface ResolvedOptionLevels {
   target2: number;
   target3: number;
   riskPerUnit: number;
+  rr1: number;
+  rr2: number;
+  rr3: number;
+  maxPotentialR: number;
 }
 
 export class OptionTradeLevelsResolver {
@@ -42,9 +46,9 @@ export class OptionTradeLevelsResolver {
       }
     }
 
-    const tp1Multiplier = params.tp1Ratio && params.tp1Ratio > 0 ? params.tp1Ratio : 1.0;
-    const tp2Multiplier = params.tp2Ratio && params.tp2Ratio > tp1Multiplier ? params.tp2Ratio : 2.0;
-    const tp3Multiplier = params.tp3Ratio && params.tp3Ratio > tp2Multiplier ? params.tp3Ratio : 3.0;
+    const tp1Multiplier = params.tp1Ratio && params.tp1Ratio > 0 ? params.tp1Ratio : 1.5;
+    const tp2Multiplier = params.tp2Ratio && params.tp2Ratio > tp1Multiplier ? params.tp2Ratio : 2.5;
+    const tp3Multiplier = params.tp3Ratio && params.tp3Ratio > tp2Multiplier ? params.tp3Ratio : 4.0;
 
     const target1 = Math.round((entry + riskPerUnit * tp1Multiplier) * 100) / 100;
     const target2 = Math.round((entry + riskPerUnit * tp2Multiplier) * 100) / 100;
@@ -64,6 +68,10 @@ export class OptionTradeLevelsResolver {
       target2,
       target3,
       riskPerUnit,
+      rr1: tp1Multiplier,
+      rr2: tp2Multiplier,
+      rr3: tp3Multiplier,
+      maxPotentialR: tp3Multiplier,
     };
   }
 }

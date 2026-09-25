@@ -144,17 +144,28 @@ export function usePaperTrading(selectedSymbol: string) {
   }, [executions, selectedSymbol]);
 
   const closePosition = useCallback(
-    async (positionId: string) => {
+    async (positionId: string, reason: string = 'Manual Exit') => {
       setIsPlacingOrder(true);
       try {
         const res = await fetch(
           `${API_BASE}/api/paper-trading/positions/${positionId}/close`,
           {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason }),
           },
         );
         if (res.ok) {
+          const data = await res.json().catch(() => ({}));
           await fetchPortfolio();
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('quant_trade_closed', {
+                detail: { positionId, symbol: selectedSymbol, ...data },
+              }),
+            );
+          }
+          return data;
         }
       } catch (err) {
         console.error('Failed to close position:', err);
@@ -162,7 +173,7 @@ export function usePaperTrading(selectedSymbol: string) {
         setIsPlacingOrder(false);
       }
     },
-    [fetchPortfolio],
+    [fetchPortfolio, selectedSymbol],
   );
 
   return {

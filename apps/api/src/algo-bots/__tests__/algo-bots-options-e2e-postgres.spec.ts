@@ -124,7 +124,13 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
 
     // Clear test bots
     await prisma.algoBot.deleteMany({
-      where: { symbol: 'NIFTY_SPOT' },
+      where: {
+        OR: [
+          { symbol: 'NIFTY_SPOT' },
+          { id: 'bot_nifty_smc_pro' },
+          { name: { contains: 'e2e' } },
+        ],
+      },
     });
   });
 
@@ -212,8 +218,9 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
     const results = await algoBotsService.evaluateSignalForBots(bullishSignal);
 
     // 5. PIPELINE STEP 2 & 3: TRADE DECISION & TRADE TAKEN
-    expect(results).toHaveLength(1);
-    const execRes = results[0];
+    const botResults = results.filter((r) => r.botId === bot.id);
+    expect(botResults).toHaveLength(1);
+    const execRes = botResults[0];
     expect(execRes.botId).toBe(bot.id);
     expect(execRes.decision).toBe('TAKE');
     expect(execRes.status).toBe('EXECUTED');
@@ -419,8 +426,9 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
     // 4. Trigger Execution
     const results = await algoBotsService.evaluateSignalForBots(bearishSignal);
 
-    expect(results).toHaveLength(1);
-    const execRes = results[0];
+    const botResults = results.filter((r) => r.botId === bot.id);
+    expect(botResults).toHaveLength(1);
+    const execRes = botResults[0];
     expect(execRes.botId).toBe(bot.id);
     expect(execRes.decision).toBe('TAKE');
     expect(execRes.status).toBe('EXECUTED');

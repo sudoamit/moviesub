@@ -8,6 +8,7 @@ export interface ITradeLevels {
     max: number;
     optimal: number;
   };
+  entry: number;
   stopLoss: number;
   stopLossDistance: number;
   takeProfits: {
@@ -15,11 +16,18 @@ export interface ITradeLevels {
     tp2: number;
     tp3: number;
   };
+  tp1: number;
+  tp2: number;
+  tp3: number;
   riskRewardRatios: {
     rr1: number;
     rr2: number;
     rr3: number;
   };
+  rr1: number;
+  rr2: number;
+  rr3: number;
+  maxPotentialR: number;
 }
 
 export class TradeLevelsCalculator {
@@ -124,6 +132,7 @@ export class TradeLevelsCalculator {
           max: Number(entryMax.toFixed(2)),
           optimal: Number(entryOptimal.toFixed(2)),
         },
+        entry: Number(entryOptimal.toFixed(2)),
         stopLoss,
         stopLossDistance: Number(risk.toFixed(2)),
         takeProfits: {
@@ -131,11 +140,18 @@ export class TradeLevelsCalculator {
           tp2,
           tp3,
         },
+        tp1,
+        tp2,
+        tp3,
         riskRewardRatios: {
           rr1: 2.0,
           rr2: 3.5,
           rr3: 6.0,
         },
+        rr1: 2.0,
+        rr2: 3.5,
+        rr3: 6.0,
+        maxPotentialR: 6.0,
       };
     } else {
       // 1. Short Entry Zone (Anchored strictly to Order Block, FVG, or Closed Trigger Structure)
@@ -189,6 +205,7 @@ export class TradeLevelsCalculator {
           max: Number(entryMax.toFixed(2)),
           optimal: Number(entryOptimal.toFixed(2)),
         },
+        entry: Number(entryOptimal.toFixed(2)),
         stopLoss,
         stopLossDistance: Number(risk.toFixed(2)),
         takeProfits: {
@@ -196,11 +213,18 @@ export class TradeLevelsCalculator {
           tp2,
           tp3,
         },
+        tp1,
+        tp2,
+        tp3,
         riskRewardRatios: {
           rr1: 2.0,
           rr2: 3.5,
           rr3: 6.0,
         },
+        rr1: 2.0,
+        rr2: 3.5,
+        rr3: 6.0,
+        maxPotentialR: 6.0,
       };
     }
   }

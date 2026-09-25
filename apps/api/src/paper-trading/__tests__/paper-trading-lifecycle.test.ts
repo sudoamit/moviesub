@@ -54,8 +54,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         id: 'acc-1',
         name: 'Primary Paper Account',
         currency: 'INR',
-        initialCapital: new Decimal(1000000.0),
-        cashBalance: new Decimal(1000000.0),
+        initialCapital: new Decimal(100000000.0),
+        cashBalance: new Decimal(100000000.0),
         usedMargin: new Decimal(0.0),
         realizedPnL: new Decimal(0.0),
         totalChargesPaid: new Decimal(0.0),
@@ -850,7 +850,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const dbPos = dbPositions.find((p) => p.id === pos.id);
     expect(dbPos.status).toBe(PositionState.PARTIALLY_CLOSED);
-    expect(Number(dbPos.quantity)).toBe(5); // 50% remaining
+    expect(Number(dbPos.quantity)).toBe(7); // 70% remaining (30% scale-out)
     expect(Number(dbPos.stopLoss)).toBe(50000); // SL moved to breakeven
 
     // Verify NO top-level PaperTrade record was created at TP1 partial exit
@@ -947,7 +947,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const tradesForPos = dbTrades.filter((t) => t.positionId === pos.id);
     expect(tradesForPos.length).toBe(1); // STRICTLY ONE CANONICAL PAPERTRADE RECORD
     expect(Number(tradesForPos[0].quantity)).toBe(10); // Original full quantity (10)
-    expect(Number(tradesForPos[0].exitPrice)).toBe(51500); // Weighted exit price: (51000*5 + 52000*5)/10 = 51500
+    expect(Number(tradesForPos[0].exitPrice)).toBe(51700); // Weighted exit price: (51000*3 + 52000*7)/10 = 51700
   });
 
   // TEST T: MULTI-LEG WEIGHTED REALIZED R & NET PNL AGGREGATION
@@ -994,8 +994,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const trade = dbTrades.find((t) => t.positionId === pos.id);
     expect(trade).toBeDefined();
 
-    // Weighted R = (1.0R * 5 + 2.0R * 5) / 10 = 1.5R
-    expect(Number(trade.realizedR)).toBeCloseTo(1.5, 1);
+    // Weighted R = (1.0R * 3 + 2.0R * 7) / 10 = 1.7R
+    expect(Number(trade.realizedR)).toBeCloseTo(1.7, 1);
     expect(Number(trade.realizedPnL)).toBeGreaterThan(0);
     expect(trade.outcomeSnapshotJson?.legs).toBeDefined();
     expect(trade.outcomeSnapshotJson.legs.length).toBeGreaterThanOrEqual(2);
@@ -1112,14 +1112,14 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const postTp1Account = dbAccounts[0];
     const tp1Fill = dbFills.find((f) => f.orderId !== dbOrders[0].id);
-    const tp1NetPnL = (51000 - 50000) * 5 - Number(tp1Fill.fee);
+    const tp1NetPnL = (51000 - 50000) * 3 - Number(tp1Fill.fee);
     const postTp1Cash = Number(postTp1Account.cashBalance);
     const postTp1RealizedPnL = Number(postTp1Account.realizedPnL);
 
     expect(postTp1RealizedPnL).toBeCloseTo(tp1NetPnL - entryCharges, 2);
     expect(postTp1Cash).toBeCloseTo(postEntryCash + tp1NetPnL, 2);
 
-    // 2. Execute TP2 final exit (5 qty @ 52000)
+    // 2. Execute TP2 final exit (7 qty @ 52000)
     (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
       symbol: 'NIFTY',
       price: 52000,
@@ -1130,7 +1130,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const finalAccount = dbAccounts[0];
     const finalFill = dbFills[dbFills.length - 1];
-    const finalLegNetPnL = (52000 - 50000) * 5 - Number(finalFill.fee);
+    const finalLegNetPnL = (52000 - 50000) * 7 - Number(finalFill.fee);
     const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
 
     expect(Number(finalAccount.realizedPnL)).toBeCloseTo(totalLifecycleNetPnL, 2);
@@ -1358,7 +1358,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(partialFills.length).toBe(1);
 
     const updatedPos = dbPositions.find((p) => p.id === pos.id);
-    expect(Number(updatedPos.quantity)).toBe(5);
+    expect(Number(updatedPos.quantity)).toBe(7);
     expect(updatedPos.status).toBe(PositionState.PARTIALLY_CLOSED);
   });
 
@@ -1530,16 +1530,16 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const tp1Pos = dbPositions.find((p) => p.id === pos.id);
     expect(tp1Pos.status).toBe(PositionState.PARTIALLY_CLOSED);
-    expect(Number(tp1Pos.quantity)).toBe(5);
+    expect(Number(tp1Pos.quantity)).toBe(7);
     expect(Number(tp1Pos.stopLoss)).toBe(50000); // Moved to breakeven
 
     const tp1Fill = dbFills[dbFills.length - 1];
     const btcFx140 =
       ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ??
       PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
-    const tp1NetPnL = (51000 - 50000) * btcFx140 * 5 - Number(tp1Fill.fee);
+    const tp1NetPnL = (51000 - 50000) * btcFx140 * 3 - Number(tp1Fill.fee);
 
-    // 3. Price drops back to SL Breakeven @ 49,900 -> close remaining 5 units
+    // 3. Price drops back to SL Breakeven @ 49,900 -> close remaining 7 units
     currentPrice = 49900;
     currentEventTime = Date.now() + 10000;
     await monitorService.evaluateActivePositions();
@@ -1548,7 +1548,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(finalPos.status).toBe(PositionState.CLOSED);
 
     const finalFill = dbFills[dbFills.length - 1];
-    const finalLegNetPnL = (49900 - 50000) * btcFx140 * 5 - Number(finalFill.fee);
+    const finalLegNetPnL = (49900 - 50000) * btcFx140 * 7 - Number(finalFill.fee);
     const totalLifecycleNetPnL = tp1NetPnL + finalLegNetPnL - entryCharges;
 
     // 4. Assert Account Ledger Invariants
@@ -1611,7 +1611,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const btcFx141 =
       ((pos as any).executionEventsJson as any)?.accountingSnapshot?.fxRate ??
       PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
-    const tp1GrossPnL = (51000 - 50000) * btcFx141 * 5;
+    const tp1GrossPnL = (51000 - 50000) * btcFx141 * 3;
     const tp1ExitFees = Number(tp1Fill.fee);
     const tp1NetPnL = tp1GrossPnL - tp1ExitFees;
 
@@ -1620,7 +1620,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     currentEventTime += 5000;
     await monitorService.evaluateActivePositions();
     const finalFill = dbFills[dbFills.length - 1];
-    const finalGrossPnL = (48000 - 50000) * btcFx141 * 5;
+    const finalGrossPnL = (48000 - 50000) * btcFx141 * 7;
     const finalExitFees = Number(finalFill.fee);
     const finalLegNetPnL = finalGrossPnL - finalExitFees;
 
@@ -1721,7 +1721,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
         providerEventTime: Date.now(),
       }),
     );
-    expect(tickKnown!.tickSize).toBe(0.1); // Registry tickSize for BTCUSDT
+    expect(tickKnown!.tickSize).toBe(0.01); // Registry tickSize for BTCUSDT
 
     const tickUnknown = streamer.ingestCanonicalSpotTick(
       BINANCE_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
@@ -1842,7 +1842,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
   it('TEST 144-2: REAL PRODUCTION MODEL-A ENTRY ACCOUNTING — placeOrder() decrements cashBalance & realizedPnL by entryFees before any exit', async () => {
     // 1. Set up clean account balance
-    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].initialCapital = new Decimal(100000000.0);
+    dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
@@ -1854,7 +1855,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: Date.now(),
     });
 
-    const initCash = 1000000.0;
+    const initCash = 10000000.0;
 
     // 2. Place MARKET entry order with quantity: 2 (risk = 4,000 <= 10,000 max risk limit)
     const pos = await paperService.placeOrder({
@@ -1903,12 +1904,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // Path 1: Full Exit Without TP1 (Direct Target 2 Hit)
     {
-      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 500000.0;
+      const initCash = 10000000.0;
       currentPrice = 50000;
       currentEventTime = Date.now();
 
@@ -1939,12 +1941,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // Path 2: TP1 -> TP2 (Scale-out then full target hit)
     {
-      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 500000.0;
+      const initCash = 10000000.0;
       currentPrice = 50000;
       currentEventTime = Date.now();
 
@@ -1980,12 +1983,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // Path 3: TP1 -> SL (Scale-out then initial SL hit)
     {
-      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 500000.0;
+      const initCash = 10000000.0;
       currentPrice = 50000;
       currentEventTime = Date.now();
 
@@ -2020,12 +2024,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // Path 4: TP1 -> Breakeven (Scale-out then SL moved to entry price hit)
     {
-      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 500000.0;
+      const initCash = 10000000.0;
       currentPrice = 50000;
       currentEventTime = Date.now();
 
@@ -2060,12 +2065,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     // Path 5: Losing Final Exit (Direct SL hit without TP1)
     {
-      dbAccounts[0].cashBalance = new Decimal(500000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 500000.0;
+      const initCash = 10000000.0;
       currentPrice = 50000;
       currentEventTime = Date.now();
 
@@ -2138,12 +2144,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
   // =========================================================================
 
   it('TEST 145-1: ENTRY TRANSACTION ATOMICITY & FAILURE INJECTION — DB error midway rolls back account state 100%', async () => {
-    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].initialCapital = new Decimal(100000000.0);
+    dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-    const initCash = 1000000.0;
+    const initCash = 10000000.0;
     const initialOrdersCount = dbOrders.length;
     const initialFillsCount = dbFills.length;
     const initialPositionsCount = dbPositions.length;
@@ -2213,12 +2220,13 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       ticks: { price: number; delayMs?: number; action?: 'monitor' | 'close' }[],
     ) => {
       // Reset account for isolated test run
-      dbAccounts[0].cashBalance = new Decimal(1000000.0);
+      dbAccounts[0].initialCapital = new Decimal(100000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
 
-      const initCash = 1000000.0;
+      const initCash = 10000000.0;
       currentPrice = entryPrice;
       currentEventTime = Date.now();
 
@@ -2326,7 +2334,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: currentEventTime,
     }));
 
-    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].initialCapital = new Decimal(10000000.0);
+    dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
@@ -2363,7 +2372,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(tp1Leg.role).toBe('TP1_PARTIAL');
     expect(tp1Leg.triggerPrice).toBe(52000);
     expect(tp1Leg.fillPrice).toBe(52000);
-    expect(tp1Leg.quantity).toBe(1.0);
+    expect(tp1Leg.quantity).toBe(0.6);
     expect(tp1Leg.fee).toBeGreaterThan(0);
     expect(tp1Leg.grossPnL).toBeGreaterThan(0);
     expect(tp1Leg.netPnL).toBeGreaterThan(0);
@@ -2373,7 +2382,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     expect(finalLeg).toBeDefined();
     expect(finalLeg.role).toBe('FINAL_EXIT');
     expect(finalLeg.fillPrice).toBe(55000);
-    expect(finalLeg.quantity).toBe(1.0);
+    expect(finalLeg.quantity).toBe(1.4);
     expect(finalLeg.fee).toBeGreaterThan(0);
   });
 
@@ -2676,12 +2685,12 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     const tp1Pos = dbPositions.find((p) => p.id === pos.id);
     expect(tp1Pos.status).toBe(PositionState.PARTIALLY_CLOSED);
-    expect(Number(tp1Pos.quantity)).toBeCloseTo(0.05, 4); // 50% of 0.1
+    expect(Number(tp1Pos.quantity)).toBeCloseTo(0.07, 4); // 70% of 0.1 remaining (30% scale-out)
 
     const tp1Fill = dbFills[dbFills.length - 1];
     const tp1ExitFees = Number(tp1Fill.fee);
     // TP1 gross MUST use stored snapshot.fxRate = 95.0 (not live 85.0)
-    const expectedTp1Gross = (52000 - 50000) * 95.0 * 0.05;
+    const expectedTp1Gross = (52000 - 50000) * 95.0 * 0.03;
     const expectedTp1Net = expectedTp1Gross - tp1ExitFees;
 
     const partialLegs = (tp1Pos.executionEventsJson as any)?.partialLegs || [];
@@ -2703,7 +2712,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const finalFill = dbFills[dbFills.length - 1];
     const finalExitFees = Number(finalFill.fee);
     // Final gross MUST use stored snapshot.fxRate = 95.0 (not live 75.0)
-    const expectedFinalGross = (55000 - 50000) * 95.0 * 0.05;
+    const expectedFinalGross = (55000 - 50000) * 95.0 * 0.07;
     const expectedFinalNet = expectedFinalGross - finalExitFees;
 
     const expectedTotalNetPnL = Number((expectedTp1Net + expectedFinalNet - entryFees).toFixed(2));
@@ -3305,9 +3314,9 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           expect(trade.positionId).toBe(pos.id);
 
           // 3. Orders and Fills exact counts:
-          // Single-leg exit (paths 1, 6): exactly 2 orders (Entry + FinalExit), exactly 2 fills
-          // Multi-leg exit (paths 2, 3, 4, 5): exactly 3 orders (Entry + TP1 + FinalExit), exactly 3 fills
-          const isMultiLeg = path === 2 || path === 3 || path === 4 || path === 5;
+          // Single-leg exit (path 6): exactly 2 orders (Entry + FinalExit), exactly 2 fills
+          // Multi-leg exit (paths 1, 2, 3, 4, 5): exactly 3 orders (Entry + TP1 + FinalExit), exactly 3 fills
+          const isMultiLeg = path === 1 || path === 2 || path === 3 || path === 4 || path === 5;
           const expectedCount = isMultiLeg ? 3 : 2;
           expect(dbOrders.length).toBe(expectedCount);
           expect(dbFills.length).toBe(expectedCount);
@@ -3366,8 +3375,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
           if (isMultiLeg) {
             expect(partialLegs.length).toBe(1);
-            expect(Number(partialLegs[0].quantity)).toBe(5);
-            expect(finalExitQty).toBe(5);
+            expect(Number(partialLegs[0].quantity)).toBe(3);
+            expect(finalExitQty).toBe(7);
           } else {
             expect(partialLegs.length).toBe(0);
             expect(finalExitQty).toBe(10);

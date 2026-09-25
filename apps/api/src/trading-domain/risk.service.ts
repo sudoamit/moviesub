@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import {
   IRiskDomainService,
@@ -87,6 +87,11 @@ export class RiskService implements IRiskDomainService {
     const tradeNotional = Number((quantity * entryPrice * contractSize * fxRate).toFixed(2));
 
     // 2. Margin Required: capital locked to support position
+    if (marginMode === 'SPOT' && leverage !== undefined && Number(leverage) > 1) {
+      throw new BadRequestException(
+        `LEVERAGE_EXCEEDS_MAX: Requested leverage ${leverage}x is strictly forbidden for SPOT margin mode. Maximum allowable leverage is 1x.`,
+      );
+    }
     const effLeverage = marginMode === 'SPOT' ? 1 : Math.max(1, leverage);
     const marginRequired = Number((tradeNotional / effLeverage).toFixed(2));
 

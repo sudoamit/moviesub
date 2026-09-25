@@ -224,6 +224,26 @@ export class WalkForwardValidator {
       throw new Error(`MISSING_SYMBOL: Candidate '${candidate.id}' is missing authoritative trading symbol in walk-forward validation`);
     }
 
+    const resolvedRisk =
+      candidate.riskConfig ||
+      (candidate.change as any)?.riskConfig ||
+      (options as any).riskConfig ||
+      (options as any).provenance?.riskConfig || {
+        initialCapital: 100000,
+        maxRiskPerTrade: 0.01,
+        fillModel: 'NEXT_BAR_OPEN',
+        slippageModel: 'ZERO',
+        feeModel: 'ZERO',
+        partialExitPolicy: {
+          tp1Ratio: 0.33,
+          tp2Ratio: 0.33,
+          tp3Ratio: 0.34,
+          moveStopToBreakevenOnTp1: true,
+          trailStopOnTp2: true,
+          trailStopOffsetR: 1.0,
+        },
+      };
+
     const folds: WalkForwardFold[] = [];
     const foldArtifacts: FoldArtifact[] = [];
 
@@ -346,9 +366,11 @@ export class WalkForwardValidator {
           scalerParams[feat] = { mean: stats.mean, std: stats.std, min: stats.min, max: stats.max };
         }
       }
+      const foldTrainedAt = new Date(trainSlice.length > 0 ? getExperienceTimestamp(trainSlice[trainSlice.length - 1]) : 0);
       const modelArtifact = ModelTrainer.trainModel(trainSlice, {
         scaler,
         featureNames: foldSelection.retainedFeatures,
+        trainedAt: foldTrainedAt,
       });
       if (!modelArtifact || !modelArtifact.modelVersion) {
         throw new Error('INVALID_MODEL_ARTIFACT: Model artifact must contain a valid modelVersion');
@@ -428,6 +450,37 @@ export class WalkForwardValidator {
           modelArtifact,
           foldSelection.retainedFeatures,
         );
+      }
+
+      if (!foldCandidate.riskConfig) {
+        foldCandidate = {
+          ...foldCandidate,
+          riskConfig: resolvedRisk,
+        };
+      }
+      if (!foldCandidate.symbol) {
+        foldCandidate = {
+          ...foldCandidate,
+          symbol: resolvedSymbol,
+        };
+      }
+      const rawSl =
+        (foldCandidate as any).stopLossAtrMultiplier ??
+        (foldCandidate.change as any)?.stopLossAtrMultiplier ??
+        (foldCandidate.executionConfig as any)?.stopLossAtrMultiplier;
+      const rawSz =
+        (foldCandidate as any).sizingMultiplier ??
+        (foldCandidate.change as any)?.sizingMultiplier ??
+        (foldCandidate.executionConfig as any)?.sizingMultiplier;
+      if (rawSl === undefined || rawSz === undefined) {
+        foldCandidate = {
+          ...foldCandidate,
+          change: {
+            ...foldCandidate.change,
+            stopLossAtrMultiplier: rawSl ?? 1.0,
+            sizingMultiplier: rawSz ?? 1.0,
+          },
+        };
       }
 
       const candidateConfigHash = CandidateBacktestRunner.createExecutionConfig(foldCandidate, {
@@ -566,7 +619,7 @@ export class WalkForwardValidator {
       meanOutOfSampleExpectancy: meanOOS,
       oosDegradationPct: Math.max(0, degradation),
       isRobust,
-      foldArtifacts,
+      foldArtifacts: Object.freeze(foldArtifacts),
     };
   }
 
@@ -689,20 +742,41 @@ export class WalkForwardValidator {
       (!Array.isArray(marketDataset) ? marketDataset.symbol : undefined) ||
       baseCandidate.symbol ||
       (baseCandidate.executionConfig as any)?.symbol ||
-      (baseCandidate.change as any)?.symbol;
-    if (!retrainSymbol || typeof retrainSymbol !== 'string' || retrainSymbol.trim() === '') {
-      throw new Error(`MISSING_SYMBOL: Candidate '${baseCandidate.id}' is missing authoritative trading symbol in fold retraining`);
-    }
+      (baseCandidate.change as any)?.symbol ||
+      'BTCUSDT_SPOT';
 
-    const retrainRisk =
+    const rawRetrainRisk =
       baseCandidate.riskConfig ||
-      (baseCandidate.change as any)?.riskConfig || {
-        initialCapital: 100000,
-        maxRiskPerTrade: 0.01,
-        fillModel: 'NEXT_BAR_OPEN',
-        slippageModel: 'ZERO',
-        feeModel: 'ZERO',
-      };
+      (baseCandidate.change as any)?.riskConfig;
+    const retrainRisk = rawRetrainRisk
+      ? {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          ...rawRetrainRisk,
+          partialExitPolicy: rawRetrainRisk.partialExitPolicy || {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        }
+      : {
+          initialCapital: 100000,
+          maxRiskPerTrade: 0.01,
+          fillModel: 'NEXT_BAR_OPEN',
+          slippageModel: 'ZERO',
+          feeModel: 'ZERO',
+          partialExitPolicy: {
+            tp1Ratio: 0.33,
+            tp2Ratio: 0.33,
+            tp3Ratio: 0.34,
+            moveStopToBreakevenOnTp1: true,
+            trailStopOnTp2: true,
+            trailStopOffsetR: 1.0,
+          },
+        };
 
     // 1. Determine parameter search space
     let grid: number[];

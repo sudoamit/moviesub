@@ -34,7 +34,7 @@ process.on('message', async (data: WorkerPayload) => {
           fs.appendFileSync(liveOrdersLogFile, JSON.stringify({ pid: process.pid, clientOrderId: decision.clientOrderId, ts: Date.now() }) + '\n', 'utf-8');
         }
         // Realistic broker network latency ensuring concurrent sibling workers encounter the active EXECUTING lock
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 2500));
         return { liveOrderId: `live-order-${process.pid}`, status: 'PLACED' as const };
       },
       cancelLiveOrder: async () => true,

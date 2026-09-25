@@ -247,8 +247,14 @@ export const TradeJournal: React.FC<TradeJournalProps> = ({
 
   const filteredTrades = trades.filter((t) => {
     if (selectedFilter === 'ALL') return true;
-    if (selectedFilter === 'WINS') return t.state !== 'SL_HIT';
-    if (selectedFilter === 'LOSSES') return t.state === 'SL_HIT';
+    if (selectedFilter === 'WINS') {
+      const pnl = Number((t as any).netPnlAccount ?? (t as any).realizedPnL ?? t.pnlAmount ?? 0);
+      return (t as any).state !== 'SL_HIT' && pnl >= 0;
+    }
+    if (selectedFilter === 'LOSSES') {
+      const pnl = Number((t as any).netPnlAccount ?? (t as any).realizedPnL ?? t.pnlAmount ?? 0);
+      return (t as any).state === 'SL_HIT' || pnl < 0;
+    }
     return t.symbol === selectedFilter;
   });
 

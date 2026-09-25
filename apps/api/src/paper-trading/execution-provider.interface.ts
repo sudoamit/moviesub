@@ -23,6 +23,7 @@ export interface IPaperOrderRequest {
   target2?: number;
   target3?: number;
   leverage?: number;
+  accountId?: string;
   accountBalance?: number;
   productType?: 'INTRADAY' | 'DELIVERY';
   instrumentType?: 'SPOT' | 'OPTION';

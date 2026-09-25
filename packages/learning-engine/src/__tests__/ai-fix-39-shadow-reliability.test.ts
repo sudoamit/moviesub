@@ -288,7 +288,7 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       ModelRegistry.registerCandidateArtifact(artifact);
 
       const filePath = path.join(testDir, `shadow-${candidateId}.json`);
-      const candles = generateMultiRegimeMarketHistory(1700000000000, 50, 900000, 123);
+      const candles = generateMultiRegimeMarketHistory(1700000000000, 80, 900000, 123);
 
       const orch1 = new ShadowOrchestrator({ persistenceDir: testDir });
       orch1.startCandidate(candidateId);
@@ -783,7 +783,8 @@ describe('AI Fix 39 — Long-Duration Shadow Reliability & Certification', () =>
       const hashes: string[] = [];
 
       for (let run = 0; run < 4; run++) {
-        const orch = new ShadowOrchestrator({ persistenceDir: testDir });
+        const runDir = path.join(testDir, `run_${run}`);
+        const orch = new ShadowOrchestrator({ persistenceDir: runDir });
         orch.startCandidate(candidateId);
 
         for (let i = 0; i < candles.length; i++) {

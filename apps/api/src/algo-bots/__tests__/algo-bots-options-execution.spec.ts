@@ -120,7 +120,7 @@ describe('Fix 202: 20 Unit Invariant Tests for Options-Only Algo Bot Execution',
     // Clear test bots
     await prisma.algoBot.deleteMany({
       where: {
-        symbol: { in: ['NIFTY_SPOT', 'BANKNIFTY_SPOT'] },
+        symbol: { in: ['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'NIFTY', 'BANKNIFTY'] },
       },
     });
   });

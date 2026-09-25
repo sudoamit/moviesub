@@ -45,9 +45,11 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       hitTp1Only?: boolean;
       hitTp1BeSl?: boolean;
       hitFullTp1Tp2TrailingTp3?: boolean;
+      symbol?: string;
     } = {},
   ) => {
     const isShort = options.isShort ?? false;
+    const fixtureSymbol = options.symbol || 'ETHUSDT';
     const entryPrice = 100;
     const stopDistance = 5;
     const stopLoss = isShort ? entryPrice + stopDistance : entryPrice - stopDistance;
@@ -138,7 +140,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       featureTimestamp: baseTime,
       labelStartTimestamp: baseTime + 1000,
       labelEndTimestamp: baseTime + 180000,
-      instrument: { symbol: 'BTCUSDT', assetType: 'CRYPTO' },
+      instrument: { symbol: fixtureSymbol, assetType: 'CRYPTO' },
       marketState: { quant },
       decision: { action: isShort ? 'SELL' : 'BUY', score: 80 },
       execution: { entryPrice, entryTime: new Date(baseTime) },
@@ -173,7 +175,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-cand-fixture',
       type: 'THRESHOLD',
       description: 'Authoritative candidate fixture',
-      symbol: 'BTCUSDT',
+      symbol: fixtureSymbol,
       riskConfig: {
         initialCapital: 100000,
         maxRiskPerTrade: 0.01,
@@ -189,7 +191,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       change: {
         parameter: 'minMtfScore',
         value: 70,
-        symbol: 'BTCUSDT',
+        symbol: fixtureSymbol,
         riskConfig: {
           initialCapital: 100000,
           maxRiskPerTrade: 0.01,
@@ -218,7 +220,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     // Method A: Run directly through authoritative BacktestSimulator
     const simResult = BacktestSimulator.runSimulation({
       runId: 'bt_direct',
-      symbol: 'BTCUSDT',
+      symbol: candidate.symbol!,
       timeframe: '15m',
       candles,
       experiences: [exp],
@@ -327,7 +329,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
   test('Test G: Partial quantities match production backtester', () => {
     const { candles, exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     const simRes = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: candidate.symbol!,
       timeframe: '15m',
       candles,
       experiences: [exp],
@@ -344,7 +346,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
   test('Test H: Fees match production execution', () => {
     const { candles, exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     const simRes = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: candidate.symbol!,
       timeframe: '15m',
       candles,
       experiences: [exp],
@@ -362,7 +364,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
   test('Test I: Slippage matches production execution', () => {
     const { candles, exp, candidate } = createDeterministicTradeFixture({ hitFullTp1Tp2TrailingTp3: true });
     const simRes = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: candidate.symbol!,
       timeframe: '15m',
       candles,
       experiences: [exp],
@@ -510,7 +512,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     };
 
     const simResultBullish = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: exp.instrument.symbol,
       timeframe: '15m',
       candles: exp.candlesDuringTrade!,
       experiences: [exp],
@@ -521,7 +523,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
     });
 
     const simResultBearish = BacktestSimulator.runSimulation({
-      symbol: 'BTCUSDT',
+      symbol: exp.instrument.symbol,
       timeframe: '15m',
       candles: exp.candlesDuringTrade!,
       experiences: [exp],
@@ -1062,7 +1064,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
   // Test AA — Candidate strategy changes discover new trades on market data that base strategy does not generate (True Strategy Replay)
   test('Test AA: Candidate strategy changes discover new trades on market data without synthetic experience extraction', async () => {
     const provider = new MockMarketDataProvider({ seed: 42 });
-    const candles = await provider.getHistoricalCandles('NIFTY', '15m', 250);
+    const candles = await provider.getHistoricalCandles('NIFTY_SPOT', '15m', 250);
 
     const testRiskConfig = {
       initialCapital: 100000,
@@ -1083,12 +1085,12 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-strict',
       type: 'THRESHOLD',
       description: 'Strict baseline strategy',
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       riskConfig: testRiskConfig,
       change: {
         parameter: 'minMtfScore',
-        value: 85, // Very strict score threshold
-        symbol: 'NIFTY',
+        value: 90, // Very strict score threshold
+        symbol: 'NIFTY_SPOT',
         riskConfig: testRiskConfig,
       },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
@@ -1102,12 +1104,12 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       candidateVersion: 'v2.0-permissive',
       type: 'THRESHOLD',
       description: 'Permissive candidate strategy with lower score threshold',
-      symbol: 'NIFTY',
+      symbol: 'NIFTY_SPOT',
       riskConfig: testRiskConfig,
       change: {
         parameter: 'minMtfScore',
-        value: 50, // Permissive score threshold
-        symbol: 'NIFTY',
+        value: 70, // Permissive score threshold
+        symbol: 'NIFTY_SPOT',
         riskConfig: testRiskConfig,
       },
       evidence: { sampleSize: 10, expectancyBefore: 0.5, expectancyAfterHistorical: 0.5 },
@@ -2070,7 +2072,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
       symbol: 'BTCUSDT',
       riskConfig: {
         initialCapital: 100000,
-        maxRiskPerTrade: 0.01,
+        maxRiskPerTrade: 0.001,
         fillModel: 'NEXT_BAR_OPEN',
         slippageModel: 'ZERO',
         feeModel: 'ZERO',
@@ -2090,7 +2092,7 @@ describe('AI Fix 4 — Authoritative Execution & Learning Engine Equivalence (Te
         symbol: 'BTCUSDT',
         riskConfig: {
           initialCapital: 100000,
-          maxRiskPerTrade: 0.01,
+          maxRiskPerTrade: 0.001,
           partialExitPolicy: {
             tp1Ratio: 0.33,
             tp2Ratio: 0.33,

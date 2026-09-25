@@ -67,6 +67,12 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
 
   // Save leverage changes immediately to localStorage
   const handleLeverageChange = (newLev: number) => {
+    if (isSpot && newLev > 1) {
+      showSavedToast(
+        `❌ Order Rejected [LEVERAGE_EXCEEDS_MAX]: Instrument ${selectedSignal?.symbol || 'SPOT'} does not support ${newLev}x leverage. Maximum allowable leverage is 1x.`,
+      );
+      return;
+    }
     const val = isSpot ? 1 : Math.max(1, Math.min(125, newLev));
     setLeverage(val);
     if (typeof window !== 'undefined' && !isSpot) {
@@ -173,6 +179,10 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   const riskPerUnit = Math.abs(entryPrice - stopLoss);
   const target1Distance = Math.abs(tp1Price - entryPrice);
   const target2Distance = Math.abs(tp2Price - entryPrice);
+  const authoritativeRR1 =
+    selectedSignal?.rr1 ?? (selectedSignal?.riskRewardRatios?.rr1 ?? 2.0);
+  const authoritativeRR2 =
+    selectedSignal?.rr2 ?? (selectedSignal?.riskRewardRatios?.rr2 ?? 3.5);
   const plannedRiskAmount = (accountBalance * riskPercent) / 100;
 
   // Unit / Quantity sizing
@@ -242,6 +252,11 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
               <span className="bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 rounded text-[10px] font-bold">
                 {selectedSignal?.symbol || 'NIFTY'}
               </span>
+              {isSpot && selectedSignal?.direction === 'BEARISH' && (
+                <span className="bg-rose-950/80 text-rose-300 border border-rose-800 px-2 py-0.5 rounded text-[10px] font-bold animate-pulse">
+                  EXECUTION BLOCKED (Spot Short Forbidden)
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Strict quantitative capital preservation engine guaranteeing fixed % equity risk and
@@ -487,7 +502,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl">
               <span className="text-[10px] text-cyan-400 font-bold block uppercase flex items-center gap-1">
-                <Target className="w-3 h-3" /> Target 1 (1.5R)
+                <Target className="w-3 h-3" /> Target 1 ({authoritativeRR1}R)
               </span>
               <span className="text-sm font-black text-cyan-300 mt-1 block">
                 +{currencySymbol}
@@ -500,7 +515,7 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
 
             <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-xl">
               <span className="text-[10px] text-emerald-400 font-bold block uppercase flex items-center gap-1">
-                <TrendingUp className="w-3 h-3" /> Target 2 (2.5R)
+                <TrendingUp className="w-3 h-3" /> Target 2 ({authoritativeRR2}R)
               </span>
               <span className="text-sm font-black text-emerald-300 mt-1 block">
                 +{currencySymbol}
