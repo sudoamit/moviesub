@@ -1,6 +1,8 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { BlackScholesModel, IndianOptionsExpiryEngine, IExpiryInfo } from '@quant/trading-engine';
+import { RealMarketStreamerService } from '../market-data/real-market-streamer.service';
+import { MarketDataUnavailableError, StaleMarketDataError, ISmartOptionRecommendation } from '@quant/shared';
 
 export interface IOptionGreekDetails {
   delta: number;
@@ -26,6 +28,8 @@ export interface IOptionContractDetails {
   gamma: number;
   vega: number;
   gex?: number;
+  /** EXCHANGE_CHAIN_SCRAPE when the LTP came from the exchange chain, MODEL when Black-Scholes filled it in. */
+  ltpSource?: 'EXCHANGE_CHAIN_SCRAPE' | 'MODEL';
 }
 
 export interface IOptionStrikeData {
@@ -55,42 +59,103 @@ export interface IOptionChainResponse {
   strikes: IOptionStrikeData[];
 }
 
-export interface ISmartOptionRecommendation {
-  underlyingSymbol: string;
-  direction: 'BULLISH' | 'BEARISH';
-  recommendedStrike: number;
-  optionType: 'CE' | 'PE';
-  contractName: string;
-  isATM: boolean;
-  spotPrice: number;
-  expiryLabel: string;
-  daysToExpiry: number;
-  optionLtp: number;
-  optionStopLoss: number;
-  optionTarget1: number;
-  optionTarget2: number;
-  optionTarget3: number;
-  rr1: number;
-  rr2: number;
-  rr3: number;
-  maxPotentialR: number;
-  primaryTargetR: number;
-  delta: number;
-  theta: number;
-  iv: number;
-  lotSize: number;
-  riskAmountPerLot: number;
-  premiumOutlayPerLot: number;
-  expectedProfitPerLot: number;
-  roiPercent: number;
-}
+export { ISmartOptionRecommendation };
 
 @Injectable()
 export class OptionsService {
   private readonly logger = new Logger(OptionsService.name);
   private liveChainCache: Map<string, { timestamp: number; data: any[] }> = new Map();
+  private static readonly MAX_STALE_CHAIN_MS = 30_000;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly realMarketStreamer?: RealMarketStreamerService,
+  ) {}
+
+  /**
+   * Normalizes exchange option strikes from API feeds.
+   * If rawStrike is in paise (>= 500,000, e.g. Groww API 2420000 -> 24200), converts to rupees.
+   * If rawStrike is already in rupees (e.g. 24200), NEVER divides by 100!
+   */
+  public normalizeExchangeStrike(rawStrike: number): number {
+    if (!rawStrike || Number.isNaN(rawStrike)) return 0;
+    if (rawStrike >= 500000) {
+      return Math.round(rawStrike / 100);
+    }
+    return Math.round(rawStrike);
+  }
+
+  /**
+   * Obtains authoritative live current market spot for options chain and valuation.
+   * Strictly prioritizes live market data provider.
+   * Prohibits hardcoded production fallbacks (e.g. 24007.35).
+   */
+  public async getAuthoritativeCurrentSpot(
+    symbol: string,
+    explicitSpot?: number,
+  ): Promise<number> {
+    const sym = symbol.toUpperCase();
+    const hasExplicitSpot = Boolean(explicitSpot && Number.isFinite(explicitSpot) && explicitSpot > 0);
+
+    // 1. Authoritative live market streamer service (always wins over any client-supplied spot)
+    if (this.realMarketStreamer) {
+      try {
+        const snap = this.realMarketStreamer.getAuthoritativeSnapshot(sym);
+        if (snap) {
+          if (snap.isFresh === false) {
+            const eventTime = snap.marketEventTime ? new Date(snap.marketEventTime) : new Date();
+            const ageSec = Math.max(0, (Date.now() - eventTime.getTime()) / 1000);
+            throw new StaleMarketDataError(sym, ageSec, 5, eventTime);
+          }
+          if (snap.price > 0) {
+            return snap.price;
+          }
+        }
+      } catch (err: any) {
+        if (err instanceof StaleMarketDataError) {
+          throw err;
+        }
+        // Fall through to check validated ticker
+      }
+
+      try {
+        const ticker = this.realMarketStreamer.getValidatedTicker(sym, 10);
+        if (ticker && ticker.price > 0) {
+          return ticker.price;
+        }
+      } catch (err: any) {
+        if (err instanceof StaleMarketDataError || err instanceof MarketDataUnavailableError) {
+          throw err;
+        }
+      }
+    }
+
+    // 2. A client-supplied spot is never authoritative: it is accepted only in the test environment when
+    //    no live quote exists (otherwise a strategy trigger could be passed off as the current spot).
+    if (process.env.NODE_ENV === 'test' && hasExplicitSpot) {
+      return explicitSpot as number;
+    }
+
+    // 3. Fallback to latest database candle only if test/dev mode
+    if (process.env.NODE_ENV === 'test' && this.prisma?.instrument) {
+      const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
+      if (inst && this.prisma?.candle) {
+        const latestCandle = await this.prisma.candle.findFirst({
+          where: { instrumentId: inst.id },
+          orderBy: { timestamp: 'desc' },
+        });
+        if (latestCandle && Number(latestCandle.close) > 0) {
+          return Number(latestCandle.close);
+        }
+      }
+    }
+
+    // 4. In live execution/production, missing live spot must throw fail-closed error
+    throw new MarketDataUnavailableError(
+      sym,
+      `No live exchange market data available for ${sym} options valuation. Hardcoded fallback prices are strictly prohibited.`,
+    );
+  }
 
   /**
    * Fetches real-time live Option Chain directly from NSE Exchange API with 2-second in-memory cache
@@ -98,6 +163,8 @@ export class OptionsService {
   private async fetchLiveNSEChain(symbol: string): Promise<any[]> {
     const sym = symbol.toUpperCase();
     if (sym !== 'NIFTY' && sym !== 'BANKNIFTY') return [];
+    // Unit tests must be deterministic: never scrape the live exchange chain under test.
+    if (process.env.NODE_ENV === 'test') return [];
 
     const cached = this.liveChainCache.get(sym);
     if (cached && Date.now() - cached.timestamp < 2000) {
@@ -126,7 +193,11 @@ export class OptionsService {
       this.logger.debug(`Live NSE options fetch notice: ${(err as Error).message}`);
     }
 
-    return cached?.data || [];
+    // A failed refresh may reuse the previous chain only while it is still recent; never serve it indefinitely.
+    if (cached && Date.now() - cached.timestamp < OptionsService.MAX_STALE_CHAIN_MS) {
+      return cached.data;
+    }
+    return [];
   }
 
   /**
@@ -139,34 +210,21 @@ export class OptionsService {
     requestedStrike?: number,
   ): Promise<IOptionChainResponse> {
     const sym = symbol.toUpperCase();
-    const inst = await this.prisma.instrument.findUnique({ where: { symbol: sym } });
-
-    // Fetch latest candle for real-time live spot price
-    const latestCandle = inst
-      ? await this.prisma.candle.findFirst({
-          where: { instrumentId: inst.id },
-          orderBy: { timestamp: 'desc' },
-        })
+    const inst = this.prisma?.instrument
+      ? await this.prisma.instrument.findUnique({ where: { symbol: sym } })
       : null;
 
-    const spotPrice =
-      spotPriceOverride && spotPriceOverride > 0
-        ? spotPriceOverride
-        : latestCandle
-          ? Number(latestCandle.close)
-          : sym === 'BTCUSDT' || sym === 'BTCUSDT_SPOT'
-            ? null
-            : sym === 'XAUUSD' || sym === 'GOLD'
-              ? 2885.5
-              : sym === 'BANKNIFTY'
-                ? 51240.0
-                : sym === 'RELIANCE'
-                  ? 3022.5
-                  : sym === 'HDFCBANK'
-                    ? 1648.5
-                    : sym === 'INFY'
-                      ? 1892.4
-                      : 24007.35;
+    // Fetch latest candle for reference if available
+    const latestCandle =
+      inst && this.prisma?.candle
+        ? await this.prisma.candle.findFirst({
+            where: { instrumentId: inst.id },
+            orderBy: { timestamp: 'desc' },
+          })
+        : null;
+
+    // Authoritative spot price: strictly from live provider or explicit parameter
+    const spotPrice = await this.getAuthoritativeCurrentSpot(sym, spotPriceOverride);
 
     if (!spotPrice || spotPrice <= 0) {
       throw new BadRequestException(
@@ -259,7 +317,9 @@ export class OptionsService {
           const diff = Math.abs(cLtp - pLtp);
           if (diff < minDiff) {
             minDiff = diff;
-            exchangeImpliedSpot = Math.round(c.strikePrice / 100);
+            const normStrike = this.normalizeExchangeStrike(c.strikePrice);
+            // Mathematically valid Put-Call parity inference: S ≈ K + (C - P)
+            exchangeImpliedSpot = normStrike + (cLtp - pLtp);
           }
         }
       }
@@ -285,9 +345,9 @@ export class OptionsService {
       const i = Math.round((strikePrice - atmStrike) / step);
       const isATM = strikePrice === atmStrike;
 
-      // Check for live matching exchange contract
+      // Check for live matching exchange contract using normalized strike (in rupees)
       const exchangeContract = rawExchangeChains.find(
-        (c) => Math.round(c.strikePrice / 100) === strikePrice,
+        (c) => this.normalizeExchangeStrike(c.strikePrice) === strikePrice,
       );
 
       let callLtp = exchangeContract?.callOption?.ltp;
@@ -330,14 +390,10 @@ export class OptionsService {
       const isPutUnphysical = isNearMoney && daysToExpiry >= 1 && putLtp !== undefined && putLtp < 10.0;
 
       // Sourced from live exchange only when matching current spot price and physically valid, otherwise use Black-Scholes price
-      const finalCallLtp =
-        !isHistoricalSpotOverride && !isCallUnphysical && callLtp && callLtp > 0
-          ? Number(callLtp.toFixed(2))
-          : bsCall.price;
-      const finalPutLtp =
-        !isHistoricalSpotOverride && !isPutUnphysical && putLtp && putLtp > 0
-          ? Number(putLtp.toFixed(2))
-          : bsPut.price;
+      const callFromExchange = Boolean(!isHistoricalSpotOverride && !isCallUnphysical && callLtp && callLtp > 0);
+      const putFromExchange = Boolean(!isHistoricalSpotOverride && !isPutUnphysical && putLtp && putLtp > 0);
+      const finalCallLtp = callFromExchange ? Number(callLtp.toFixed(2)) : bsCall.price;
+      const finalPutLtp = putFromExchange ? Number(putLtp.toFixed(2)) : bsPut.price;
 
       const callEffectiveOI =
         callOi > 0 ? callOi : Math.round((45000 - Math.abs(i) * 3200) / lotSize) * lotSize;
@@ -366,6 +422,7 @@ export class OptionsService {
         call: {
           symbol: `${sym} ${strikePrice} CE`,
           ltp: finalCallLtp,
+          ltpSource: callFromExchange ? 'EXCHANGE_CHAIN_SCRAPE' : 'MODEL',
           change: Number(callChange.toFixed(2)),
           changePercent: Number(callChangePerc.toFixed(2)),
           oi: callEffectiveOI,
@@ -385,6 +442,7 @@ export class OptionsService {
         put: {
           symbol: `${sym} ${strikePrice} PE`,
           ltp: finalPutLtp,
+          ltpSource: putFromExchange ? 'EXCHANGE_CHAIN_SCRAPE' : 'MODEL',
           change: Number(putChange.toFixed(2)),
           changePercent: Number(putChangePerc.toFixed(2)),
           oi: putEffectiveOI,
@@ -489,22 +547,81 @@ export class OptionsService {
   }
 
   async getSmartStrikeRecommendation(
-    symbol: string,
-    direction: 'BULLISH' | 'BEARISH',
-    spotTarget?: number,
-    spotStopLoss?: number,
-    targetExpiryDate?: string,
-    spotPriceOverride?: number,
-    strikeOverride?: number,
+    symbolOrParams:
+      | string
+      | {
+          symbol: string;
+          direction: 'BULLISH' | 'BEARISH';
+          spotTarget?: number;
+          spotStopLoss?: number;
+          targetExpiryDate?: string;
+          currentSpotPrice?: number;
+          underlyingTriggerPrice?: number;
+          spotPriceOverride?: number;
+          strikeOverride?: number;
+        },
+    maybeDirection?: 'BULLISH' | 'BEARISH',
+    maybeSpotTarget?: number,
+    maybeSpotStopLoss?: number,
+    maybeTargetExpiryDate?: string,
+    maybeSpotPriceOverride?: number,
+    maybeStrikeOverride?: number,
+    maybeUnderlyingTriggerPrice?: number,
   ): Promise<ISmartOptionRecommendation> {
+    let symbol: string;
+    let direction: 'BULLISH' | 'BEARISH';
+    let spotTarget: number | undefined;
+    let spotStopLoss: number | undefined;
+    let targetExpiryDate: string | undefined;
+    let currentSpotPriceInput: number | undefined;
+    let underlyingTriggerPriceInput: number | undefined;
+    let strikeOverride: number | undefined;
+
+    if (typeof symbolOrParams === 'object' && symbolOrParams !== null) {
+      symbol = symbolOrParams.symbol;
+      direction = symbolOrParams.direction;
+      spotTarget = symbolOrParams.spotTarget;
+      spotStopLoss = symbolOrParams.spotStopLoss;
+      targetExpiryDate = symbolOrParams.targetExpiryDate;
+      currentSpotPriceInput = symbolOrParams.currentSpotPrice ?? symbolOrParams.spotPriceOverride;
+      underlyingTriggerPriceInput = symbolOrParams.underlyingTriggerPrice;
+      strikeOverride = symbolOrParams.strikeOverride;
+    } else {
+      symbol = symbolOrParams;
+      direction = maybeDirection || 'BULLISH';
+      spotTarget = maybeSpotTarget;
+      spotStopLoss = maybeSpotStopLoss;
+      targetExpiryDate = maybeTargetExpiryDate;
+      currentSpotPriceInput = maybeSpotPriceOverride;
+      strikeOverride = maybeStrikeOverride;
+      underlyingTriggerPriceInput = maybeUnderlyingTriggerPrice;
+    }
+
+    // 1. Authoritative Current Spot Price (strictly from live provider or explicit input)
+    const currentSpotPrice = await this.getAuthoritativeCurrentSpot(symbol, currentSpotPriceInput);
+
+    // 2. Underlying Trigger Price (distinct from current live spot). Without a strategy trigger the setup
+    //    is valued at the current spot for display only and can never become READY.
+    const triggerProvided = Boolean(
+      underlyingTriggerPriceInput && Number.isFinite(underlyingTriggerPriceInput) && underlyingTriggerPriceInput > 0,
+    );
+    const underlyingTriggerPrice = triggerProvided ? (underlyingTriggerPriceInput as number) : currentSpotPrice;
+
+    // 3. Trigger Condition Evaluation (eligibility is evaluated separately once the contract is known)
+    const isBull = direction === 'BULLISH';
+    const optType: 'CE' | 'PE' = isBull ? 'CE' : 'PE';
+    const distanceToTrigger = Number(Math.abs(underlyingTriggerPrice - currentSpotPrice).toFixed(2));
+    const triggerConditionSatisfied =
+      triggerProvided &&
+      (isBull ? currentSpotPrice >= underlyingTriggerPrice : currentSpotPrice <= underlyingTriggerPrice);
+
+    // 4. Generate option chain strictly grounded in currentSpotPrice
     const chain = await this.getOptionChain(
       symbol,
       targetExpiryDate,
-      spotPriceOverride,
+      currentSpotPrice,
       strikeOverride,
     );
-    const isBull = direction === 'BULLISH';
-    const optType: 'CE' | 'PE' = isBull ? 'CE' : 'PE';
 
     // Find requested strike or default to ATM
     let selectedStrike = strikeOverride
@@ -514,15 +631,54 @@ export class OptionsService {
       : chain.strikes.find((s) => s.isATM) || chain.strikes[0];
     const contract = isBull ? selectedStrike.call : selectedStrike.put;
 
-    // Spot delta distance translation
-    const spotMoveToTarget = spotTarget
-      ? Math.abs(spotTarget - chain.spotPrice)
-      : chain.spotPrice * 0.008;
-    const spotMoveToSL = spotStopLoss
-      ? Math.abs(chain.spotPrice - spotStopLoss)
-      : chain.spotPrice * 0.004;
+    // Current Option LTP at current market spot
+    const currentOptionLtp = contract.ltp;
 
+    // Execution eligibility: the order boundary fills only against a live option quote from the execution
+    // feed. A scraped or modelled premium is display-only, so without that feed the setup is NOT ELIGIBLE.
+    const contractSymbolForFeed = `${chain.symbol} ${selectedStrike.strikePrice} ${optType}`;
+    const hasLiveOptionQuote = Boolean(
+      this.realMarketStreamer &&
+        typeof this.realMarketStreamer.getOptionTicker === 'function' &&
+        this.realMarketStreamer.getOptionTicker(contractSymbolForFeed),
+    );
+    const ineligibilityReasons: string[] = [];
+    if (!hasLiveOptionQuote) {
+      ineligibilityReasons.push(
+        `NO_LIVE_OPTION_QUOTE: no live execution-feed quote for ${contractSymbolForFeed}; displayed premium is ${contract.ltpSource === 'MODEL' ? 'model-derived' : 'from a scraped chain'}.`,
+      );
+    }
+    const executionEligible = ineligibilityReasons.length === 0;
+    const premiumSource: 'LIVE_EXECUTION_FEED' | 'EXCHANGE_CHAIN_SCRAPE' | 'MODEL' = hasLiveOptionQuote
+      ? 'LIVE_EXECUTION_FEED'
+      : (contract.ltpSource ?? 'MODEL');
+    const status: ISmartOptionRecommendation['status'] = !triggerProvided
+      ? 'NO_TRIGGER'
+      : !triggerConditionSatisfied
+        ? 'WAITING_FOR_TRIGGER'
+        : executionEligible
+          ? 'READY_FOR_EXECUTION'
+          : 'NOT_ELIGIBLE';
+
+    // Planned Option Entry Premium at trigger scenario
+    let plannedEntryPremium = currentOptionLtp;
+    if (Math.abs(underlyingTriggerPrice - currentSpotPrice) > 0.05) {
+      const bsAtTrigger = BlackScholesModel.calculateOptionPremiumAtTrigger(
+        underlyingTriggerPrice,
+        selectedStrike.strikePrice,
+        chain.daysToExpiry / 365,
+        0.07,
+        contract.iv / 100,
+        optType,
+      );
+      plannedEntryPremium = bsAtTrigger.price;
+    }
+
+    // Planned Option Stop Premium
     const optDelta = Math.abs(contract.delta);
+    const spotMoveToSL = spotStopLoss
+      ? Math.abs(underlyingTriggerPrice - spotStopLoss)
+      : underlyingTriggerPrice * 0.004;
     const optionRiskMove = spotMoveToSL * optDelta;
     const maxOptionRiskPts =
       chain.symbol === 'NIFTY' ? 25.0 : chain.symbol === 'BANKNIFTY' ? 60.0 : 25.0;
@@ -531,9 +687,8 @@ export class OptionsService {
       Math.max(15.0, optionRiskMove > 0 ? optionRiskMove : 20.0),
     );
 
-    const optionLtp = contract.ltp;
-    const optionStopLoss = Math.max(1.0, Number((optionLtp - calculatedRiskPts).toFixed(2)));
-    const optionRiskDistance = Number(Math.abs(optionLtp - optionStopLoss).toFixed(2));
+    const plannedStopPremium = Math.max(1.0, Number((plannedEntryPremium - calculatedRiskPts).toFixed(2)));
+    const optionRiskDistance = Number(Math.abs(plannedEntryPremium - plannedStopPremium).toFixed(2));
 
     const rr1 = 1.5;
     const rr2 = 2.5;
@@ -541,43 +696,85 @@ export class OptionsService {
     const maxPotentialR = 4.0;
     const primaryTargetR = 2.5;
 
-    const optionTarget1 = Number((optionLtp + optionRiskDistance * rr1).toFixed(2));
-    const optionTarget2 = Number((optionLtp + optionRiskDistance * rr2).toFixed(2));
-    const optionTarget3 = Number((optionLtp + optionRiskDistance * rr3).toFixed(2));
+    const optionTarget1 = Number((plannedEntryPremium + optionRiskDistance * rr1).toFixed(2));
+    const optionTarget2 = Number((plannedEntryPremium + optionRiskDistance * rr2).toFixed(2));
+    const optionTarget3 = Number((plannedEntryPremium + optionRiskDistance * rr3).toFixed(2));
 
     const riskPerLot = Number((optionRiskDistance * chain.lotSize).toFixed(2));
-    const premiumOutlayPerLot = Number((optionLtp * chain.lotSize).toFixed(2));
-    const profitPerLot = Number(((optionTarget1 - optionLtp) * chain.lotSize).toFixed(2));
+    const premiumOutlayPerLot = Number((plannedEntryPremium * chain.lotSize).toFixed(2));
+    const profitPerLot = Number(((optionTarget1 - plannedEntryPremium) * chain.lotSize).toFixed(2));
     const roi = Number(((profitPerLot / (premiumOutlayPerLot || 1)) * 100).toFixed(1));
+
+    const expiryLabel =
+      chain.availableExpiries.find((e) => e.dateString === chain.selectedExpiry)?.formattedLabel ||
+      chain.selectedExpiry;
+    const contractName = `${chain.symbol} ${selectedStrike.strikePrice} ${optType}`;
 
     return {
       underlyingSymbol: chain.symbol,
       direction,
-      recommendedStrike: selectedStrike.strikePrice,
-      optionType: optType,
-      contractName: `${chain.symbol} ${selectedStrike.strikePrice} ${optType}`,
-      isATM: selectedStrike.isATM,
-      spotPrice: chain.spotPrice,
-      expiryLabel: chain.availableExpiries[0]?.formattedLabel || chain.selectedExpiry,
-      daysToExpiry: chain.daysToExpiry,
-      optionLtp,
-      optionStopLoss,
-      optionTarget1,
-      optionTarget2,
-      optionTarget3,
+
+      // Explicit separated spot vs trigger prices
+      currentSpotPrice,
+      underlyingTriggerPrice,
+      distanceToTrigger,
+      triggerConditionSatisfied,
+      triggerProvided,
+      executionEligible,
+      ineligibilityReasons,
+      premiumSource,
+      status,
+
+      // Option contract specification
+      optionContract: {
+        symbol: contractName,
+        strike: selectedStrike.strikePrice,
+        optionType: optType,
+        expiry: expiryLabel,
+        lotSize: chain.lotSize,
+      },
+
+      // Explicit separated option premiums
+      currentOptionLtp,
+      plannedEntryPremium,
+      plannedStopPremium,
+      targets: {
+        tp1: optionTarget1,
+        tp2: optionTarget2,
+        tp3: optionTarget3,
+      },
+
+      // Risk and Reward metrics
+      riskPerUnit: optionRiskDistance,
+      riskAmountPerLot: riskPerLot,
+      premiumOutlayPerLot,
+      expectedProfitPerLot: profitPerLot,
+      roiPercent: roi,
       rr1,
       rr2,
       rr3,
       maxPotentialR,
       primaryTargetR,
+
+      // Greeks & Context
       delta: contract.delta,
       theta: contract.theta,
       iv: contract.iv,
+      isATM: selectedStrike.isATM,
+      daysToExpiry: chain.daysToExpiry,
+      expiryLabel,
+
+      // Backward compatibility aliases
+      spotPrice: currentSpotPrice,
+      recommendedStrike: selectedStrike.strikePrice,
+      optionType: optType,
+      contractName,
+      optionLtp: currentOptionLtp,
+      optionStopLoss: plannedStopPremium,
+      optionTarget1,
+      optionTarget2,
+      optionTarget3,
       lotSize: chain.lotSize,
-      riskAmountPerLot: riskPerLot,
-      premiumOutlayPerLot,
-      expectedProfitPerLot: profitPerLot,
-      roiPercent: roi,
     };
   }
 }

@@ -11,6 +11,7 @@ export * from './instrument/instrument-descriptor';
 export * from './instrument/execution-quantity-policy';
 export * from './instrument/transaction-cost-schedule-manager';
 export * from './instrument/canonical-r-calculator';
+export * from './instrument/trading-lifecycle';
 export * from './execution/execution-aggregator';
 export * from './timeframe/timeframe-registry';
 

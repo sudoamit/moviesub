@@ -50,6 +50,22 @@ export const LEGACY_SPOT_ALIASES: Record<string, SupportedSpotSymbol> = {
   BTCUSDT: 'BTCUSDT_SPOT',
 };
 
+/**
+ * Bitcoin aliases that must always execute as true spot (BTCUSDT_SPOT).
+ * The legacy 'BTCUSDT' registry entry is a leveraged perpetual specification and must never be
+ * selected by an execution path: the platform only trades BTC as spot.
+ */
+const BTC_SPOT_EXECUTION_ALIASES = new Set(['BTC', 'BTCUSD', 'BTCUSDT', 'BTCUSDT_SPOT']);
+
+/**
+ * Canonicalizes a symbol for execution, sizing, and risk lookups.
+ * BTC aliases resolve to BTCUSDT_SPOT; every other symbol is trimmed and upper-cased unchanged.
+ */
+export function canonicalizeExecutionSymbol(symbol: string): string {
+  const sym = (symbol || '').trim().toUpperCase();
+  return BTC_SPOT_EXECUTION_ALIASES.has(sym) ? 'BTCUSDT_SPOT' : sym;
+}
+
 export function canonicalizeSpotSymbol(
   symbol: string,
   options?: { allowLegacyAliases?: boolean },
@@ -573,6 +589,11 @@ export function getAuthoritativeInstrument(
     return baseInstrument;
   }
 
+  // A true spot instrument keeps its spot margin model regardless of venue overrides.
+  if (baseInstrument.marginMode === 'SPOT') {
+    return baseInstrument;
+  }
+
   // Compose with venue override
   return {
     ...baseInstrument,
@@ -622,14 +643,21 @@ export function resolveMarginModel(
     ? { ...(instrument.venueProfile || {}), ...options.venueOverride }
     : instrument.venueProfile;
 
+  // A true spot instrument can never be converted into a margin product by a venue override.
   const marginMode: MarginMode =
-    options?.venueOverride?.marginMode ?? instrument.marginMode ?? venue?.marginMode ?? 'SPOT';
+    instrument.marginMode === 'SPOT'
+      ? 'SPOT'
+      : (options?.venueOverride?.marginMode ?? instrument.marginMode ?? venue?.marginMode ?? 'SPOT');
 
   if (marginMode === 'SPOT') {
-    if (options?.requestedLeverage !== undefined && options.requestedLeverage > 1) {
-      throw new Error(
-        `LEVERAGE_EXCEEDS_MAX: Requested leverage ${options.requestedLeverage}x exceeds maximum allowable leverage of 1x for spot instrument ${instrument.symbol}`,
-      );
+    // Reject (never silently clamp) any leverage > 1 on spot, whichever field it arrives in.
+    const spotLeverageRequests = [options?.requestedLeverage, options?.customLeverage];
+    for (const lev of spotLeverageRequests) {
+      if (lev !== undefined && lev !== null && Number(lev) > 1) {
+        throw new Error(
+          `LEVERAGE_EXCEEDS_MAX: Requested leverage ${lev}x exceeds maximum allowable leverage of 1x for spot instrument ${instrument.symbol}`,
+        );
+      }
     }
     return {
       marginMode: 'SPOT',

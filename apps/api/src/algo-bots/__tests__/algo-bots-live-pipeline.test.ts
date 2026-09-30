@@ -209,7 +209,7 @@ describe('AlgoBotsService execution integration test', () => {
     return { candles, htf1Candles, htf2Candles, decisionTime };
   };
 
-  it('Proves live market stream flows end-to-end to PaperTradingService.placeOrder with canonical decision timestamp', async () => {
+  it('Proves a live BEARISH BTC spot signal flows through the pipeline and is rejected as a spot short (no order placed)', async () => {
     const { candles, htf1Candles, htf2Candles, decisionTime } = buildNaturalLiveSMCCandles();
 
     const btcBot: any = {
@@ -271,19 +271,10 @@ describe('AlgoBotsService execution integration test', () => {
     // Single-pass machine-readable evaluation
     const executionResults = await algoBotsService.evaluateSignalForBots(signal);
 
+    // BTC is true spot (long-only): a BEARISH signal must be rejected before any order is placed.
     expect(executionResults).toHaveLength(1);
-    expect(executionResults[0].status).toBe('EXECUTED');
-    expect(executionResults[0].reasonCode).toBe('ORDER_PLACED_SUCCESSFULLY');
-    expect(executionResults[0].executionId).toBeDefined();
-    expect(executionResults[0].orderPositionId).toBeDefined();
-
-    // Verify placeOrder was called with exact canonical decision time
-    expect(mockPaperTradingService.placeOrder).toHaveBeenCalledWith(
-      expect.objectContaining({
-        symbol: 'BTCUSDT',
-        direction: 'SELL',
-        signalTime: decisionTime.toISOString(),
-      }),
-    );
+    expect(executionResults[0].status).toBe('REJECTED');
+    expect(executionResults[0].reasonCode).toBe('SPOT_SHORT_SELLING_FORBIDDEN');
+    expect(mockPaperTradingService.placeOrder).not.toHaveBeenCalled();
   });
 });

@@ -26,16 +26,19 @@ export class OptionsController {
     @Query('spotStopLoss') spotStopLoss?: string,
     @Query('expiryDate') expiryDate?: string,
     @Query('spotPrice') spotPrice?: string,
+    @Query('currentSpotPrice') currentSpotPrice?: string,
+    @Query('underlyingTriggerPrice') underlyingTriggerPrice?: string,
     @Query('strike') strike?: string,
   ) {
-    return this.optionsService.getSmartStrikeRecommendation(
-      symbol || 'NIFTY',
-      direction || 'BULLISH',
-      spotTarget ? parseFloat(spotTarget) : undefined,
-      spotStopLoss ? parseFloat(spotStopLoss) : undefined,
-      expiryDate,
-      spotPrice ? parseFloat(spotPrice) : undefined,
-      strike ? parseFloat(strike) : undefined,
-    );
+    return this.optionsService.getSmartStrikeRecommendation({
+      symbol: symbol || 'NIFTY',
+      direction: direction || 'BULLISH',
+      spotTarget: spotTarget ? parseFloat(spotTarget) : undefined,
+      spotStopLoss: spotStopLoss ? parseFloat(spotStopLoss) : undefined,
+      targetExpiryDate: expiryDate,
+      currentSpotPrice: currentSpotPrice ? parseFloat(currentSpotPrice) : (spotPrice ? parseFloat(spotPrice) : undefined),
+      underlyingTriggerPrice: underlyingTriggerPrice ? parseFloat(underlyingTriggerPrice) : undefined,
+      strikeOverride: strike ? parseFloat(strike) : undefined,
+    });
   }
 }

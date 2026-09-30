@@ -30,8 +30,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     this.autoScanTimer = setInterval(async () => {
       try {
+        // Every selectable bot strategy must be scanned, otherwise bots on it can never receive a signal.
         await this.triggerScan(Timeframe.M15, 'SMC');
         await this.triggerScan(Timeframe.M15, 'SAIYAN_OCC');
+        await this.triggerScan(Timeframe.M15, 'HYBRID');
       } catch (err: any) {
         this.logger.warn(`Auto market scan failed: ${err.message}`);
       }

@@ -209,9 +209,6 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       return;
     }
 
-    const savedBalanceStr = typeof window !== 'undefined' ? localStorage.getItem('quant_account_balance') : null;
-    const clientAccountBalance = savedBalanceStr && !isNaN(Number(savedBalanceStr)) ? Number(savedBalanceStr) : undefined;
-
     try {
       setIsSubmitting(true);
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -222,15 +219,14 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
           symbol: currentSymbol,
           direction: side,
           quantity: totalQuantity,
+          // MARKET orders fill at the server's validated quote; the client never supplies a fill price
+          // or an account balance (the server's ledger is authoritative).
           orderType: 'MARKET',
-          allowPriceOverride: true,
-          price: cmp,
           stopLoss: finalSL,
           target1: finalTP1,
           target2: finalTP2,
           target3: finalTP3,
           leverage: requestedLeverage,
-          accountBalance: clientAccountBalance,
         }),
       });
 

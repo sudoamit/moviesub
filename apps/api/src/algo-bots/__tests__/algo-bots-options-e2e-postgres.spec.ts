@@ -203,7 +203,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
         timeframe: '15m',
         minScore: 75,
         smcCondition: 'ORDER_BLOCK',
-        lots: 1, // 1 lot = 65 units for NIFTY
+        lots: 4, // 4 lots = 260 units: enough for whole-lot TP1/TP2 partials (1 lot cannot be split)
         autoExecutePaper: true,
         notifyWebhook: false,
         isActive: true,
@@ -268,7 +268,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
     expect(dbOrder!.instrumentType).toBe('OPTION');
     expect(dbOrder!.direction).toBe(Direction.BULLISH); // BUY side
     expect(dbOrder!.strategyDirection).toBe(Direction.BULLISH);
-    expect(Number(dbOrder!.requestedQuantity)).toBe(65);
+    expect(Number(dbOrder!.requestedQuantity)).toBe(260);
     expect(Number(dbOrder!.strike)).toBe(24100);
     expect(dbOrder!.optionType).toBe('CE');
 
@@ -277,7 +277,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
       where: { orderId: dbOrder!.id },
     });
     expect(dbFill).toBeDefined();
-    expect(Number(dbFill!.fillQuantity)).toBe(65);
+    expect(Number(dbFill!.fillQuantity)).toBe(260);
     expect(Number(dbFill!.fillPrice)).toBeGreaterThanOrEqual(150);
 
     // 9. PIPELINE STEP 7: POSITION
@@ -290,7 +290,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
     expect(dbPos!.direction).toBe(Direction.BULLISH); // BUY
     expect(dbPos!.strategyDirection).toBe(Direction.BULLISH);
     expect(dbPos!.status).toBe(PositionState.OPEN);
-    expect(Number(dbPos!.quantity)).toBe(65);
+    expect(Number(dbPos!.quantity)).toBe(260);
     expect(Number(dbPos!.strike)).toBe(24100);
     expect(dbPos!.optionType).toBe('CE');
 
@@ -316,8 +316,8 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
 
     dbPos = await prisma.paperPosition.findUnique({ where: { id: positionId } });
     expect(dbPos!.status).toBe(PositionState.PARTIALLY_CLOSED);
-    // 30% scale-out: 65 * 0.3 = 19.5 -> rounded to 20 units; 45 units remaining
-    expect(Number(dbPos!.quantity)).toBeLessThan(65);
+    // 30% of 260 = 78 -> floored to whole lots = 65 units; 195 units remaining
+    expect(Number(dbPos!.quantity)).toBe(195);
     // StopLoss moved to breakeven
     expect(Number(dbPos!.stopLoss)).toBe(entryPrice);
 
@@ -336,7 +336,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
 
     dbPos = await prisma.paperPosition.findUnique({ where: { id: positionId } });
     expect(dbPos!.status).toBe(PositionState.PARTIALLY_CLOSED);
-    expect(Number(dbPos!.quantity)).toBeLessThan(45.5);
+    expect(Number(dbPos!.quantity)).toBe(130);
 
     // Verify TP2 leg recorded
     const eventsAfterTP2 = dbPos!.executionEventsJson as any;
@@ -396,7 +396,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
         timeframe: '15m',
         minScore: 75,
         smcCondition: 'ORDER_BLOCK',
-        lots: 1, // 1 lot = 65 units for NIFTY
+        lots: 4, // 4 lots = 260 units: enough for a whole-lot TP1 partial
         autoExecutePaper: true,
         notifyWebhook: false,
         isActive: true,

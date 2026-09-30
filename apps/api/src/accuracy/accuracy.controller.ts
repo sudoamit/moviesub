@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { AccuracyService } from './accuracy.service';
 
 @Controller('api/accuracy')
@@ -41,14 +41,15 @@ export class AccuracyController {
     @Query('currentPrice') currentPrice: string,
     @Query('direction') direction: 'BULLISH' | 'BEARISH' = 'BULLISH',
   ) {
-    return this.accuracyService.getDynamicTrailingState(
-      Number(entryPrice || 24175),
-      Number(stopLoss || 24100),
-      Number(tp1 || 24250),
-      Number(tp2 || 24320),
-      Number(currentPrice || 24175),
-      direction,
-    );
+    // No fabricated NIFTY levels: every level must be supplied by the caller.
+    const levels = [entryPrice, stopLoss, tp1, tp2, currentPrice].map((v) => Number(v));
+    if (levels.some((v) => !Number.isFinite(v) || v <= 0)) {
+      throw new BadRequestException(
+        'entryPrice, stopLoss, tp1, tp2 and currentPrice are required positive numbers.',
+      );
+    }
+    const [entry, sl, t1, t2, current] = levels;
+    return this.accuracyService.getDynamicTrailingState(entry, sl, t1, t2, current, direction);
   }
 
   @Get('liquidity-heatmap')

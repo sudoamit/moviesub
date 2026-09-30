@@ -21,6 +21,8 @@ describe('Trade Cut Logic & Journal Entry Verification Suite', () => {
 
   let accountId: string;
   let testBotId: string;
+  // Live NIFTY quote served by the mocked streamer; exits are priced by the server from this value.
+  let liveNiftyPrice = 24000.0;
 
   beforeAll(async () => {
     PointInTimeCurrencyConverter.getInstance().seedFixtureRates([
@@ -42,7 +44,7 @@ describe('Trade Cut Logic & Journal Entry Verification Suite', () => {
       })),
       getValidatedTicker: jest.fn((symbol: string) => ({
         symbol,
-        price: symbol.startsWith('BTC') ? 60000.0 : symbol === 'XAUUSD' ? 2600.0 : 24000.0,
+        price: symbol.startsWith('BTC') ? 60000.0 : symbol === 'XAUUSD' ? 2600.0 : liveNiftyPrice,
         provenance: 'LIVE_PROVIDER',
         marketEventTime: Date.now() - 500,
         providerId: 'STREAMER',
@@ -140,12 +142,12 @@ describe('Trade Cut Logic & Journal Entry Verification Suite', () => {
       expect(openPositions.length).toBeGreaterThanOrEqual(1);
       const position = openPositions[0];
 
-      // 2. Perform a full market cut via controller
+      // 2. Perform a full market cut via controller (priced by the server from the live quote)
+      liveNiftyPrice = 24200.0;
       const closedTrade: any = await controller.closePositionById(position.id, {
         reason: 'Manual Market Cut @ Current Price',
-        exitPrice: 24200,
-        allowPriceOverride: true,
       });
+      liveNiftyPrice = 24000.0;
 
       expect(closedTrade).toBeDefined();
       expect(Number(closedTrade.exitPrice)).toBeCloseTo(24200, -2);
@@ -247,9 +249,9 @@ describe('Trade Cut Logic & Journal Entry Verification Suite', () => {
       expect(position).toBeDefined();
 
       // Execute 50% scale-out cut via controller
+      liveNiftyPrice = 24100.0;
       const scaleOutRes = await controller.scaleOutPositionById(position!.id, {
         ratio: 0.5,
-        exitPrice: 24100,
         reason: 'Manual 50% Scale Out',
       });
 
@@ -269,11 +271,11 @@ describe('Trade Cut Logic & Journal Entry Verification Suite', () => {
       expect(tradeCountBeforeFinal).toBe(0);
 
       // Now close remaining 50% runner
+      liveNiftyPrice = 24200.0;
       const finalTrade = await controller.closePositionById(position!.id, {
         reason: 'Runner Final Exit',
-        exitPrice: 24200,
-        allowPriceOverride: true,
       });
+      liveNiftyPrice = 24000.0;
 
       expect(finalTrade).toBeDefined();
 

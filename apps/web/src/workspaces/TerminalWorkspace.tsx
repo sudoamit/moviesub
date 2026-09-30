@@ -136,6 +136,7 @@ export const TerminalWorkspace: React.FC<TerminalWorkspaceProps> = ({
         signal={selectedSignal}
         livePrice={currentTicker.price ?? 0}
         activePosition={activePosition}
+        activeExecution={activeExecution}
         onClosePosition={onClosePosition}
       />
 

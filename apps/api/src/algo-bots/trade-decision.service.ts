@@ -19,6 +19,7 @@ import {
   Direction,
   getAuthoritativeInstrument,
   hasInstrument,
+  canonicalizeExecutionSymbol,
   IInstrument,
   IPositionSizing,
   ISignalSetup,
@@ -408,6 +409,8 @@ export interface IPlannedTradeLevels {
   leverage: number;
   riskAmount: number;
   riskPercent: number;
+  /** Quote-currency to INR rate used for riskAmount (1 for INR instruments). */
+  fxRate?: number;
 }
 
 export interface IPreTradeDecisionResult {
@@ -786,7 +789,7 @@ export class TradeDecisionService {
     }
 
     // Gate 7: Symbol Match
-    if (!signal.symbol || bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+    if (!signal.symbol || canonicalizeExecutionSymbol(bot.symbol) !== canonicalizeExecutionSymbol(signal.symbol)) {
       reasons.push({
         code: 'SYMBOL_MISMATCH',
         message: `Bot symbol '${bot.symbol}' !== signal symbol '${signal.symbol}'`,
@@ -812,15 +815,26 @@ export class TradeDecisionService {
     }
 
     // Gate 9.1: Spot Short Selling Protection (Requirements 8, 12, 29)
-    const effectiveExecutionInstrument =
+    const execInstType =
+      (signal as any).executionInstrumentType ||
+      (bot as any).executionInstrumentType;
+    const isOptionBotOrSignal =
+      execInstType === 'OPTION' ||
+      Boolean((bot as any).executionInstrument?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).contractSymbol?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).strike) ||
+      Boolean((signal as any).contractSymbol?.match(/\b(CE|PE)\b/));
+
+    const effectiveExecutionInstrument = (
       (bot as any).executionInstrument ||
       (signal as any).contractSymbol ||
-      bot.symbol.toUpperCase();
-    const SPOT_SHORT_FORBIDDEN_SET = new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']);
+      bot.symbol ||
+      ''
+    ).toUpperCase();
+    const SPOT_SHORT_FORBIDDEN_SET = new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']);
     const isSpotShort =
-      (SPOT_SHORT_FORBIDDEN_SET.has(effectiveExecutionInstrument) ||
-       SPOT_SHORT_FORBIDDEN_SET.has(bot.symbol.toUpperCase()) ||
-       SPOT_SHORT_FORBIDDEN_SET.has(signal.symbol.toUpperCase())) &&
+      !isOptionBotOrSignal &&
+      SPOT_SHORT_FORBIDDEN_SET.has(canonicalizeExecutionSymbol(effectiveExecutionInstrument)) &&
       signal.direction === 'BEARISH';
     if (isSpotShort) {
       reasons.push({
@@ -831,9 +845,6 @@ export class TradeDecisionService {
 
     // Gate 9.2: Options-Only Enforcement for NIFTY & BANKNIFTY Algo Bots
     const isOptionsUnderlyingBot = isOptionsUnderlying(bot.symbol);
-    const execInstType =
-      (signal as any).executionInstrumentType ||
-      (bot as any).executionInstrumentType;
     const execInst =
       (signal as any).contractSymbol ||
       (bot as any).executionInstrument ||
@@ -844,12 +855,6 @@ export class TradeDecisionService {
       execInst === 'BANKNIFTY_SPOT' ||
       (bot as any).executionInstrument === 'NIFTY_SPOT' ||
       (bot as any).executionInstrument === 'BANKNIFTY_SPOT';
-
-    const isOptionBotOrSignal =
-      execInstType === 'OPTION' ||
-      Boolean((bot as any).executionInstrument?.toUpperCase().includes('OPTION')) ||
-      Boolean((signal as any).contractSymbol?.toUpperCase().includes('OPTION')) ||
-      Boolean((signal as any).strike);
 
     if (isOptionBotOrSignal) {
       if (isExplicitSpot || (execInstType && execInstType !== 'OPTION')) {
@@ -1028,7 +1033,7 @@ export class TradeDecisionService {
       if (lookupSymbol && typeof lookupSymbol === 'string' && lookupSymbol.endsWith(' OPTION')) {
         lookupSymbol = lookupSymbol.replace(' OPTION', '');
       }
-      instrument = getAuthoritativeInstrument(lookupSymbol);
+      instrument = getAuthoritativeInstrument(canonicalizeExecutionSymbol(lookupSymbol));
       contractSize = Number(instrument.contractSize || 1);
     } catch (err: any) {
       try {
@@ -1036,7 +1041,7 @@ export class TradeDecisionService {
         if (fallbackSym && typeof fallbackSym === 'string' && fallbackSym.endsWith(' OPTION')) {
           fallbackSym = fallbackSym.replace(' OPTION', '');
         }
-        instrument = getAuthoritativeInstrument(fallbackSym);
+        instrument = getAuthoritativeInstrument(canonicalizeExecutionSymbol(fallbackSym));
         contractSize = Number(instrument.contractSize || 1);
       } catch (innerErr: any) {
         reasons.push({
@@ -1104,9 +1109,19 @@ export class TradeDecisionService {
       if (isOptionsBot) {
         const optionLotsQty = this.resolveOrderQuantity(bot, instrument);
         const maxUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
-        resolvedQuantity = Math.min(maxUnits, optionLotsQty);
+        // Options trade in whole lots only: floor the risk-capped quantity to a lot multiple.
+        const optLotSize = Number(instrument.lotSize || 1);
+        const cappedUnits = Math.min(maxUnits, optionLotsQty);
+        resolvedQuantity = Math.floor(cappedUnits / optLotSize) * optLotSize;
+        if (resolvedQuantity <= 0) {
+          reasons.push({
+            code: 'INVALID_QUANTITY',
+            message: `RISK_TOO_SMALL_FOR_ONE_LOT: risk budget allows ${Number(maxUnits).toFixed(2)} units, below one lot of ${optLotSize}`,
+          });
+        }
       } else {
-        const botInst = hasInstrument(bot.symbol) ? getAuthoritativeInstrument(bot.symbol) : instrument;
+        const botSym = canonicalizeExecutionSymbol(bot.symbol);
+        const botInst = hasInstrument(botSym) ? getAuthoritativeInstrument(botSym) : instrument;
         const rawBotQty = this.resolveOrderQuantity(bot, botInst);
         const maxAuthoritativeUnits =
           sizing.calculatedUnits > 0 ? sizing.calculatedUnits : (sizing.roundedUnits > 0 ? sizing.roundedUnits : rawBotQty);
@@ -1375,6 +1390,7 @@ export class TradeDecisionService {
       leverage: effectiveLev,
       riskAmount,
       riskPercent,
+      fxRate,
     };
 
     const riskSnapshotJson = {
@@ -1498,9 +1514,17 @@ export class TradeDecisionService {
       const plannedEntry = decisionResult.plannedLevels?.optimalEntry || 0;
       const plannedSL = decisionResult.plannedLevels?.stopLoss || 0;
       const riskDist = Math.abs(plannedEntry - plannedSL);
-      const riskAmt = decisionResult.plannedLevels?.riskAmount ?? (riskDist * plannedQty);
-      const exposureAmt = (plannedEntry > 0 ? plannedEntry : 1) * plannedQty;
-      const marginAmt = isOption ? exposureAmt : (exposureAmt / ((bot as any).leverage || 1.0));
+      // Reservation amounts are booked in INR: convert quote-currency notional with the decision's FX rate
+      // and divide by the leverage the risk engine actually approved (spot = 1).
+      const plannedFx = Number(decisionResult.plannedLevels?.fxRate) > 0
+        ? Number(decisionResult.plannedLevels!.fxRate)
+        : 1.0;
+      const plannedLev = Number(decisionResult.plannedLevels?.leverage) > 0
+        ? Number(decisionResult.plannedLevels!.leverage)
+        : 1.0;
+      const riskAmt = decisionResult.plannedLevels?.riskAmount ?? (riskDist * plannedQty * plannedFx);
+      const exposureAmt = (plannedEntry > 0 ? plannedEntry : 1) * plannedQty * plannedFx;
+      const marginAmt = isOption ? exposureAmt : (exposureAmt / plannedLev);
 
       try {
         const reservationRecord = await this.reservationService.reserveResources({
@@ -2230,7 +2254,7 @@ export class TradeDecisionService {
 
     // 10. SYMBOL_MISMATCH
     const isSymbolMatch =
-      Boolean(signal.symbol) && bot.symbol.toUpperCase() === signal.symbol.toUpperCase();
+      Boolean(signal.symbol) && canonicalizeExecutionSymbol(bot.symbol) === canonicalizeExecutionSymbol(signal.symbol);
     gateResults.push({
       code: 'SYMBOL_MISMATCH',
       message: isSymbolMatch
@@ -2266,10 +2290,18 @@ export class TradeDecisionService {
       (bot as any).executionInstrument ||
       (signal as any).contractSymbol ||
       bot.symbol.toUpperCase();
+    const execInstTypeGate =
+      (signal as any).executionInstrumentType ||
+      (bot as any).executionInstrumentType;
+    const isOptionGate =
+      execInstTypeGate === 'OPTION' ||
+      Boolean((bot as any).executionInstrument?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).contractSymbol?.toUpperCase().includes('OPTION')) ||
+      Boolean((signal as any).strike) ||
+      Boolean((signal as any).contractSymbol?.match(/\b(CE|PE)\b/));
     const isSpotShortForbidden =
-      (new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(execInst) ||
-       new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(bot.symbol.toUpperCase()) ||
-       new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT', 'BTCUSDT']).has(signal.symbol.toUpperCase())) &&
+      !isOptionGate &&
+      new Set(['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT']).has(canonicalizeExecutionSymbol(execInst)) &&
       signal.direction === 'BEARISH';
     gateResults.push({
       code: 'SPOT_SHORT_SELLING_FORBIDDEN',

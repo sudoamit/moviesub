@@ -23,11 +23,11 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
   // In-memory mock database store for algoBot records
   let dbBots: Map<string, any>;
 
-  const createDummyCandles = (count = 50, basePrice = 24000) => {
+  const createDummyCandles = (count = 50, basePrice = 24000, tfMs = 15 * 60 * 1000) => {
     const candles: any[] = [];
     const now = Date.now();
     for (let i = count - 1; i >= 0; i--) {
-      const time = now - i * 15 * 60 * 1000;
+      const time = now - i * tfMs;
       candles.push({
         time,
         timestamp: new Date(time).toISOString(),
@@ -36,6 +36,7 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
         low: basePrice + i * 2 - 5,
         close: basePrice + i * 2 + 3,
         volume: 1000 + i * 10,
+        isClosed: true,
       });
     }
     return candles;
@@ -54,7 +55,7 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
             strategy: data.strategy || 'SMC',
             direction: data.direction || 'ANY',
             timeframe: data.timeframe || '15m',
-            minScore: data.minScore || 80,
+            minScore: data.minScore !== undefined ? data.minScore : 80,
             smcCondition: data.smcCondition || 'ANY_CONFLUENCE',
             lots: data.lots || 1,
             autoExecutePaper: Boolean(data.autoExecutePaper),
@@ -140,9 +141,15 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
     mockCandlesService = {
       getCandles: jest.fn().mockImplementation(async ({ timeframe }) => {
         if (timeframe === Timeframe.M15 || timeframe === '15m') {
-          return { candles: createDummyCandles(100) };
+          return { candles: createDummyCandles(100, 24000, 15 * 60 * 1000) };
         }
-        return { candles: [] };
+        if (timeframe === Timeframe.H1 || timeframe === '1h') {
+          return { candles: createDummyCandles(60, 24000, 60 * 60 * 1000) };
+        }
+        if (timeframe === Timeframe.H4 || timeframe === '4h') {
+          return { candles: createDummyCandles(40, 24000, 4 * 60 * 60 * 1000) };
+        }
+        return { candles: createDummyCandles(50, 24000, 15 * 60 * 1000) };
       }),
     };
 
@@ -273,6 +280,7 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
       name: 'Switchable Bot',
       symbol: 'NIFTY',
       strategy: 'SAIYAN_OCC',
+      minScore: 0,
     });
     expect(bot.strategy).toBe('SAIYAN_OCC');
 
@@ -411,6 +419,7 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
       name: 'Fast Transition Bot',
       symbol: 'NIFTY',
       strategy: 'SMC',
+      minScore: 0,
     });
 
     // Update via controller (PUT/PATCH)
@@ -429,6 +438,7 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
     expect(currentBot?.strategy).toBe('SAIYAN_OCC');
 
     const match = algoBotsService.matchesBotStrategy(currentBot!, signal);
+    console.log('TEST 8 match:', JSON.stringify(match, null, 2), 'signal:', signal?.strategy, signal?.score);
     expect(match.matches).toBe(true);
   });
 

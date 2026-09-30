@@ -41,8 +41,16 @@ export class BlackScholesModel {
   }
 
   /**
-   * Calculates Black-Scholes-Merton Price and Greeks for Call or Put option
-   * @param spot Underlying spot price S
+   * Calculates Black-Scholes-Merton Price and Greeks for Call or Put option.
+   *
+   * IMPORTANT ARCHITECTURAL RULE:
+   * The `spot` parameter MUST be explicitly documented and passed as:
+   * - current underlying market spot (for current-market option valuation / currentOptionLtp)
+   * - OR trigger-scenario underlying spot (for projected execution scenario / plannedEntryPremium).
+   *
+   * NEVER silently pass strategy entry/trigger into functions expecting current live market spot.
+   *
+   * @param spot Underlying spot price S (current live spot OR explicit trigger scenario)
    * @param strike Strike price K
    * @param timeToExpiryYears Time to expiry T in years (e.g. days / 365)
    * @param riskFreeRate Annualized risk free interest rate r (e.g. 0.07 for 7%)
@@ -123,5 +131,27 @@ export class BlackScholesModel {
       },
       iv: Number((volatility * 100).toFixed(1)),
     };
+  }
+
+  /**
+   * Calculates Option Price and Greeks strictly at a projected trigger scenario price.
+   * This is explicitly isolated from current-market valuation at live spot.
+   *
+   * @param triggerSpot Underlying trigger scenario price (e.g. strategy entry trigger 24175.65)
+   * @param strike Strike price K (e.g. 24200)
+   * @param timeToExpiryYears Time to expiry T in years
+   * @param riskFreeRate Annualized risk free interest rate r
+   * @param volatility Annualized Implied Volatility sigma
+   * @param type 'CE' | 'PE'
+   */
+  static calculateOptionPremiumAtTrigger(
+    triggerSpot: number,
+    strike: number,
+    timeToExpiryYears: number,
+    riskFreeRate: number = 0.07,
+    volatility: number = 0.135,
+    type: 'CE' | 'PE' = 'CE',
+  ): IOptionContractPrice {
+    return this.calculate(triggerSpot, strike, timeToExpiryYears, riskFreeRate, volatility, type);
   }
 }

@@ -29,6 +29,7 @@ import {
   Timeframe,
   TradeDecisionType,
   TradeLifecycleState,
+  canonicalizeExecutionSymbol,
 } from '@quant/shared';
 import {
   TradeDecisionService,
@@ -490,7 +491,7 @@ export class AlgoBotsService implements OnModuleInit {
     const strategy = this.normalizeStrategy(dto.strategy);
     const direction = dto.direction || 'ANY';
     const timeframe = this.normalizeTimeframe(dto.timeframe);
-    const minScore = Number(dto.minScore || 80);
+    const minScore = dto.minScore !== undefined ? Number(dto.minScore) : 80;
     const smcCondition = dto.smcCondition || 'ANY_CONFLUENCE';
     const lots = Number(dto.lots || 1);
     const autoExecutePaper = dto.autoExecutePaper === true;
@@ -934,7 +935,7 @@ export class AlgoBotsService implements OnModuleInit {
     }
 
     // 1. Symbol Match
-    if (!signal.symbol || bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+    if (!signal.symbol || canonicalizeExecutionSymbol(bot.symbol) !== canonicalizeExecutionSymbol(signal.symbol)) {
       return {
         matches: false,
         reasonCode: 'SYMBOL_MISMATCH',
@@ -1457,7 +1458,7 @@ export class AlgoBotsService implements OnModuleInit {
     }
 
     // Gate 7: Symbol Parity
-    if (!signal.symbol || bot.symbol.toUpperCase() !== signal.symbol.toUpperCase()) {
+    if (!signal.symbol || canonicalizeExecutionSymbol(bot.symbol) !== canonicalizeExecutionSymbol(signal.symbol)) {
       reasons.push('SYMBOL_MISMATCH');
     }
 

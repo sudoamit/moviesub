@@ -3,6 +3,7 @@ import {
   Logger,
   BadRequestException,
   NotFoundException,
+  ConflictException,
   Optional,
   OnModuleInit,
 } from '@nestjs/common';
@@ -30,6 +31,7 @@ import {
   ExecutionAggregator,
   IFillRecord,
   isSupportedSpotSymbol,
+  canonicalizeExecutionSymbol,
   LEGACY_SPOT_ALIASES,
   TradeLifecycleState,
   validateOptionLotQuantity,
@@ -287,7 +289,14 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           ticker = this.realMarketStreamer.getValidatedTicker(key, maxAgeSeconds);
         }
         if (ticker && typeof ticker.price === 'number' && Number.isFinite(ticker.price) && ticker.price > 0) {
-          const ts = ticker.marketEventTime || ticker.lastUpdated || Date.now();
+          // Fail closed: a quote without a provider timestamp cannot prove freshness.
+          const ts = ticker.marketEventTime || ticker.lastUpdated;
+          if (!ts) {
+            throw new MarketDataUnavailableError(
+              key,
+              `Option quote for ${key} has no provider timestamp; freshness cannot be verified.`,
+            );
+          }
           const ageMs = Date.now() - ts;
           if (ageMs > maxAgeSeconds * 1000) {
             throw new StaleMarketDataError(
@@ -405,6 +414,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     ]);
 
     let totalUnrealized = 0.0;
+    // Entry fees are already deducted from cashBalance at fill, so equity must add GROSS unrealized P&L;
+    // adding the net (fee-deducted) figure would charge entry fees twice.
+    let totalGrossUnrealized = 0.0;
     let totalUsedMargin = 0.0;
     const formattedPositions: IPaperPosition[] = [];
 
@@ -595,12 +607,13 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       });
 
       totalUnrealized += unrealizedPnL;
+      totalGrossUnrealized += pnlCalc.grossPnlAccount;
       totalUsedMargin += usedMargin;
     }
 
     const cashBalance = Number(account.cashBalance);
     const availableMargin = Number((cashBalance - totalUsedMargin).toFixed(2));
-    const totalEquity = Number((cashBalance + totalUnrealized).toFixed(2));
+    const totalEquity = Number((cashBalance + totalGrossUnrealized).toFixed(2));
 
     const formattedHistory: IPaperTradeHistory[] = tradeHistory.map((t) => {
       const charges = (t.chargesJson as any) || { totalCharges: 0 };
@@ -696,8 +709,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       );
     }
 
-    const rawSymbol = this.normalizeSymbol(req.symbol);
-    const execSymbol = this.normalizeSymbol(req.executionInstrument || req.symbol);
+    // BTC aliases (e.g. legacy 'BTCUSDT') always execute as true spot BTCUSDT_SPOT, never the perpetual spec.
+    const rawSymbol = canonicalizeExecutionSymbol(req.symbol);
+    const execSymbol = canonicalizeExecutionSymbol(req.executionInstrument || req.symbol);
     const isOptionsUnderlyingSymbol = isOptionsUnderlying(rawSymbol);
 
     // Section 10 Validation: Options-Only Execution for NIFTY / BANKNIFTY Algo Bots
@@ -764,10 +778,10 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     const instrumentType = (isOptionsBotOrder || isExplicitOptionOrder) ? 'OPTION' : (req.instrumentType || 'SPOT');
     const isOption = instrumentType === 'OPTION';
 
-    const isSpot = instrumentType === 'SPOT' && !isOption;
     const isSupportedSpot = isSupportedSpotSymbol(execSymbol);
 
-    if (isSpot && isSupportedSpot && req.direction !== 'BUY') {
+    // Any non-option order on a supported spot symbol is long-only, whatever instrumentType the caller claims.
+    if (!isOption && isSupportedSpot && req.direction !== 'BUY') {
       throw new BadRequestException(
         `SPOT_SHORT_SELLING_FORBIDDEN: Cannot create a short/bearish position for spot instrument '${execSymbol}'. ` +
           `Spot instruments (NIFTY_SPOT, BANKNIFTY_SPOT, BTCUSDT_SPOT) are long-only. ` +
@@ -851,7 +865,8 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         );
         sourceTimestamp = optionPriceData.timestamp;
 
-        // If client provided an execution price, it MUST strictly match the validated option premium
+        // A client-supplied premium is only a sanity reference: reject if it diverges, but always
+        // fill at the validated option quote (never at the client's price).
         if (req.price && req.price > 0) {
           const priceDiff = Math.abs(req.price - optionPriceData.price);
           const maxTol = Math.max(1.0, optionPriceData.price * 0.05); // 5% max tolerance
@@ -860,10 +875,13 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
               `Order Rejected [PRICE_MISMATCH]: Requested execution price (${req.price}) diverges from authoritative option market premium (${optionPriceData.price}). Frontend price invention and silent price substitution are strictly forbidden.`,
             );
           }
-          executionPrice = req.price;
-        } else {
-          executionPrice = optionPriceData.price;
         }
+        if (!isMarketOrder && req.price && req.price > 0 && optionPriceData.price > req.price) {
+          throw new BadRequestException(
+            `Order Rejected [LIMIT_NOT_MARKETABLE]: BUY limit ${req.price} is below the current option premium ${optionPriceData.price}. Resting limit orders are not supported.`,
+          );
+        }
+        executionPrice = optionPriceData.price;
       } catch (err: any) {
         if (err instanceof BadRequestException) throw err;
         const rejReason =
@@ -892,9 +910,10 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         throw new BadRequestException(`Order Rejected: ${err.message}`);
       }
     } else {
-      if (!isMarketOrder && req.price && req.price > 0) {
-        executionPrice = req.price;
-      } else if (!isLiveMarket && req.allowPriceOverride && req.price && req.price > 0) {
+      // Internal simulation hook only (backtests / tests). The HTTP DTO strips allowPriceOverride,
+      // so external clients can never choose their own fill price. LIMIT orders never fill at the
+      // limit price: they are checked for marketability against the validated quote below.
+      if (isMarketOrder && !isLiveMarket && req.allowPriceOverride && req.price && req.price > 0) {
         executionPrice = req.price;
       }
 
@@ -940,6 +959,17 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           );
 
           throw new BadRequestException(`Order Rejected: ${err.message}`);
+        }
+      }
+
+      // LIMIT orders fill only if marketable, and always at the validated quote (no resting orders yet).
+      if (!isMarketOrder && req.price && req.price > 0) {
+        const isBuyLimit = req.direction === 'BUY';
+        const marketable = isBuyLimit ? executionPrice <= req.price : executionPrice >= req.price;
+        if (!marketable) {
+          throw new BadRequestException(
+            `Order Rejected [LIMIT_NOT_MARKETABLE]: ${req.direction} limit ${req.price} is not marketable at ${executionPrice}. Resting limit orders are not supported.`,
+          );
         }
       }
     }
@@ -1261,30 +1291,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       );
     }
 
-    // 5.4 Position Risk Limit
-    const riskPerUnit = Math.abs(executionPrice - stopLoss);
-    const totalPositionRisk = riskPerUnit * req.quantity;
+    // 5.4 Position Risk Limit is evaluated after slippage, contract size and FX are resolved (see below).
     const initialCapital = Number(account.initialCapital);
     const maxAllowedRiskAmount = initialCapital * (Number(config.maxPositionRiskPercent) / 100);
-
-    if (totalPositionRisk > maxAllowedRiskAmount) {
-      await this.rejectOrder(
-        account.id,
-        symbol,
-        contractSymbol,
-        instrumentType,
-        req.direction,
-        req.orderType,
-        req.quantity,
-        RiskRejectionReason.POSITION_RISK_LIMIT,
-        `Position risk amount ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)} (${config.maxPositionRiskPercent}% of ₹${initialCapital})`,
-        idempotencyKey,
-        correlationId,
-      );
-      throw new BadRequestException(
-        `Order Rejected [POSITION_RISK_LIMIT]: Risk ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)}.`,
-      );
-    }
 
     // 5.5 Max Daily Loss Limit
     const todayTrades = await this.prisma.paperTrade.findMany({
@@ -1343,7 +1352,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     const openingInst = getAuthoritativeInstrument(baseLookupSymbol);
     const maxInstLeverage = (openingInst.marginMode === 'SPOT' || isOptionOrder)
       ? 1
-      : Math.max(Number(config.maxLeverage || 5), openingInst.maxLeverage ?? 5);
+      : Math.max(Number(config.maxLeverage || 5), openingInst.maxLeverage ?? 5); // TODO(decision): should the system cap bind margin instruments (XAUUSD defaults to 10x)?
 
     // 5.6 Max Leverage Check
     if (req.leverage !== undefined && req.leverage !== null) {
@@ -1414,6 +1423,28 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       contractSymbol || symbol,
     );
     const requiredMargin = Number((turnoverAccount / effLeverage).toFixed(2));
+
+    // 5.4 Position Risk Limit in ACCOUNT currency (INR): |fill - SL| x qty x contractSize x fx
+    const riskPerUnit = Math.abs(finalFillPrice - stopLoss);
+    const totalPositionRisk = Number((riskPerUnit * req.quantity * contractSize * fxRate).toFixed(2));
+    if (totalPositionRisk > maxAllowedRiskAmount) {
+      await this.rejectOrder(
+        account.id,
+        symbol,
+        contractSymbol,
+        instrumentType,
+        req.direction,
+        req.orderType,
+        req.quantity,
+        RiskRejectionReason.POSITION_RISK_LIMIT,
+        `Position risk amount ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)} (${config.maxPositionRiskPercent}% of ₹${initialCapital})`,
+        idempotencyKey,
+        correlationId,
+      );
+      throw new BadRequestException(
+        `Order Rejected [POSITION_RISK_LIMIT]: Risk ₹${totalPositionRisk.toFixed(2)} exceeds allowed limit ₹${maxAllowedRiskAmount.toFixed(2)}.`,
+      );
+    }
     const maxExposureAllowed = initialCapital * (Number(config.maxTotalExposurePercent) / 100);
 
     const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
@@ -1428,15 +1459,28 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       calculatedAt: fillExecutionTime.getTime(),
     });
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    // Rejections detected while the account row is locked are recorded only after the transaction ends:
+    // writing them through a separate connection while holding FOR UPDATE can block on the FK check.
+    const deferredRejections: Array<() => Promise<void>> = [];
+    let result: any;
+    try {
+    result = await this.prisma.$transaction(async (tx) => {
       // Concurrency Lock: Row-level lock on the paper account in PostgreSQL
-      try {
-        await tx.$executeRawUnsafe(
-          `SELECT "id" FROM "paper_accounts" WHERE "id" = $1 FOR UPDATE`,
-          account.id,
-        );
-      } catch {
-        // Fallback for mock environments / non-Postgres engines
+      // Fail closed: if the lock cannot be taken outside a test/mock environment, the order must not proceed,
+      // otherwise two orders could consume the same available cash.
+      if (typeof (tx as any).$executeRawUnsafe === 'function') {
+        try {
+          await tx.$executeRawUnsafe(
+            `SELECT "id" FROM "paper_accounts" WHERE "id" = $1 FOR UPDATE`,
+            account.id,
+          );
+        } catch (lockErr: any) {
+          if (process.env.NODE_ENV !== 'test') {
+            throw new BadRequestException(
+              `Order Rejected [ACCOUNT_LOCK_FAILED]: Could not lock trading account: ${lockErr?.message}`,
+            );
+          }
+        }
       }
 
       const txAccount = await tx.paperAccount.findUnique({
@@ -1469,6 +1513,13 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         0,
       );
 
+      // Re-check the open-position limit under the account lock so concurrent orders cannot both pass.
+      if (activePositions.length >= config.maxOpenPositions) {
+        throw new BadRequestException(
+          `Order Rejected [MAX_OPEN_POSITIONS]: Maximum open positions limit reached (${config.maxOpenPositions}).`,
+        );
+      }
+
       // 2. Reconcile active reservations committed margin
       const now = new Date();
       const activeReservations =
@@ -1478,6 +1529,8 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
                 accountId: account.id,
                 status: 'RESERVED',
                 expiresAt: { gt: now },
+                // This order's own pre-trade reservation must not be counted against itself.
+                NOT: { fingerprint: idempotencyKey },
               },
               select: { marginAmount: true },
             })
@@ -1497,7 +1550,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         requiredMargin > authoritativeAvailableCash ||
         requiredMargin > txCash
       ) {
-        await this.rejectOrder(
+        deferredRejections.push(() => this.rejectOrder(
           account.id,
           symbol,
           contractSymbol,
@@ -1509,9 +1562,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           `[INSUFFICIENT_MARGIN] Concurrency check failed. Required: ₹${totalCashRequired.toFixed(2)} (${isOption ? 'Option Premium Outlay' : 'Margin'}: ₹${requiredMargin.toFixed(2)} + Fees: ₹${charges.totalCharges.toFixed(2)}), Available: ₹${authoritativeAvailableCash.toFixed(2)}`,
           idempotencyKey,
           correlationId,
-        );
+        ));
         throw new BadRequestException(
-          `Order Rejected [INSUFFICIENT_FUNDS]: Available cash (₹${authoritativeAvailableCash.toFixed(2)}) is insufficient for ${isOption ? 'option premium outlay' : 'required margin'} (₹${requiredMargin.toFixed(2)}) and fees (₹${charges.totalCharges.toFixed(2)}).`,
+          `Order Rejected [INSUFFICIENT_MARGIN / INSUFFICIENT_FUNDS]: Available cash (₹${authoritativeAvailableCash.toFixed(2)}) is insufficient for ${isOption ? 'option premium outlay' : 'required margin'} (₹${requiredMargin.toFixed(2)}) and fees (₹${charges.totalCharges.toFixed(2)}).`,
         );
       }
 
@@ -1524,7 +1577,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         const reqQtyDecimal = new Decimal(req.quantity);
 
         if (reqQtyDecimal.greaterThan(maxAffordableQtyDecimal)) {
-          await this.rejectOrder(
+          deferredRejections.push(() => this.rejectOrder(
             account.id,
             symbol,
             contractSymbol,
@@ -1536,7 +1589,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
             `[INSUFFICIENT_MARGIN] Spot order quantity (${req.quantity}) exceeds maximum affordable quantity (${maxAffordableQtyDecimal.toFixed(4)}) for available cash ₹${authoritativeAvailableCash.toFixed(2)}`,
             idempotencyKey,
             correlationId,
-          );
+          ));
           throw new BadRequestException(
             `Order Rejected [INSUFFICIENT_MARGIN]: Spot order quantity (${req.quantity}) exceeds maximum affordable quantity (${maxAffordableQtyDecimal.toFixed(4)}) for available cash ₹${authoritativeAvailableCash.toFixed(2)}.`,
           );
@@ -1546,7 +1599,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       // Check portfolio exposure limit
       const projectedTotalExposure = reconciledUsedMargin + requiredMargin;
       if (projectedTotalExposure > maxExposureAllowed) {
-        await this.rejectOrder(
+        deferredRejections.push(() => this.rejectOrder(
           account.id,
           symbol,
           contractSymbol,
@@ -1558,7 +1611,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           `Projected portfolio exposure (₹${projectedTotalExposure.toFixed(2)}) exceeds maximum allowed (₹${maxExposureAllowed.toFixed(2)})`,
           idempotencyKey,
           correlationId,
-        );
+        ));
         throw new BadRequestException(
           `Order Rejected [MAX_PORTFOLIO_RISK_EXCEEDED]: Position requires ₹${requiredMargin.toFixed(2)} margin, which pushes portfolio exposure to ₹${projectedTotalExposure.toFixed(2)} (Limit: ₹${maxExposureAllowed.toFixed(2)}).`,
         );
@@ -1997,6 +2050,12 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
       return position;
     });
+    } catch (txErr) {
+      for (const record of deferredRejections) {
+        await record();
+      }
+      throw txErr;
+    }
 
     this.logger.log(
       `✓ [PERSISTED PAPER POSITION OPENED] ${req.direction} ${req.quantity} ${contractSymbol} @ ₹${finalFillPrice.toFixed(2)} (slip: ₹${slippageAmount.toFixed(2)}) (${effLeverage}x) | Margin: ₹${requiredMargin.toFixed(2)} | Corr: ${correlationId}`,
@@ -2256,21 +2315,29 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     } else {
       const existingEvents = (pos.executionEventsJson as any) || {};
       const hasTP2 = Boolean(existingEvents.tp2FillTime);
-      const hasTP1 = Boolean(existingEvents.tp1FillTime);
+      const hasTP1 =
+        Boolean(existingEvents.tp1FillTime) ||
+        pos.status === PositionState.PARTIALLY_CLOSED ||
+        (Array.isArray(existingEvents.partialLegs) && existingEvents.partialLegs.length > 0);
+      const reasonLc = exitReason.toLowerCase();
+      const isStopExit = reasonLc.includes('stop loss') || /\bsl\b/.test(reasonLc);
+      const isBreakevenExit = reasonLc.includes('breakeven');
+      const hitTarget3 = reasonLc.includes('target 3') || /\btp3\b/.test(reasonLc);
+      const hitTarget2 = reasonLc.includes('target 2') || /\btp2\b/.test(reasonLc);
+      const hitTarget1 = reasonLc.includes('target 1') || /\btp1\b/.test(reasonLc);
 
-      if (hasTP2) {
+      // Label by the highest target actually achieved over the lifecycle; a stop on the runner after a
+      // partial keeps the partial's label instead of being promoted to the next target.
+      if (hitTarget3) {
         outcomeClassification = 'WIN_TP3_RUNNER';
-      } else if (hasTP1) {
+      } else if (hasTP2 || hitTarget2) {
         outcomeClassification = 'WIN_TP2';
-      } else if (pos.status === PositionState.PARTIALLY_CLOSED) {
+      } else if (hasTP1 || hitTarget1) {
         outcomeClassification = 'WIN_TP1';
-      } else if (
-        exitReason.toLowerCase().includes('stop loss') ||
-        exitReason.toLowerCase().includes('sl')
-      ) {
-        outcomeClassification = 'LOSS_SL';
-      } else if (exitReason.toLowerCase().includes('breakeven')) {
+      } else if (isBreakevenExit) {
         outcomeClassification = 'BREAKEVEN';
+      } else if (isStopExit) {
+        outcomeClassification = 'LOSS_SL';
       } else {
         outcomeClassification = 'MANUAL_EXIT';
       }
@@ -2315,6 +2382,22 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           return existingTrade;
         }
         throw new BadRequestException(`Position '${pos.id}' was already closed.`);
+      }
+
+      // Guard against a partial exit that committed between our read and the CLOSING transition:
+      // settling with a stale quantity would pay out P&L and cash for units that no longer exist.
+      if (typeof (tx.paperPosition as any).findUnique === 'function') {
+        const fresh = await (tx.paperPosition as any).findUnique({ where: { id: pos.id } });
+        const stalePartialCount = ((pos.executionEventsJson as any)?.partialLegs || []).length;
+        const freshPartialCount = ((fresh?.executionEventsJson as any)?.partialLegs || []).length;
+        if (
+          fresh &&
+          (Number(fresh.quantity) !== Number(pos.quantity) || freshPartialCount !== stalePartialCount)
+        ) {
+          throw new ConflictException(
+            `Position '${pos.id}' changed concurrently (partial exit). Retry the close.`,
+          );
+        }
       }
 
       // 2. Create Exit PaperOrder

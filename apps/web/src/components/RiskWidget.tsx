@@ -58,11 +58,11 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
     }
   }, [isSpot]);
 
-  const [entryPrice, setEntryPrice] = useState<number>(24175.65);
-  const [stopLoss, setStopLoss] = useState<number>(24086.6);
-  const [tp1Price, setTp1Price] = useState<number>(24302.62);
-  const [tp2Price, setTp2Price] = useState<number>(24387.27);
-  const [lotSize, setLotSize] = useState<number>(65);
+  const [entryPrice, setEntryPrice] = useState<number>(selectedSignal?.entryZone?.optimal || 0);
+  const [stopLoss, setStopLoss] = useState<number>(selectedSignal?.stopLoss || 0);
+  const [tp1Price, setTp1Price] = useState<number>(selectedSignal?.takeProfits?.tp1 || 0);
+  const [tp2Price, setTp2Price] = useState<number>(selectedSignal?.takeProfits?.tp2 || 0);
+  const [lotSize, setLotSize] = useState<number>(selectedSignal?.symbol === 'BANKNIFTY' ? 15 : selectedSignal?.symbol === 'NIFTY' ? 65 : 1);
   const [savedNotification, setSavedNotification] = useState<string | null>(null);
 
   // Save leverage changes immediately to localStorage

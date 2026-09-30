@@ -574,7 +574,7 @@ export class SignalGenerator {
 
     // 10. Hybrid Strategy Confluence Check
     if (strategyMode === 'HYBRID') {
-      const saiyanAnalysis = SaiyanOCCEngine.analyze(execCandles);
+      const saiyanAnalysis = SaiyanOCCEngine.analyze(execCandles, {}, symbol);
       if (
         saiyanAnalysis.direction !== candidateDir &&
         saiyanAnalysis.direction !== Direction.NEUTRAL

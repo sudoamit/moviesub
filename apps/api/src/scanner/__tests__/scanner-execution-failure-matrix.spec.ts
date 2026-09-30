@@ -506,12 +506,13 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
         strategyConfig: {
           deterministicSignal: {
             symbol: 'BTCUSDT',
-            direction: Direction.BEARISH,
+            // BTC is long-only true spot, so the execution-failure matrix uses a BULLISH setup.
+            direction: Direction.BULLISH,
             score: 85,
             grade: SignalGrade.A_PLUS,
             entryZone: { min: 64800, max: 64900, optimal: 64850 },
-            stopLoss: 65500,
-            takeProfits: { tp1: 64000, tp2: 63500, tp3: 62000 },
+            stopLoss: 64200,
+            takeProfits: { tp1: 65500, tp2: 66000, tp3: 67000 },
             canonicalCandleTime: decisionTime.getTime(),
             canonicalDecisionTime: decisionTime,
             timestamp: decisionTime,
@@ -522,7 +523,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
               structureBreak: { matched: true, timestamp: decisionTime },
             },
             reasoning: {
-              htfStructure: '1H/4H Bearish Alignment',
+              htfStructure: '1H/4H Bullish Alignment',
               marketStructure: 'Confirmed BOS',
             },
           },
@@ -688,12 +689,13 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
         strategyConfig: {
           deterministicSignal: {
             symbol: 'BTCUSDT',
-            direction: Direction.BEARISH,
+            // BTC is long-only true spot, so the execution-failure matrix uses a BULLISH setup.
+            direction: Direction.BULLISH,
             score: 85,
             grade: SignalGrade.A_PLUS,
             entryZone: { min: 64800, max: 64900, optimal: 64850 },
-            stopLoss: 65500,
-            takeProfits: { tp1: 64000, tp2: 63500, tp3: 62000 },
+            stopLoss: 64200,
+            takeProfits: { tp1: 65500, tp2: 66000, tp3: 67000 },
             canonicalCandleTime: decisionTime.getTime(),
             canonicalDecisionTime: decisionTime,
             timestamp: decisionTime,
@@ -704,7 +706,7 @@ describe('Fix 182 — Comprehensive Failure Matrix & Retry Semantics Suite', () 
               structureBreak: { matched: true, timestamp: decisionTime },
             },
             reasoning: {
-              htfStructure: '1H/4H Bearish Alignment',
+              htfStructure: '1H/4H Bullish Alignment',
               marketStructure: 'Confirmed BOS',
             },
           },

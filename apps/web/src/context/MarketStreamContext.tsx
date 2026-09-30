@@ -33,25 +33,25 @@ interface MarketStreamContextType {
 const defaultTickers: Record<string, ITickerInfo> = {
   NIFTY: {
     symbol: 'NIFTY',
-    price: 24175.65,
-    changePercent: -0.13,
-    changeAmount: -32.15,
-    high: 24220,
-    low: 24135,
-    volume: 1250000,
-    provenance: 'LIVE_PROVIDER',
-    isFresh: true,
+    price: 0,
+    changePercent: 0,
+    changeAmount: 0,
+    high: 0,
+    low: 0,
+    volume: 0,
+    provenance: 'UNKNOWN',
+    isFresh: false,
   },
   BANKNIFTY: {
     symbol: 'BANKNIFTY',
-    price: 57496.3,
-    changePercent: 0.2,
-    changeAmount: 116.3,
-    high: 57596,
-    low: 57307,
-    volume: 850000,
-    provenance: 'LIVE_PROVIDER',
-    isFresh: true,
+    price: 0,
+    changePercent: 0,
+    changeAmount: 0,
+    high: 0,
+    low: 0,
+    volume: 0,
+    provenance: 'UNKNOWN',
+    isFresh: false,
   },
   BTCUSDT_SPOT: {
     symbol: 'BTCUSDT_SPOT',
@@ -192,7 +192,7 @@ export const MarketStreamProvider: React.FC<{ children: ReactNode }> = ({ childr
   // Fetch Authoritative Snapshot on mount
   useEffect(() => {
     const fetchSnapshot = async () => {
-      const symbolsToFetch = ['BTCUSDT_SPOT', 'XAUUSD'];
+      const symbolsToFetch = ['NIFTY', 'BANKNIFTY', 'BTCUSDT_SPOT', 'XAUUSD'];
       for (const sym of symbolsToFetch) {
         try {
           const res = await fetch(`http://localhost:3001/api/market-data/snapshot/${sym}`);

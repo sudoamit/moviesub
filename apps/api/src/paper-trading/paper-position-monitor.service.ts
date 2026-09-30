@@ -14,11 +14,13 @@ import {
   TradeLifecycleState,
   WS_EVENTS,
   getAuthoritativeInstrument,
+  canonicalizeExecutionSymbol,
   PointInTimeCurrencyConverter,
   parseAndValidateRedisOptionQuote,
   validateAuthoritativeExecutionQuote,
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
+import { getOptionLotSize, normalizeOptionsUnderlying } from '../algo-bots/option-contract-resolver';
 import { Decimal } from '@prisma/client/runtime/library';
 import {
   TradeLifecycleService,
@@ -229,6 +231,10 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
             existingEvents.partialLegs = tp1Result.partialLegs;
           }
         } catch (err: any) {
+          if (String(err?.message).startsWith('PARTIAL_BELOW_ONE_LOT')) {
+            // Position too small for a whole-lot partial: book the full position at TP1 instead.
+            return this.closeFullAtTarget(pos, 'TP1 Target Hit (full close: below one lot for partial)', target1!, livePrice, marketEventTime, 'WIN_TP1');
+          }
           this.logger.error(`Failed partial TP1 scale-out for position '${pos.id}': ${err.message}`);
         }
       }
@@ -269,6 +275,10 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
               existingEvents.partialLegs = tp2Result.partialLegs;
             }
           } catch (err: any) {
+            if (String(err?.message).startsWith('PARTIAL_BELOW_ONE_LOT')) {
+              // Position too small for a whole-lot partial: book the full position at TP2 instead.
+              return this.closeFullAtTarget(pos, 'TP2 Target Hit (full close: below one lot for partial)', target2!, livePrice, marketEventTime, 'WIN_TP2');
+            }
             this.logger.error(`Failed partial TP2 scale-out for position '${pos.id}': ${err.message}`);
           }
         } else {
@@ -415,6 +425,53 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     return null;
   }
 
+  private async closeFullAtTarget(
+    pos: any,
+    exitReason: string,
+    triggerPrice: number,
+    livePrice: number,
+    marketEventTime: Date,
+    outcomeClassification: string,
+  ): Promise<void> {
+    try {
+      const completedTrade = await this.paperTradingService.closePosition(pos.id, exitReason, {
+        triggerPrice,
+        triggerMarketEventTime: marketEventTime,
+        exitPriceOverride: livePrice,
+        allowPriceOverride: true,
+        isInternalCall: true,
+        executionMode: ExecutionMode.PAPER_MARKET,
+        correlationId: pos.correlationId,
+        outcomeClassification,
+      });
+      await this.publishTradeClosedEvent(completedTrade);
+    } catch (err: any) {
+      this.logger.error(`Failed full close of position '${pos.id}' at target: ${err.message}`);
+    }
+  }
+
+  /**
+   * Smallest tradeable quantity step for a position, matching the rule applied at entry:
+   * whole lots for options, otherwise the instrument's quantity precision (e.g. 0.0001 BTC).
+   */
+  private resolvePartialLotStep(pos: any): number {
+    const isOptionPos =
+      pos.instrumentType === 'OPTION' ||
+      Boolean(pos.strike) ||
+      /\b(CE|PE)$/.test(String(pos.contractSymbol || '').toUpperCase());
+    if (isOptionPos) {
+      const underlying = normalizeOptionsUnderlying(pos.symbol);
+      if (underlying) return getOptionLotSize(underlying);
+    }
+    try {
+      const inst = getAuthoritativeInstrument(canonicalizeExecutionSymbol(pos.symbol));
+      const precision = Number.isInteger(inst.quantityPrecision) ? Number(inst.quantityPrecision) : 0;
+      return Math.pow(10, -precision);
+    } catch {
+      return 1;
+    }
+  }
+
   /**
    * Backend Real Partial Scale-Out at TP1 or TP2 (Creates Execution Leg ONLY — NO duplicate PaperTrade row)
    */
@@ -489,8 +546,17 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const originalQuantity = Number(
       existingEvents.initialQuantity || (currentQuantity + alreadyClosedQty).toFixed(4),
     );
-    const partialQty = Number((originalQuantity * ratio).toFixed(4));
-    const remainingQty = Number((currentQuantity - partialQty).toFixed(4));
+    // Partial exits must be whole tradeable units: whole lots for options, lot-size steps for spot.
+    const lotStep = this.resolvePartialLotStep(pos);
+    const partialQty = Number(
+      (Math.floor((originalQuantity * ratio) / lotStep + 1e-9) * lotStep).toFixed(8),
+    );
+    if (partialQty <= 0 || partialQty >= currentQuantity - 1e-9) {
+      throw new Error(
+        `PARTIAL_BELOW_ONE_LOT: A ${(ratio * 100).toFixed(0)}% partial of ${originalQuantity} is not a whole multiple of lot ${lotStep} that leaves a remainder (current ${currentQuantity}).`,
+      );
+    }
+    const remainingQty = Number((currentQuantity - partialQty).toFixed(8));
     const entryPrice = Number(pos.entryPrice);
     const isBuy = pos.direction === Direction.BULLISH;
     const isCrypto =

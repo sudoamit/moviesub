@@ -610,6 +610,83 @@ export interface IModelDriftReport {
   recommendedAction: 'CONTINUE_LIVE' | 'REDUCE_RISK' | 'SWITCH_TO_PAPER' | 'DISABLE_MODEL';
 }
 
+/**
+ * Authoritative Smart Option Recommendation & Setup
+ * Explicitly separates current underlying spot, strategy trigger, current option LTP, and planned entry premium.
+ */
+export interface ISmartOptionRecommendation {
+  underlyingSymbol: string;
+  direction: 'BULLISH' | 'BEARISH';
+
+  // Explicit separated spot vs trigger prices
+  currentSpotPrice: number;
+  underlyingTriggerPrice: number;
+  distanceToTrigger: number;
+  triggerConditionSatisfied: boolean;
+  /** False when no strategy trigger was supplied; the setup is then never READY. */
+  triggerProvided?: boolean;
+  /**
+   * Execution eligibility is independent of the trigger: READY_FOR_EXECUTION requires BOTH
+   * triggerConditionSatisfied AND executionEligible.
+   */
+  executionEligible?: boolean;
+  ineligibilityReasons?: string[];
+  /** Where currentOptionLtp came from: a live exchange quote, a scraped chain quote, or a pricing model. */
+  premiumSource?: 'LIVE_EXECUTION_FEED' | 'EXCHANGE_CHAIN_SCRAPE' | 'MODEL';
+  status: 'WAITING_FOR_TRIGGER' | 'TRIGGERED' | 'READY_FOR_EXECUTION' | 'NOT_ELIGIBLE' | 'NO_TRIGGER';
+
+  // Option contract specification
+  optionContract: {
+    symbol: string;
+    strike: number;
+    optionType: 'CE' | 'PE';
+    expiry: string;
+    lotSize: number;
+  };
+
+  // Explicit separated option premiums
+  currentOptionLtp: number;
+  plannedEntryPremium: number;
+  plannedStopPremium: number;
+  targets: {
+    tp1: number;
+    tp2: number;
+    tp3: number;
+  };
+
+  // Risk and Reward metrics
+  riskPerUnit: number;
+  riskAmountPerLot: number;
+  premiumOutlayPerLot: number;
+  expectedProfitPerLot: number;
+  roiPercent: number;
+  rr1: number;
+  rr2: number;
+  rr3: number;
+  maxPotentialR: number;
+  primaryTargetR: number;
+
+  // Greeks & Market Context
+  delta: number;
+  theta: number;
+  iv: number;
+  isATM: boolean;
+  daysToExpiry: number;
+  expiryLabel: string;
+
+  // Backward compatibility fields
+  spotPrice: number;
+  recommendedStrike: number;
+  optionType: 'CE' | 'PE';
+  contractName: string;
+  optionLtp: number;
+  optionStopLoss: number;
+  optionTarget1: number;
+  optionTarget2: number;
+  optionTarget3: number;
+  lotSize: number;
+}
+
 export * from './trade-journal.interface';
 export * from './financial-domain.interface';
 

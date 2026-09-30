@@ -12,6 +12,13 @@ import {
 } from '@nestjs/common';
 import { PaperTradingService, IPaperOrderRequest } from './paper-trading.service';
 import { PaperPositionMonitorService } from './paper-position-monitor.service';
+import {
+  ClosePositionByBodyDto,
+  ClosePositionDto,
+  PlaceOrderDto,
+  ScaleOutByBodyDto,
+  ScaleOutDto,
+} from './dto/paper-trading.dto';
 
 @Controller('api/paper-trading')
 export class PaperTradingController {
@@ -26,122 +33,80 @@ export class PaperTradingController {
   }
 
   @Post('order')
-  async placeOrder(@Body() orderDto: IPaperOrderRequest) {
-    return this.paperTradingService.placeOrder(orderDto);
+  async placeOrder(@Body() orderDto: PlaceOrderDto) {
+    // Only whitelisted, non-authoritative fields reach the execution boundary (see PlaceOrderDto).
+    return this.paperTradingService.placeOrder(orderDto as IPaperOrderRequest);
   }
 
+  /**
+   * Manual close. The exit is always priced by the server from the validated live quote;
+   * client-supplied exit prices are not accepted.
+   */
   @Post('close-position')
-  async closePosition(
-    @Body()
-    body: {
-      positionId: string;
-      reason?: string;
-      exitPrice?: number;
-      exitPriceOverride?: number;
-      allowPriceOverride?: boolean;
-      partialRatio?: number;
-    },
-  ) {
-    if (body.partialRatio && body.partialRatio < 1.0 && this.paperPositionMonitorService) {
-      const pos = await this.paperTradingService.getPositionById(body.positionId);
-      if (pos && pos.status !== 'CLOSED' && pos.status !== 'CLOSING') {
-        const exitP = body.exitPriceOverride ?? body.exitPrice ?? Number(pos.currentPrice ?? pos.entryPrice);
-        const stage = pos.status === 'PARTIALLY_CLOSED' ? 'TP2' : 'TP1';
-        const res = await this.paperPositionMonitorService.executePartialScaleOut(
-          pos,
-          stage,
-          exitP,
-          exitP,
-          new Date(),
-          body.partialRatio,
-        );
-        if (res) return res;
-      }
-    }
-
-    return this.paperTradingService.closePosition(body.positionId, body.reason, {
-      exitPriceOverride: body.exitPriceOverride ?? body.exitPrice,
-      allowPriceOverride: body.allowPriceOverride ?? true,
-    });
+  async closePosition(@Body() body: ClosePositionByBodyDto) {
+    return this.closeOrScaleOut(body.positionId, body.reason, body.partialRatio);
   }
 
   @Post('positions/:id/close')
-  async closePositionById(
-    @Param('id') id: string,
-    @Body()
-    body?: {
-      reason?: string;
-      exitPrice?: number;
-      exitPriceOverride?: number;
-      allowPriceOverride?: boolean;
-      partialRatio?: number;
-    },
-  ) {
-    if (body?.partialRatio && body.partialRatio < 1.0 && this.paperPositionMonitorService) {
-      const pos = await this.paperTradingService.getPositionById(id);
-      if (pos && pos.status !== 'CLOSED' && pos.status !== 'CLOSING') {
-        const exitP = body.exitPriceOverride ?? body.exitPrice ?? Number(pos.currentPrice ?? pos.entryPrice);
-        const stage = pos.status === 'PARTIALLY_CLOSED' ? 'TP2' : 'TP1';
-        const res = await this.paperPositionMonitorService.executePartialScaleOut(
-          pos,
-          stage,
-          exitP,
-          exitP,
-          new Date(),
-          body.partialRatio,
-        );
-        if (res) return res;
-      }
-    }
-
-    return this.paperTradingService.closePosition(id, body?.reason, {
-      exitPriceOverride: body?.exitPriceOverride ?? body?.exitPrice,
-      allowPriceOverride: body?.allowPriceOverride ?? true,
-    });
+  async closePositionById(@Param('id') id: string, @Body() body?: ClosePositionDto) {
+    return this.closeOrScaleOut(id, body?.reason, body?.partialRatio);
   }
 
   @Post('positions/:id/scale-out')
-  async scaleOutPositionById(
-    @Param('id') id: string,
-    @Body()
-    body?: {
-      ratio?: number;
-      exitPrice?: number;
-      reason?: string;
-    },
-  ) {
-    if (!this.paperPositionMonitorService) {
-      throw new BadRequestException('Position monitor service unavailable for scale-out');
-    }
-    const pos = await this.paperTradingService.getPositionById(id);
-    if (!pos || pos.status === 'CLOSED' || pos.status === 'CLOSING') {
-      throw new NotFoundException(`Active position '${id}' not found`);
-    }
-    const ratio = body?.ratio ?? 0.5;
-    const exitP = body?.exitPrice ?? Number(pos.currentPrice ?? pos.entryPrice);
-    const stage = pos.status === 'PARTIALLY_CLOSED' ? 'TP2' : 'TP1';
-    const res = await this.paperPositionMonitorService.executePartialScaleOut(
-      pos,
-      stage,
-      exitP,
-      exitP,
-      new Date(),
-      ratio,
-    );
+  async scaleOutPositionById(@Param('id') id: string, @Body() body?: ScaleOutDto) {
+    const res = await this.scaleOutAtLiveQuote(id, body?.ratio ?? 0.5);
     return res || { success: true, message: 'Scale-out already executed or position closed' };
   }
 
   @Post('scale-out')
-  async scaleOutPosition(
-    @Body()
-    body: {
-      positionId: string;
-      ratio?: number;
-      exitPrice?: number;
-      reason?: string;
-    },
-  ) {
+  async scaleOutPosition(@Body() body: ScaleOutByBodyDto) {
     return this.scaleOutPositionById(body.positionId, body);
+  }
+
+  private async closeOrScaleOut(positionId: string, reason?: string, partialRatio?: number) {
+    if (partialRatio && partialRatio < 1.0) {
+      const res = await this.scaleOutAtLiveQuote(positionId, partialRatio);
+      if (res) return res;
+    }
+    return this.paperTradingService.closePosition(positionId, reason);
+  }
+
+  /**
+   * Partial exit priced from the validated live quote for the exact executed instrument.
+   * Fails closed when no fresh quote exists (never falls back to a stale DB price or a client price).
+   */
+  private async scaleOutAtLiveQuote(positionId: string, ratio: number) {
+    if (!this.paperPositionMonitorService) {
+      throw new BadRequestException('Position monitor service unavailable for scale-out');
+    }
+    const pos = await this.paperTradingService.getPositionById(positionId);
+    if (!pos || pos.status === 'CLOSED' || pos.status === 'CLOSING') {
+      throw new NotFoundException(`Active position '${positionId}' not found`);
+    }
+    let quote: { price: number; timestamp: Date };
+    try {
+      quote = await this.paperTradingService.resolveLivePositionQuote(pos);
+    } catch (err: any) {
+      throw new BadRequestException(
+        `Cannot scale out '${positionId}': real-time market data unavailable (${err.message}).`,
+      );
+    }
+    const stage = pos.status === 'PARTIALLY_CLOSED' ? 'TP2' : 'TP1';
+    try {
+      return await this.paperPositionMonitorService.executePartialScaleOut(
+        pos,
+        stage,
+        quote.price,
+        quote.price,
+        quote.timestamp,
+        ratio,
+      );
+    } catch (err: any) {
+      if (String(err?.message).startsWith('PARTIAL_BELOW_ONE_LOT')) {
+        throw new BadRequestException(err.message);
+      }
+      throw err;
+    }
   }
 
   @Get('active-positions')

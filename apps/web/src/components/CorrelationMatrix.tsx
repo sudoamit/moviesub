@@ -36,7 +36,7 @@ export const CorrelationMatrix: React.FC<CorrelationMatrixProps> = ({ tickers })
     },
   ];
 
-  const niftyTicker = tickers['NIFTY'] || { price: 24175.65, changePercent: -0.15 };
+  const niftyTicker = tickers['NIFTY'] || { price: 0, changePercent: 0 };
 
   // Calculate live correlation coefficient & divergence
   const correlationData = constituents.map((item) => {

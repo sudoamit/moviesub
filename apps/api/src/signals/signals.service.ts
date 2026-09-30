@@ -132,6 +132,7 @@ export class SignalsService implements OnModuleInit {
             symbol: sym,
             executionCandles: htf1Candles.candles,
             executionTimeframe: Timeframe.H1,
+            asOfTimestamp: execSnapshot.decisionTimestamp,
             allowSyntheticInProduction: process.env.NODE_ENV !== 'production',
           })
         : undefined;
@@ -142,6 +143,7 @@ export class SignalsService implements OnModuleInit {
             symbol: sym,
             executionCandles: htf2Candles.candles,
             executionTimeframe: Timeframe.H4,
+            asOfTimestamp: execSnapshot.decisionTimestamp,
             allowSyntheticInProduction: process.env.NODE_ENV !== 'production',
           })
         : undefined;
@@ -170,6 +172,8 @@ export class SignalsService implements OnModuleInit {
     });
 
     signal.instrumentId = inst.id;
+    (signal as any).strategy = resolvedStrategy;
+    signal.strategyMode = resolvedStrategy as any;
 
     if (!htf1Snapshot || !htf2Snapshot) {
       const missingHtfs: string[] = [];

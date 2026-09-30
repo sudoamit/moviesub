@@ -162,7 +162,8 @@ describe('Fix 193 — True Trade Decision & Lifecycle Backend E2E Suite', () => 
       expect.objectContaining({
         symbol: 'BTCUSDT',
         direction: 'BUY',
-        quantity: 0.001,
+        // 1 lot of BTCUSDT resolves to true spot BTCUSDT_SPOT, whose lot size is 0.0001 BTC.
+        quantity: 0.0001,
         signalPrice: 65000,
         stopLoss: 64200,
         target1: 66000,

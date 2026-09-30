@@ -139,7 +139,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
           emergencyStop: false,
           maxDailyLossPercent: new Decimal(3.0),
           maxPositionRiskPercent: new Decimal(1.0),
-          maxTotalExposurePercent: new Decimal(20.0),
+          maxTotalExposurePercent: new Decimal(100.0), // 1x spot: exposure is the full notional
           maxOpenPositions: 5,
           maxTradesPerDay: 20,
           maxConsecutiveLosses: 3,
@@ -2307,11 +2307,19 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       { price: 48000, action: 'monitor' },
     ]);
 
-    // Path G: Short/Bearish Lifecycle (SELL order @ 50000, TP1 @ 48000, TP2 @ 45000)
-    await runLifecyclePath('PathG', 'SELL', 50000, 52000, 48000, 45000, [
-      { price: 48000, action: 'monitor' },
-      { price: 45000, action: 'monitor' },
-    ]);
+    // Path G: BTC is true spot (long-only), so a SELL entry must be rejected before any fill.
+    currentPrice = 50000;
+    await expect(
+      paperService.placeOrder({
+        symbol: 'BTCUSDT',
+        direction: 'SELL',
+        quantity: 2,
+        orderType: 'MARKET',
+        stopLoss: 52000,
+        target1: 48000,
+        executionMode: ExecutionMode.TEST,
+      }),
+    ).rejects.toThrow(/SPOT_SHORT_SELLING_FORBIDDEN/);
   });
 
   it('TEST 145-4: EXECUTION PATH USES VALIDATED TICKER — position monitor fails closed on invalid ticker', async () => {
@@ -2334,7 +2342,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: currentEventTime,
     }));
 
-    dbAccounts[0].initialCapital = new Decimal(10000000.0);
+    dbAccounts[0].initialCapital = new Decimal(100000000.0); // INR risk (2000 x 2 x fx 92) must fit 1% of capital
     dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
@@ -2410,7 +2418,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       marketEventTime: now,
     });
 
-    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
@@ -2449,7 +2457,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       version: '1.0',
     });
 
-    dbAccounts[0].cashBalance = new Decimal(1000000.0);
+    dbAccounts[0].cashBalance = new Decimal(10000000.0);
     dbAccounts[0].usedMargin = new Decimal(0.0);
     dbAccounts[0].realizedPnL = new Decimal(0.0);
     dbAccounts[0].totalChargesPaid = new Decimal(0.0);
@@ -3400,7 +3408,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
     it('TEST 149-2 (Blocker 2): LIVE override rejection leaves zero side effects before any state mutation', async () => {
       const now = Date.now();
-      dbAccounts[0].cashBalance = new Decimal(1000000.0);
+      dbAccounts[0].cashBalance = new Decimal(10000000.0);
       dbAccounts[0].usedMargin = new Decimal(0.0);
       dbAccounts[0].realizedPnL = new Decimal(0.0);
       dbAccounts[0].totalChargesPaid = new Decimal(0.0);
@@ -3700,7 +3708,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
       dbAccounts = [
         {
           id: 'acc_sem',
-          cashBalance: new Decimal(1000000.0),
+          cashBalance: new Decimal(10000000.0),
           usedMargin: new Decimal(0.0),
           realizedPnL: new Decimal(0.0),
           totalChargesPaid: new Decimal(0.0),

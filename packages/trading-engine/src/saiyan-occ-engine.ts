@@ -204,6 +204,7 @@ export class SaiyanOCCEngine {
   public static analyze(
     candles: ICandle[],
     config: Partial<ISaiyanOCCConfig> = {},
+    symbol?: string,
   ): ISaiyanOCCResult {
     const cfg: ISaiyanOCCConfig = { ...this.DEFAULT_CONFIG, ...config };
     const n = candles.length;
@@ -385,9 +386,15 @@ export class SaiyanOCCEngine {
       }
     }
 
-    const isCrypto = currentPrice > 50000;
-    const isNifty = currentPrice > 15000 && currentPrice < 35000;
-    const isBankNifty = currentPrice > 35000 && currentPrice < 75000;
+    // Instrument class comes from the symbol. Price-magnitude inference is only a fallback for callers
+    // that do not pass one: it misclassifies instruments (BANKNIFTY ~57,000 would read as crypto).
+    const sym = (symbol || '').toUpperCase();
+    const hasSymbol = sym.length > 0;
+    const isCrypto = hasSymbol ? sym.includes('BTC') : currentPrice > 50000;
+    const isBankNifty = hasSymbol ? sym.startsWith('BANKNIFTY') : currentPrice > 35000 && currentPrice < 75000;
+    const isNifty = hasSymbol
+      ? sym.startsWith('NIFTY')
+      : !isCrypto && !isBankNifty && currentPrice > 15000 && currentPrice < 35000;
 
     let riskPoints = currentPrice * (cfg.slPercent / 100);
     if (isCrypto) {
@@ -466,7 +473,7 @@ export class SaiyanOCCEngine {
     candles: ICandle[],
     timeframe: string = '15m',
   ): ISignalSetup {
-    const analysis = this.analyze(candles);
+    const analysis = this.analyze(candles, {}, symbol);
     const lastCandle = candles[candles.length - 1];
     const timestamp =
       analysis.triggerTimestamp || (lastCandle ? new Date(lastCandle.timestamp) : new Date());

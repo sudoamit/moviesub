@@ -40,16 +40,18 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
       if (!isIndex) return;
       try {
         if (!silent && !data) setLoading(true);
-        const url = `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}&spotPrice=${spotPrice || 24080}${selectedStrike ? `&strike=${selectedStrike}` : ''}`;
+        const spotParam = spotPrice && spotPrice > 0 ? `&currentSpotPrice=${spotPrice}` : '';
+        const url = `http://localhost:3001/api/options/smart-strike?symbol=${symbol}&direction=${direction}${spotParam}${selectedStrike ? `&strike=${selectedStrike}` : ''}`;
         const res = await fetch(url);
         const json = await res.json();
-        if (json && json.optionLtp) {
-          if (data && json.optionLtp !== data.optionLtp) {
-            setPriceFlash(json.optionLtp > data.optionLtp ? 'up' : 'down');
+        const effectiveLtp = json.currentOptionLtp ?? json.optionLtp;
+        if (json && effectiveLtp) {
+          if (data && effectiveLtp !== (data.currentOptionLtp ?? data.optionLtp)) {
+            setPriceFlash(effectiveLtp > (data.currentOptionLtp ?? data.optionLtp) ? 'up' : 'down');
             setTimeout(() => setPriceFlash(null), 800);
           }
           setData(json);
-          setLastLtp(json.optionLtp);
+          setLastLtp(effectiveLtp);
         }
       } catch {
         // ignore network error
@@ -72,15 +74,16 @@ export const SmartStrikeCard: React.FC<SmartStrikeCardProps> = ({
 
   // Available strikes for fast selection
   const step = symbol === 'NIFTY' ? 50 : 100;
-  const atm = Math.round((spotPrice || 24080) / step) * step;
-  const strikeOptions = [
+  const effectiveSpot = spotPrice && spotPrice > 0 ? spotPrice : (data?.currentSpotPrice ?? data?.spotPrice ?? 0);
+  const atm = effectiveSpot > 0 ? Math.round(effectiveSpot / step) * step : 0;
+  const strikeOptions = atm > 0 ? [
     atm - 2 * step,
     atm - step,
     atm,
     atm + step,
     atm + 2 * step,
     atm + 3 * step,
-  ];
+  ] : [];
 
   return (
     <div className="bg-[#111827]/95 border border-cyan-500/40 rounded-xl p-4 shadow-xl font-mono relative overflow-hidden">

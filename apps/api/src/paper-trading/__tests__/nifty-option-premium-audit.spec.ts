@@ -178,7 +178,7 @@ describe('NIFTY Option Premium Mode Audit & Execution Invariants (Section 16)', 
     paperTradingService = new PaperTradingService(
       mockPrisma,
       {} as any,
-      { getValidatedTicker: () => ({ price: 56.63 }) } as any,
+      { getValidatedTicker: () => ({ price: 56.63, marketEventTime: Date.now() }) } as any,
       undefined,
       {} as any,
       {} as any,

@@ -212,7 +212,8 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
           provide: RealMarketStreamerService,
           useValue: {
             getValidatedTicker: jest.fn().mockImplementation((sym: string) => {
-              if (sym.toUpperCase() !== 'BTCUSDT') {
+              // Mirrors RealMarketStreamerService: BTCUSDT and BTCUSDT_SPOT resolve to the same spot quote.
+              if (!['BTCUSDT', 'BTCUSDT_SPOT'].includes(sym.toUpperCase())) {
                 throw new MarketDataUnavailableError(sym);
               }
               const now = Date.now();
@@ -456,11 +457,13 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
     expect(dbExecution!.orderPositionId).toBeDefined();
     expect(dbExecution!.signalTimestamp.getTime()).toBe(evaluatedSignal.canonicalCandleTime);
 
+    // Positions are recorded under the canonical true-spot instrument actually traded.
     const dbPosition = await prismaService.paperPosition.findFirst({
-      where: { symbol: 'BTCUSDT' },
+      where: { symbol: 'BTCUSDT_SPOT' },
     });
     expect(dbPosition).not.toBeNull();
-    expect(dbPosition!.symbol).toBe('BTCUSDT');
+    expect(dbPosition!.symbol).toBe('BTCUSDT_SPOT');
+    expect(Number(dbPosition!.leverage)).toBe(1);
     expect(dbPosition!.direction).toBe(Direction.BULLISH);
     expect(dbPosition!.status).toBe('OPEN');
     expect(Number(dbPosition!.entryPrice)).toBeGreaterThan(0);
