@@ -28,7 +28,7 @@ describe('Fix 201 Invariant Suite: Algo Bot Execution Authority & NIFTY Lifecycl
   const DB_URL =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   const mockStreamer: any = {
     getValidatedTicker: (sym: string) => ({

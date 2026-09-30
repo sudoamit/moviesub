@@ -48,6 +48,8 @@ import {
 } from '@quant/trading-engine';
 import { ChartMarketSnapshot } from '@quant/shared';
 import { ChartSnapshotValidator } from '@quant/trading-engine';
+import { isUsdQuoted, quoteCurrencySymbol } from '../models/instrument-display';
+import { isSameSymbol } from '../hooks/usePaperTrading';
 
 interface TradingChartProps {
   symbol: string;
@@ -190,7 +192,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         const res = await fetch('http://localhost:3001/api/paper-trading/portfolio');
         const data = await res.json();
         if (isMounted && data && Array.isArray(data.openPositions)) {
-          const found = data.openPositions.find((p: any) => p.symbol === symbol);
+          const found = data.openPositions.find((p: any) => isSameSymbol(p.symbol, symbol));
           setPaperPosition(found || null);
         }
       } catch (e) {}
@@ -776,9 +778,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   }, [symbol, timeframe, candles.length]);
 
   // 4. Trade Setup Calculation & Guaranteed Native Price Lines
-  const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
-  const currSymbol = isUsd ? '$' : '₹';
-  const isSignalForThisSymbol = signal && (!signal.symbol || signal.symbol === symbol);
+  // Alias-aware: the chart symbol is BTCUSDT_SPOT while signals may say BTCUSDT (same instrument).
+  const isUsd = isUsdQuoted(symbol);
+  const currSymbol = quoteCurrencySymbol(symbol);
+  const isSignalForThisSymbol = signal && (!signal.symbol || isSameSymbol(signal.symbol, symbol));
   const effSignal = isSignalForThisSymbol ? signal : null;
   const isActualTradeActive =
     isTradeActive !== false &&
@@ -1376,7 +1379,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         ctx.fillRect(width - 200, pocY - 8, 80, 16);
         ctx.fillStyle = '#0F172A';
         ctx.font = 'bold 9px monospace';
-        ctx.fillText(`★ POC ₹${clientVP.poc.toFixed(2)}`, width - 196, pocY + 4);
+        ctx.fillText(`★ POC ${currSymbol}${clientVP.poc.toFixed(2)}`, width - 196, pocY + 4);
       }
 
       // Highlight VAH & VAL (70% Value Area)
@@ -1393,7 +1396,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
         ctx.fillStyle = '#06B6D4';
         ctx.font = 'bold 8px monospace';
-        ctx.fillText(`VAH ₹${clientVP.vah.toFixed(2)}`, width - 150, vahY - 3);
+        ctx.fillText(`VAH ${currSymbol}${clientVP.vah.toFixed(2)}`, width - 150, vahY - 3);
       }
 
       const valY = priceToY(clientVP.val);
@@ -1409,7 +1412,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
 
         ctx.fillStyle = '#06B6D4';
         ctx.font = 'bold 8px monospace';
-        ctx.fillText(`VAL ₹${clientVP.val.toFixed(2)}`, width - 150, valY + 10);
+        ctx.fillText(`VAL ${currSymbol}${clientVP.val.toFixed(2)}`, width - 150, valY + 10);
       }
     }
 

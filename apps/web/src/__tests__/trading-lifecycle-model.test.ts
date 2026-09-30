@@ -586,8 +586,57 @@ describe('Authoritative Trading Lifecycle & Standby vs Active Trade State Model'
         expect(html).not.toContain('Execute Paper Trade');
         expect(html).not.toContain('Execute BTC');
         expect(html).not.toContain('Execute Trade');
-        // Renders clean non-actionable badge instead
-        expect(html).toContain('No Execution (Spot Long-Only)');
+        // No trade was taken, so no "no execution" notice is rendered either
+        expect(html).not.toContain('No Execution (Spot Long-Only)');
+      });
+
+      it('a stale EXECUTED bot execution from an earlier setup does not turn a bearish spot setup into READY', () => {
+        const signalTime = Date.UTC(2026, 8, 30, 6, 15, 0);
+        const html = ReactDOMServer.renderToStaticMarkup(
+          React.createElement(LivePositionTracker, {
+            symbol: 'BTCUSDT_SPOT',
+            signal: { ...btcBearishSignal, canonicalCandleTime: signalTime } as any,
+            livePrice: 83821.39,
+            activePosition: null,
+            // Finished execution from an earlier BULLISH signal whose position no longer exists
+            activeExecution: {
+              id: 'exec_old',
+              symbol: 'BTCUSDT',
+              direction: 'BULLISH',
+              state: 'EXECUTED',
+              orderPositionId: 'pos_gone',
+              signalTimestamp: new Date(signalTime - 4 * 3600 * 1000).toISOString(),
+            },
+          }),
+        );
+
+        expect(html).not.toContain('READY FOR EXECUTION');
+        expect(html).toContain('SAIYAN OCC • NO TRADE');
+        expect(html).toContain('This bearish setup is not eligible for execution.');
+      });
+
+      it('an execution produced by the current signal still drives the state (e.g. ORDER REJECTED)', () => {
+        const signalTime = Date.UTC(2026, 8, 30, 6, 15, 0);
+        const bullish = { ...btcBearishSignal, direction: Direction.BULLISH, canonicalCandleTime: signalTime } as any;
+        const html = ReactDOMServer.renderToStaticMarkup(
+          React.createElement(LivePositionTracker, {
+            symbol: 'BTCUSDT_SPOT',
+            signal: bullish,
+            livePrice: 84500,
+            activePosition: null,
+            activeExecution: {
+              id: 'exec_now',
+              symbol: 'BTCUSDT',
+              direction: 'BULLISH',
+              state: 'FAILED_FINAL',
+              failureReason: 'Insufficient cash',
+              signalTimestamp: new Date(signalTime).toISOString(),
+            },
+          }),
+        );
+
+        expect(html).toContain('ORDER REJECTED');
+        expect(html).not.toContain('READY FOR EXECUTION');
       });
 
       it('renders Bullish BTCUSDT_SPOT setup with execution button available when trigger satisfied', () => {

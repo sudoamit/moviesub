@@ -1,7 +1,8 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RedisService } from '../common/redis/redis.service';
 import { MarketDataService } from '../market-data/market-data.service';
+import { RealMarketStreamerService } from '../market-data/real-market-streamer.service';
 import {
   AssetType,
   ChartMarketSnapshot,
@@ -96,6 +97,7 @@ export class CandlesService {
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly marketDataService: MarketDataService,
+    @Optional() private readonly realMarketStreamer?: RealMarketStreamerService,
   ) {}
 
   private async findInstrument(symbol: string) {
@@ -499,14 +501,63 @@ export class CandlesService {
     const sourceIdentity = candlesResp.sourceIdentity;
     const lastCandleClose =
       closedCandles.length > 0 ? closedCandles[closedCandles.length - 1].close : null;
-    const livePrice = candlesResp.formingCandle ? candlesResp.formingCandle.close : lastCandleClose;
+    // Live price and marketAsOf come from the authoritative streamer quote (same source as execution and
+    // the header ticker), folded into the forming candle so livePrice === formingCandle.close always holds
+    // (the chart snapshot validator rejects the snapshot otherwise). The quote is applied only when its
+    // event time falls inside the forming candle's window; otherwise the candle data is used unchanged.
+    let authoritativeQuote: { price: number; marketEventTime: string } | null = null;
+    try {
+      const snap = this.realMarketStreamer?.getAuthoritativeSnapshot(sym);
+      if (snap && snap.isFresh && snap.price > 0) {
+        authoritativeQuote = { price: snap.price, marketEventTime: snap.marketEventTime };
+      }
+    } catch {
+      authoritativeQuote = null; // No fresh live quote: fall back to candle data and stay DEGRADED.
+    }
+
+    let formingCandle = candlesResp.formingCandle
+      ? {
+          timestamp: candlesResp.formingCandle.timestamp,
+          open: candlesResp.formingCandle.open,
+          high: candlesResp.formingCandle.high,
+          low: candlesResp.formingCandle.low,
+          close: candlesResp.formingCandle.close,
+          volume: candlesResp.formingCandle.volume ?? 0,
+          isClosed: false as const,
+          provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
+        }
+      : null;
+
+    if (authoritativeQuote && formingCandle) {
+      const formingStartMs = new Date(formingCandle.timestamp).getTime();
+      const quoteMs = new Date(authoritativeQuote.marketEventTime).getTime();
+      const inFormingWindow =
+        Number.isFinite(formingStartMs) &&
+        Number.isFinite(quoteMs) &&
+        quoteMs >= formingStartMs &&
+        quoteMs < formingStartMs + getTimeframeDurationMs(timeframe);
+      if (inFormingWindow) {
+        const px = authoritativeQuote.price;
+        formingCandle = {
+          ...formingCandle,
+          close: px,
+          high: Math.max(formingCandle.high, px),
+          low: Math.min(formingCandle.low, px),
+        };
+      } else {
+        authoritativeQuote = null; // Quote belongs to a different bar: do not mix it with this candle.
+      }
+    } else if (authoritativeQuote && !formingCandle) {
+      authoritativeQuote = null; // No forming bar to carry the quote; keep the closed-candle view consistent.
+    }
+
+    const livePrice = formingCandle ? formingCandle.close : lastCandleClose;
     const observationTime = new Date().toISOString();
 
     // Genuine provider market event timestamp (P0-1)
     // Do NOT derive marketAsOf from formingCandle.timestamp, closed candle timestamp, or Date.now().
-    const providerMarketEventMs = candlesResp.latestMarketEventTimestamp
-      ? new Date(candlesResp.latestMarketEventTimestamp).getTime()
-      : null;
+    const providerEventSource = authoritativeQuote?.marketEventTime ?? candlesResp.latestMarketEventTimestamp;
+    const providerMarketEventMs = providerEventSource ? new Date(providerEventSource).getTime() : null;
 
     let marketAsOf: string | undefined = undefined;
     let isDegraded = Boolean(convResult.isDegraded || smcAnalysis.isDegraded);
@@ -538,18 +589,7 @@ export class CandlesService {
       symbol: sym,
       timeframe,
       closedCandles,
-      formingCandle: candlesResp.formingCandle
-        ? {
-            timestamp: candlesResp.formingCandle.timestamp,
-            open: candlesResp.formingCandle.open,
-            high: candlesResp.formingCandle.high,
-            low: candlesResp.formingCandle.low,
-            close: candlesResp.formingCandle.close,
-            volume: candlesResp.formingCandle.volume ?? 0,
-            isClosed: false as const,
-            provenance: (candlesResp.dataProvenance as DataProvenance) || 'LIVE',
-          }
-        : null,
+      formingCandle,
       livePrice,
       closedThrough: latestClosedTimestamp,
       asOfTimestamp: observationTime,

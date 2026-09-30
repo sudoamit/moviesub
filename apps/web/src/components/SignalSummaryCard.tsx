@@ -17,6 +17,7 @@ import {
 import { ISignalSetup, Direction, SignalGrade } from '@quant/shared';
 
 import { EmptyState } from './common/EmptyState';
+import { quoteCurrencySymbol } from '../models/instrument-display';
 
 interface SignalSummaryCardProps {
   signal: ISignalSetup | null;
@@ -29,6 +30,8 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
   symbol,
   livePrice,
 }) => {
+  const ccy = quoteCurrencySymbol(signal?.symbol || symbol);
+
   if (!signal) {
     return (
       <EmptyState
@@ -120,7 +123,7 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
             <span>Planned Entry</span>
           </div>
           <div className="text-sm font-bold text-white mt-1">
-            {entryOptimal ? `₹${entryOptimal.toFixed(2)}` : 'Market Price'}
+            {entryOptimal ? `${ccy}${entryOptimal.toFixed(2)}` : 'Market Price'}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">
             Zone: {signal.entryZone?.min?.toFixed(1)} - {signal.entryZone?.max?.toFixed(1)}
@@ -134,11 +137,11 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
             <span>Stop Loss</span>
           </div>
           <div className="text-sm font-bold text-rose-400 mt-1">
-            {stopLoss ? `₹${stopLoss.toFixed(2)}` : 'N/A'}
+            {stopLoss ? `${ccy}${stopLoss.toFixed(2)}` : 'N/A'}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">
             Risk:{' '}
-            {entryOptimal && stopLoss ? `₹${Math.abs(entryOptimal - stopLoss).toFixed(2)}` : '---'}
+            {entryOptimal && stopLoss ? `${ccy}${Math.abs(entryOptimal - stopLoss).toFixed(2)}` : '---'}
           </div>
         </div>
 
@@ -149,7 +152,7 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
             <span>Target 1 (1:2.0 R:R)</span>
           </div>
           <div className="text-sm font-bold text-emerald-400 mt-1">
-            {tp1 ? `₹${tp1.toFixed(2)}` : 'N/A'}
+            {tp1 ? `${ccy}${tp1.toFixed(2)}` : 'N/A'}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">50% Scale-out target</div>
         </div>
@@ -164,7 +167,7 @@ export const SignalSummaryCard: React.FC<SignalSummaryCardProps> = ({
             <span className="text-[9px] font-bold text-slate-400">1:{rr.toFixed(1)} R:R</span>
           </div>
           <div className="text-sm font-bold text-emerald-400 mt-1">
-            {tp2 ? `₹${tp2.toFixed(2)}` : 'N/A'}
+            {tp2 ? `${ccy}${tp2.toFixed(2)}` : 'N/A'}
           </div>
           <div className="text-[10px] text-slate-400 mt-0.5">Full runner target</div>
         </div>

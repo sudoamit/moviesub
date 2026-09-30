@@ -29,7 +29,7 @@ describe('Fix 193 Requirements 28-35: NIFTY Bearish -> Bullish Signal Decoupled 
   const DB_URL =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   const mockStreamer: any = {
     getValidatedTicker: (sym: string) => ({

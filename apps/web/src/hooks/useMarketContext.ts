@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ChartMarketSnapshot, CanonicalCandleAggregator } from '@quant/shared';
 import { ChartSnapshotValidator } from '@quant/trading-engine';
 import { useMarketStream } from '../context/MarketStreamContext';
+import { toAggregatorTick } from '../models/aggregator-tick';
 
 export interface MarketDataState {
   status: 'CONNECTED' | 'RECONNECTING' | 'STALE' | 'DEGRADED' | 'UNAVAILABLE';
@@ -152,13 +153,14 @@ export function useMarketContext(initialSymbol = 'NIFTY', initialTimeframe = '15
 
   // Process Live Ticks through CanonicalCandleAggregator
   useEffect(() => {
-    const rawTick = tickers[selectedSymbol];
-    if (rawTick && chartSnapshot && chartSnapshot.symbol === selectedSymbol) {
-      setChartSnapshot((prev) => {
-        if (!prev || prev.symbol !== selectedSymbol) return prev;
-        return aggregatorRef.current.processTick(prev, rawTick);
-      });
-    }
+    const ticker: any = tickers[selectedSymbol];
+    if (!ticker || !chartSnapshot || chartSnapshot.symbol !== selectedSymbol) return;
+    const providerTick = toAggregatorTick(selectedSymbol, ticker);
+    if (!providerTick) return;
+    setChartSnapshot((prev) => {
+      if (!prev || prev.symbol !== selectedSymbol) return prev;
+      return aggregatorRef.current.processTick(prev, providerTick as any);
+    });
   }, [tickers, selectedSymbol]);
 
   const currentTicker = useMemo(() => {

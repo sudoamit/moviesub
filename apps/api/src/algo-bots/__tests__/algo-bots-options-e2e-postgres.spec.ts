@@ -28,7 +28,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
   const DB_URL =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   const optionQuotes: Record<string, { price: number; lastUpdated: number }> = {};
   let currentSpotPrice = 24120.0;

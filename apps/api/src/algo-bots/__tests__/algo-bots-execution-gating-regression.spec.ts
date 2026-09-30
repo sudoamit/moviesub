@@ -16,7 +16,7 @@ describe('Algo Bot Auto-Execution Gating Regression Suite (Fix Bug cc4e5fade6a3f
   const DB_URL =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   let prisma: PrismaClient;
   let algoBotsService: AlgoBotsService;

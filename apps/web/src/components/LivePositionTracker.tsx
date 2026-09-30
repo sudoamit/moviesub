@@ -142,7 +142,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   signal,
   livePrice,
   activePosition,
-  activeExecution,
+  activeExecution: rawActiveExecution,
   onClosePosition,
 }) => {
   const isCrypto =
@@ -490,7 +490,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     ? `${symbol}_${direction}_${signal.id}`
     : `${symbol}_${direction}_${signal?.timestamp ? new Date(signal.timestamp).getTime() : 'curr'}`;
   const spotStorageKey = `quant_locked_spot_entry_v2_${setupKey}`;
-  const strikeStorageKey = `quant_locked_strike_${setupKey}`;
+  const strikeStorageKey = `quant_locked_strike_v2_${setupKey}`;
 
   // Initial spot entry should strictly match paper position entry (if open) or signal's optimal entry price
   const paperEntryPrice = paperPosition ? Number(paperPosition.entryPrice) : null;
@@ -547,6 +547,29 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const isStructurallyIneligible = !executionEligible;
   const operationalIneligibilityReason: string =
     optionData?.ineligibilityReasons?.[0] || 'No live option quote from the execution feed.';
+
+  // The latest bot execution for a symbol can belong to an earlier setup (e.g. a finished trade). It only
+  // describes THIS setup when it was produced by this signal (same signal candle time and direction), or when
+  // it is backing the currently open position. Otherwise a stale EXECUTED/FAILED record would override the
+  // current signal's state (e.g. show READY FOR EXECUTION on a bearish, non-executable spot setup).
+  const activeExecution = useMemo(() => {
+    const exec: any = rawActiveExecution;
+    if (!exec) return null;
+    if (hasActiveTrade) return exec;
+    const sigTime =
+      typeof (signal as any)?.canonicalCandleTime === 'number'
+        ? (signal as any).canonicalCandleTime
+        : signal?.timestamp
+          ? new Date(signal.timestamp).getTime()
+          : null;
+    // An EXECUTED record with no open position is a finished (or orphaned) trade: it can never describe a
+    // setup that has not been traded.
+    if (exec.state === 'EXECUTED') return null;
+    const execTime = exec.signalTimestamp ? new Date(exec.signalTimestamp).getTime() : null;
+    if (sigTime !== null && execTime !== null && sigTime !== execTime) return null;
+    if (exec.direction && signal?.direction && String(exec.direction) !== String(signal.direction)) return null;
+    return exec;
+  }, [rawActiveExecution, hasActiveTrade, signal]);
 
   // Strict Authoritative Trading Lifecycle State Model
   const lifecycleState: TradingLifecycleState = useMemo(() => {
@@ -627,7 +650,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
       if (!validSpot || validSpot === 0) {
         validSpot = initialSpotCandidate;
-        localStorage.setItem(spotStorageKey, String(validSpot));
+        // Only a real signal defines a setup worth locking; never persist values for a signal-less view.
+        if (signal) localStorage.setItem(spotStorageKey, String(validSpot));
       }
 
       lockedSpotRef.current = validSpot;
@@ -637,7 +661,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       const validStrike =
         savedStrike && Number(savedStrike) > 0 ? Number(savedStrike) : defaultStrike;
       setLockedStrike(validStrike);
-      if (validStrike > 0) {
+      if (validStrike > 0 && signal) {
         localStorage.setItem(strikeStorageKey, String(validStrike));
       }
 
@@ -1566,6 +1590,23 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     );
   }
 
+
+  // No strategy signal and no position: there is no setup to show. Rendering one here used to display a
+  // default BULLISH direction with a previously locked strike (e.g. "NIFTY 24200 CE" at spot 22,729).
+  if (!signal && !hasActiveTrade && !(isPositionCut && closedTradeSummary)) {
+    return (
+      <div className="bg-[#111827]/95 border border-slate-800 rounded-xl p-5 font-mono">
+        <div className="flex items-center gap-2 text-slate-300 text-xs font-bold uppercase tracking-wider">
+          <Radio className="w-4 h-4 text-slate-500" />
+          {activeStrategyLabel.toUpperCase()} • {symbol}
+        </div>
+        <p className="mt-2 text-sm text-slate-400">
+          No active {activeStrategyLabel} signal for {symbol}. A trade setup appears here once the strategy produces one.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-[#111827]/95 backdrop-blur-md border border-cyan-500/30 rounded-xl p-5 shadow-2xl space-y-4 relative overflow-hidden">
       {/* Top Background Glow Effect */}
@@ -1675,10 +1716,10 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 <Clock className="w-3 h-3 text-amber-400" />
                 ORDER PENDING
               </span>
-            ) : !isTriggerSatisfied ? (
+            ) : lifecycleState !== 'ready' ? (
               <span className="bg-amber-950/80 text-amber-300 border border-amber-800/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-1">
                 <Clock className="w-3 h-3 text-amber-400" />
-                POTENTIAL SETUP (WAITING FOR TRIGGER)
+                {!isTriggerSatisfied ? 'POTENTIAL SETUP (WAITING FOR TRIGGER)' : 'POTENTIAL SETUP'}
               </span>
             ) : (
               <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-1">
@@ -1872,7 +1913,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                             ? 'bg-rose-950/80 text-rose-300 border-rose-700/80'
                             : lifecycleState === 'pending_order'
                               ? 'bg-amber-950/80 text-amber-300 border-amber-700/80 animate-pulse'
-                              : !isTriggerSatisfied
+                              : lifecycleState !== 'ready'
                                 ? 'bg-amber-950/80 text-amber-300 border-amber-700/80'
                                 : 'bg-emerald-950/80 text-emerald-300 border-emerald-700/80'
                       }`}
@@ -1883,9 +1924,11 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                           ? 'REJECTED'
                           : lifecycleState === 'pending_order'
                             ? 'ORDER SUBMITTED'
-                            : !isTriggerSatisfied
-                              ? 'WAITING FOR TRIGGER'
-                              : 'READY FOR EXECUTION'}
+                            : lifecycleState === 'ready'
+                              ? 'READY FOR EXECUTION'
+                              : !isTriggerSatisfied
+                                ? 'WAITING FOR TRIGGER'
+                                : 'POTENTIAL SETUP'}
                     </span>
                   </div>
                 </div>
@@ -2466,15 +2509,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               </div>
             )}
 
-            {!canExecute ? (
-              <div
-                className="bg-slate-950/80 border border-slate-800 text-amber-300/80 text-[11px] font-mono font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5"
-                title="This setup is not eligible for execution because spot instruments are long-only."
-              >
-                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-                No Execution (Spot Long-Only)
-              </div>
-            ) : (
+            {/* A non-executable setup (e.g. a bearish signal on long-only spot) has no trade, so nothing is
+                shown here: no execute button and no "no execution" notice. */}
+            {!canExecute ? null : (
               <button
                 type="button"
                 onClick={handleExecutePaperOrder}

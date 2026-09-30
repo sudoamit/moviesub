@@ -18,7 +18,7 @@ describe('FIX 203: 20 Automated Invariant Checks', () => {
   const dbUrl =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   beforeAll(async () => {
     prisma = new PrismaClient({ datasources: { db: { url: dbUrl } } });

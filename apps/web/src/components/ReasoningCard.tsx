@@ -18,6 +18,7 @@ import {
   BarChart2,
   Flame,
 } from 'lucide-react';
+import { quoteCurrencySymbol } from '../models/instrument-display';
 
 interface ReasoningCardProps {
   signal: ISignalSetup | null;
@@ -52,8 +53,7 @@ export const ReasoningCard: React.FC<ReasoningCardProps> = ({ signal }) => {
     riskRewardRatios,
   } = signal;
 
-  const isUsd = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD';
-  const currencySymbol = isUsd ? '$' : '₹';
+  const currencySymbol = quoteCurrencySymbol(symbol);
   const riskPts = Math.abs(entryZone.optimal - stopLoss).toFixed(2);
   const rewardPts = Math.abs(takeProfits.tp2 - entryZone.optimal).toFixed(2);
   const isBull = direction === 'BULLISH';

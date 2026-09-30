@@ -19,6 +19,7 @@ import {
   Download,
   Coins,
 } from 'lucide-react';
+import { quoteCurrencySymbol } from '../models/instrument-display';
 
 interface BacktestDashboardProps {
   initialSymbol?: string;
@@ -79,7 +80,7 @@ export const BacktestDashboard: React.FC<BacktestDashboardProps> = ({
   const pnl = results ? Number(results.netPnL || 0) : 0;
   const isProfitable = pnl >= 0;
   const roi = results && initialCapital > 0 ? ((pnl / initialCapital) * 100).toFixed(1) : '0.0';
-  const currSym = symbol === 'BTCUSDT' || symbol === 'XAUUSD' || symbol === 'GOLD' ? '$' : '₹';
+  const currSym = quoteCurrencySymbol(symbol);
   const equityCurve: any[] = results?.equityCurve || results?.parametersJson?.equityCurve || [];
 
   return (

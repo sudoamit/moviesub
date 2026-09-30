@@ -28,7 +28,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
   const DB_URL =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   const optionQuotes: Record<string, { price: number; lastUpdated: number }> = {};
   const spotQuotes: Record<string, { price: number; lastUpdated: number }> = {

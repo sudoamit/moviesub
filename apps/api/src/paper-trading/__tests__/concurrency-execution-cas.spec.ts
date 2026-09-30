@@ -14,7 +14,7 @@ describe('FIX 203: Concurrency Execution CAS Integration Suite (PostgreSQL)', ()
   const dbUrl =
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform?schema=public';
+    'postgresql://postgres:postgrespassword@localhost:5433/trading_platform_test?schema=public';
 
   let accountId: string;
   let testBotId: string;
