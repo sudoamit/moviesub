@@ -52,6 +52,12 @@ export class PaperTradingController {
     return this.closeOrScaleOut(id, body?.reason, body?.partialRatio);
   }
 
+  /** Moves the position's stop to its fee-adjusted breakeven on the server (tighten-only). */
+  @Post('positions/:id/breakeven')
+  async moveStopToBreakeven(@Param('id') id: string) {
+    return this.paperTradingService.moveStopToBreakeven(id);
+  }
+
   @Post('positions/:id/scale-out')
   async scaleOutPositionById(@Param('id') id: string, @Body() body?: ScaleOutDto) {
     const res = await this.scaleOutAtLiveQuote(id, body?.ratio ?? 0.5);

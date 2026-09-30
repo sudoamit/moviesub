@@ -25,6 +25,19 @@ import {
 } from '@quant/shared';
 import { Decimal } from '@prisma/client/runtime/library';
 
+// Fee-adjusted breakeven the monitor sets after TP1: entry +/- per-unit round-trip fees (2 x entry fees).
+const feeAdjustedBreakeven = (p: any): number => {
+  const snap = (p.executionEventsJson as any)?.accountingSnapshot || {};
+  const fx = Number(snap.fxRate ?? 1);
+  const contractSize = Number(snap.contractSize ?? 1);
+  const initialQty = Number((p.executionEventsJson as any)?.initialQuantity ?? p.quantity);
+  const fees = Number((p.chargesJson as any)?.totalChargesAccount ?? (p.chargesJson as any)?.totalCharges ?? 0);
+  const perUnit = (2 * fees) / (initialQty * contractSize * fx);
+  const isBuy = p.direction === 'BULLISH' || p.direction === 'BUY';
+  return Number((isBuy ? Number(p.entryPrice) + perUnit : Number(p.entryPrice) - perUnit).toFixed(2));
+};
+
+
 describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests A-O)', () => {
   let paperService: PaperTradingService;
   let monitorService: PaperPositionMonitorService;
@@ -851,7 +864,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const dbPos = dbPositions.find((p) => p.id === pos.id);
     expect(dbPos.status).toBe(PositionState.PARTIALLY_CLOSED);
     expect(Number(dbPos.quantity)).toBe(7); // 70% remaining (30% scale-out)
-    expect(Number(dbPos.stopLoss)).toBe(50000); // SL moved to breakeven
+    expect(Number(dbPos.stopLoss)).toBe(feeAdjustedBreakeven(dbPos)); // SL moved to fee-adjusted breakeven
 
     // Verify NO top-level PaperTrade record was created at TP1 partial exit
     const tradesForPosAtTP1 = dbTrades.filter((t) => t.positionId === pos.id);
@@ -1531,7 +1544,7 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     const tp1Pos = dbPositions.find((p) => p.id === pos.id);
     expect(tp1Pos.status).toBe(PositionState.PARTIALLY_CLOSED);
     expect(Number(tp1Pos.quantity)).toBe(7);
-    expect(Number(tp1Pos.stopLoss)).toBe(50000); // Moved to breakeven
+    expect(Number(tp1Pos.stopLoss)).toBe(feeAdjustedBreakeven(tp1Pos)); // Moved to fee-adjusted breakeven
 
     const tp1Fill = dbFills[dbFills.length - 1];
     const btcFx140 =

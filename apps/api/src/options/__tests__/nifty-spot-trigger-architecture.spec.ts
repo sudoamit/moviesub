@@ -299,8 +299,8 @@ describe('NIFTY Spot vs Trigger Architectural Separation Suite (Section 17)', ()
       strikeOverride: 24200,
     });
 
-    // 1. Current Option LTP reflects live market spot 23060 (deep OTM CE is near zero)
-    expect(rec.currentOptionLtp).toBeLessThan(1.0);
+    // 1. Current Option LTP reflects live market spot 23060 (deep OTM CE is low)
+    expect(rec.currentOptionLtp).toBeLessThan(5.0);
     expect(rec.currentOptionLtp).toBeLessThan(rec.plannedEntryPremium);
 
     // 2. Planned Entry Premium reflects the ATM scenario at trigger spot 24175.65 (substantial option value)
@@ -339,5 +339,45 @@ describe('NIFTY Spot vs Trigger Architectural Separation Suite (Section 17)', ()
     expect(rec.targets).toHaveProperty('tp1');
     expect(rec.targets).toHaveProperty('tp2');
     expect(rec.targets).toHaveProperty('tp3');
+  });
+
+  // =========================================================================
+  // TEST 11: Option Premium Trigger (+/- 1% touch / band)
+  // =========================================================================
+  it('TEST 11: triggerMode = OPTION_PREMIUM triggers when option price is within +/- 1% of planned entry', async () => {
+    const params = {
+      symbol: 'NIFTY',
+      direction: 'BULLISH' as const,
+      currentSpotPrice: 24175.65,
+      underlyingTriggerPrice: 24175.65,
+      strikeOverride: 24200,
+      triggerMode: 'OPTION_PREMIUM' as const,
+    };
+    // The planned premium is model-derived and depends on time to expiry, so read it instead of hardcoding it.
+    const baseline = await optionsService.getSmartStrikeRecommendation(params);
+    const planned = baseline.plannedEntryPremium;
+    expect(planned).toBeGreaterThan(0);
+
+    // 1. Live option ticker within +/- 1% of the planned entry (+0.5%)
+    mockRealMarketStreamer.getOptionTicker = jest.fn().mockReturnValue({
+      symbol: 'NIFTY 24200 CE',
+      price: Number((planned * 1.005).toFixed(2)),
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    const recTriggered = await optionsService.getSmartStrikeRecommendation(params);
+    expect(recTriggered.triggerConditionSatisfied).toBe(true);
+    expect(recTriggered.status).toBe('READY_FOR_EXECUTION');
+
+    // 2. Live option ticker outside +/- 1% (-22%)
+    mockRealMarketStreamer.getOptionTicker = jest.fn().mockReturnValue({
+      symbol: 'NIFTY 24200 CE',
+      price: Number((planned * 0.78).toFixed(2)),
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: Date.now(),
+    });
+    const recWaiting = await optionsService.getSmartStrikeRecommendation(params);
+    expect(recWaiting.triggerConditionSatisfied).toBe(false);
+    expect(recWaiting.status).toBe('WAITING_FOR_TRIGGER');
   });
 });

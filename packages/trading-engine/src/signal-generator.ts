@@ -6,6 +6,7 @@ import {
   SignalGrade,
   SignalState,
   Timeframe,
+  getTimeframeDurationMs,
 } from '@quant/shared';
 import { SMCAnalyzer } from './smc-analyzer';
 import { IMTFTimeframeData, MultiTimeframeAnalyzer } from './mtf-analyzer';
@@ -352,7 +353,19 @@ export class SignalGenerator {
 
     // 2. Direct Routing if Saiyan OCC Strategy is Selected
     if (strategyMode === 'SAIYAN_OCC') {
-      return SaiyanOCCEngine.generateSignal(symbol, execCandles, String(executionTf));
+      const saiyanSignal = SaiyanOCCEngine.generateSignal(symbol, execCandles, String(executionTf));
+      // Canonical timestamps are required by the execution pipeline (bots reject signals without them).
+      // A Saiyan setup is anchored to its crossover candle, so the signal is stamped with that candle's
+      // CLOSE time (never later than the decision boundary). The pipeline's freshness gate then only lets a
+      // crossover trade within one bar of forming, instead of treating an hours-old crossover as fresh.
+      const crossoverOpenMs = new Date(saiyanSignal.timestamp as any).getTime();
+      const barMs = getTimeframeDurationMs(executionTf);
+      const crossoverCloseMs = Number.isFinite(crossoverOpenMs)
+        ? Math.min(crossoverOpenMs + barMs, decisionTimestamp.getTime())
+        : decisionTimestamp.getTime();
+      saiyanSignal.canonicalCandleTime = crossoverCloseMs;
+      saiyanSignal.canonicalDecisionTime = new Date(crossoverCloseMs);
+      return saiyanSignal;
     }
 
     // 3. Run Execution Timeframe SMC Analysis (strictly point-in-time)

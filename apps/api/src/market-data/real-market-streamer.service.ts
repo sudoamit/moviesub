@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, forwardRef } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { RedisService } from '../common/redis/redis.service';
+import { IndianOptionsExpiryEngine } from '@quant/trading-engine';
 import { TradingWebsocketGateway } from '../websocket/websocket.gateway';
 import {
   WS_EVENTS,
@@ -67,6 +68,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   private nseTimer: NodeJS.Timeout | null = null;
   private binanceTimer: NodeJS.Timeout | null = null;
   private microTickTimer: NodeJS.Timeout | null = null;
+  private nseOptionTimer: NodeJS.Timeout | null = null;
+  private nseOptionPollInFlight = false;
+  private lastOptionExpiryMismatchLog = 0;
 
   private tickers: Map<string, ILiveRealTicker> = new Map([
     [
@@ -204,9 +208,134 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       await this.fetchRealNSEQuotes();
     }, 3500);
 
+    // 3. Live NSE option quotes (NIFTY / BANKNIFTY) every 2 seconds
+    this.nseOptionTimer = setInterval(async () => {
+      await this.fetchRealNseOptionQuotes();
+    }, 2000);
+
     // Initial fetch
     this.fetchRealBinancePrice();
     this.fetchRealNSEQuotes();
+    this.fetchRealNseOptionQuotes();
+  }
+
+  /**
+   * Live option quote producer for NIFTY / BANKNIFTY (NSE_REST_OPTION_PROVIDER).
+   *
+   * Reads the Groww option chain (exchange LTP + genuine last-trade time) and publishes each near-the-money
+   * CE/PE through the validated canonical option path, which makes it available to execution
+   * (getValidatedOptionPrice), the position monitor and smart-strike eligibility.
+   *
+   * Safety:
+   * - the quote timestamp is the exchange last-trade time; the provider validator rejects ticks older than
+   *   the execution max age, so stale or after-hours quotes are never published;
+   * - contract symbols carry no expiry, so quotes are published ONLY when the chain's expiry is the one the
+   *   contract resolver trades (the nearest expiry); otherwise nothing is published for that underlying.
+   */
+  private async fetchRealNseOptionQuotes(): Promise<void> {
+    if (this.nseOptionPollInFlight) return;
+    this.nseOptionPollInFlight = true;
+    const providerId = 'NSE_REST_OPTION_PROVIDER';
+    try {
+      const underlyings: Array<{ underlying: 'NIFTY' | 'BANKNIFTY'; slug: string; step: number }> = [
+        { underlying: 'NIFTY', slug: 'nifty', step: 50 },
+        { underlying: 'BANKNIFTY', slug: 'nifty-bank', step: 100 },
+      ];
+      let anySuccess = false;
+      for (const { underlying, slug, step } of underlyings) {
+        try {
+          const res = await fetch(
+            `https://groww.in/v1/api/option_chain_service/v1/option_chain/${slug}`,
+            {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+                Accept: 'application/json',
+              },
+            },
+          );
+          if (!res.ok) continue;
+          const json: any = await res.json();
+          const chains: any[] = json?.optionChain?.optionChains || [];
+          const chainExpiry: string | undefined = json?.optionChain?.expiryDetailsDto?.currentExpiry;
+          if (chains.length === 0 || !chainExpiry) continue;
+          anySuccess = true;
+
+          const tradedExpiry = IndianOptionsExpiryEngine.getUpcomingExpiries(underlying)[0]?.dateString;
+          if (!tradedExpiry || !RealMarketStreamerService.isSameCalendarDay(chainExpiry, tradedExpiry)) {
+            if (Date.now() - this.lastOptionExpiryMismatchLog > 60_000) {
+              this.lastOptionExpiryMismatchLog = Date.now();
+              this.logger.warn(
+                `[OPTION_FEED] ${underlying} chain expiry ${chainExpiry} != traded expiry ${tradedExpiry}; not publishing option quotes.`,
+              );
+            }
+            continue;
+          }
+
+          if (!this.isExecutionDataHealthy('REST_POLLING', providerId)) {
+            this.setRestHealthState('HEALTHY', providerId);
+          }
+
+          const spot = this.tickers.get(underlying)?.price;
+          const window = step * 15;
+          for (const row of chains) {
+            const rawStrike = Number(row?.strikePrice);
+            const strike = rawStrike >= 500000 ? Math.round(rawStrike / 100) : Math.round(rawStrike);
+            if (!strike || (spot && spot > 0 && Math.abs(strike - spot) > window)) continue;
+            for (const [side, opt] of [
+              ['CE', row?.callOption],
+              ['PE', row?.putOption],
+            ] as const) {
+              const ltp = Number(opt?.ltp);
+              const lastTradeSec = Number(opt?.lastTradeTime);
+              if (!(ltp > 0) || !(lastTradeSec > 0)) continue;
+              try {
+                await this.publishNseRestCanonicalOptionQuote({
+                  contractSymbol: `${underlying} ${strike} ${side}`,
+                  price: ltp,
+                  marketEventTime: lastTradeSec * 1000,
+                  open: Number(opt.open) || undefined,
+                  high: Number(opt.high) || undefined,
+                  low: Number(opt.low) || undefined,
+                  close: ltp,
+                  volume: Number(opt.volume) || undefined,
+                  prevClose: Number(opt.close) || undefined,
+                  changePercent: Number(opt.dayChangePerc) || undefined,
+                  changeAmount: Number(opt.dayChange) || undefined,
+                  tickSize: 0.05,
+                });
+              } catch {
+                // Stale (no recent trade) or otherwise invalid tick: never publish it.
+              }
+            }
+          }
+        } catch (err) {
+          this.logger.debug(`[OPTION_FEED] ${underlying} fetch notice: ${(err as Error).message}`);
+        }
+      }
+      if (!anySuccess && this.isExecutionDataHealthy('REST_POLLING', providerId)) {
+        this.setRestHealthState('UNAVAILABLE', providerId);
+      }
+    } finally {
+      this.nseOptionPollInFlight = false;
+    }
+  }
+
+  /** Compares '2026-10-06' with '06-Oct-2026' (or any two parseable dates) by calendar day. */
+  private static isSameCalendarDay(a: string, b: string): boolean {
+    const toYmd = (v: string): string | null => {
+      const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(v);
+      if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+      const dmy = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})/.exec(v);
+      if (dmy) {
+        const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        const m = months.indexOf(dmy[2].toUpperCase()) + 1;
+        if (m === 0) return null;
+        return `${dmy[3]}-${String(m).padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+      }
+      return null;
+    };
+    const ya = toYmd(a);
+    return ya !== null && ya === toYmd(b);
   }
 
   private async fetchRealBinancePrice() {
@@ -294,8 +423,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     }
   }
 
+  /**
+   * NSE spot quotes. Every tick carries the provider's REAL event time: a quote is never re-stamped with the
+   * poll time, so delayed data is rejected as stale instead of being presented as live.
+   * - NIFTY / BANKNIFTY: Groww live index quote (value + exchange timestamp), falling back to Yahoo.
+   * - Equities: Yahoo chart meta (regularMarketTime).
+   * Ticks are ingested through the NSE REST spot connection (labelled NSE_YAHOO_REST for both sources).
+   */
   private async fetchRealNSEQuotes() {
-    const now = Date.now();
+    const providerId = 'NSE_YAHOO_REST';
     const symbolMap: Record<string, string> = {
       NIFTY: '^NSEI',
       BANKNIFTY: '^NSEBANK',
@@ -303,72 +439,124 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       HDFCBANK: 'HDFCBANK.NS',
       INFY: 'INFY.NS',
     };
+    let anyFetched = false;
 
     for (const [sym, yahooSym] of Object.entries(symbolMap)) {
       try {
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-          yahooSym,
-        )}?interval=1m&range=1d`;
-        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const data = await res.json();
-        const meta = data?.chart?.result?.[0]?.meta;
+        const quote =
+          (sym === 'NIFTY' || sym === 'BANKNIFTY' ? await this.fetchGrowwIndexQuote(sym) : null) ??
+          (await this.fetchYahooQuote(yahooSym));
+        if (!quote) continue;
+        anyFetched = true;
+        if (this.getRestHealthState(providerId) !== 'HEALTHY') {
+          this.setRestHealthState('HEALTHY', providerId);
+        }
 
-        if (meta && meta.regularMarketPrice) {
-          const livePrice = Number(meta.regularMarketPrice.toFixed(2));
-          const prevClose = Number(
-            (meta.chartPreviousClose || meta.previousClose || livePrice).toFixed(2),
-          );
-          const high = Number((meta.regularMarketDayHigh || livePrice).toFixed(2));
-          const low = Number((meta.regularMarketDayLow || livePrice).toFixed(2));
-          const volume = meta.regularMarketVolume || 100000;
-          const changeAmount = Number((livePrice - prevClose).toFixed(2));
-          const changePercent = Number(((changeAmount / prevClose) * 100).toFixed(2));
-
-          const marketEventTime = meta.regularMarketTime ? meta.regularMarketTime * 1000 : null;
-          if (!marketEventTime || !Number.isFinite(marketEventTime) || marketEventTime <= 0) {
-            this.setRestHealthState('DEGRADED', 'NSE_YAHOO_REST');
-            continue;
-          }
-
-          const regularSession = meta.currentTradingPeriod?.regular;
-          const nowSeconds = Math.floor(now / 1000);
-          const inActiveSession = Boolean(
-            regularSession &&
-            nowSeconds >= regularSession.start &&
-            nowSeconds <= regularSession.end,
-          );
-
-          // For REST polling feeds during active exchange trading sessions, the provider event timestamp
-          // represents the current poll observation time (Date.now()), preventing false-positive stale rejection
-          // caused by free-tier delayed REST publication (e.g. 10-15 minute COMEX delay for GC=F).
-          // Outside active trading sessions (e.g. market closed), marketEventTime is used, preserving fail-closed rejection.
-          const providerEventTime = inActiveSession ? now : marketEventTime;
-
-          this.setRestHealthState('HEALTHY', 'NSE_YAHOO_REST');
-          const canonicalTick = NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+        let canonicalTick;
+        try {
+          canonicalTick = NSE_YAHOO_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
             providerSymbol: sym,
-            price: livePrice,
-            providerEventTime,
-            open: Number((meta.regularMarketOpen || livePrice).toFixed(2)),
-            high,
-            low,
-            close: livePrice,
-            volume,
-            prevClose,
-            changeAmount,
-            changePercent,
+            price: quote.price,
+            providerEventTime: quote.eventTimeMs,
+            open: quote.open,
+            high: quote.high,
+            low: quote.low,
+            close: quote.price,
+            volume: quote.volume,
+            prevClose: quote.prevClose,
+            changeAmount: quote.changeAmount,
+            changePercent: quote.changePercent,
           });
+        } catch {
+          // Stale (e.g. market closed or delayed source) or invalid: skip THIS symbol only.
+          continue;
+        }
 
-          const updated = this.ingestCanonicalSpotTick(canonicalTick);
-          if (updated) {
-            await this.broadcastTick(updated);
-          }
+        const updated = this.ingestCanonicalSpotTick(canonicalTick);
+        if (updated) {
+          await this.broadcastTick(updated);
         }
       } catch (err) {
-        this.setRestHealthState('UNAVAILABLE', 'NSE_YAHOO_REST');
         this.logger.debug(`NSE real tick notice for ${sym}: ${(err as Error).message}`);
       }
     }
+
+    if (!anyFetched && this.getRestHealthState(providerId) === 'HEALTHY') {
+      this.setRestHealthState('UNAVAILABLE', providerId);
+    }
+  }
+
+  private async fetchGrowwIndexQuote(sym: 'NIFTY' | 'BANKNIFTY'): Promise<{
+    price: number;
+    eventTimeMs: number;
+    open?: number;
+    high?: number;
+    low?: number;
+    volume?: number;
+    prevClose?: number;
+    changeAmount?: number;
+    changePercent?: number;
+  } | null> {
+    try {
+      const res = await fetch(
+        `https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/segment/CASH/latest_indices_ohlc/${sym}`,
+        { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', Accept: 'application/json' } },
+      );
+      if (!res.ok) return null;
+      const d: any = await res.json();
+      const price = Number(d?.value);
+      const rawTs = Number(d?.tsInMillis);
+      if (!(price > 0) || !(rawTs > 0)) return null;
+      // Despite its name, Groww reports this timestamp in seconds.
+      const eventTimeMs = rawTs < 1e12 ? rawTs * 1000 : rawTs;
+      return {
+        price: Number(price.toFixed(2)),
+        eventTimeMs,
+        open: Number(d.open) || undefined,
+        high: Number(d.high) || undefined,
+        low: Number(d.low) || undefined,
+        prevClose: Number(d.close) || undefined,
+        changeAmount: Number.isFinite(Number(d.dayChange)) ? Number(Number(d.dayChange).toFixed(2)) : undefined,
+        changePercent: Number.isFinite(Number(d.dayChangePerc))
+          ? Number(Number(d.dayChangePerc).toFixed(2))
+          : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchYahooQuote(yahooSym: string): Promise<{
+    price: number;
+    eventTimeMs: number;
+    open?: number;
+    high?: number;
+    low?: number;
+    volume?: number;
+    prevClose?: number;
+    changeAmount?: number;
+    changePercent?: number;
+  } | null> {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1m&range=1d`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const data: any = await res.json();
+    const meta = data?.chart?.result?.[0]?.meta;
+    if (!meta || !meta.regularMarketPrice || !meta.regularMarketTime) return null;
+    const price = Number(meta.regularMarketPrice.toFixed(2));
+    const prevClose = Number((meta.chartPreviousClose || meta.previousClose || price).toFixed(2));
+    const changeAmount = Number((price - prevClose).toFixed(2));
+    return {
+      price,
+      // Yahoo's own quote time. Never replaced by the poll time: a delayed quote must look delayed.
+      eventTimeMs: meta.regularMarketTime * 1000,
+      open: Number((meta.regularMarketOpen || price).toFixed(2)),
+      high: Number((meta.regularMarketDayHigh || price).toFixed(2)),
+      low: Number((meta.regularMarketDayLow || price).toFixed(2)),
+      volume: meta.regularMarketVolume || undefined,
+      prevClose,
+      changeAmount,
+      changePercent: Number(((changeAmount / prevClose) * 100).toFixed(2)),
+    };
   }
 
   public async broadcastTick(ticker: ILiveRealTicker) {
@@ -1784,6 +1972,35 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
     const key = `option:ltp:${params.contractSymbol.toUpperCase()}`;
     await redisClient.set(key, JSON.stringify(canonicalRecord), 'EX', 60);
+
+    const now = Date.now();
+    const updatedTicker: ILiveRealTicker = {
+      symbol: params.contractSymbol.toUpperCase(),
+      price: params.price,
+      open: params.open,
+      high: params.high,
+      low: params.low,
+      close: params.close ?? params.price,
+      volume: params.volume,
+      prevClose: params.prevClose,
+      changePercent: params.changePercent,
+      changeAmount: params.changeAmount,
+      tickSize: params.tickSize,
+      volatility: params.volatility,
+      lastUpdated: params.marketEventTime || now,
+      provenance: 'LIVE_PROVIDER',
+      marketEventTime: params.marketEventTime || now,
+      connectionEpoch: params.connectionEpoch,
+      providerId: params.providerId,
+      providerInstanceId: params.providerInstanceId,
+      providerConnectionId: params.providerConnectionId,
+      providerTransport: params.providerTransport,
+      sequence: params.sequence,
+      observedAt: params.observedAt ?? now,
+      receivedAt: params.receivedAt ?? now,
+    };
+    this.optionTickers.set(params.contractSymbol.toUpperCase(), updatedTicker);
+
     return canonicalRecord;
   }
 
@@ -1795,5 +2012,6 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     if (this.binanceTimer) clearInterval(this.binanceTimer);
     if (this.nseTimer) clearInterval(this.nseTimer);
     if (this.microTickTimer) clearInterval(this.microTickTimer);
+    if (this.nseOptionTimer) clearInterval(this.nseOptionTimer);
   }
 }

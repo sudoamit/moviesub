@@ -17,6 +17,19 @@ import {
   PointInTimeCurrencyConverter,
 } from '@quant/shared';
 
+// Fee-adjusted breakeven the monitor sets after TP1: entry +/- per-unit round-trip fees (2 x entry fees).
+const feeAdjustedBreakeven = (p: any): number => {
+  const snap = (p.executionEventsJson as any)?.accountingSnapshot || {};
+  const fx = Number(snap.fxRate ?? 1);
+  const contractSize = Number(snap.contractSize ?? 1);
+  const initialQty = Number((p.executionEventsJson as any)?.initialQuantity ?? p.quantity);
+  const fees = Number((p.chargesJson as any)?.totalChargesAccount ?? (p.chargesJson as any)?.totalCharges ?? 0);
+  const perUnit = (2 * fees) / (initialQty * contractSize * fx);
+  const isBuy = p.direction === 'BULLISH' || p.direction === 'BUY';
+  return Number((isBuy ? Number(p.entryPrice) + perUnit : Number(p.entryPrice) - perUnit).toFixed(2));
+};
+
+
 describe('Fix 193 Requirements 28-35: NIFTY Bearish -> Bullish Signal Decoupled Lifecycle E2E Suite', () => {
   let prisma: PrismaClient;
   let algoBotsService: AlgoBotsService;
@@ -369,7 +382,7 @@ describe('Fix 193 Requirements 28-35: NIFTY Bearish -> Bullish Signal Decoupled 
     const dbPosAfter = await prisma.paperPosition.findUnique({ where: { id: positionId } });
     expect(dbPosAfter!.status).toBe(PositionState.PARTIALLY_CLOSED);
     expect(Number(dbPosAfter!.quantity)).toBe(70); // 100 initial - 30% (30 qty) = 70 qty remaining
-    expect(Number(dbPosAfter!.stopLoss)).toBe(Number(dbPosAfter!.entryPrice)); // Moved to breakeven (entryPrice)
+    expect(Number(dbPosAfter!.stopLoss)).toBe(feeAdjustedBreakeven(dbPosAfter)); // Moved to fee-adjusted breakeven
 
     const events = dbPosAfter!.executionEventsJson as any;
     expect(events.partialLegs).toHaveLength(1);

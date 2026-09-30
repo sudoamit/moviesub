@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Wallet,
   TrendingUp,
@@ -50,6 +50,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'analytics'>('positions');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  // Synchronous in-flight guard: React state updates are async, so two fast clicks could both pass isSubmitting.
+  const submitInFlightRef = useRef<boolean>(false);
   const [lots, setLots] = useState<number>(1);
   const [customQty, setCustomQty] = useState<number>(0);
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>(
@@ -149,6 +151,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   );
 
   const handlePlaceOrder = async (overrideSide?: 'BUY' | 'SELL') => {
+    if (submitInFlightRef.current) return;
     const side = overrideSide || orderSide;
     const requestedLeverage = leverage;
 
@@ -211,12 +214,16 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
 
     try {
       setIsSubmitting(true);
+      submitInFlightRef.current = true;
+      // One key per submission: if this request is ever re-sent, the server returns the same position.
+      const idempotencyKey = `ui_widget:${currentSymbol}:${side}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
       const res = await fetch(`${apiBase}/api/paper-trading/order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol: currentSymbol,
+          idempotencyKey,
           direction: side,
           quantity: totalQuantity,
           // MARKET orders fill at the server's validated quote; the client never supplies a fill price
@@ -252,6 +259,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       setTimeout(() => setStatusMessage(null), 6000);
     } finally {
       setIsSubmitting(false);
+      submitInFlightRef.current = false;
     }
   };
 

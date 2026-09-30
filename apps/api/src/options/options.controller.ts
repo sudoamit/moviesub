@@ -29,6 +29,7 @@ export class OptionsController {
     @Query('currentSpotPrice') currentSpotPrice?: string,
     @Query('underlyingTriggerPrice') underlyingTriggerPrice?: string,
     @Query('strike') strike?: string,
+    @Query('triggerMode') triggerMode?: 'OPTION_PREMIUM' | 'UNDERLYING_SPOT',
   ) {
     return this.optionsService.getSmartStrikeRecommendation({
       symbol: symbol || 'NIFTY',
@@ -39,6 +40,7 @@ export class OptionsController {
       currentSpotPrice: currentSpotPrice ? parseFloat(currentSpotPrice) : (spotPrice ? parseFloat(spotPrice) : undefined),
       underlyingTriggerPrice: underlyingTriggerPrice ? parseFloat(underlyingTriggerPrice) : undefined,
       strikeOverride: strike ? parseFloat(strike) : undefined,
+      triggerMode,
     });
   }
 }

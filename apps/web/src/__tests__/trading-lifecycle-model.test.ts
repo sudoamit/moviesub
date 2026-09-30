@@ -663,6 +663,23 @@ describe('Authoritative Trading Lifecycle & Standby vs Active Trade State Model'
         expect(html).toContain('Execute Paper Trade @ Market');
         expect(html).not.toContain('NO TRADE');
       });
+
+      it('renders Option Premium Trigger with waiting indicator and +/- 1% band', () => {
+        const html = ReactDOMServer.renderToStaticMarkup(
+          React.createElement(LivePositionTracker, {
+            symbol: 'NIFTY',
+            signal: mockSignal,
+            livePrice: 24150, // below underlying trigger
+            activePosition: null,
+            activeExecution: null,
+          }),
+        );
+
+        expect(html).toContain('POTENTIAL SETUP (WAITING FOR TRIGGER)');
+        expect(html).toContain('PLANNED OPTION ENTRY');
+        expect(html).toContain('Trigger Band:');
+        expect(html).toContain('(±1%)');
+      });
     });
   });
 });

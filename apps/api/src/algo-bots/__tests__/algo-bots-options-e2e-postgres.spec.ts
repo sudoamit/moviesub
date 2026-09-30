@@ -17,6 +17,19 @@ import {
   PointInTimeCurrencyConverter,
 } from '@quant/shared';
 
+// Fee-adjusted breakeven the monitor sets after TP1: entry +/- per-unit round-trip fees (2 x entry fees).
+const feeAdjustedBreakeven = (p: any): number => {
+  const snap = (p.executionEventsJson as any)?.accountingSnapshot || {};
+  const fx = Number(snap.fxRate ?? 1);
+  const contractSize = Number(snap.contractSize ?? 1);
+  const initialQty = Number((p.executionEventsJson as any)?.initialQuantity ?? p.quantity);
+  const fees = Number((p.chargesJson as any)?.totalChargesAccount ?? (p.chargesJson as any)?.totalCharges ?? 0);
+  const perUnit = (2 * fees) / (initialQty * contractSize * fx);
+  const isBuy = p.direction === 'BULLISH' || p.direction === 'BUY';
+  return Number((isBuy ? Number(p.entryPrice) + perUnit : Number(p.entryPrice) - perUnit).toFixed(2));
+};
+
+
 describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution', () => {
   let prisma: PrismaClient;
   let algoBotsService: AlgoBotsService;
@@ -318,8 +331,8 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
     expect(dbPos!.status).toBe(PositionState.PARTIALLY_CLOSED);
     // 30% of 260 = 78 -> floored to whole lots = 65 units; 195 units remaining
     expect(Number(dbPos!.quantity)).toBe(195);
-    // StopLoss moved to breakeven
-    expect(Number(dbPos!.stopLoss)).toBe(entryPrice);
+    // StopLoss moved to fee-adjusted breakeven
+    expect(Number(dbPos!.stopLoss)).toBe(feeAdjustedBreakeven(dbPos)); // fee-adjusted breakeven
 
     // Verify TP1 leg recorded in executionEventsJson
     const eventsAfterTP1 = dbPos!.executionEventsJson as any;
@@ -455,7 +468,7 @@ describe('Fix 202: PostgreSQL E2E Pipeline for Options-Only Algo Bot Execution',
 
     dbPos = await prisma.paperPosition.findUnique({ where: { id: positionId } });
     expect(dbPos!.status).toBe(PositionState.PARTIALLY_CLOSED);
-    expect(Number(dbPos!.stopLoss)).toBe(entryPrice); // Breakeven SL
+    expect(Number(dbPos!.stopLoss)).toBe(feeAdjustedBreakeven(dbPos)); // fee-adjusted breakeven // Breakeven SL
 
     // 7. Price reverses back down to Breakeven SL
     optionQuotes[contractSymbol] = { price: entryPrice - 1.0, lastUpdated: nowMs + 120000 };

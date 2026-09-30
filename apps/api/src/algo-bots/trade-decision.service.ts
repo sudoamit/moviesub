@@ -32,6 +32,7 @@ import {
   Timeframe,
   TradeDecisionType,
   TradeLifecycleState,
+  TransactionCostScheduleManager,
 } from '@quant/shared';
 import { PortfolioRiskManager, PositionSizer, TradeAccountingEngine } from '@quant/risk-engine';
 import { IAlgoBot } from './algo-bots.service';
@@ -437,6 +438,15 @@ export interface ICommitTradeDecisionResult {
 
 @Injectable()
 export class TradeDecisionService {
+  /**
+   * Maximum estimated round-trip fees as a fraction of planned risk (R). Default 0.5R; override with
+   * TRADING_MAX_COST_TO_RISK (e.g. pipeline-wiring tests whose synthetic setups are not economic).
+   */
+  static get MAX_COST_TO_RISK(): number {
+    const configured = Number(process.env.TRADING_MAX_COST_TO_RISK);
+    return Number.isFinite(configured) && configured > 0 ? configured : 0.5;
+  }
+
   private readonly logger = new Logger(TradeDecisionService.name);
 
   constructor(
@@ -1147,6 +1157,34 @@ export class TradeDecisionService {
     const riskPercent =
       initialCapital > 0 ? Number(((riskAmount / initialCapital) * 100).toFixed(2)) : 1.0;
 
+    // Gate 13.5: Cost vs risk. Estimated entry + exit fees (same schedule execution charges) must not exceed
+    // half of the planned risk; otherwise fees alone consume most of a 1R move and the trade is fee-negative.
+    // Skipped for non-option NIFTY/BANKNIFTY: that legacy index "derivative" is not a live-traded product and
+    // its fee schedule is a cash-equity placeholder (open audit item M-1), so a cost gate on it would be noise.
+    const isLegacyIndexDerivative =
+      !isOptionBotOrSignal && ['NIFTY', 'BANKNIFTY'].includes(String(instrument?.symbol).toUpperCase());
+    if (resolvedQuantity > 0 && riskAmount > 0 && optEntry && sl && instrument && !isLegacyIndexDerivative) {
+      try {
+        const costSymbol = (signal as any).contractSymbol || instrument.symbol;
+        const costs = TransactionCostScheduleManager.getInstance();
+        const entryFees = costs.calculateCostForSymbol(
+          optEntry * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'ENTRY', 'BUY',
+        ).totalChargesAccount;
+        const exitFees = costs.calculateCostForSymbol(
+          sl * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'EXIT', 'SELL',
+        ).totalChargesAccount;
+        const costInR = (entryFees + exitFees) / riskAmount;
+        if (costInR > TradeDecisionService.MAX_COST_TO_RISK) {
+          reasons.push({
+            code: 'COST_EXCEEDS_EDGE',
+            message: `Estimated round-trip fees ₹${(entryFees + exitFees).toFixed(2)} are ${costInR.toFixed(2)}R of planned risk ₹${riskAmount.toFixed(2)} (max ${TradeDecisionService.MAX_COST_TO_RISK}R). Stop is too tight for this instrument's costs.`,
+          });
+        }
+      } catch (costErr: any) {
+        this.logger.debug(`Cost-vs-risk estimate unavailable: ${costErr?.message}`);
+      }
+    }
+
     // Gate 14: Portfolio Open Position Duplicate Guard
     if (portfolioError) {
       reasons.push({
@@ -1406,7 +1444,15 @@ export class TradeDecisionService {
     };
 
     if (reasons.length > 0) {
-      const primaryReason = reasons[0];
+      // Missing or stale market data is the root cause whenever it occurs: without a valid quote, option levels
+      // cannot be derived and any geometry/sizing failure is only a downstream symptom. Report it first.
+      const rootCauseCodes = [
+        'OPTION_QUOTE_UNAVAILABLE',
+        'OPTION_QUOTE_STALE',
+        'MARKET_DATA_UNAVAILABLE',
+        'STALE_MARKET_DATA',
+      ];
+      const primaryReason = reasons.find((r) => rootCauseCodes.includes(r.code)) ?? reasons[0];
       return {
         decision: TradeDecisionType.REJECT,
         decisionReasonCode: primaryReason.code,

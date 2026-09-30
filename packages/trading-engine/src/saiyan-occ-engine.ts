@@ -398,7 +398,10 @@ export class SaiyanOCCEngine {
 
     let riskPoints = currentPrice * (cfg.slPercent / 100);
     if (isCrypto) {
-      riskPoints = Math.min(250, Math.max(120, currentATR * 1.2));
+      // Spot crypto round-trip fees are ~0.2% of notional. A stop tighter than ~0.5% makes fees alone cost
+      // 0.7-1.4R per trade (the old 120-250 point cap at BTC ~83,000), so the stop is floored at 0.5% of price
+      // and widened by volatility (1.2 x ATR) when that is larger, capped at 2%.
+      riskPoints = Math.min(currentPrice * 0.02, Math.max(currentPrice * 0.005, currentATR * 1.2));
     } else if (isNifty) {
       riskPoints = Math.min(22, Math.max(12, currentATR * 1.1));
     } else if (isBankNifty) {

@@ -376,8 +376,6 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   }, [entryDate, elapsedSeconds]);
 
   // Position Configuration with LocalStorage Persistence
-  const [isBreakevenActive, setIsBreakevenActive] = useState(false);
-  const [isTrailingSLActive, setIsTrailingSLActive] = useState(false);
   const [isAutoScaledOut, setIsAutoScaledOut] = useState(false);
   const [scaledOutPnL, setScaledOutPnL] = useState(0);
   const [manualCloseToast, setManualCloseToast] = useState<string | null>(null);
@@ -528,15 +526,64 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // spotEntryPrice alias for trade-math calculations
   const spotEntryPrice = underlyingTriggerPrice;
 
+  // Compute and Freeze Active Strike Price so it NEVER automatically switches mid-trade
+  const defaultStrike = useMemo(() => {
+    if (symbol === 'NIFTY') return Math.round(spotEntryPrice / 50) * 50;
+    if (symbol === 'BANKNIFTY') return Math.round(spotEntryPrice / 100) * 100;
+    return Math.round(spotEntryPrice);
+  }, [symbol, spotEntryPrice]);
+
+  const [lockedStrike, setLockedStrike] = useState<number>(defaultStrike);
+
+  const activeStrike = lockedStrike || defaultStrike;
+  const strikeKey = String(activeStrike);
+  const lockStorageKey = `quant_locked_opt_entry_v2_${setupKey}_${strikeKey}`;
+
+  // Lock Initial Entry Prices so they NEVER change during a running trade
+  const [lockedEntryPremium, setLockedEntryPremium] = useState<number>(0);
+
+  const lockedEntryRef = React.useRef<number>(lockedEntryPremium);
+  useEffect(() => {
+    lockedEntryRef.current = lockedEntryPremium;
+  }, [lockedEntryPremium]);
+
+  // PLANNED vs ACTUAL: once an option position exists, every value comes from the filled position
+  // (actual fill premium, initial stop, targets). Before a fill, values are the backend's planned levels.
+  const filledOptionPosition: any =
+    paperPosition && isOptionMode && !isCrypto && !isGold ? paperPosition : null;
+  const optionEntryPremium = filledOptionPosition
+    ? Number(filledOptionPosition.entryPrice) || 0
+    : lockedEntryRef.current > 0
+      ? lockedEntryRef.current
+      : lockedEntryPremium > 0
+        ? lockedEntryPremium
+        : optionData?.plannedEntryPremium || 0; // No fabricated premium: 0 means no planned premium yet.
+
+  const liveOptionPremium = optionData?.optionLtp || optionEntryPremium;
+
   // 3. Trigger Condition Evaluation
-  const isTriggerSatisfied =
-    hasActiveTrade ||
+  // For Options: entry triggers strictly according to Option Premium within +/- 1% of Planned Entry Premium.
+  // In SSR / before option data loads, falls back to underlying trigger level.
+  const isOptionTriggerSatisfied =
+    isOptionsAsset &&
+    (optionEntryPremium > 0 && liveOptionPremium > 0
+      ? Math.abs(liveOptionPremium - optionEntryPremium) / optionEntryPremium <= 0.01
+      : currentCMP > 0 && underlyingTriggerPrice > 0 && (isBull ? currentCMP >= underlyingTriggerPrice : currentCMP <= underlyingTriggerPrice));
+
+  const isSpotTriggerSatisfied =
+    !isOptionsAsset &&
     (isBull
       ? currentCMP > 0 && underlyingTriggerPrice > 0 && currentCMP >= underlyingTriggerPrice
       : currentCMP > 0 && underlyingTriggerPrice > 0 && currentCMP <= underlyingTriggerPrice);
 
-  const distanceToTrigger =
-    currentCMP > 0 && underlyingTriggerPrice > 0
+  const isTriggerSatisfied =
+    hasActiveTrade || (isOptionsAsset ? isOptionTriggerSatisfied : isSpotTriggerSatisfied);
+
+  const distanceToTrigger = isOptionsAsset
+    ? optionEntryPremium > 0 && liveOptionPremium > 0
+      ? Math.abs(liveOptionPremium - optionEntryPremium)
+      : 0
+    : currentCMP > 0 && underlyingTriggerPrice > 0
       ? Math.abs(currentCMP - underlyingTriggerPrice)
       : 0;
 
@@ -611,27 +658,6 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
   const canDisplayLiveMetrics = shouldDisplayLiveTradeMetrics(lifecycleState);
 
-  // Compute and Freeze Active Strike Price so it NEVER automatically switches mid-trade
-  const defaultStrike = useMemo(() => {
-    if (symbol === 'NIFTY') return Math.round(spotEntryPrice / 50) * 50;
-    if (symbol === 'BANKNIFTY') return Math.round(spotEntryPrice / 100) * 100;
-    return Math.round(spotEntryPrice);
-  }, [symbol, spotEntryPrice]);
-
-  const [lockedStrike, setLockedStrike] = useState<number>(defaultStrike);
-
-  const activeStrike = lockedStrike || defaultStrike;
-  const strikeKey = String(activeStrike);
-  const lockStorageKey = `quant_locked_opt_entry_v2_${setupKey}_${strikeKey}`;
-
-  // Lock Initial Entry Prices so they NEVER change during a running trade
-  const [lockedEntryPremium, setLockedEntryPremium] = useState<number>(0);
-
-  const lockedEntryRef = React.useRef<number>(lockedEntryPremium);
-  useEffect(() => {
-    lockedEntryRef.current = lockedEntryPremium;
-  }, [lockedEntryPremium]);
-
   // Re-sync ONLY on setup change or symbol change, NEVER on live price ticks!
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -699,7 +725,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         const triggerParam =
           underlyingTriggerPrice > 0 ? `&underlyingTriggerPrice=${underlyingTriggerPrice}` : '';
         const resLive = await fetch(
-          `${API_BASE}/api/options/smart-strike?symbol=${symbol}&direction=${direction}${triggerParam}&strike=${activeStrike}`,
+          `${API_BASE}/api/options/smart-strike?symbol=${symbol}&direction=${direction}${triggerParam}&strike=${activeStrike}&triggerMode=OPTION_PREMIUM`,
         );
         const dataLive = await resLive.json();
         if (isMounted && dataLive && (dataLive.contractName || dataLive.underlyingSymbol)) {
@@ -745,20 +771,6 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const numericQty = activeQty;
   const totalQuantity = isCrypto ? activeQty.toFixed(4) : isGold ? `${activeQty}` : activeQty.toLocaleString();
 
-  // PLANNED vs ACTUAL: once an option position exists, every value comes from the filled position
-  // (actual fill premium, initial stop, targets). Before a fill, values are the backend's planned levels.
-  const filledOptionPosition: any =
-    paperPosition && isOptionMode && !isCrypto && !isGold ? paperPosition : null;
-  const optionEntryPremium = filledOptionPosition
-    ? Number(filledOptionPosition.entryPrice) || 0
-    : lockedEntryRef.current > 0
-      ? lockedEntryRef.current
-      : lockedEntryPremium > 0
-        ? lockedEntryPremium
-        : optionData?.plannedEntryPremium || 0; // No fabricated premium: 0 means no planned premium yet.
-
-  const liveOptionPremium = optionData?.optionLtp || optionEntryPremium;
-
   // Authoritative strategy target configuration and R-multiples strictly sourced from strategy/backend
   const authoritativeRR1 = isOptionMode && !isCrypto && !isGold
     ? (optionData?.rr1 ?? signal?.rr1 ?? DEFAULT_OPTION_RR_RATIOS.rr1)
@@ -794,77 +806,32 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const effectiveEntryPrice = isOptionMode && !isCrypto && !isGold ? optionEntryPremium : spotEntryPrice;
   const effectiveCurrentPrice = isOptionMode && !isCrypto && !isGold ? liveOptionPremium : currentCMP;
 
-  // Strict Directional Stop Loss Geometry Validator (Bearish SL strictly > Entry, Bullish SL strictly < Entry)
-  const safeInitialSL = React.useMemo(() => {
-    const rawSL = Number(signal?.stopLoss);
-    if (isOptionMode && !isCrypto && !isGold) return optionStopLoss;
+  // STOPS ARE NEVER INVENTED OR TRAILED IN THE BROWSER.
+  // - Filled position: the server's stops. initialStopLoss anchors risk/R; stopLoss is the live stop the server
+  //   actually enforces (it moves only on the server: fee-adjusted breakeven after TP1, TP1 after TP2).
+  // - Planned setup: the strategy's own stop, unmodified (option setups use the backend's planned premium stop).
+  //   The server validates its geometry at order time; the browser does not clamp or default it.
+  const stopSourcePosition: any = paperPosition || null;
+  const plannedSL =
+    isOptionMode && !isCrypto && !isGold ? optionStopLoss : Number(signal?.stopLoss) || 0;
+  const serverInitialSL = stopSourcePosition
+    ? Number(stopSourcePosition.initialStopLoss ?? stopSourcePosition.stopLoss) || 0
+    : 0;
+  const serverCurrentSL = stopSourcePosition ? Number(stopSourcePosition.stopLoss) || 0 : 0;
 
-    // Tight sniper SL defaults: BTC max 180 pts, Gold 15 pts, NIFTY max 20 pts, BANKNIFTY max 55 pts
-    const defaultRisk = isCrypto
-      ? 160.0
-      : isGold
-        ? 15.0
-        : symbol === 'NIFTY'
-          ? 20.0
-          : symbol === 'BANKNIFTY'
-            ? 55.0
-            : spotEntryPrice * 0.004;
-
-    const minAllowedDist = isGold ? 10.0 : isCrypto ? 80.0 : 5.0;
-
-    if (isBull) {
-      if (rawSL > 0 && rawSL < spotEntryPrice) {
-        const dist = spotEntryPrice - rawSL;
-        // Clamp excessive SL on BTC only if extreme (> 500 pts)
-        if (isCrypto && dist > 500) return Number((spotEntryPrice - 300.0).toFixed(2));
-        // Clamp micro-SL on Gold if < 10.0 pts
-        if (isGold && dist < minAllowedDist) return Number((spotEntryPrice - defaultRisk).toFixed(2));
-        return rawSL;
-      }
-      return Number((spotEntryPrice - defaultRisk).toFixed(2));
-    } else {
-      if (rawSL > 0 && rawSL > spotEntryPrice) {
-        const dist = rawSL - spotEntryPrice;
-        if (isCrypto && dist > 500) return Number((spotEntryPrice + 300.0).toFixed(2));
-        if (isGold && dist < minAllowedDist) return Number((spotEntryPrice + defaultRisk).toFixed(2));
-        return rawSL;
-      }
-      return Number((spotEntryPrice + defaultRisk).toFixed(2));
-    }
-  }, [signal?.stopLoss, isOptionMode, isCrypto, isGold, optionStopLoss, isBull, spotEntryPrice, symbol]);
-
+  const safeInitialSL = serverInitialSL > 0 ? serverInitialSL : plannedSL;
   const originalSL = safeInitialSL;
   const riskPerUnit = Math.abs(effectiveEntryPrice - originalSL);
 
-  // Dynamic Trailing Stop Loss Calculation
-  const trailingSL = React.useMemo(() => {
-    if (!isTrailingSLActive || riskPerUnit <= 0) return originalSL;
-    if (isOptionMode && !isCrypto && !isGold) {
-      return Number(Math.max(originalSL, effectiveCurrentPrice - riskPerUnit * 0.6).toFixed(2));
-    }
-    if (isBull) {
-      const candidateSL = effectiveCurrentPrice - riskPerUnit * 0.9;
-      return Math.max(originalSL, candidateSL);
-    } else {
-      const candidateSL = effectiveCurrentPrice + riskPerUnit * 0.9;
-      return Math.min(originalSL, candidateSL);
-    }
-  }, [
-    isTrailingSLActive,
-    riskPerUnit,
-    originalSL,
-    effectiveCurrentPrice,
-    isBull,
-    isOptionMode,
-    isCrypto,
-    isGold,
-  ]);
-
-  const currentSL = isTrailingSLActive
-    ? trailingSL
-    : isBreakevenActive || isAutoScaledOut
-      ? effectiveEntryPrice
-      : originalSL;
+  const currentSL = serverCurrentSL > 0 ? serverCurrentSL : originalSL;
+  // "At breakeven" reflects the SERVER's stop (moved by the monitor after TP1 or via the breakeven endpoint).
+  // Options are always bought, so their protected side is "above entry" regardless of the signal direction.
+  const isLongForStop = isOptionMode && !isCrypto && !isGold ? true : isBull;
+  const isBreakevenActive =
+    Boolean(stopSourcePosition) &&
+    currentSL > 0 &&
+    effectiveEntryPrice > 0 &&
+    (isLongForStop ? currentSL >= effectiveEntryPrice : currentSL <= effectiveEntryPrice);
 
   const isProfitLocked =
     isOptionMode && !isCrypto && !isGold
@@ -1450,6 +1417,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         };
       }
 
+      // Idempotency: one key per setup + attempt. Double clicks, retries and a second tab for the SAME setup send
+      // the same key, so the server returns the existing position instead of opening a duplicate. The attempt
+      // number advances only after a rejection, so a genuinely rejected order can be retried.
+      const attemptKey = `quant_order_attempt_${setupKey}_${isOptionsAsset ? activeStrike : 'spot'}`;
+      let attempt = 1;
+      try {
+        attempt = Number(localStorage.getItem(attemptKey)) || 1;
+      } catch {}
+      payload.idempotencyKey = `ui:${setupKey}:${isOptionsAsset ? activeStrike : 'spot'}:a${attempt}`;
+
       setOrderRejectionReason(null);
       const res = await fetch(`${API_BASE}/api/paper-trading/order`, {
         method: 'POST',
@@ -1460,6 +1437,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
         const errorMsg = errJson.message || 'Failed to place paper order';
+        try {
+          localStorage.setItem(attemptKey, String(attempt + 1));
+        } catch {}
         setOrderRejectionReason(errorMsg);
         throw new Error(errorMsg);
       }
@@ -1521,24 +1501,21 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     setTimeout(() => setManualCloseToast(null), 3000);
   };
 
-  const handleToggleBreakeven = () => {
-    setIsBreakevenActive(!isBreakevenActive);
-    setManualCloseToast(
-      !isBreakevenActive
-        ? `🛡️ Stop Loss moved to Breakeven (Entry: ${currencySymbol}${effectiveEntryPrice.toFixed(2)}). Trade is now 100% RISK-FREE!`
-        : `Stop Loss restored to original level (${currencySymbol}${originalSL.toFixed(2)})`,
-    );
-    setTimeout(() => setManualCloseToast(null), 5000);
-  };
-
-  const handleToggleTrailing = () => {
-    setIsTrailingSLActive(!isTrailingSLActive);
-    setManualCloseToast(
-      !isTrailingSLActive
-        ? `📈 Dynamic Trailing Stop Loss ACTIVATED! SL will trail option premium to protect profit.`
-        : `Trailing Stop Loss disabled. SL restored to fixed level.`,
-    );
-    setTimeout(() => setManualCloseToast(null), 5000);
+  // Moves the stop to fee-adjusted breakeven ON THE SERVER; the displayed stop updates from the position.
+  const handleToggleBreakeven = async () => {
+    const posId = (paperPosition as any)?.id;
+    if (!posId || isBreakevenActive) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/paper-trading/positions/${posId}/breakeven`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message || 'Could not move stop to breakeven');
+      setManualCloseToast(
+        `🛡️ Server stop moved to fee-adjusted breakeven: ${currencySymbol}${Number(body.stopLoss).toFixed(2)}`,
+      );
+    } catch (err: any) {
+      setManualCloseToast(`BREAKEVEN NOT SET: ${err.message}`);
+    }
+    setTimeout(() => setManualCloseToast(null), 6000);
   };
 
   const lockedStrikeLabel = useMemo(() => {
@@ -2235,7 +2212,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               ? isOptionMode && !isCrypto && !isGold
                 ? `Underlying: ${nativeCurrency}${dp(spotEntryPrice).toFixed(2)} | Outlay: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                 : `Margin Used: ${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })}${isCrypto || isGold ? ` (${effectiveLeverage}x Leverage)` : ''}`
-              : `Underlying Trigger: ${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)}`}
+              : isOptionMode && !isCrypto && !isGold
+                ? `Trigger Band: ₹${(optionEntryPremium * 0.99).toFixed(2)} - ₹${(optionEntryPremium * 1.01).toFixed(2)} (±1%) | Underlying Trigger: ${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)}`
+                : `Underlying Trigger: ${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)}`}
           </span>
         </div>
 
@@ -2396,21 +2375,6 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 : 'Move SL to Breakeven'}
             </button>
 
-            {/* Dynamic Trailing Stop Loss Toggle */}
-            <button
-              onClick={handleToggleTrailing}
-              className={`px-3 py-1.5 rounded-lg border font-bold flex items-center gap-1.5 transition-all ${
-                isTrailingSLActive
-                  ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-md shadow-amber-400/20'
-                  : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              <TrendingUp className="w-3.5 h-3.5" />
-              {isTrailingSLActive
-                ? `Trailing SL Active (${currencySymbol}${dp(trailingSL).toFixed(2)})`
-                : 'Enable Trailing SL'}
-            </button>
-
             {/* Manual 50% Scale Out Button */}
             {!isAutoScaledOut && (
               <button
@@ -2454,7 +2418,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                         ? 'WAITING FOR TRIGGER'
                         : 'TRIGGER SATISFIED'}
                   </span>
-                  Current {symbol}: <strong className="text-white">₹{dp(currentCMP).toFixed(2)}</strong> | Underlying Trigger: <strong className="text-amber-300">₹{dp(underlyingTriggerPrice).toFixed(2)}</strong> | Distance: <strong className="text-cyan-300">₹{dp(distanceToTrigger).toFixed(2)}</strong> | Contract: <strong className="text-indigo-300">{symbol} {activeStrike} {isBull ? 'CE' : 'PE'}</strong> | Planned Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)}</strong> | Qty: <strong className="text-white">{numericQty} Qty</strong>
+                  Current {symbol}: <strong className="text-white">₹{dp(currentCMP).toFixed(2)}</strong> | Option LTP: <strong className="text-white">₹{dp(liveOptionPremium).toFixed(2)}</strong> | Planned Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)} (±1%)</strong> | Distance: <strong className="text-cyan-300">₹{dp(distanceToTrigger).toFixed(2)}</strong> | Contract: <strong className="text-indigo-300">{symbol} {activeStrike} {isBull ? 'CE' : 'PE'}</strong> | Qty: <strong className="text-white">{numericQty} Qty</strong>
                 </>
               ) : (
                 <>
@@ -2523,7 +2487,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 }`}
                 title={
                   !isTriggerSatisfied
-                    ? `Order cannot be executed until market price reaches the trigger level (${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)}).`
+                    ? isOptionsAsset
+                      ? `Order cannot be executed until option premium reaches the trigger level (₹${dp(optionEntryPremium).toFixed(2)} ±1%).`
+                      : `Order cannot be executed until market price reaches the trigger level (${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)}).`
                     : 'Execute paper order'
                 }
               >
@@ -2535,7 +2501,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 ) : !isTriggerSatisfied ? (
                   <>
                     <Clock className="w-3.5 h-3.5 text-amber-400" />
-                    WAITING FOR TRIGGER ({nativeCurrency}{dp(underlyingTriggerPrice).toFixed(2)})
+                    {isOptionsAsset
+                      ? `WAITING FOR OPTION TRIGGER (₹${dp(optionEntryPremium).toFixed(2)} ±1%)`
+                      : `WAITING FOR TRIGGER (${nativeCurrency}${dp(underlyingTriggerPrice).toFixed(2)})`}
                   </>
                 ) : isOptionsAsset ? (
                   <>

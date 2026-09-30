@@ -80,36 +80,25 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    // Distributed Leader Election Lease for Multi-Instance API Deployments (8s TTL)
-    const lockKey = 'scanner:leader';
-    const lockId = `instance_${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
-    const redisClient = this.redis.getClient();
-
-    if (redisClient && redisClient.status === 'ready') {
-      try {
-        const setRes = await redisClient.set(lockKey, lockId, 'PX', 8000, 'NX');
-        if (!setRes) {
-          this.isLeader = false;
-          this.logger.debug(
-            `[SCANNER_FOLLOWER_SKIPPED] Scanner leader lease held by another API instance. Skipping trigger.`,
-          );
-          return {
-            timestamp: new Date().toISOString(),
-            timeframe,
-            scannedCount: 0,
-            signalsFound: 0,
-            durationMs: 0,
-            signals: [],
-            status: 'SKIPPED_FOLLOWER_INSTANCE',
-          };
-        }
-        this.isLeader = true;
-      } catch (err: any) {
-        this.logger.warn(`Failed acquiring Redis scanner leader lock: ${err?.message || err}`);
-      }
-    } else {
-      this.isLeader = true;
+    // Distributed leader lease for multi-instance API deployments. One lease per scan, released when the
+    // scan ends so the next strategy scan in the same cycle can run.
+    const leaseToken = await this.acquireScanLease();
+    if (leaseToken === null) {
+      this.isLeader = false;
+      this.logger.debug(
+        `[SCANNER_FOLLOWER_SKIPPED] Scanner leader lease held by another API instance. Skipping trigger.`,
+      );
+      return {
+        timestamp: new Date().toISOString(),
+        timeframe,
+        scannedCount: 0,
+        signalsFound: 0,
+        durationMs: 0,
+        signals: [],
+        status: 'SKIPPED_FOLLOWER_INSTANCE',
+      };
     }
+    this.isLeader = true;
 
     this.isScanning = true;
     this.lastScanStartedAt = new Date();
@@ -279,6 +268,99 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       return summary;
     } finally {
       this.isScanning = false;
+      await this.releaseScanLease(leaseToken);
+    }
+  }
+
+  private static readonly SCAN_LEASE_KEY = 'scanner:leader';
+  private static readonly SCAN_LEASE_MS = 60_000;
+
+  /**
+   * Acquires the scanner leader lease. Returns the lease token, '' when Redis is unavailable (single
+   * instance: scan anyway), or null when a live lease is held by another instance.
+   *
+   * A lease is considered stale, and is taken over, when:
+   * - its remaining TTL is longer than any lease can be (the system clock moved backwards after it was set:
+   *   Redis stores absolute expiry times, so an 8s lease set "in December" would otherwise block scans for
+   *   months), or
+   * - its recorded acquisition time is in the future, or older than the lease duration.
+   */
+  private async acquireScanLease(): Promise<string | null> {
+    const redisClient = this.redis.getClient();
+    if (!redisClient || redisClient.status !== 'ready') return '';
+
+    const key = ScannerService.SCAN_LEASE_KEY;
+    const leaseMs = ScannerService.SCAN_LEASE_MS;
+    const token = `instance_${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
+    const value = JSON.stringify({ token, acquiredAt: Date.now() });
+
+    try {
+      if (await redisClient.set(key, value, 'PX', leaseMs, 'NX')) return token;
+    } catch (err: any) {
+      // Redis failed on the acquire itself: behave as a single instance and scan (previous behavior).
+      this.logger.warn(`Failed acquiring Redis scanner leader lock: ${err?.message || err}`);
+      return '';
+    }
+
+    // The lease is held. Anything that goes wrong while inspecting it means "held": never scan concurrently.
+    try {
+      const [held, pttl] = await Promise.all([redisClient.get(key), redisClient.pttl(key)]);
+      if (held === null) {
+        // Lease expired between our SET and GET: try once more.
+        return (await redisClient.set(key, value, 'PX', leaseMs, 'NX')) ? token : null;
+      }
+      let acquiredAt: number | null = null;
+      try {
+        acquiredAt = Number(JSON.parse(held || '').acquiredAt) || null;
+      } catch {
+        acquiredAt = null; // legacy plain-string lease
+      }
+      const now = Date.now();
+      const isStale =
+        pttl > leaseMs ||
+        (acquiredAt !== null && (acquiredAt > now + 5_000 || now - acquiredAt > leaseMs));
+      if (!isStale) return null;
+
+      this.logger.warn(
+        `[SCANNER_LEASE_RECOVERED] Discarding stale scanner lease '${held}' (pttl=${pttl}ms). The system clock likely changed.`,
+      );
+      // Compare-and-delete so we never remove a lease that changed hands in the meantime.
+      await redisClient.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        key,
+        held,
+      );
+      return (await redisClient.set(key, value, 'PX', leaseMs, 'NX')) ? token : null;
+    } catch (err: any) {
+      this.logger.warn(`Could not inspect held scanner lease; skipping this scan: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  private async releaseScanLease(token: string | null): Promise<void> {
+    if (!token) return;
+    const redisClient = this.redis.getClient();
+    if (!redisClient || redisClient.status !== 'ready') return;
+    try {
+      const held = await redisClient.get(ScannerService.SCAN_LEASE_KEY);
+      if (!held) return;
+      let heldToken: string | null = null;
+      try {
+        heldToken = JSON.parse(held).token;
+      } catch {
+        heldToken = null;
+      }
+      if (heldToken === token) {
+        await redisClient.eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          1,
+          ScannerService.SCAN_LEASE_KEY,
+          held,
+        );
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed releasing scanner leader lock: ${err?.message || err}`);
     }
   }
 

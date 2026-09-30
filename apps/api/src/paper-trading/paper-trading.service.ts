@@ -2112,6 +2112,61 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
   /**
    * Retrieves a position by ID with its parent account.
    */
+  /**
+   * Moves an open position's stop to its FEE-ADJUSTED breakeven (entry +/- per-unit round-trip fees), the
+   * same level the monitor sets after TP1. Server-side, so the stop the UI shows is the stop that is enforced.
+   * Rules: the position must be open; the live price must already be beyond the breakeven level (otherwise the
+   * stop would trigger immediately); the stop is only ever tightened, never loosened.
+   */
+  async moveStopToBreakeven(positionId: string): Promise<IPaperPosition> {
+    const pos: any = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!pos || (pos.status !== PositionState.OPEN && pos.status !== PositionState.PARTIALLY_CLOSED)) {
+      throw new NotFoundException(`Open position '${positionId}' not found`);
+    }
+    const isBuy = isLongPosition(pos.direction);
+    const events = (pos.executionEventsJson as any) || {};
+    const snap = events.accountingSnapshot || {};
+    const fx = Number(snap.fxRate ?? 1);
+    const contractSize = Number(snap.contractSize ?? 1);
+    const initialQty = Number(events.initialQuantity ?? pos.quantity);
+    const entryFees = Number((pos.chargesJson as any)?.totalChargesAccount ?? (pos.chargesJson as any)?.totalCharges ?? 0);
+    const entry = Number(pos.entryPrice);
+    const perUnitRoundTripFee = initialQty > 0 && fx > 0 ? (2 * entryFees) / (initialQty * contractSize * fx) : 0;
+    const breakeven = Number((isBuy ? entry + perUnitRoundTripFee : entry - perUnitRoundTripFee).toFixed(2));
+
+    let live: number;
+    try {
+      live = (await this.resolveLivePositionQuote(pos)).price;
+    } catch (err: any) {
+      throw new BadRequestException(`Cannot move stop: real-time market data unavailable (${err.message}).`);
+    }
+    if (isBuy ? live <= breakeven : live >= breakeven) {
+      throw new BadRequestException(
+        `Cannot move stop to breakeven ${breakeven}: live price ${live} has not moved beyond it yet (the stop would trigger immediately).`,
+      );
+    }
+    const currentStop = Number(pos.stopLoss);
+    if (isBuy ? currentStop >= breakeven : currentStop > 0 && currentStop <= breakeven) {
+      return this.mapDbPositionToInterface(pos); // already at or beyond breakeven: never loosen
+    }
+
+    const updated = await this.prisma.paperPosition.update({
+      where: { id: pos.id },
+      data: {
+        stopLoss: new Decimal(breakeven),
+        executionEventsJson: { ...events, currentStopLoss: breakeven, breakevenMovedAt: new Date().toISOString() },
+      },
+    });
+    await this.recordAudit(
+      'STOP_MOVED_TO_BREAKEVEN',
+      'POSITION',
+      pos.id,
+      { from: currentStop, to: breakeven, livePrice: live, perUnitRoundTripFee },
+      pos.correlationId,
+    );
+    return this.mapDbPositionToInterface(updated);
+  }
+
   async getPositionById(positionId: string) {
     return this.prisma.paperPosition.findUnique({
       where: { id: positionId },

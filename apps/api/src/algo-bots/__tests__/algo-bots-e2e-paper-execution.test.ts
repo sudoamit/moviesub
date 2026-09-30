@@ -5,6 +5,19 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { Direction, ICandle, SignalState, Timeframe } from '@quant/shared';
 import { SignalGenerator, CanonicalMarketSnapshotBuilder } from '@quant/trading-engine';
 
+// These suites verify pipeline WIRING (scanner -> decision -> order -> position). Their synthetic setups use
+// very tight stops that the cost-vs-risk gate correctly rejects as fee-negative, so the gate is relaxed here.
+// The gate itself is covered by cost-vs-risk-gate.spec.ts.
+const PREVIOUS_MAX_COST_TO_RISK = process.env.TRADING_MAX_COST_TO_RISK;
+beforeAll(() => {
+  process.env.TRADING_MAX_COST_TO_RISK = '1000';
+});
+afterAll(() => {
+  if (PREVIOUS_MAX_COST_TO_RISK === undefined) delete process.env.TRADING_MAX_COST_TO_RISK;
+  else process.env.TRADING_MAX_COST_TO_RISK = PREVIOUS_MAX_COST_TO_RISK;
+});
+
+
 describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
   let prismaClient: any = null;
   let algoBotsService: AlgoBotsService;

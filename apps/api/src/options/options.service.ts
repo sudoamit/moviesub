@@ -559,6 +559,7 @@ export class OptionsService {
           underlyingTriggerPrice?: number;
           spotPriceOverride?: number;
           strikeOverride?: number;
+          triggerMode?: 'OPTION_PREMIUM' | 'UNDERLYING_SPOT';
         },
     maybeDirection?: 'BULLISH' | 'BEARISH',
     maybeSpotTarget?: number,
@@ -567,6 +568,7 @@ export class OptionsService {
     maybeSpotPriceOverride?: number,
     maybeStrikeOverride?: number,
     maybeUnderlyingTriggerPrice?: number,
+    maybeTriggerMode?: 'OPTION_PREMIUM' | 'UNDERLYING_SPOT',
   ): Promise<ISmartOptionRecommendation> {
     let symbol: string;
     let direction: 'BULLISH' | 'BEARISH';
@@ -576,6 +578,7 @@ export class OptionsService {
     let currentSpotPriceInput: number | undefined;
     let underlyingTriggerPriceInput: number | undefined;
     let strikeOverride: number | undefined;
+    let triggerMode: 'OPTION_PREMIUM' | 'UNDERLYING_SPOT' | undefined;
 
     if (typeof symbolOrParams === 'object' && symbolOrParams !== null) {
       symbol = symbolOrParams.symbol;
@@ -586,6 +589,7 @@ export class OptionsService {
       currentSpotPriceInput = symbolOrParams.currentSpotPrice ?? symbolOrParams.spotPriceOverride;
       underlyingTriggerPriceInput = symbolOrParams.underlyingTriggerPrice;
       strikeOverride = symbolOrParams.strikeOverride;
+      triggerMode = symbolOrParams.triggerMode;
     } else {
       symbol = symbolOrParams;
       direction = maybeDirection || 'BULLISH';
@@ -595,6 +599,7 @@ export class OptionsService {
       currentSpotPriceInput = maybeSpotPriceOverride;
       strikeOverride = maybeStrikeOverride;
       underlyingTriggerPriceInput = maybeUnderlyingTriggerPrice;
+      triggerMode = maybeTriggerMode;
     }
 
     // 1. Authoritative Current Spot Price (strictly from live provider or explicit input)
@@ -607,13 +612,8 @@ export class OptionsService {
     );
     const underlyingTriggerPrice = triggerProvided ? (underlyingTriggerPriceInput as number) : currentSpotPrice;
 
-    // 3. Trigger Condition Evaluation (eligibility is evaluated separately once the contract is known)
     const isBull = direction === 'BULLISH';
     const optType: 'CE' | 'PE' = isBull ? 'CE' : 'PE';
-    const distanceToTrigger = Number(Math.abs(underlyingTriggerPrice - currentSpotPrice).toFixed(2));
-    const triggerConditionSatisfied =
-      triggerProvided &&
-      (isBull ? currentSpotPrice >= underlyingTriggerPrice : currentSpotPrice <= underlyingTriggerPrice);
 
     // 4. Generate option chain strictly grounded in currentSpotPrice
     const chain = await this.getOptionChain(
@@ -633,15 +633,54 @@ export class OptionsService {
 
     // Current Option LTP at current market spot
     const currentOptionLtp = contract.ltp;
+    const contractSymbolForFeed = `${chain.symbol} ${selectedStrike.strikePrice} ${optType}`;
+
+    // Planned Option Entry Premium at trigger scenario
+    let plannedEntryPremium = currentOptionLtp;
+    if (Math.abs(underlyingTriggerPrice - currentSpotPrice) > 0.05) {
+      const bsAtTrigger = BlackScholesModel.calculateOptionPremiumAtTrigger(
+        underlyingTriggerPrice,
+        selectedStrike.strikePrice,
+        chain.daysToExpiry / 365,
+        0.07,
+        contract.iv / 100,
+        optType,
+      );
+      plannedEntryPremium = bsAtTrigger.price;
+    }
+
+    // NOTE: this service must never publish into the execution quote feed. The chart premium here may be a
+    // Black-Scholes model value or a cached scrape; stamping it with Date.now() would let an order fill at a
+    // model price labelled as a live exchange quote. Live option quotes are published only by
+    // RealMarketStreamerService.fetchRealNseOptionQuotes, with the exchange's real last-trade time.
 
     // Execution eligibility: the order boundary fills only against a live option quote from the execution
     // feed. A scraped or modelled premium is display-only, so without that feed the setup is NOT ELIGIBLE.
-    const contractSymbolForFeed = `${chain.symbol} ${selectedStrike.strikePrice} ${optType}`;
-    const hasLiveOptionQuote = Boolean(
+    const liveOptionTicker =
       this.realMarketStreamer &&
-        typeof this.realMarketStreamer.getOptionTicker === 'function' &&
-        this.realMarketStreamer.getOptionTicker(contractSymbolForFeed),
-    );
+      typeof this.realMarketStreamer.getOptionTicker === 'function'
+        ? this.realMarketStreamer.getOptionTicker(contractSymbolForFeed)
+        : null;
+    const hasLiveOptionQuote = Boolean(liveOptionTicker);
+    const effectiveOptionLtp =
+      hasLiveOptionQuote && liveOptionTicker?.price ? liveOptionTicker.price : currentOptionLtp;
+
+    // Trigger Condition Evaluation
+    const isOptionPremiumTrigger = triggerMode === 'OPTION_PREMIUM';
+    const triggerConditionSatisfied =
+      triggerProvided &&
+      (isOptionPremiumTrigger
+        ? plannedEntryPremium > 0 &&
+          effectiveOptionLtp > 0 &&
+          Math.abs(effectiveOptionLtp - plannedEntryPremium) / plannedEntryPremium <= 0.01
+        : isBull
+          ? currentSpotPrice >= underlyingTriggerPrice
+          : currentSpotPrice <= underlyingTriggerPrice);
+
+    const distanceToTrigger = isOptionPremiumTrigger
+      ? Number(Math.abs(effectiveOptionLtp - plannedEntryPremium).toFixed(2))
+      : Number(Math.abs(underlyingTriggerPrice - currentSpotPrice).toFixed(2));
+
     const ineligibilityReasons: string[] = [];
     if (!hasLiveOptionQuote) {
       ineligibilityReasons.push(
@@ -659,20 +698,6 @@ export class OptionsService {
         : executionEligible
           ? 'READY_FOR_EXECUTION'
           : 'NOT_ELIGIBLE';
-
-    // Planned Option Entry Premium at trigger scenario
-    let plannedEntryPremium = currentOptionLtp;
-    if (Math.abs(underlyingTriggerPrice - currentSpotPrice) > 0.05) {
-      const bsAtTrigger = BlackScholesModel.calculateOptionPremiumAtTrigger(
-        underlyingTriggerPrice,
-        selectedStrike.strikePrice,
-        chain.daysToExpiry / 365,
-        0.07,
-        contract.iv / 100,
-        optType,
-      );
-      plannedEntryPremium = bsAtTrigger.price;
-    }
 
     // Planned Option Stop Premium
     const optDelta = Math.abs(contract.delta);

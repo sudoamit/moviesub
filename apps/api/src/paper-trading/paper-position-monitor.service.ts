@@ -617,8 +617,27 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const fractionOfCurrent = currentQuantity > 0 ? partialQty / currentQuantity : 0;
     const releasedMargin = Number((posUsedMargin * fractionOfCurrent).toFixed(2));
 
+    // After TP1 the stop moves to a FEE-ADJUSTED breakeven: entry plus the per-unit round-trip fees (the entry
+    // fee already paid, plus an exit fee of similar size). A stop at the bare entry price books a net loss
+    // once fees are paid. Falls back to entry if the adjusted level would not be on the protected side of
+    // the current price.
+    const entryFeesAccount = Number(
+      (pos.chargesJson as any)?.totalChargesAccount ?? (pos.chargesJson as any)?.totalCharges ?? 0,
+    );
+    const perUnitRoundTripFee =
+      originalQuantity > 0 && fxRate > 0
+        ? (2 * entryFeesAccount) / (originalQuantity * contractSize * fxRate)
+        : 0;
+    const feeAdjustedBreakeven = Number(
+      (isBuy ? entryPrice + perUnitRoundTripFee : entryPrice - perUnitRoundTripFee).toFixed(2),
+    );
+    const breakevenStop =
+      perUnitRoundTripFee > 0 &&
+      (isBuy ? feeAdjustedBreakeven < livePrice : feeAdjustedBreakeven > livePrice)
+        ? feeAdjustedBreakeven
+        : entryPrice;
     const newStopLoss =
-      stage === 'TP1' ? entryPrice : pos.target1 ? Number(pos.target1) : entryPrice;
+      stage === 'TP1' ? breakevenStop : pos.target1 ? Number(pos.target1) : entryPrice;
 
     const execTimeStr = new Date().toISOString();
     const marketTimeStr = marketEventTime.toISOString();

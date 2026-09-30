@@ -20,6 +20,19 @@ import {
   TradeLifecycleManager,
 } from '@quant/risk-engine';
 
+// Fee-adjusted breakeven the monitor sets after TP1: entry +/- per-unit round-trip fees (2 x entry fees).
+const feeAdjustedBreakeven = (p: any): number => {
+  const snap = (p.executionEventsJson as any)?.accountingSnapshot || {};
+  const fx = Number(snap.fxRate ?? 1);
+  const contractSize = Number(snap.contractSize ?? 1);
+  const initialQty = Number((p.executionEventsJson as any)?.initialQuantity ?? p.quantity);
+  const fees = Number((p.chargesJson as any)?.totalChargesAccount ?? (p.chargesJson as any)?.totalCharges ?? 0);
+  const perUnit = (2 * fees) / (initialQty * contractSize * fx);
+  const isBuy = p.direction === 'BULLISH' || p.direction === 'BUY';
+  return Number((isBuy ? Number(p.entryPrice) + perUnit : Number(p.entryPrice) - perUnit).toFixed(2));
+};
+
+
 describe('NIFTY Paper-Trading Lifecycle End-to-End Suite (14 Invariant Tests)', () => {
   let prisma: PrismaClient;
   let paperTrading: PaperTradingService;
@@ -269,7 +282,7 @@ describe('NIFTY Paper-Trading Lifecycle End-to-End Suite (14 Invariant Tests)', 
     const dbPosAfter = await prisma.paperPosition.findUnique({ where: { id: pos.id } });
     expect(dbPosAfter!.status).toBe(PositionState.PARTIALLY_CLOSED);
     expect(Number(dbPosAfter!.quantity)).toBe(70); // exactly 30% closed, 70% remaining
-    expect(Number(dbPosAfter!.stopLoss)).toBe(Number(dbPosAfter!.entryPrice)); // moved to breakeven
+    expect(Number(dbPosAfter!.stopLoss)).toBe(feeAdjustedBreakeven(dbPosAfter)); // moved to fee-adjusted breakeven
 
     const events = dbPosAfter!.executionEventsJson as any;
     expect(events.partialLegs).toHaveLength(1);

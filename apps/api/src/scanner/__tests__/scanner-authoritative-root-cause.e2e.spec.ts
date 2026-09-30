@@ -20,6 +20,19 @@ import {
   Timeframe,
 } from '@quant/shared';
 
+// These suites verify pipeline WIRING (scanner -> decision -> order -> position). Their synthetic setups use
+// very tight stops that the cost-vs-risk gate correctly rejects as fee-negative, so the gate is relaxed here.
+// The gate itself is covered by cost-vs-risk-gate.spec.ts.
+const PREVIOUS_MAX_COST_TO_RISK = process.env.TRADING_MAX_COST_TO_RISK;
+beforeAll(() => {
+  process.env.TRADING_MAX_COST_TO_RISK = '1000';
+});
+afterAll(() => {
+  if (PREVIOUS_MAX_COST_TO_RISK === undefined) delete process.env.TRADING_MAX_COST_TO_RISK;
+  else process.env.TRADING_MAX_COST_TO_RISK = PREVIOUS_MAX_COST_TO_RISK;
+});
+
+
 describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real PostgreSQL & Real Provider Adapter)', () => {
   let moduleRef: TestingModule;
   let scannerService: ScannerService;

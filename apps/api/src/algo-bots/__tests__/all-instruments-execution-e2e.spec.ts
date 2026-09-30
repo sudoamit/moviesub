@@ -465,7 +465,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
           timeframe: '15m',
           minScore: 75,
           smcCondition: 'ORDER_BLOCK',
-          lots: 1,
+          lots: 25, // economic size: fees on 1 share exceed the 0.5R cost-vs-risk limit
           autoExecutePaper: true,
           notifyWebhook: false,
           isActive: true,
@@ -482,7 +482,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
       const pos = await prisma.paperPosition.findUnique({ where: { id: posId } });
       expect(pos).toBeDefined();
       expect(pos!.symbol).toBe('RELIANCE');
-      expect(Number(pos!.quantity)).toBe(1); // Lot size 1
+      expect(Number(pos!.quantity)).toBe(25); // 25 x lot size 1
 
       const charges = pos!.chargesJson as any;
       expect(charges.feeCurrency).toBe('INR');
@@ -507,7 +507,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
           timeframe: '15m',
           minScore: 75,
           smcCondition: 'ORDER_BLOCK',
-          lots: 1,
+          lots: 25, // economic size: fees on 1 share exceed the 0.5R cost-vs-risk limit
           autoExecutePaper: true,
           notifyWebhook: false,
           isActive: true,
@@ -536,7 +536,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
           timeframe: '15m',
           minScore: 75,
           smcCondition: 'ORDER_BLOCK',
-          lots: 1,
+          lots: 25, // economic size: fees on 1 share exceed the 0.5R cost-vs-risk limit
           autoExecutePaper: true,
           notifyWebhook: false,
           isActive: true,
@@ -631,7 +631,7 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
           timeframe: '15m',
           minScore: 75,
           smcCondition: 'ORDER_BLOCK',
-          lots: 1,
+          lots: 25, // economic size: fees on 1 share exceed the 0.5R cost-vs-risk limit
           autoExecutePaper: true,
           notifyWebhook: false,
           isActive: true,
