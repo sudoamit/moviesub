@@ -231,7 +231,8 @@ export const RiskWidget: React.FC<RiskWidgetProps> = ({ selectedSignal }) => {
   // Quick Account Balance Presets (INR)
   const currentPresets = [50000, 100000, 200000, 500000, 1000000, 2500000, 5000000];
 
-  const leveragePresets = isSpot ? [1] : isGold ? [1, 2, 5] : [1, 2, 4, 5, 10];
+  const isPerp = selectedSignal?.symbol === 'BTCUSDT_PERP';
+  const leveragePresets = isSpot ? [1] : isGold ? [1, 2, 5] : isPerp ? [1, 5, 10, 20, 50] : [1, 2, 4, 5, 10];
 
   return (
     <div className="bg-[#0B0F19] border border-slate-800 rounded-xl p-4 sm:p-6 shadow-2xl font-mono space-y-5 relative overflow-hidden">

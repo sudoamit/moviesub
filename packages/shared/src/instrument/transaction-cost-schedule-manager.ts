@@ -180,6 +180,40 @@ export class TransactionCostScheduleManager {
         };
       }
 
+      case 'BINANCE_USDM_FUTURES': {
+        // Binance USDⓈ-M futures regular tier: 0.05% taker (market orders), charged in USDT on notional
+        const totalChargesQuote = Number((grossTurnoverQuote * 0.0005).toFixed(4));
+        const totalChargesAccount = Number((totalChargesQuote * fxRate).toFixed(2));
+
+        return {
+          brokerage: totalChargesAccount,
+          brokerageQuote: totalChargesQuote,
+          brokerageAccount: totalChargesAccount,
+          stt: 0,
+          exchangeFee: 0,
+          exchangeTurnover: 0,
+          sebi: 0,
+          sebiTurnover: 0,
+          stampDuty: 0,
+          gst: 0,
+          totalChargesQuote,
+          totalChargesAccount,
+          totalCharges: totalChargesAccount,
+          totalFees: totalChargesAccount,
+          feeCurrency: 'USDT',
+          accountCurrency: 'INR',
+          grossTurnoverQuote,
+          grossTurnoverAccount,
+          fxRate,
+          fxRateTimestamp: fxTimestamp,
+          fxTimestamp,
+          scheduleVersion: 'BINANCE_USDM_FUTURES_2024',
+          feeCalculationBasis: 'BINANCE_FUTURES_TAKER_0_05_PERCENT',
+          instrumentType: 'FUTURE',
+          stage,
+        };
+      }
+
       case 'COMEX_COMMODITY_SPOT': {
         // Spot metals 0.02% spread/fee in USD
         const totalChargesQuote = Number((grossTurnoverQuote * 0.0002).toFixed(4));

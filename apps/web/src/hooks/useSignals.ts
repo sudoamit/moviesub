@@ -12,7 +12,9 @@ function matchSignalSymbol(signalSym?: string, targetSym?: string): boolean {
   const normTgt = targetSym.toUpperCase().replace(/_SPOT$/, '');
   if (normSig === normTgt) return true;
   if ((normSig === 'GOLD' || normSig === 'XAUUSD') && (normTgt === 'GOLD' || normTgt === 'XAUUSD')) return true;
-  if ((normSig === 'BTC' || normSig.includes('BTC')) && (normTgt === 'BTC' || normTgt.includes('BTC'))) return true;
+  // BTC spot aliases match each other; the perpetual (BTCUSDT_PERP) is a separate instrument and only matches itself.
+  const isBtcSpot = (x: string) => x.includes('BTC') && !x.includes('PERP');
+  if (isBtcSpot(normSig) && isBtcSpot(normTgt)) return true;
   return false;
 }
 
@@ -63,6 +65,19 @@ export function useSignals(
   useEffect(() => {
     fetchSignals(selectedTimeframe, selectedStrategy);
   }, [fetchSignals, selectedTimeframe, selectedStrategy]);
+
+  // Re-fetch signals when a setup is invalidated/missed
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleRescan = (e: any) => {
+      const targetSym = e?.detail?.symbol;
+      if (!targetSym || matchSignalSymbol(targetSym, selectedSymbol)) {
+        fetchSignals(selectedTimeframe, selectedStrategy);
+      }
+    };
+    window.addEventListener('quant_rescan_requested', handleRescan);
+    return () => window.removeEventListener('quant_rescan_requested', handleRescan);
+  }, [fetchSignals, selectedSymbol, selectedTimeframe, selectedStrategy]);
 
   // Keep selectedSignal in sync when symbol changes
   useEffect(() => {

@@ -24,7 +24,8 @@
       "@quant/trading-engine": ["packages/trading-engine/src"],
       "@quant/risk-engine": ["packages/risk-engine/src"],
       "@quant/backtesting": ["packages/backtesting/src"],
-      "@quant/learning-engine": ["packages/learning-engine/src"]
+      "@quant/learning-engine": ["packages/learning-engine/src"],
+      "@quant/strategy-lab": ["packages/strategy-lab/src"]
     }
   },
   "exclude": ["node_modules", "dist", ".next", "coverage"]

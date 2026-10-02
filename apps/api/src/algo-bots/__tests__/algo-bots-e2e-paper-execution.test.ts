@@ -255,6 +255,12 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
     expect(signal.stopLoss).toBeLessThan(signal.entryZone.optimal);
     expect(signal.takeProfits.tp1).toBeGreaterThan(signal.entryZone.optimal);
 
+    // An executable setup: the live market is at the planned entry (a fixed unrelated quote would be a chased entry).
+    mockPaperTradingService.getValidatedMarketPrice.mockResolvedValue({
+      price: signal.entryZone.optimal,
+      timestamp: new Date(),
+    });
+
     const btcBot: IAlgoBot = {
       id: 'bot_btc_liquidity_sweep',
       name: 'BTCUSDT Liquidity Sweeper Test',

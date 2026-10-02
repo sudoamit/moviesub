@@ -40,7 +40,9 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
     currentSymbol === 'BTCUSDT_SPOT' ||
     currentSymbol.toUpperCase().includes('BTC');
   const isGold = currentSymbol === 'XAUUSD' || currentSymbol === 'GOLD';
+  // Instrument prices are in the instrument's own currency; account balances and P&L are always INR.
   const currencySymbol = isCrypto || isGold ? '$' : '₹';
+  const accountCcy = '₹';
   // Quote currency identifier
   const quoteCurrency = isCrypto ? 'USDT' : isGold ? 'USD' : 'INR';
   // Display price helper
@@ -57,13 +59,16 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>(
     activeSignal?.direction === 'BEARISH' ? 'SELL' : 'BUY',
   );
-  const [leverage, setLeverage] = useState<number>(isCrypto ? 1 : 5);
+  // BTC spot is 1x only; the BTC perpetual is an isolated-margin future (backend max 20x).
+  const isPerp = currentSymbol.toUpperCase() === 'BTCUSDT_PERP';
+  const isSpotCrypto = isCrypto && !isPerp;
+  const [leverage, setLeverage] = useState<number>(isSpotCrypto ? 1 : 5);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const availableLeverages = isCrypto ? [1] : [1, 2, 5, 10, 20];
+  const availableLeverages = isSpotCrypto ? [1] : isPerp ? [1, 5, 10, 20, 50] : [1, 2, 5, 10, 20];
 
   useEffect(() => {
-    if (isCrypto) {
+    if (isSpotCrypto) {
       setLeverage(1);
       return;
     }
@@ -73,7 +78,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         setLeverage(Number(saved));
       }
     }
-  }, [isCrypto]);
+  }, [isSpotCrypto]);
 
   // Exact Exchange Lot Multipliers
   const getLotMultiplier = (sym: string): number => {
@@ -92,6 +97,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         return 400;
       case 'BTCUSDT':
       case 'BTCUSDT_SPOT':
+      case 'BTCUSDT_PERP':
         return 0.01;
       case 'XAUUSD':
       case 'GOLD':
@@ -142,7 +148,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
     currentSymbol === 'BTCUSDT' ||
     currentSymbol === 'NIFTY_SPOT' ||
     currentSymbol === 'BANKNIFTY_SPOT' ||
-    currentSymbol.toUpperCase().includes('BTC');
+    isSpotCrypto;
 
   const hasOpenPosition = portfolio?.openPositions?.some(
     (p: any) =>
@@ -272,7 +278,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
       });
       const data = await res.json();
       setStatusMessage(
-        `✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net P&L: ${currencySymbol}${data.realizedPnL.toFixed(2)}`,
+        `✓ Position Closed @ ${currencySymbol}${data.exitPrice.toFixed(2)} | Net P&L: ${accountCcy}${data.realizedPnL.toFixed(2)}`,
       );
       setTimeout(() => setStatusMessage(null), 5000);
       if (typeof window !== 'undefined') {
@@ -361,9 +367,8 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-xl">
           <span className="text-[10px] text-slate-400 block uppercase font-bold">TOTAL EQUITY</span>
           <span className="text-lg sm:text-xl font-black text-white block mt-0.5">
-            {currencySymbol}
-            {portfolio?.totalEquity?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
-              '10,00,000.00'}
+            {accountCcy}
+            {portfolio?.totalEquity?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ?? '—'}
           </span>
           <span className="text-[9px] text-slate-500">Virtual Portfolio</span>
         </div>
@@ -373,12 +378,11 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             AVAILABLE MARGIN
           </span>
           <span className="text-lg sm:text-xl font-black text-cyan-300 block mt-0.5">
-            {currencySymbol}
-            {portfolio?.availableMargin?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
-              '10,00,000.00'}
+            {accountCcy}
+            {portfolio?.availableMargin?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ?? '—'}
           </span>
           <span className="text-[9px] text-slate-500">
-            Used: {currencySymbol}
+            Used: {accountCcy}
             {portfolio?.usedMargin?.toLocaleString() || '0'}
           </span>
         </div>
@@ -391,7 +395,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             }`}
           >
             {(portfolio?.realizedPnL || 0) >= 0 ? '+' : ''}
-            {currencySymbol}
+            {accountCcy}
             {portfolio?.realizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
               '0.00'}
           </span>
@@ -410,7 +414,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
             }`}
           >
             {(portfolio?.unrealizedPnL || 0) >= 0 ? '+' : ''}
-            {currencySymbol}
+            {accountCcy}
             {portfolio?.unrealizedPnL?.toLocaleString(undefined, { minimumFractionDigits: 2 }) ||
               '0.00'}
           </span>
@@ -463,7 +467,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                   key={lev}
                   onClick={() => {
                     setLeverage(lev);
-                    if (typeof window !== 'undefined' && !isCrypto) {
+                    if (typeof window !== 'undefined' && !isSpotCrypto) {
                       localStorage.setItem('quant_risk_leverage', String(lev));
                     }
                   }}
@@ -674,13 +678,13 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                               }
                             >
                               {pos.unrealizedPnL >= 0 ? '+' : ''}
-                              {currencySymbol}
+                              {accountCcy}
                               {pos.unrealizedPnL.toFixed(2)} ({pos.unrealizedR}R)
                             </span>
                           </td>
                           <td className="p-3 text-slate-500">
-                            {currencySymbol}
-                            {pos.charges?.totalCharges || 20}
+                            {accountCcy}
+                            {pos.charges?.totalCharges ?? '—'}
                           </td>
                           <td className="p-3 text-right">
                             <button
@@ -763,7 +767,7 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
                               }
                             >
                               {trade.realizedPnL >= 0 ? '+' : ''}
-                              {currencySymbol}
+                              {accountCcy}
                               {trade.realizedPnL.toFixed(2)}
                             </span>
                           </td>

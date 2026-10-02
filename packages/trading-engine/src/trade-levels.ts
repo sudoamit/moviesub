@@ -41,6 +41,7 @@ export class TradeLevelsCalculator {
     anchorSwing: ISwingPoint | null,
     orderBlock: IOrderBlock | null,
     fvg: IFairValueGap | null,
+    symbol?: string,
   ): ITradeLevels | null {
     if (direction === Direction.NEUTRAL || !candles || candles.length === 0) {
       return null;
@@ -55,13 +56,25 @@ export class TradeLevelsCalculator {
         ? Number(rawAtr)
         : Math.max(1, Number(lastCandle.high) - Number(lastCandle.low));
 
-    const isBtc = currentPrice > 20000;
-    const isGold = currentPrice > 3000 && currentPrice < 10000;
+    // Crypto is identified by symbol when known. Crypto stops sit beyond the structure (order block / FVG /
+    // swing) plus a quarter-ATR buffer, bounded to 0.5%-2% of price: a 100-220 point BTC stop (~0.15%) is inside
+    // normal 15m noise and smaller than round-trip fees (0.1%-0.2% of notional), so it could never pay.
+    const sym = (symbol || '').toUpperCase();
+    const isCrypto = sym.includes('BTC') || sym.includes('ETH');
+    // Indian indices are identified by symbol so NIFTY/BANKNIFTY (> 20,000) are not mistaken for BTC.
+    const isIndex = !isCrypto && /NIFTY|SENSEX|BANKEX/.test(sym);
+    // Without a known symbol the legacy price heuristic is kept.
+    const isBtc = !isCrypto && !isIndex && currentPrice > 20000;
+    const isGold = !isCrypto && !isIndex && currentPrice > 3000 && currentPrice < 10000;
 
     // Ultra-tight institutional invalidation buffer (0.05x ATR)
     const slBuffer = Math.max(
       0.1,
-      isBtc
+      isCrypto
+        ? currentAtr * 0.25
+        : isIndex
+        ? currentAtr * 0.1
+        : isBtc
         ? Math.min(15.0, currentAtr * 0.05)
         : isGold
           ? Math.max(0.8, currentAtr * 0.1)
@@ -69,12 +82,21 @@ export class TradeLevelsCalculator {
     );
 
     // Tight sniper risk boundaries (BTC capped at 120-220 pts; Gold at 10-30 pts; Indices capped at 0.10%-0.15%)
-    const maxRiskPoints = isBtc
+    // Indices: stop 0.1%-0.6% of the index level (about 25-150 NIFTY points)
+    const maxRiskPoints = isCrypto
+      ? currentPrice * 0.02
+      : isIndex
+      ? currentPrice * 0.006
+      : isBtc
       ? Math.min(220, Math.max(120, currentAtr * 0.35))
       : isGold
         ? Math.min(30.0, Math.max(15.0, currentAtr * 2.0))
         : Math.max(currentAtr * 0.35, currentAtr * 0.45);
-    const minRiskPoints = isBtc
+    const minRiskPoints = isCrypto
+      ? currentPrice * 0.005
+      : isIndex
+      ? currentPrice * 0.001
+      : isBtc
       ? 100.0
       : isGold
         ? Math.max(10.0, currentAtr * 0.8)
@@ -115,8 +137,13 @@ export class TradeLevelsCalculator {
       const targetSL = localLow - slBuffer;
       const unconstrainedRisk = entryOptimal - targetSL;
 
-      // Clamp risk tightly so SL is ultra-small and precise
-      let risk = Math.min(maxRiskPoints, Math.max(minRiskPoints, unconstrainedRisk));
+      // The stop must sit beyond the structure (invalidation level). A stop narrower than the minimum is widened;
+      // if the structure needs more than the maximum risk the setup is rejected rather than pulling the stop
+      // inside the zone, where an ordinary retest would hit it.
+      const maxRisk = isCrypto ? entryOptimal * 0.02 : maxRiskPoints;
+      const minRisk = isCrypto ? entryOptimal * 0.005 : minRiskPoints;
+      if (unconstrainedRisk > maxRisk) return null;
+      let risk = Math.max(minRisk, unconstrainedRisk);
       const stopLoss = Number((entryOptimal - risk).toFixed(2));
       risk = entryOptimal - stopLoss;
 
@@ -188,8 +215,13 @@ export class TradeLevelsCalculator {
       const targetSL = localHigh + slBuffer;
       const unconstrainedRisk = targetSL - entryOptimal;
 
-      // Clamp risk tightly so SL is ultra-small and precise
-      let risk = Math.min(maxRiskPoints, Math.max(minRiskPoints, unconstrainedRisk));
+      // The stop must sit beyond the structure (invalidation level). A stop narrower than the minimum is widened;
+      // if the structure needs more than the maximum risk the setup is rejected rather than pulling the stop
+      // inside the zone, where an ordinary retest would hit it.
+      const maxRisk = isCrypto ? entryOptimal * 0.02 : maxRiskPoints;
+      const minRisk = isCrypto ? entryOptimal * 0.005 : minRiskPoints;
+      if (unconstrainedRisk > maxRisk) return null;
+      let risk = Math.max(minRisk, unconstrainedRisk);
       const stopLoss = Number((entryOptimal + risk).toFixed(2));
       risk = stopLoss - entryOptimal;
 

@@ -24,6 +24,7 @@ export interface ISaiyanOCCConfig {
   tp3Percent: number; // default 2.0%
   tp3Qty: number; // default 20%
   slPercent: number; // default 0.5%
+  useAlternateResolution?: boolean; // default true (script: useRes)
 }
 
 export interface ISaiyanSupplyDemandBox {
@@ -91,7 +92,8 @@ export class SaiyanOCCEngine {
     sigma: number = 5,
   ): number[] {
     const result: number[] = new Array(src.length).fill(0);
-    const m = Math.floor(offset * (len - 1));
+    // Pine: m = offset * (len - 1), not floored (len 2: ~90% weight on the current bar, ~10% on the previous)
+    const m = offset * (len - 1);
     const s = len / sigma;
 
     for (let i = 0; i < src.length; i++) {
@@ -181,7 +183,48 @@ export class SaiyanOCCEngine {
   }
 
   /**
-   * Alternate Resolution Smoothing Simulator (intRes = 8)
+   * The script's "alternate resolution" (useRes = true, intRes = 8): the open/close MAs are computed on candles of
+   * intRes x the chart timeframe (15m chart -> 2h). The script reads them with lookahead_on, which on historical
+   * bars shows each signal with the higher-timeframe candle's FINAL close (look-ahead). Live, that close is not
+   * known until the candle closes, so only CLOSED higher-timeframe candles are used here (non-repainting).
+   * Higher-timeframe candles are aligned to UTC (24/7 markets) or to the 09:15 IST session open (NSE).
+   */
+  public static alternateResolutionCandles(
+    candles: ICandle[],
+    intRes: number,
+    symbol?: string,
+  ): Array<{ open: number; close: number; lastIndex: number }> {
+    const n = candles.length;
+    if (n < 2) return [];
+    const ts = candles.map((c) => new Date(c.timestamp).getTime());
+    const diffs = ts.slice(1).map((t, i) => t - ts[i]).filter((d) => d > 0).sort((a, b) => a - b);
+    const barMs = diffs.length ? diffs[0] : 15 * 60 * 1000;
+    const htfMs = barMs * Math.max(1, intRes);
+    const sym = (symbol || '').toUpperCase();
+    const isNse = /NIFTY|SENSEX|BANKEX/.test(sym);
+    const DAY = 86_400_000;
+    const NSE_OPEN = 3.75 * 3_600_000; // 09:15 IST in UTC
+    const NSE_CLOSE = 10 * 3_600_000; // 15:30 IST in UTC
+    const bucketOf = (t: number) => {
+      if (!isNse) return { key: Math.floor(t / htfMs), end: (Math.floor(t / htfMs) + 1) * htfMs };
+      const day = Math.floor(t / DAY) * DAY;
+      const k = Math.floor((t - day - NSE_OPEN) / htfMs);
+      return { key: day + k, end: Math.min(day + NSE_OPEN + (k + 1) * htfMs, day + NSE_CLOSE) };
+    };
+    const lastClose = ts[n - 1] + barMs;
+    const out: Array<{ open: number; close: number; lastIndex: number; key: number; end: number }> = [];
+    for (let i = 0; i < n; i++) {
+      const b = bucketOf(ts[i]);
+      const cur = out[out.length - 1];
+      if (!cur || cur.key !== b.key) out.push({ open: candles[i].open, close: candles[i].close, lastIndex: i, key: b.key, end: b.end });
+      else { cur.close = candles[i].close; cur.lastIndex = i; }
+    }
+    // Only closed higher-timeframe candles
+    return out.filter((b, k) => k < out.length - 1 || b.end <= lastClose).map(({ open, close, lastIndex }) => ({ open, close, lastIndex }));
+  }
+
+  /**
+   * Legacy 8-bar smoothing of chart-timeframe series (kept for callers outside the engine; not used for signals).
    */
   public static smoothAlternateResolution(series: number[], factor: number = 8): number[] {
     const result: number[] = new Array(series.length).fill(0);
@@ -254,18 +297,26 @@ export class SaiyanOCCEngine {
       cfg.offsetALMA,
     );
 
-    // 2. Apply Alternate Resolution Smoothing (intRes = 8)
-    const closeSeriesAlt = this.smoothAlternateResolution(closeSeries, cfg.intRes);
-    const openSeriesAlt = this.smoothAlternateResolution(openSeries, cfg.intRes);
+    // 2. Alternate resolution: the open/close MAs on closed intRes x chart-timeframe candles (15m chart -> 2h)
+    const htf = cfg.useAlternateResolution === false
+      ? candles.map((c, i) => ({ open: c.open, close: c.close, lastIndex: i }))
+      : this.alternateResolutionCandles(candles, cfg.intRes, symbol);
+    const closeSeriesAlt = this.calculateVariant(cfg.basisType, htf.map((h) => h.close), cfg.basisLen, cfg.offsetSigma, cfg.offsetALMA);
+    const openSeriesAlt = this.calculateVariant(cfg.basisType, htf.map((h) => h.open), cfg.basisLen, cfg.offsetSigma, cfg.offsetALMA);
+    void closeSeries;
+    void openSeries;
+    const m = htf.length;
 
-    const curCloseAlt = closeSeriesAlt[n - 1];
-    const prevCloseAlt = closeSeriesAlt[n - 2];
-    const curOpenAlt = openSeriesAlt[n - 1];
-    const prevOpenAlt = openSeriesAlt[n - 2];
+    const curCloseAlt = m > 0 ? closeSeriesAlt[m - 1] : closes[n - 1];
+    const prevCloseAlt = m > 1 ? closeSeriesAlt[m - 2] : curCloseAlt;
+    const curOpenAlt = m > 0 ? openSeriesAlt[m - 1] : opens[n - 1];
+    const prevOpenAlt = m > 1 ? openSeriesAlt[m - 2] : curOpenAlt;
 
-    // 3. Exact Trigger Signals (leTrigger / seTrigger)
-    const isLongTrigger = prevCloseAlt <= prevOpenAlt && curCloseAlt > curOpenAlt;
-    const isShortTrigger = prevCloseAlt >= prevOpenAlt && curCloseAlt < curOpenAlt;
+    // 3. Triggers (leTrigger / seTrigger): crossover on the last CLOSED alternate-resolution candle, acted on at
+    // the close of the chart candle that completed it, and only while that is the latest chart candle.
+    const crossedAtLastHtf = m > 1 && htf[m - 1].lastIndex === n - 1;
+    const isLongTrigger = crossedAtLastHtf && prevCloseAlt <= prevOpenAlt && curCloseAlt > curOpenAlt;
+    const isShortTrigger = crossedAtLastHtf && prevCloseAlt >= prevOpenAlt && curCloseAlt < curOpenAlt;
 
     const currentPrice = closes[n - 1];
     const atrSeries = calculateATR(candles, 14);
@@ -372,70 +423,32 @@ export class SaiyanOCCEngine {
     // Track the historical entry line and trigger timestamp from the last confirmed crossover (as in PineScript entryLine)
     let lockedCrossoverPrice = currentPrice;
     let lockedCrossoverTime = candles[n - 1] ? new Date(candles[n - 1].timestamp) : new Date();
-    for (let i = 1; i < n; i++) {
+    for (let k = 1; k < m; k++) {
       const isCrossUp =
-        closeSeriesAlt[i - 1] <= openSeriesAlt[i - 1] && closeSeriesAlt[i] > openSeriesAlt[i];
+        closeSeriesAlt[k - 1] <= openSeriesAlt[k - 1] && closeSeriesAlt[k] > openSeriesAlt[k];
       const isCrossDn =
-        closeSeriesAlt[i - 1] >= openSeriesAlt[i - 1] && closeSeriesAlt[i] < openSeriesAlt[i];
-      if (isCrossUp && isBull) {
-        lockedCrossoverPrice = closes[i];
-        lockedCrossoverTime = new Date(candles[i].timestamp);
-      } else if (isCrossDn && !isBull) {
+        closeSeriesAlt[k - 1] >= openSeriesAlt[k - 1] && closeSeriesAlt[k] < openSeriesAlt[k];
+      if ((isCrossUp && isBull) || (isCrossDn && !isBull)) {
+        // The script enters at the close of the chart candle where the crossover is confirmed
+        const i = htf[k].lastIndex;
         lockedCrossoverPrice = closes[i];
         lockedCrossoverTime = new Date(candles[i].timestamp);
       }
     }
 
-    // Instrument class comes from the symbol. Price-magnitude inference is only a fallback for callers
-    // that do not pass one: it misclassifies instruments (BANKNIFTY ~57,000 would read as crypto).
-    const sym = (symbol || '').toUpperCase();
-    const hasSymbol = sym.length > 0;
-    const isCrypto = hasSymbol ? sym.includes('BTC') : currentPrice > 50000;
-    const isBankNifty = hasSymbol ? sym.startsWith('BANKNIFTY') : currentPrice > 35000 && currentPrice < 75000;
-    const isNifty = hasSymbol
-      ? sym.startsWith('NIFTY')
-      : !isCrypto && !isBankNifty && currentPrice > 15000 && currentPrice < 35000;
-
-    let riskPoints = currentPrice * (cfg.slPercent / 100);
-    if (isCrypto) {
-      // Spot crypto round-trip fees are ~0.2% of notional. A stop tighter than ~0.5% makes fees alone cost
-      // 0.7-1.4R per trade (the old 120-250 point cap at BTC ~83,000), so the stop is floored at 0.5% of price
-      // and widened by volatility (1.2 x ATR) when that is larger, capped at 2%.
-      riskPoints = Math.min(currentPrice * 0.02, Math.max(currentPrice * 0.005, currentATR * 1.2));
-    } else if (isNifty) {
-      riskPoints = Math.min(22, Math.max(12, currentATR * 1.1));
-    } else if (isBankNifty) {
-      riskPoints = Math.min(65, Math.max(35, currentATR * 1.1));
-    }
-
+    // Script risk management (G_RISK): stop 0.5%, TP1 1% / TP2 1.5% / TP3 2% from the entry, for every instrument.
     const entryPrice = Number(lockedCrossoverPrice.toFixed(2));
-
-    const stopLoss = isBull
-      ? Number((entryPrice - riskPoints).toFixed(2))
-      : Number((entryPrice + riskPoints).toFixed(2));
-
-    const tp1 = isBull
-      ? Number((entryPrice + riskPoints * 1.5).toFixed(2))
-      : Number((entryPrice - riskPoints * 1.5).toFixed(2));
-
-    const tp2 = isBull
-      ? Number((entryPrice + riskPoints * 2.5).toFixed(2))
-      : Number((entryPrice - riskPoints * 2.5).toFixed(2));
-
-    const tp3 = isBull
-      ? Number((entryPrice + riskPoints * 4.0).toFixed(2))
-      : Number((entryPrice - riskPoints * 4.0).toFixed(2));
+    const pct = (p: number) => (isBull ? 1 : -1) * (p / 100);
+    const stopLoss = Number((entryPrice * (1 - pct(cfg.slPercent))).toFixed(2));
+    const tp1 = Number((entryPrice * (1 + pct(cfg.tp1Percent))).toFixed(2));
+    const tp2 = Number((entryPrice * (1 + pct(cfg.tp2Percent))).toFixed(2));
+    const tp3 = Number((entryPrice * (1 + pct(cfg.tp3Percent))).toFixed(2));
+    void currentATR;
 
     // Scoring & Grade Determination
-    let signalScore = 70;
-    if (isLongTrigger || isShortTrigger) signalScore += 15; // Fresh crossover momentum
-    if (bosBoxes.length > 0) signalScore += 10; // Structure breakout confirmation
-    const activeDemand = demandBoxes.filter((b) => !b.isBroken).length;
-    const activeSupply = supplyBoxes.filter((b) => !b.isBroken).length;
-    if ((isBull && activeDemand > activeSupply) || (!isBull && activeSupply > activeDemand)) {
-      signalScore += 5;
-    }
-    signalScore = Math.min(100, signalScore);
+    // The script takes every crossover and nothing else gates it (its supply/demand boxes are drawn with
+    // transparent colours and never used in the entry logic): a fresh crossover is an A setup, an older one B.
+    const signalScore = direction === Direction.NEUTRAL ? 0 : isLongTrigger || isShortTrigger ? 85 : 70;
 
     const signalGrade =
       signalScore >= 90
@@ -545,12 +558,12 @@ export class SaiyanOCCEngine {
         tp3: analysis.tp3,
       },
       riskRewardRatios: {
-        rr1: 1.5,
-        rr2: 2.5,
-        rr3: 4.0,
+        rr1: Number((Math.abs(analysis.tp1 - entry) / Math.max(1e-9, Math.abs(entry - sl))).toFixed(2)),
+        rr2: Number((Math.abs(analysis.tp2 - entry) / Math.max(1e-9, Math.abs(entry - sl))).toFixed(2)),
+        rr3: Number((Math.abs(analysis.tp3 - entry) / Math.max(1e-9, Math.abs(entry - sl))).toFixed(2)),
       },
       reasoning: {
-        htfStructure: `Saiyan ALMA OCC Engine: ${analysis.direction} momentum confirmed by 8x alternate resolution open-close crossover.`,
+        htfStructure: `Saiyan ALMA OCC: ${analysis.direction} open/close crossover on closed 8x-timeframe candles (non-repainting).`,
         liquidityReason: `Dynamic Swing S/D Analysis: Active Supply/Demand POI zones identified with ATR threshold filtering.`,
         triggerReason: `${analysis.isLongTrigger ? 'Fresh LONG' : analysis.isShortTrigger ? 'Fresh SHORT' : analysis.direction} ALMA crossover with ${analysis.bosBoxes.length} confirmed Supply/Demand BOS breakouts.`,
         invalidationReason: `Strict Invalidation anchor at ${sl} (${Math.abs(entry - sl).toFixed(2)} pts risk).`,
@@ -558,7 +571,7 @@ export class SaiyanOCCEngine {
           `Saiyan ALMA OCC 8x Resolution Momentum Crossover`,
           `Dynamic Swing High/Low Supply & Demand POI Map`,
           `ATR-Buffered Break of Structure (BOS) Conversion`,
-          `Multi-Tier Scaling Exit Plan (TP1 1.5R, TP2 2.5R, TP3 4.0R)`,
+          `Script exits: SL 0.5%, TP1 1% (50%), TP2 1.5% (30%), TP3 2% (20%)`,
           `Non-Repainting Multi-Bar Execution Confirmation`,
         ],
         summary: `Setup Score: ${analysis.signalScore}/100 (Grade ${analysis.signalGrade}). High-conviction ${analysis.direction} setup on ${symbol} driven by Saiyan OCC ALMA open-close cross and dynamic Supply/Demand structure.`,

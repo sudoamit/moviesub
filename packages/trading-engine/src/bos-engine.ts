@@ -22,6 +22,9 @@ export class BOSEngine {
    * Detects valid Bullish and Bearish Breaks of Structure (BOS).
    * Guarantees at most ONE Bullish BOS and/or ONE Bearish BOS per candle by targeting
    * the active structural pivot rather than emitting for all historical levels.
+   *
+   * A BOS is a break in the direction of the prevailing structure. A break against it is a Change of Character
+   * (reported by CHOCHEngine), so it is not emitted here; it only flips the structure this engine tracks.
    */
   static detectBOS(
     candles: ICandle[],
@@ -53,6 +56,8 @@ export class BOSEngine {
 
     let activeProtectedHigh: ISwingPoint | null = null;
     let activeProtectedLow: ISwingPoint | null = null;
+    // Prevailing structure as established by the breaks seen so far (NEUTRAL until the first break)
+    let structure: Direction = Direction.NEUTRAL;
 
     for (let i = 0; i < candles.length; i++) {
       const candle = candles[i];
@@ -108,7 +113,7 @@ export class BOSEngine {
           isBroken = candle.close > targetHigh.price && dispMetrics.isDisplacement;
         }
 
-        if (isBroken) {
+        if (isBroken && structure !== Direction.BEARISH) {
           bosEvents.push({
             direction: Direction.BULLISH,
             brokenLevel: targetHigh.price,
@@ -121,7 +126,10 @@ export class BOSEngine {
             displacementScore: dispMetrics.compositeScore,
             confirmationType: confType,
           });
+        }
 
+        if (isBroken) {
+          structure = Direction.BULLISH;
           if (activeProtectedHigh && activeProtectedHigh.index === targetHigh.index) {
             activeProtectedHigh = null;
           }
@@ -159,7 +167,7 @@ export class BOSEngine {
           isBroken = candle.close < targetLow.price && dispMetrics.isDisplacement;
         }
 
-        if (isBroken) {
+        if (isBroken && structure !== Direction.BULLISH) {
           bosEvents.push({
             direction: Direction.BEARISH,
             brokenLevel: targetLow.price,
@@ -172,7 +180,10 @@ export class BOSEngine {
             displacementScore: dispMetrics.compositeScore,
             confirmationType: confType,
           });
+        }
 
+        if (isBroken) {
+          structure = Direction.BEARISH;
           if (activeProtectedLow && activeProtectedLow.index === targetLow.index) {
             activeProtectedLow = null;
           }

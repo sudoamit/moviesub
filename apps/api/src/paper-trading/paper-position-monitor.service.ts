@@ -18,6 +18,7 @@ import {
   PointInTimeCurrencyConverter,
   parseAndValidateRedisOptionQuote,
   validateAuthoritativeExecutionQuote,
+  roundPrice,
 } from '@quant/shared';
 import { TradeAccountingEngine } from '@quant/risk-engine';
 import { getOptionLotSize, normalizeOptionsUnderlying } from '../algo-bots/option-contract-resolver';
@@ -154,6 +155,37 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
     const entryPrice = Number(pos.entryPrice);
     const existingEvents = (pos.executionEventsJson as any) || {};
 
+    // 1.5 Perpetual liquidation (isolated margin). Checked before the stop: if price gapped through both,
+    // the exchange liquidates the position and the whole isolated margin is lost, so the exit is priced at
+    // the bankruptcy price (entry -/+ entry/leverage) rather than at the more favourable stop.
+    const liquidationPrice = Number(existingEvents.liquidationPrice);
+    if (!isOption && Number.isFinite(liquidationPrice) && liquidationPrice > 0) {
+      const liquidated = isBuy ? livePrice <= liquidationPrice : livePrice >= liquidationPrice;
+      if (liquidated) {
+        const leverage = Math.max(1, Number(pos.leverage) || 1);
+        const bankruptcyPrice = roundPrice(pos.symbol, isBuy ? entryPrice * (1 - 1 / leverage) : entryPrice * (1 + 1 / leverage));
+        this.logger.warn(
+          `💥 [LIQUIDATION] Position '${pos.id}' (${pos.contractSymbol}) liquidated: live ${livePrice} crossed liquidation ${liquidationPrice}. Closing at bankruptcy price ${bankruptcyPrice}.`,
+        );
+        try {
+          const completedTrade = await this.paperTradingService.closePosition(pos.id, 'Liquidation', {
+            triggerPrice: liquidationPrice,
+            triggerMarketEventTime: marketEventTime,
+            exitPriceOverride: bankruptcyPrice,
+            allowPriceOverride: true,
+            isInternalCall: true,
+            executionMode: ExecutionMode.PAPER_MARKET,
+            correlationId: pos.correlationId,
+            outcomeClassification: 'LOSS_SL',
+          });
+          await this.publishTradeClosedEvent(completedTrade);
+        } catch (err: any) {
+          this.logger.error(`Failed liquidating position '${pos.id}': ${err.message}`);
+        }
+        return;
+      }
+    }
+
     // 2. Evaluate Active Stop Loss Threshold FIRST (Full close remaining quantity)
     let isSLHit = false;
     if (currentStopLoss !== null) {
@@ -195,6 +227,11 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
         this.logger.error(`Failed auto-closing position '${pos.id}' on SL: ${err.message}`);
         return;
       }
+    }
+
+    // Trailing-exit positions (lab strategies) have no target ladder: only the stop and liquidation close them.
+    if (existingEvents.exitPlan === 'TRAIL') {
+      return;
     }
 
     // 3. Evaluate TP1 Partial Scale-Out (Sequential Gating: TP1 must be evaluated if position has not filled TP1)
@@ -628,9 +665,7 @@ export class PaperPositionMonitorService implements OnModuleInit, OnModuleDestro
       originalQuantity > 0 && fxRate > 0
         ? (2 * entryFeesAccount) / (originalQuantity * contractSize * fxRate)
         : 0;
-    const feeAdjustedBreakeven = Number(
-      (isBuy ? entryPrice + perUnitRoundTripFee : entryPrice - perUnitRoundTripFee).toFixed(2),
-    );
+    const feeAdjustedBreakeven = roundPrice(pos.symbol, isBuy ? entryPrice + perUnitRoundTripFee : entryPrice - perUnitRoundTripFee);
     const breakevenStop =
       perUnitRoundTripFee > 0 &&
       (isBuy ? feeAdjustedBreakeven < livePrice : feeAdjustedBreakeven > livePrice)

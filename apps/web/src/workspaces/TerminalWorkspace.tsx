@@ -11,6 +11,10 @@ import { SmartStrikeCard } from '../components/SmartStrikeCard';
 import { ExecutionTimeline } from '../components/ExecutionTimeline';
 import { LivePositionTracker } from '../components/LivePositionTracker';
 import { QuantIntelligencePanel } from '../components/QuantIntelligencePanel';
+import { LabStrategiesCard } from '../components/LabStrategiesCard';
+import { MarketObserverCard } from '../components/MarketObserverCard';
+import { NiftyLabCard } from '../components/NiftyLabCard';
+import { LessonsCard } from '../components/LessonsCard';
 import { ReasoningCard } from '../components/ReasoningCard';
 import { RiskWidget } from '../components/RiskWidget';
 import { TradeJournal } from '../components/TradeJournal';
@@ -139,6 +143,12 @@ export const TerminalWorkspace: React.FC<TerminalWorkspaceProps> = ({
         activeExecution={activeExecution}
         onClosePosition={onClosePosition}
       />
+
+      {/* AI Lab strategies (shadow / live / retired) */}
+      <LabStrategiesCard />
+      <NiftyLabCard />
+      <LessonsCard />
+      <MarketObserverCard />
 
       {/* Quant Intelligence Engine Panel */}
       <QuantIntelligencePanel

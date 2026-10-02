@@ -61,8 +61,9 @@ export class OrderBlockEngine {
       const next2 = candles[i + 2];
       const next3 = candles[i + 3];
 
-      // 1. Bullish Order Block candidate: Bearish candle followed by rapid upward impulse
-      if (isBearishCandle) {
+      // 1. Bullish Order Block candidate: the LAST bearish candle before a rapid upward impulse
+      // (if the next candle is also bearish, that one is the order block candidate instead)
+      if (isBearishCandle && !(next1.close < next1.open)) {
         const maxUpMove = Math.max(next1.high, next2.high, next3.high) - candle.low;
         const hasAtrDisplacement = maxUpMove >= candleAtr * displacementThreshold;
 
@@ -80,12 +81,17 @@ export class OrderBlockEngine {
           (b) =>
             b.direction === Direction.BULLISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
         );
-        const createdFVG = fvgList.some(
-          (f) =>
-            f.direction === Direction.BULLISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
-        );
+        const createdFVG =
+          fvgList.some(
+            (f) =>
+              f.direction === Direction.BULLISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
+          ) ||
+          // Imbalance left by the impulse itself (3-candle gap within the window)
+          candle.high < next2.low ||
+          next1.high < next3.low;
 
-        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG || maxUpMove >= candleAtr * 1.5)) {
+        // The impulse must leave a structure break or an imbalance (FVG); a large move alone does not make an OB
+        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG)) {
           const confirmedAtIndex = i + 3;
           const confirmedTime = new Date(next3.timestamp);
           orderBlocks.push({
@@ -111,8 +117,8 @@ export class OrderBlockEngine {
         }
       }
 
-      // 2. Bearish Order Block candidate: Bullish candle followed by rapid downward impulse
-      if (isBullishCandle) {
+      // 2. Bearish Order Block candidate: the LAST bullish candle before a rapid downward impulse
+      if (isBullishCandle && !(next1.close > next1.open)) {
         const maxDownMove = candle.high - Math.min(next1.low, next2.low, next3.low);
         const hasAtrDisplacement = maxDownMove >= candleAtr * displacementThreshold;
 
@@ -128,12 +134,15 @@ export class OrderBlockEngine {
           (b) =>
             b.direction === Direction.BEARISH && b.candleIndex >= i + 1 && b.candleIndex <= i + 3,
         );
-        const createdFVG = fvgList.some(
-          (f) =>
-            f.direction === Direction.BEARISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
-        );
+        const createdFVG =
+          fvgList.some(
+            (f) =>
+              f.direction === Direction.BEARISH && f.candleIndex >= i + 1 && f.candleIndex <= i + 3,
+          ) ||
+          candle.low > next2.high ||
+          next1.low > next3.high;
 
-        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG || maxDownMove >= candleAtr * 1.5)) {
+        if ((hasAtrDisplacement || hasEngineDisplacement) && (createdBOS || createdFVG)) {
           const confirmedAtIndex = i + 3;
           const confirmedTime = new Date(next3.timestamp);
           orderBlocks.push({

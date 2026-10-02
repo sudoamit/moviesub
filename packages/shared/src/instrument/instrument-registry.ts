@@ -13,8 +13,36 @@ export const FORBIDDEN_DERIVATIVE_INSTRUMENTS = new Set([
   'BANKNIFTY_FUT',
   'NIFTY_OPTION',
   'BANKNIFTY_OPTION',
-  'BTCUSDT_PERP',
 ]);
+
+/**
+ * Binance USDⓈ-M perpetuals supported for execution (long and short, isolated margin), with exchange contract
+ * specs (tick, lot step, precisions) and the paper engine's margin assumptions. BTCUSDT_PERP is defined in full
+ * in AUTHORITATIVE_INSTRUMENTS; the others are generated from this table.
+ */
+export const PERPETUAL_SPECS: Record<string, {
+  base: string; name: string; tickSize: number; lotSize: number; quantityPrecision: number; pricePrecision: number;
+  maxLeverage: number; maintenanceMarginRate: number;
+}> = {
+  BTCUSDT_PERP: { base: 'BTC', name: 'Bitcoin / Tether USD Perpetual Futures', tickSize: 0.1, lotSize: 0.001, quantityPrecision: 3, pricePrecision: 1, maxLeverage: 50, maintenanceMarginRate: 0.004 },
+  ETHUSDT_PERP: { base: 'ETH', name: 'Ethereum / Tether USD Perpetual Futures', tickSize: 0.01, lotSize: 0.001, quantityPrecision: 3, pricePrecision: 2, maxLeverage: 50, maintenanceMarginRate: 0.005 },
+  SOLUSDT_PERP: { base: 'SOL', name: 'Solana / Tether USD Perpetual Futures', tickSize: 0.01, lotSize: 0.01, quantityPrecision: 2, pricePrecision: 2, maxLeverage: 20, maintenanceMarginRate: 0.01 },
+  BNBUSDT_PERP: { base: 'BNB', name: 'BNB / Tether USD Perpetual Futures', tickSize: 0.01, lotSize: 0.01, quantityPrecision: 2, pricePrecision: 2, maxLeverage: 20, maintenanceMarginRate: 0.01 },
+  ADAUSDT_PERP: { base: 'ADA', name: 'Cardano / Tether USD Perpetual Futures', tickSize: 0.0001, lotSize: 1, quantityPrecision: 0, pricePrecision: 4, maxLeverage: 20, maintenanceMarginRate: 0.01 },
+  LINKUSDT_PERP: { base: 'LINK', name: 'Chainlink / Tether USD Perpetual Futures', tickSize: 0.001, lotSize: 0.01, quantityPrecision: 2, pricePrecision: 3, maxLeverage: 20, maintenanceMarginRate: 0.01 },
+};
+
+/** Leveraged perpetual futures that are supported for execution (long and short, isolated margin). */
+export const SUPPORTED_PERPETUAL_SYMBOLS = new Set<string>(Object.keys(PERPETUAL_SPECS));
+
+/** Binance futures symbol for a perpetual (e.g. ETHUSDT_PERP -> ETHUSDT). */
+export function perpetualVenueSymbol(symbol: string): string {
+  return (symbol || '').toUpperCase().replace(/_PERP$/, '');
+}
+
+export function isPerpetualSymbol(symbol: string): boolean {
+  return SUPPORTED_PERPETUAL_SYMBOLS.has((symbol || '').trim().toUpperCase());
+}
 
 export const SUPPORTED_SPOT_SYMBOLS = ['NIFTY_SPOT', 'BANKNIFTY_SPOT', 'BTCUSDT_SPOT'] as const;
 export type SupportedSpotSymbol = (typeof SUPPORTED_SPOT_SYMBOLS)[number];
@@ -59,7 +87,8 @@ const BTC_SPOT_EXECUTION_ALIASES = new Set(['BTC', 'BTCUSD', 'BTCUSDT', 'BTCUSDT
 
 /**
  * Canonicalizes a symbol for execution, sizing, and risk lookups.
- * BTC aliases resolve to BTCUSDT_SPOT; every other symbol is trimmed and upper-cased unchanged.
+ * BTC aliases resolve to BTCUSDT_SPOT; every other symbol (including the explicit BTCUSDT_PERP futures
+ * instrument) is trimmed and upper-cased unchanged.
  */
 export function canonicalizeExecutionSymbol(symbol: string): string {
   const sym = (symbol || '').trim().toUpperCase();
@@ -192,6 +221,43 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
     minimumQuantity: 0.0001,
     quantityPrecision: 4,
     pricePrecision: 2,
+    tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
+    isActive: true,
+  },
+  BTCUSDT_PERP: {
+    id: 'inst_btcusdt_perp',
+    symbol: 'BTCUSDT_PERP',
+    name: 'Bitcoin / Tether USD Perpetual Futures',
+    exchange: 'BINANCE',
+    assetType: AssetType.CRYPTO,
+    tickSize: 0.1,
+    lotSize: 0.001,
+    contractSize: 1,
+    currency: 'USDT',
+    baseCurrency: 'BTC',
+    quoteCurrency: 'USDT',
+    accountingCurrency: 'INR',
+    marginMode: 'ISOLATED',
+    defaultLeverage: 5,
+    maxLeverage: 50,
+    initialMarginRate: 0.02,
+    // Up to 50x (1 / 0.02 initial margin). Maintenance margin is Binance's tier-1 rate; the paper engine does not
+    // model Binance's notional brackets (larger positions have a higher maintenance rate on the exchange).
+    // Binance USDⓈ-M BTCUSDT tier-1 maintenance margin rate
+    maintenanceMarginRate: 0.004,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'BINANCE_FUTURES_USDT',
+      defaultLeverage: 5,
+      maxLeverage: 50,
+      marginMode: 'ISOLATED',
+      initialMarginRate: 0.02,
+      maintenanceMarginRate: 0.004,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
+    minimumQuantity: 0.001,
+    quantityPrecision: 3,
+    pricePrecision: 1,
     tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
     isActive: true,
   },
@@ -503,6 +569,46 @@ export const AUTHORITATIVE_INSTRUMENTS: Record<string, IInstrument> = {
   },
 };
 
+// Generated perpetual instruments (BTCUSDT_PERP is declared explicitly above)
+for (const [symbol, spec] of Object.entries(PERPETUAL_SPECS)) {
+  if (AUTHORITATIVE_INSTRUMENTS[symbol]) continue;
+  const imr = 1 / spec.maxLeverage;
+  AUTHORITATIVE_INSTRUMENTS[symbol] = {
+    id: `inst_${symbol.toLowerCase()}`,
+    symbol,
+    name: spec.name,
+    exchange: 'BINANCE',
+    assetType: AssetType.CRYPTO,
+    tickSize: spec.tickSize,
+    lotSize: spec.lotSize,
+    contractSize: 1,
+    currency: 'USDT',
+    baseCurrency: spec.base,
+    quoteCurrency: 'USDT',
+    accountingCurrency: 'INR',
+    marginMode: 'ISOLATED',
+    defaultLeverage: 5,
+    maxLeverage: spec.maxLeverage,
+    initialMarginRate: imr,
+    maintenanceMarginRate: spec.maintenanceMarginRate,
+    liquidationModel: 'ISOLATED_LINEAR',
+    venueProfile: {
+      venueId: 'BINANCE_FUTURES_USDT',
+      defaultLeverage: 5,
+      maxLeverage: spec.maxLeverage,
+      marginMode: 'ISOLATED',
+      initialMarginRate: imr,
+      maintenanceMarginRate: spec.maintenanceMarginRate,
+      liquidationModel: 'ISOLATED_LINEAR',
+    },
+    minimumQuantity: spec.lotSize,
+    quantityPrecision: spec.quantityPrecision,
+    pricePrecision: spec.pricePrecision,
+    tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
+    isActive: true,
+  };
+}
+
 const customInstruments: Map<string, IInstrument> = new Map();
 
 export function registerInstrument(instrument: IInstrument): void {
@@ -733,4 +839,35 @@ export function resolveMarginModel(
     maintenanceMarginRate: Number(maintenanceMarginRate.toFixed(4)),
     liquidationModel,
   };
+}
+
+/**
+ * Isolated-margin liquidation price for a linear (USDT-margined) perpetual, ignoring the tiered
+ * maintenance amount: long = entry x (1 - 1/L + MMR), short = entry x (1 + 1/L - MMR).
+ */
+export function computeIsolatedLiquidationPrice(
+  entryPrice: number,
+  direction: 'LONG' | 'SHORT',
+  leverage: number,
+  maintenanceMarginRate: number,
+): number {
+  if (!(entryPrice > 0) || !(leverage >= 1)) {
+    throw new Error(`INVALID_LIQUIDATION_INPUT: entry ${entryPrice}, leverage ${leverage}`);
+  }
+  const imr = 1 / leverage;
+  return direction === 'LONG'
+    ? entryPrice * (1 - imr + maintenanceMarginRate)
+    : entryPrice * (1 + imr - maintenanceMarginRate);
+}
+
+/**
+ * Rounds a price to the instrument's price precision (e.g. 4 decimals for ADAUSDT_PERP, 1 for BTCUSDT_PERP).
+ * Unknown instruments keep 2 decimals. Never rounds to fewer decimals than `minDecimals`.
+ */
+export function roundPrice(symbol: string, price: number, minDecimals = 2): number {
+  const sym = (symbol || '').toUpperCase();
+  const perp = PERPETUAL_SPECS[sym];
+  const inst = AUTHORITATIVE_INSTRUMENTS[sym];
+  const decimals = Math.max(minDecimals, perp?.pricePrecision ?? inst?.pricePrecision ?? 2);
+  return Number(price.toFixed(decimals));
 }

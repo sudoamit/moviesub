@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { TRADED_SYMBOLS } from '../models/traded-symbols';
 import { ArrowUpRight, ArrowDownRight, Activity, TrendingUp, Sparkles, Flame } from 'lucide-react';
 
 export interface ITickerInfo {
@@ -35,15 +36,11 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
   selectedSymbol,
   onSelectSymbol,
 }) => {
-  const assetConfig: { sym: string; name: string; tag: string }[] = [
-    { sym: 'NIFTY', name: 'Nifty 50', tag: 'INDEX' },
-    { sym: 'BANKNIFTY', name: 'Bank Nifty', tag: 'INDEX' },
-    { sym: 'XAUUSD', name: 'Gold Spot', tag: 'GOLD' },
-    { sym: 'BTCUSDT_SPOT', name: 'Bitcoin Spot', tag: 'CRYPTO' },
-    { sym: 'RELIANCE', name: 'Reliance Ind.', tag: 'EQUITY' },
-    { sym: 'HDFCBANK', name: 'HDFC Bank', tag: 'EQUITY' },
-    { sym: 'INFY', name: 'Infosys', tag: 'EQUITY' },
-  ];
+  const assetConfig: { sym: string; name: string; tag: string }[] = TRADED_SYMBOLS.map((t) => ({
+    sym: t.symbol,
+    name: t.label,
+    tag: t.tag,
+  }));
 
   return (
     <div className="bg-[#080C14]/95 border-b border-slate-800/80 px-3 sm:px-6 py-2 overflow-x-auto">
@@ -85,7 +82,7 @@ export const LiveTickerBar: React.FC<LiveTickerBarProps> = ({
           }
 
           const isUp = item.changePercent >= 0;
-          const currency = sym === 'XAUUSD' ? '$' : sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' ? '$' : '₹';
+          const currency = sym === 'XAUUSD' ? '$' : sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' || sym === 'BTCUSDT_PERP' ? '$' : '₹';
 
           return (
             <div

@@ -36,7 +36,7 @@ async function main() {
       contractSize: 1,
       currency: 'INR',
       tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
-      isActive: true,
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
     },
     {
       symbol: 'BTCUSDT',
@@ -48,7 +48,7 @@ async function main() {
       contractSize: 1,
       currency: 'USDT',
       tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
-      isActive: true,
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
     },
     {
       symbol: 'BTCUSDT_SPOT',
@@ -56,6 +56,18 @@ async function main() {
       exchange: 'BINANCE_SPOT',
       assetType: AssetType.CRYPTO,
       tickSize: 0.01,
+      lotSize: 1,
+      contractSize: 1,
+      currency: 'USDT',
+      tradingHoursJson: { start: '00:00', end: '23:59', timezone: 'UTC' },
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
+    },
+    {
+      symbol: 'BTCUSDT_PERP',
+      name: 'Bitcoin / Tether USD Perpetual Futures',
+      exchange: 'BINANCE_FUTURES',
+      assetType: AssetType.CRYPTO,
+      tickSize: 0.1,
       lotSize: 1,
       contractSize: 1,
       currency: 'USDT',
@@ -84,7 +96,7 @@ async function main() {
       contractSize: 1,
       currency: 'INR',
       tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
-      isActive: true,
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
     },
     {
       symbol: 'HDFCBANK',
@@ -96,7 +108,7 @@ async function main() {
       contractSize: 1,
       currency: 'INR',
       tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
-      isActive: true,
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
     },
     {
       symbol: 'INFY',
@@ -108,7 +120,7 @@ async function main() {
       contractSize: 1,
       currency: 'INR',
       tradingHoursJson: { start: '09:15', end: '15:30', timezone: 'Asia/Kolkata' },
-      isActive: true,
+      isActive: false, // traded set: NIFTY, XAUUSD, BTCUSDT_PERP
     },
   ];
 

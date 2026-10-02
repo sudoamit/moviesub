@@ -64,6 +64,17 @@ const defaultTickers: Record<string, ITickerInfo> = {
     provenance: 'UNKNOWN',
     isFresh: false,
   },
+  BTCUSDT_PERP: {
+    symbol: 'BTCUSDT_PERP',
+    price: 0,
+    changePercent: 0,
+    changeAmount: 0,
+    high: 0,
+    low: 0,
+    volume: 0,
+    provenance: 'UNKNOWN',
+    isFresh: false,
+  },
   BTCUSDT: {
     symbol: 'BTCUSDT',
     price: 0,
@@ -192,7 +203,8 @@ export const MarketStreamProvider: React.FC<{ children: ReactNode }> = ({ childr
   // Fetch Authoritative Snapshot on mount
   useEffect(() => {
     const fetchSnapshot = async () => {
-      const symbolsToFetch = ['NIFTY', 'BANKNIFTY', 'BTCUSDT_SPOT', 'XAUUSD'];
+      // Traded instruments only (NIFTY, Gold, BTC perp).
+      const symbolsToFetch = ['NIFTY', 'BTCUSDT_PERP', 'XAUUSD'];
       for (const sym of symbolsToFetch) {
         try {
           const res = await fetch(`http://localhost:3001/api/market-data/snapshot/${sym}`);
@@ -281,9 +293,7 @@ export const MarketStreamProvider: React.FC<{ children: ReactNode }> = ({ childr
     s.on('connect', () => {
       setIsConnected(true);
       s.emit('subscribe:instrument', { symbol: 'NIFTY' });
-      s.emit('subscribe:instrument', { symbol: 'BANKNIFTY' });
-      s.emit('subscribe:instrument', { symbol: 'BTCUSDT' });
-      s.emit('subscribe:instrument', { symbol: 'BTCUSDT_SPOT' });
+      s.emit('subscribe:instrument', { symbol: 'BTCUSDT_PERP' });
       s.emit('subscribe:instrument', { symbol: 'XAUUSD' });
     });
 

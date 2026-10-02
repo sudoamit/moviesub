@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
+import { TRADED_SYMBOLS } from '../models/traded-symbols';
 import { TrendingUp, TrendingDown, Clock, Database, ChevronDown } from 'lucide-react';
 import { MarketDataState } from '../hooks/useMarketContext';
 import { ITickerInfo } from './LiveTickerBar';
@@ -17,15 +18,7 @@ interface MarketContextBarProps {
   onSelectStrategy?: (strategy: StrategyMode) => void;
 }
 
-const SUPPORTED_SYMBOLS = [
-  { symbol: 'NIFTY', label: 'NIFTY 50', assetType: 'INDEX' },
-  { symbol: 'BANKNIFTY', label: 'BANK NIFTY', assetType: 'INDEX' },
-  { symbol: 'BTCUSDT_SPOT', label: 'BTC / USDT SPOT', assetType: 'CRYPTO' },
-  { symbol: 'XAUUSD', label: 'XAU / USD', assetType: 'COMMODITY' },
-  { symbol: 'RELIANCE', label: 'RELIANCE', assetType: 'EQUITY' },
-  { symbol: 'HDFCBANK', label: 'HDFC BANK', assetType: 'EQUITY' },
-  { symbol: 'INFY', label: 'INFOSYS', assetType: 'EQUITY' },
-];
+const SUPPORTED_SYMBOLS = TRADED_SYMBOLS.map(({ symbol, label, assetType }) => ({ symbol, label, assetType }));
 
 const TIMEFRAMES = [
   { id: '1m', label: '1m' },
@@ -57,7 +50,8 @@ export const MarketContextBar: React.FC<MarketContextBarProps> = ({
   const strategyRef = useRef<HTMLDivElement>(null);
 
   const isBullish = (currentTicker.changePercent ?? 0) >= 0;
-  const isCrypto = selectedSymbol === 'BTCUSDT' || selectedSymbol === 'BTCUSDT_SPOT';
+  const isCrypto =
+    selectedSymbol === 'BTCUSDT' || selectedSymbol === 'BTCUSDT_SPOT' || selectedSymbol === 'BTCUSDT_PERP';
   const isGold = selectedSymbol === 'XAUUSD';
 
   const isLiveValid =

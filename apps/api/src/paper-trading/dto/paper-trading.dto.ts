@@ -108,6 +108,13 @@ export class PlaceOrderDto {
   @IsString()
   signalId?: string;
 
+  /** Planned entry of the setup being executed; lets the server refuse a chased entry. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  signalPrice?: number;
+
   @IsOptional()
   @IsString()
   strategyDirection?: string;

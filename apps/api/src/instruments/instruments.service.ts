@@ -49,13 +49,13 @@ export class InstrumentsService {
         id: 'inst_btcusdt_perp',
         symbol: 'BTCUSDT_PERP',
         name: 'Bitcoin / Tether USD Perpetual Futures',
-        exchange: 'BINANCE',
+        exchange: 'BINANCE_FUTURES',
         assetType: 'CRYPTO' as any,
         tickSize: 0.1,
         lotSize: 0.001,
         contractSize: 1,
         currency: 'USDT',
-        isActive: false, // Perpetual execution disabled in spot architecture
+        isActive: true, // Isolated-margin perpetual: long and short supported
         tradingHoursJson: { timezone: 'UTC' },
       });
     }

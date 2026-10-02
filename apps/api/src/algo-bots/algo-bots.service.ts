@@ -82,6 +82,10 @@ export interface IAlgoBot {
   timeframe: string;
   minScore: number;
   smcCondition: 'ORDER_BLOCK' | 'FVG' | 'LIQUIDITY_SWEEP' | 'ANY_CONFLUENCE';
+  /** Percent of account capital risked per trade; the order is sized from the stop distance (default 1%). */
+  riskPercentage?: number;
+  /** Leverage for margin products (e.g. BTCUSDT_PERP); null/undefined = instrument default. Spot is always 1x. */
+  leverage?: number;
   lots: number;
   autoExecutePaper: boolean;
   notifyWebhook: boolean;
@@ -183,6 +187,45 @@ export class AlgoBotsService implements OnModuleInit {
       triggerCount: 0,
     },
     {
+      // BTC perpetual futures: trades both directions (shorts are only possible on the perpetual, never spot).
+      // Sized by risk: 0.5% of capital lost at the stop. lots (x 0.001 BTC) is only a ceiling (5 BTC).
+      // Isolated margin at the instrument default leverage (5x).
+      id: 'bot_btc_perp_saiyan',
+      name: 'BTCUSDT Perp 15m Saiyan OCC (Long/Short)',
+      symbol: 'BTCUSDT_PERP',
+      strategy: 'SAIYAN_OCC',
+      direction: 'ANY',
+      timeframe: '15m',
+      minScore: 75,
+      smcCondition: 'ANY_CONFLUENCE',
+      lots: 5000,
+      riskPercentage: 0.5,
+      autoExecutePaper: true,
+      notifyWebhook: false,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    },
+    {
+      // BTC perpetual futures on SMC setups (order block / liquidity sweep / structure), long and short.
+      // Same risk sizing as the Saiyan perp bot; only one BTCUSDT_PERP position is open at a time.
+      id: 'bot_btc_perp_smc',
+      name: 'BTCUSDT Perp 15m SMC Order Flow (Long/Short)',
+      symbol: 'BTCUSDT_PERP',
+      strategy: 'SMC',
+      direction: 'ANY',
+      timeframe: '15m',
+      minScore: 80,
+      smcCondition: 'ANY_CONFLUENCE',
+      lots: 5000,
+      riskPercentage: 0.5,
+      autoExecutePaper: true,
+      notifyWebhook: false,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      triggerCount: 0,
+    },
+    {
       id: 'bot_gold_order_flow',
       name: 'XAUUSD 15m Institutional Order Flow Scalper',
       symbol: 'XAUUSD',
@@ -192,6 +235,7 @@ export class AlgoBotsService implements OnModuleInit {
       minScore: 75,
       smcCondition: 'ANY_CONFLUENCE',
       lots: 1,
+      riskPercentage: 0.5,
       autoExecutePaper: false,
       notifyWebhook: false,
       isActive: false,
@@ -286,6 +330,8 @@ export class AlgoBotsService implements OnModuleInit {
                 minScore: bot.minScore,
                 smcCondition: bot.smcCondition as any,
                 lots: bot.lots,
+                riskPercentage: bot.riskPercentage ?? null,
+                leverage: bot.leverage ?? null,
                 autoExecutePaper: bot.autoExecutePaper,
                 notifyWebhook: bot.notifyWebhook,
                 isActive: bot.isActive,
@@ -364,6 +410,8 @@ export class AlgoBotsService implements OnModuleInit {
             minScore: b.minScore,
             smcCondition: b.smcCondition as any,
             lots: b.lots,
+            riskPercentage: b.riskPercentage ?? undefined,
+            leverage: b.leverage ?? undefined,
             autoExecutePaper: b.autoExecutePaper,
             notifyWebhook: b.notifyWebhook,
             isActive: b.isActive,
@@ -402,6 +450,8 @@ export class AlgoBotsService implements OnModuleInit {
           minScore: b.minScore,
           smcCondition: b.smcCondition as any,
           lots: b.lots,
+          riskPercentage: b.riskPercentage ?? undefined,
+          leverage: b.leverage ?? undefined,
           autoExecutePaper: b.autoExecutePaper,
           notifyWebhook: b.notifyWebhook,
           isActive: b.isActive,
@@ -440,6 +490,28 @@ export class AlgoBotsService implements OnModuleInit {
   /**
    * P1 #14: DTO Validation for AlgoBot Configuration
    */
+  /** Leverage for the bot's instrument: 1 .. instrument max; spot instruments only accept 1x. */
+  private validateLeverage(value: unknown, symbol: string): number | null {
+    if (value === null) return null;
+    const lev = Number(value);
+    const inst = getAuthoritativeInstrument(canonicalizeExecutionSymbol(symbol));
+    const max = inst.marginMode === 'SPOT' ? 1 : Number(inst.maxLeverage ?? 1);
+    if (!Number.isFinite(lev) || lev < 1 || lev > max) {
+      throw new BadRequestException(`leverage must be between 1 and ${max}x for ${inst.symbol}`);
+    }
+    return lev;
+  }
+
+  /** Per-trade risk as a percent of capital: (0, 1]. The execution boundary rejects anything above 1%. */
+  private validateRiskPercentage(value: unknown): number | null {
+    if (value === null) return null;
+    const pct = Number(value);
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 1) {
+      throw new BadRequestException('riskPercentage must be greater than 0 and at most 1 (% of capital)');
+    }
+    return pct;
+  }
+
   public validateBotConfig(dto: Partial<IAlgoBot>): void {
     if (!dto.name || typeof dto.name !== 'string' || dto.name.trim().length === 0) {
       throw new BadRequestException('Bot name is required and must be a non-empty string');
@@ -516,6 +588,9 @@ export class AlgoBotsService implements OnModuleInit {
             minScore,
             smcCondition: smcCondition as any,
             lots,
+            riskPercentage:
+              dto.riskPercentage !== undefined ? this.validateRiskPercentage(dto.riskPercentage) : null,
+            leverage: dto.leverage !== undefined ? this.validateLeverage(dto.leverage, symbol) : null,
             autoExecutePaper,
             notifyWebhook,
             isActive,
@@ -539,6 +614,8 @@ export class AlgoBotsService implements OnModuleInit {
           minScore: created.minScore,
           smcCondition: created.smcCondition as any,
           lots: created.lots,
+          riskPercentage: created.riskPercentage ?? undefined,
+          leverage: created.leverage ?? undefined,
           autoExecutePaper: created.autoExecutePaper,
           notifyWebhook: created.notifyWebhook,
           isActive: created.isActive,
@@ -601,6 +678,12 @@ export class AlgoBotsService implements OnModuleInit {
         if (dto.minScore !== undefined) updateData.minScore = Number(dto.minScore);
         if (dto.smcCondition !== undefined) updateData.smcCondition = dto.smcCondition as any;
         if (dto.lots !== undefined) updateData.lots = Number(dto.lots);
+        if (dto.riskPercentage !== undefined) {
+          updateData.riskPercentage = this.validateRiskPercentage(dto.riskPercentage);
+        }
+        if (dto.leverage !== undefined) {
+          updateData.leverage = this.validateLeverage(dto.leverage, dto.symbol ?? existing.symbol);
+        }
         if (dto.autoExecutePaper !== undefined) updateData.autoExecutePaper = Boolean(dto.autoExecutePaper);
         if (dto.notifyWebhook !== undefined) updateData.notifyWebhook = Boolean(dto.notifyWebhook);
         if (dto.isActive !== undefined) updateData.isActive = Boolean(dto.isActive);
@@ -621,6 +704,8 @@ export class AlgoBotsService implements OnModuleInit {
           minScore: updated.minScore,
           smcCondition: updated.smcCondition as any,
           lots: updated.lots,
+          riskPercentage: updated.riskPercentage ?? undefined,
+          leverage: updated.leverage ?? undefined,
           autoExecutePaper: updated.autoExecutePaper,
           notifyWebhook: updated.notifyWebhook,
           isActive: updated.isActive,
@@ -673,6 +758,8 @@ export class AlgoBotsService implements OnModuleInit {
           minScore: updated.minScore,
           smcCondition: updated.smcCondition as any,
           lots: updated.lots,
+          riskPercentage: updated.riskPercentage ?? undefined,
+          leverage: updated.leverage ?? undefined,
           autoExecutePaper: updated.autoExecutePaper,
           notifyWebhook: updated.notifyWebhook,
           isActive: updated.isActive,
@@ -2002,6 +2089,15 @@ export class AlgoBotsService implements OnModuleInit {
         portfolioError,
         liveQuote: effectiveLiveQuote,
         liveQuoteError: effectiveLiveQuoteError,
+        // Option bots: missed-setup check on the underlying (the option levels above are rebuilt from the premium).
+        underlyingLiveQuote: isOptionsBot ? liveQuote : null,
+        underlyingLevels: isOptionsBot
+          ? {
+              direction: String(signal.direction),
+              stopLoss: Number(signal.stopLoss),
+              tp1: Number(signal.takeProfits?.tp1),
+            }
+          : null,
       } as any);
 
       const fingerprint = this.tradeDecisionService!.getTradeFingerprint(bot, executionSignal, accountId);

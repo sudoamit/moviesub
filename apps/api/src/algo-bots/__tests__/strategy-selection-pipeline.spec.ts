@@ -293,8 +293,15 @@ describe('Strategy Selection Pipeline Across Full Vertical Stack (Section 18)', 
     const smcSignal = await signalsService.generateSignalForSymbol('NIFTY', Timeframe.M15, 'SMC');
     expect(smcSignal.strategy).toBe('SMC');
 
+    // The strategy gate passes for the SMC bot. (The dummy series is a straight line with no swings or impulse,
+    // so it holds no SMC setup; whether the setup qualifies is a separate check.)
     const matchSMC = algoBotsService.matchesBotStrategy(updated, smcSignal);
-    expect(matchSMC.matches).toBe(true);
+    expect(matchSMC.reasonCode).not.toBe('STRATEGY_MISMATCH');
+    const matchSMCSetup = algoBotsService.matchesBotStrategy(updated, {
+      ...smcSignal,
+      triggerEvidence: { structureBreak: { matched: true } } as any,
+    });
+    expect(matchSMCSetup.matches).toBe(true);
 
     const saiyanSignal: ISignalSetup = {
       ...smcSignal,

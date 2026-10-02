@@ -224,12 +224,15 @@ export class SMCAnalyzer {
     // 8. Classify Market Regime
     const marketRegime = MarketRegimeEngine.classifyRegime(closedCandles, swingPoints);
 
-    // Determine current structural trend from confirmed structure breaks at or before asOfTimestamp
+    // Current structural trend = direction of the most recent structure event (BOS or CHoCH), so a CHoCH that
+    // happened after the last BOS flips the trend.
     let currentTrend: Direction = Direction.NEUTRAL;
-    if (breaksOfStructure.length > 0) {
-      currentTrend = breaksOfStructure[breaksOfStructure.length - 1].direction;
-    } else if (changesOfCharacter.length > 0) {
-      currentTrend = changesOfCharacter[changesOfCharacter.length - 1].direction;
+    const lastBOS = breaksOfStructure[breaksOfStructure.length - 1];
+    const lastCHOCH = changesOfCharacter[changesOfCharacter.length - 1];
+    if (lastBOS && (!lastCHOCH || lastBOS.candleIndex >= lastCHOCH.candleIndex)) {
+      currentTrend = lastBOS.direction;
+    } else if (lastCHOCH) {
+      currentTrend = lastCHOCH.direction;
     }
 
     return {

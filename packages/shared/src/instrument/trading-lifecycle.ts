@@ -1,5 +1,6 @@
 import { Direction } from '../enums';
 import { isLongDirection } from './canonical-r-calculator';
+import { isPerpetualSymbol } from './instrument-registry';
 
 export type TradingLifecycleState =
   | 'signal'
@@ -26,6 +27,8 @@ export function isInstrumentLongOnly(params: {
 }): boolean {
   const { symbol, isOptionMode = false, instrumentType, marginMode } = params;
   if (isOptionMode) return false;
+  // Perpetual futures (e.g. BTCUSDT_PERP) are margin products: long and short are both allowed.
+  if (isPerpetualSymbol(symbol)) return false;
   if (marginMode === 'SPOT') return true;
   if (instrumentType === 'SPOT') return true;
   const sym = (symbol || '').toUpperCase();

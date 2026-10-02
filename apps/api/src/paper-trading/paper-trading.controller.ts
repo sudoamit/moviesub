@@ -141,6 +141,12 @@ export class PaperTradingController {
     return this.paperTradingService.clearAllCompletedTrades(body?.accountId);
   }
 
+  /** Rebuilds account totals (cash, realized P&L, charges, used margin) from closed trades and open positions. */
+  @Post('reconcile')
+  async reconcile(@Body() body?: { accountId?: string; dryRun?: boolean }) {
+    return this.paperTradingService.reconcileAccountFromLedger(body?.accountId, !body?.dryRun);
+  }
+
   @Post('reset')
   async resetPortfolio(@Body() body: { initialCapital?: number }) {
     return this.paperTradingService.resetPortfolio(body?.initialCapital);

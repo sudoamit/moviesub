@@ -31,10 +31,13 @@ import {
   ExecutionAggregator,
   IFillRecord,
   isSupportedSpotSymbol,
+  isPerpetualSymbol,
+  computeIsolatedLiquidationPrice,
   canonicalizeExecutionSymbol,
   LEGACY_SPOT_ALIASES,
   TradeLifecycleState,
   validateOptionLotQuantity,
+  roundPrice,
 } from '@quant/shared';
 import {
   normalizeOptionsUnderlying,
@@ -184,6 +187,12 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         : 'EQUITY';
 
     const sym = (symbolOrType || '').toUpperCase().trim();
+    if (isPerpetualSymbol(sym)) {
+      const side = stage === 'ENTRY' ? 'BUY' : 'SELL';
+      return TransactionCostScheduleManager.getInstance().calculateCostForSymbol(
+        turnoverQuote, sym, fxRate, fxTimestamp, stage, side,
+      );
+    }
     const isCrypto =
       typeStr === 'CRYPTO' ||
       sym.includes('BTC') ||
@@ -268,6 +277,26 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
    * Throws MarketDataUnavailableError or StaleMarketDataError if price is stale or missing.
    */
   public async getValidatedOptionPrice(
+    contractSymbol: string,
+    maxAgeSeconds = 5,
+  ): Promise<{ price: number; timestamp: Date }> {
+    try {
+      return await this.readValidatedOptionPrice(contractSymbol, maxAgeSeconds);
+    } catch (err) {
+      // Missing or stale between polls: fetch the option chain now and check once more (same freshness limit).
+      const refresh = (this.realMarketStreamer as any)?.refreshNseOptionQuotesNow;
+      if (
+        typeof refresh === 'function' &&
+        (err instanceof StaleMarketDataError || err instanceof MarketDataUnavailableError)
+      ) {
+        await refresh.call(this.realMarketStreamer).catch(() => undefined);
+        return this.readValidatedOptionPrice(contractSymbol, maxAgeSeconds);
+      }
+      throw err;
+    }
+  }
+
+  private async readValidatedOptionPrice(
     contractSymbol: string,
     maxAgeSeconds = 5,
   ): Promise<{ price: number; timestamp: Date }> {
@@ -570,6 +599,13 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         unrealizedR,
         notionalValue,
         usedMargin,
+        ...(isPerpetualSymbol(pos.symbol)
+          ? {
+              liquidationPrice: Number((pos.executionEventsJson as any)?.liquidationPrice) || undefined,
+              // Funding settled so far (account currency, positive = paid); charged with the final exit.
+              fundingAccrued: this.computePerpFunding(pos, Date.now(), fxRate).totalAccount,
+            }
+          : {}),
         maxFavorableExcursion: Number(pos.maxFavorableExcursion),
         maxAdverseExcursion: Number(pos.maxAdverseExcursion),
         openedAt: pos.openedAt.toISOString(),
@@ -1449,6 +1485,74 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
     const openingMarginModel = resolveMarginModel(openingInst, { requestedLeverage: effLeverage });
 
+    // Chased entry backstop (spot / futures market orders): when the planned entry is known, TP1 must still pay
+    // at least a quarter of its planned R from the fill. The trade-decision gate and the UI apply the stricter
+    // zone-aware rule (half of planned R outside the entry zone); this catches stale manual orders.
+    if (!isOptionOrder && Number(target1) > 0 && Number(stopLoss) > 0) {
+      const isLongOrder = req.direction === 'BUY';
+      const riskFromFill = isLongOrder ? finalFillPrice - stopLoss : stopLoss - finalFillPrice;
+      const rewardToTp1 = isLongOrder ? target1 - finalFillPrice : finalFillPrice - target1;
+      const planned = Number(req.signalPrice);
+      const plannedRr = planned > 0 ? Math.abs(target1 - planned) / Math.abs(planned - stopLoss) : 0;
+      const minRr = planned > 0 ? plannedRr * 0.25 : 0;
+      if (riskFromFill > 0 && (rewardToTp1 <= 0 || rewardToTp1 / riskFromFill < minRr)) {
+        const msg =
+          rewardToTp1 <= 0
+            ? `Fill ${finalFillPrice} is already beyond TP1 ${target1}.`
+            : `From fill ${finalFillPrice}, TP1 ${target1} pays only ${(rewardToTp1 / riskFromFill).toFixed(2)}R (planned entry ${planned}).`;
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.INVALID_RISK_REWARD,
+          `[ENTRY_MISSED_RR_DEGRADED] ${msg}`,
+          idempotencyKey,
+          correlationId,
+        );
+        throw new BadRequestException(`Order Rejected [ENTRY_MISSED_RR_DEGRADED]: ${msg}`);
+      }
+    }
+
+    // Perpetual futures (isolated margin): the protective stop must trigger before the liquidation price,
+    // otherwise the position could be liquidated (losing the whole margin) before its stop is reached.
+    let liquidationPrice: number | null = null;
+    if (!isOptionOrder && isPerpetualSymbol(openingInst.symbol)) {
+      liquidationPrice = roundPrice(
+        openingInst.symbol,
+        computeIsolatedLiquidationPrice(
+          finalFillPrice,
+          req.direction === 'BUY' ? 'LONG' : 'SHORT',
+          effLeverage,
+          openingMarginModel.maintenanceMarginRate,
+        ),
+      );
+      const stopBeforeLiquidation =
+        req.direction === 'BUY' ? stopLoss > liquidationPrice : stopLoss < liquidationPrice;
+      if (!stopBeforeLiquidation) {
+        const msg =
+          `Stop loss ${stopLoss} is beyond the liquidation price ${liquidationPrice} at ${effLeverage}x ` +
+          `(${req.direction === 'BUY' ? 'long' : 'short'} from ${finalFillPrice}). Use lower leverage or a tighter stop.`;
+        await this.rejectOrder(
+          account.id,
+          symbol,
+          contractSymbol,
+          instrumentType,
+          req.direction,
+          req.orderType,
+          req.quantity,
+          RiskRejectionReason.MAX_LEVERAGE,
+          `[STOP_BEYOND_LIQUIDATION] ${msg}`,
+          idempotencyKey,
+          correlationId,
+        );
+        throw new BadRequestException(`Order Rejected [STOP_BEYOND_LIQUIDATION]: ${msg}`);
+      }
+    }
+
     const openingAccountingSnapshot = buildAccountingSnapshot({
       accountCurrency: 'INR',
       quoteCurrency: openingQuoteCurrency,
@@ -1855,6 +1959,8 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
             remainingQuantity: Number(req.quantity),
             currentStopLoss: Number(stopLoss),
             partialLegs: [],
+            ...(liquidationPrice !== null ? { liquidationPrice } : {}),
+            ...(req.exitPlan === 'TRAIL' ? { exitPlan: 'TRAIL' } : {}),
           } as any,
           openedAt: fill.fillTimestamp,
           positionOpenedAt: fill.fillTimestamp,
@@ -2118,6 +2224,47 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
    * Rules: the position must be open; the live price must already be beyond the breakeven level (otherwise the
    * stop would trigger immediately); the stop is only ever tightened, never loosened.
    */
+  /**
+   * Funding owed by a perpetual position for every settled funding event after entry and up to `upToMs`.
+   * Payment per event = quantity held at that time x settlement mark price x funding rate, in account currency;
+   * longs pay a positive rate, shorts receive it. Quantity held accounts for partial exits made before the event.
+   * Only exchange-settled rates are used; when the settlement history is unavailable the result is flagged
+   * instead of estimated.
+   */
+  public computePerpFunding(
+    pos: any,
+    upToMs: number,
+    fxRate: number,
+  ): { totalAccount: number; events: Array<{ fundingTime: number; rate: number; markPrice: number; quantity: number; amountAccount: number }>; historyAvailable: boolean } {
+    const settlements =
+      typeof (this.realMarketStreamer as any)?.getPerpFundingSettlements === 'function'
+        ? this.realMarketStreamer!.getPerpFundingSettlements(pos.symbol)
+        : [];
+    const entryMs = new Date(pos.entryTime ?? pos.openedAt).getTime();
+    const events: Array<{ fundingTime: number; rate: number; markPrice: number; quantity: number; amountAccount: number }> = [];
+    if (settlements.length === 0) {
+      return { totalAccount: 0, events, historyAvailable: false };
+    }
+    const evts = (pos.executionEventsJson as any) || {};
+    const initialQty = Number(evts.initialQuantity ?? pos.quantity);
+    const legs: any[] = Array.isArray(evts.partialLegs) ? evts.partialLegs : [];
+    const contractSize = Number(evts.accountingSnapshot?.contractSize ?? 1);
+    const sign = isLongPosition(pos.direction) ? 1 : -1;
+    let total = 0;
+    for (const s of settlements) {
+      if (s.fundingTime <= entryMs || s.fundingTime > upToMs) continue;
+      const exitedBefore = legs
+        .filter((l) => new Date(l.fillTime ?? l.fillTimestamp ?? l.timestamp ?? 0).getTime() < s.fundingTime)
+        .reduce((sum, l) => sum + Number(l.quantity || 0), 0);
+      const qty = Math.max(0, initialQty - exitedBefore);
+      if (qty <= 0) continue;
+      const amountAccount = Number((sign * qty * contractSize * s.markPrice * s.fundingRate * fxRate).toFixed(2));
+      total += amountAccount;
+      events.push({ fundingTime: s.fundingTime, rate: s.fundingRate, markPrice: s.markPrice, quantity: qty, amountAccount });
+    }
+    return { totalAccount: Number(total.toFixed(2)), events, historyAvailable: true };
+  }
+
   async moveStopToBreakeven(positionId: string): Promise<IPaperPosition> {
     const pos: any = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
     if (!pos || (pos.status !== PositionState.OPEN && pos.status !== PositionState.PARTIALLY_CLOSED)) {
@@ -2132,7 +2279,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     const entryFees = Number((pos.chargesJson as any)?.totalChargesAccount ?? (pos.chargesJson as any)?.totalCharges ?? 0);
     const entry = Number(pos.entryPrice);
     const perUnitRoundTripFee = initialQty > 0 && fx > 0 ? (2 * entryFees) / (initialQty * contractSize * fx) : 0;
-    const breakeven = Number((isBuy ? entry + perUnitRoundTripFee : entry - perUnitRoundTripFee).toFixed(2));
+    const breakeven = roundPrice(pos.symbol, isBuy ? entry + perUnitRoundTripFee : entry - perUnitRoundTripFee);
 
     let live: number;
     try {
@@ -2165,6 +2312,88 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       pos.correlationId,
     );
     return this.mapDbPositionToInterface(updated);
+  }
+
+  /**
+   * Moves a position's stop to `newStop` if that TIGHTENS it (never loosens) and the live price is still on the
+   * safe side of it. Used by strategies with a trailing exit. Returns false when no change was made.
+   */
+  async tightenStop(positionId: string, newStop: number, reason: string): Promise<boolean> {
+    const pos: any = await this.prisma.paperPosition.findUnique({ where: { id: positionId } });
+    if (!pos || (pos.status !== PositionState.OPEN && pos.status !== PositionState.PARTIALLY_CLOSED)) return false;
+    const isBuy = isLongPosition(pos.direction);
+    const currentStop = Number(pos.stopLoss);
+    if (!(newStop > 0) || (isBuy ? newStop <= currentStop : currentStop > 0 && newStop >= currentStop)) return false;
+    const live = (await this.resolveLivePositionQuote(pos)).price;
+    if (isBuy ? live <= newStop : live >= newStop) return false; // would trigger immediately: leave it to the monitor
+    const events = (pos.executionEventsJson as any) || {};
+    await this.prisma.paperPosition.update({
+      where: { id: pos.id },
+      data: {
+        stopLoss: new Decimal(newStop),
+        executionEventsJson: { ...events, currentStopLoss: newStop, lastStopTightenedAt: new Date().toISOString() },
+      },
+    });
+    await this.recordAudit('STOP_TIGHTENED', 'POSITION', pos.id, { from: currentStop, to: newStop, livePrice: live, reason }, pos.correlationId);
+    return true;
+  }
+
+  /**
+   * Rebuilds the account's running totals from its ledger (closed trades + open positions), e.g. after trade
+   * history was deleted without adjusting the totals. Model A accounting: cash = initial capital + realized P&L;
+   * entry fees are realized at entry, partial exits when they happen, the final exit at close.
+   * `apply: false` only reports what would change.
+   */
+  async reconcileAccountFromLedger(accountId?: string, apply = true) {
+    const account = accountId
+      ? await this.prisma.paperAccount.findUnique({ where: { id: accountId } })
+      : await this.getOrCreateAccount();
+    if (!account) throw new NotFoundException(`PaperAccount '${accountId}' not found`);
+
+    const trades = await this.prisma.paperTrade.findMany({ where: { accountId: account.id } });
+    const closedRealized = trades.reduce((a, t) => a + Number(t.realizedPnL ?? 0), 0);
+    const closedFees = trades.reduce((a, t) => a + Number(t.fees ?? (t.chargesJson as any)?.totalCharges ?? 0), 0);
+
+    const open = await this.prisma.paperPosition.findMany({
+      where: { accountId: account.id, status: { in: [PositionState.OPEN, PositionState.PARTIALLY_CLOSED, PositionState.EXIT_PENDING, PositionState.CLOSING] } },
+    });
+    let openRealized = 0, openFees = 0, usedMargin = 0;
+    for (const pos of open) {
+      const entryFee = Number((pos.chargesJson as any)?.totalChargesAccount ?? (pos.chargesJson as any)?.totalCharges ?? 0);
+      const legs: any[] = ((pos.executionEventsJson as any)?.partialLegs ?? []) as any[];
+      const legNet = legs.reduce((a, l) => a + Number(l.netPnL ?? 0), 0);
+      const legFees = legs.reduce((a, l) => a + Number(l.fee ?? 0), 0);
+      openRealized += legNet - entryFee;
+      openFees += entryFee + legFees;
+      usedMargin += Number(pos.usedMargin ?? 0);
+    }
+
+    const realizedPnL = Number((closedRealized + openRealized).toFixed(2));
+    const after = {
+      cashBalance: Number((Number(account.initialCapital) + realizedPnL).toFixed(2)),
+      realizedPnL,
+      totalChargesPaid: Number((closedFees + openFees).toFixed(2)),
+      usedMargin: Number(usedMargin.toFixed(2)),
+    };
+    const before = {
+      cashBalance: Number(account.cashBalance),
+      realizedPnL: Number(account.realizedPnL),
+      totalChargesPaid: Number(account.totalChargesPaid),
+      usedMargin: Number(account.usedMargin),
+    };
+    if (apply) {
+      await this.prisma.paperAccount.update({
+        where: { id: account.id },
+        data: {
+          cashBalance: new Decimal(after.cashBalance),
+          realizedPnL: new Decimal(after.realizedPnL),
+          totalChargesPaid: new Decimal(after.totalChargesPaid),
+          usedMargin: new Decimal(after.usedMargin),
+        },
+      });
+      await this.recordAudit('ACCOUNT_RECONCILED_FROM_LEDGER', 'ACCOUNT', account.id, { before, after, closedTrades: trades.length, openPositions: open.length }, `reconcile_${Date.now()}`);
+    }
+    return { accountId: account.id, applied: apply, closedTrades: trades.length, openPositions: open.length, before, after };
   }
 
   async getPositionById(positionId: string) {
@@ -2326,7 +2555,7 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       isLongPosition(pos.direction) ? 'SELL' : 'BUY',
       config.maxSlippageBps ?? 50,
     );
-    const finalExitPrice = Number(exitSlippage.fillPrice.toFixed(2));
+    const finalExitPrice = roundPrice(pos.symbol, exitSlippage.fillPrice);
 
     const exitTime = new Date();
     const quantity = Number(pos.quantity);
@@ -2341,6 +2570,17 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
       'EXIT',
       pos.contractSymbol || pos.symbol,
     );
+    // Perpetual funding: every settlement while the position was open is a cash flow (positive = paid).
+    // It is settled with the final exit so the journal, account cash and realized PnL all include it.
+    if (isPerpetualSymbol(pos.symbol)) {
+      const funding = this.computePerpFunding(pos, exitTime.getTime(), fxRate);
+      if (funding.totalAccount !== 0) {
+        exitCharges.totalChargesAccount = Number((exitCharges.totalChargesAccount + funding.totalAccount).toFixed(2));
+        exitCharges.totalCharges = exitCharges.totalChargesAccount;
+        exitCharges.totalFees = exitCharges.totalChargesAccount;
+      }
+      (exitCharges as any).funding = funding;
+    }
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const entryChargesAmt = Number(entryCharges.totalChargesAccount ?? entryCharges.totalCharges ?? 0);
     const exitChargesAmt = Number(exitCharges.totalChargesAccount ?? exitCharges.totalCharges ?? 0);

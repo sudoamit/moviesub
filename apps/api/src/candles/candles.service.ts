@@ -18,6 +18,8 @@ import {
   chartCandlesToICandlesResult,
   VenueSessionCalendar,
   CanonicalStreamState,
+  SUPPORTED_PERPETUAL_SYMBOLS,
+  perpetualVenueSymbol,
 } from '@quant/shared';
 import {
   calculateEMA,
@@ -91,7 +93,7 @@ export interface IChartDataResponse {
 @Injectable()
 export class CandlesService {
   private readonly logger = new Logger(CandlesService.name);
-  private candleCache: Map<string, { timestamp: number; candles: ICandle[] }> = new Map();
+  private candleCache: Map<string, { timestamp: number; candles: ICandle[]; limit?: number }> = new Map();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -127,8 +129,10 @@ export class CandlesService {
     const normTf = (timeframe || '15m').toUpperCase().replace('MIN', 'M').replace('MINUTES', 'M');
     const cacheKey = `${sym}_${normTf}`;
     const cached = this.candleCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < 3000) {
-      return cached.candles;
+    // The cache is shared by callers asking for different amounts of history (chart: 200, lab runner: 500), so an
+    // entry is only reused when it was fetched for at least as many candles as requested.
+    if (cached && Date.now() - cached.timestamp < 3000 && (cached.limit ?? 0) >= limit) {
+      return cached.candles.slice(-limit);
     }
 
     try {
@@ -144,6 +148,7 @@ export class CandlesService {
       if (
         sym === 'BTCUSDT' ||
         sym === 'BTCUSDT_SPOT' ||
+        SUPPORTED_PERPETUAL_SYMBOLS.has(sym) ||
         sym === 'BTCUSD' ||
         sym === 'ETHUSDT' ||
         sym === 'PAXGUSDT' ||
@@ -162,7 +167,9 @@ export class CandlesService {
                   ? '4h'
                   : '1d';
         const binanceSym =
-          sym === 'BTCUSD' || sym === 'BTCUSDT_SPOT'
+          SUPPORTED_PERPETUAL_SYMBOLS.has(sym)
+            ? perpetualVenueSymbol(sym)
+            : sym === 'BTCUSD' || sym === 'BTCUSDT_SPOT'
             ? 'BTCUSDT'
             : sym === 'XAUUSD' || sym === 'GOLD'
               ? 'PAXGUSDT'
@@ -171,7 +178,8 @@ export class CandlesService {
         for (let attempt = 0; attempt <= 2; attempt++) {
           try {
             res = await fetch(
-              `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
+              // The perpetual trades on Binance USDⓈ-M futures and has its own price series.
+              `${SUPPORTED_PERPETUAL_SYMBOLS.has(sym) ? 'https://fapi.binance.com/fapi/v1' : 'https://api.binance.com/api/v3'}/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${Math.min(limit + 10, 500)}`,
             );
             if (res.ok) break;
             this.logger.warn(
@@ -203,7 +211,7 @@ export class CandlesService {
               };
             });
             const sliced = candles.slice(-limit);
-            this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced });
+            this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced, limit });
             return sliced;
           }
         }
@@ -245,7 +253,9 @@ export class CandlesService {
           : is5m
             ? '5d'
             : is15m
-              ? '1mo'
+              ? limit > 400
+                ? '60d' // Yahoo serves 15m bars for up to 60 days
+                : '1mo'
               : is1h
                 ? '3mo'
                 : is4h
@@ -285,7 +295,7 @@ export class CandlesService {
           }
           if (candles.length > 0) {
             const sliced = candles.slice(-limit);
-            this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced });
+            this.candleCache.set(cacheKey, { timestamp: Date.now(), candles: sliced, limit });
             return sliced;
           }
         }

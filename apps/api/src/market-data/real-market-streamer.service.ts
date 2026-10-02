@@ -30,6 +30,9 @@ import {
   validateAuthoritativeExecutionQuote,
   validateCurrentProviderExecutionQuote,
   ProviderRuntimeState,
+  SUPPORTED_PERPETUAL_SYMBOLS,
+  PERPETUAL_SPECS,
+  perpetualVenueSymbol,
 } from '@quant/shared';
 
 export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
@@ -60,6 +63,21 @@ export interface ILiveRealTicker {
   providerConnectionId?: string;
   providerTransport?: 'WEBSOCKET_STREAM' | 'REST_POLLING';
   providerId?: string;
+}
+
+export interface IPerpFundingSettlement {
+  fundingTime: number;
+  /** Positive: longs pay shorts. */
+  fundingRate: number;
+  markPrice: number;
+}
+
+export interface IPerpPremiumSnapshot {
+  markPrice: number;
+  indexPrice: number;
+  predictedFundingRate: number;
+  nextFundingTime: number;
+  time: number;
 }
 
 @Injectable()
@@ -201,6 +219,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     // 1. Fetch Real Binance Bitcoin Price every 2 seconds
     this.binanceTimer = setInterval(async () => {
       await this.fetchRealBinancePrice();
+      await this.fetchRealBinanceFuturesPrice();
     }, 2000);
 
     // 2. Fetch Real NSE Indian Market Quotes every 3.5 seconds
@@ -232,7 +251,26 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
    * - contract symbols carry no expiry, so quotes are published ONLY when the chain's expiry is the one the
    *   contract resolver trades (the nearest expiry); otherwise nothing is published for that underlying.
    */
-  private async fetchRealNseOptionQuotes(): Promise<void> {
+  private nseOptionPollPromise: Promise<void> | null = null;
+
+  /**
+   * Fetches the NSE option chains now (or joins the poll already in flight) so a caller that found an option
+   * quote missing or older than its freshness limit can retry against fresh exchange data. Groww last-trade
+   * times are whole seconds and 1-4s old when served, so between 2s polls a quote can cross a 5s limit.
+   */
+  public refreshNseOptionQuotesNow(): Promise<void> {
+    return this.fetchRealNseOptionQuotes();
+  }
+
+  private fetchRealNseOptionQuotes(): Promise<void> {
+    if (this.nseOptionPollPromise) return this.nseOptionPollPromise;
+    this.nseOptionPollPromise = this.runNseOptionPoll().finally(() => {
+      this.nseOptionPollPromise = null;
+    });
+    return this.nseOptionPollPromise;
+  }
+
+  private async runNseOptionPoll(): Promise<void> {
     if (this.nseOptionPollInFlight) return;
     this.nseOptionPollInFlight = true;
     const providerId = 'NSE_REST_OPTION_PROVIDER';
@@ -261,7 +299,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
           anySuccess = true;
 
           const tradedExpiry = IndianOptionsExpiryEngine.getUpcomingExpiries(underlying)[0]?.dateString;
-          if (!tradedExpiry || !RealMarketStreamerService.isSameCalendarDay(chainExpiry, tradedExpiry)) {
+          if (!tradedExpiry || !RealMarketStreamerService.isExpiryMatch(chainExpiry, tradedExpiry)) {
             if (Date.now() - this.lastOptionExpiryMismatchLog > 60_000) {
               this.lastOptionExpiryMismatchLog = Date.now();
               this.logger.warn(
@@ -318,6 +356,28 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     } finally {
       this.nseOptionPollInFlight = false;
     }
+  }
+
+  /**
+   * The exchange's chain expiry matches the engine's expiry on the same day, or up to 3 days earlier: NSE moves
+   * an expiry that falls on a holiday to the previous trading day, and the engine has no holiday calendar.
+   */
+  private static isExpiryMatch(chainExpiry: string, engineExpiry: string): boolean {
+    if (RealMarketStreamerService.isSameCalendarDay(chainExpiry, engineExpiry)) return true;
+    const a = RealMarketStreamerService.toUtcDay(chainExpiry);
+    const b = RealMarketStreamerService.toUtcDay(engineExpiry);
+    if (a === null || b === null) return false;
+    const daysEarlier = (b - a) / 86_400_000;
+    return daysEarlier > 0 && daysEarlier <= 3;
+  }
+
+  private static toUtcDay(v: string): number | null {
+    const iso = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
+    const dmy = v.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})/);
+    if (!dmy) return null;
+    const m = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].indexOf(dmy[2].toUpperCase());
+    return m < 0 ? null : Date.UTC(+dmy[3], m, +dmy[1]);
   }
 
   /** Compares '2026-10-06' with '06-Oct-2026' (or any two parseable dates) by calendar day. */
@@ -421,6 +481,126 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     } catch (err) {
       this.logger.debug(`Binance real tick notice: ${(err as Error).message}`);
     }
+  }
+
+  /** Per perpetual (e.g. BTCUSDT_PERP): settled funding history (oldest first), premium snapshot, 24h stats. */
+  private perpFundingHistory = new Map<string, IPerpFundingSettlement[]>();
+  private perpFundingFetchedAt = new Map<string, number>();
+  private perpPremium = new Map<string, IPerpPremiumSnapshot>();
+  private perpStats = new Map<string, { open: number; high: number; low: number; volume: number }>();
+  private perpStatsFetchedAt = 0;
+  private perpPremiumFetchedAt = 0;
+
+  /**
+   * Binance USDⓈ-M perpetuals (SUPPORTED_PERPETUAL_SYMBOLS), one request per data type for all of them:
+   * - execution quote: best bid/ask midpoint with its real-time transaction time (bookTicker, every poll).
+   *   ticker/24hr and ticker/price are served from a cache whose timestamps are 2-7s old, so they are never
+   *   used as the execution price or time;
+   * - 24h statistics (display only) and mark price / predicted funding (premiumIndex): every 10s;
+   * - settled funding history (fundingRate): per symbol every 5 minutes and right after a funding time.
+   * Perpetuals are distinct instruments from spot and are published as <SYMBOL>_PERP only.
+   */
+  private async fetchRealBinanceFuturesPrice() {
+    try {
+      const now = Date.now();
+      const venueToPerp = new Map([...SUPPORTED_PERPETUAL_SYMBOLS].map((p) => [perpetualVenueSymbol(p), p]));
+
+      if (now - this.perpStatsFetchedAt >= 10_000) {
+        this.perpStatsFetchedAt = now;
+        const sRes = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
+        if (sRes.ok) {
+          for (const d of (await sRes.json()) as any[]) {
+            const perp = venueToPerp.get(d?.symbol);
+            if (perp && parseFloat(d.openPrice) > 0) {
+              this.perpStats.set(perp, { open: parseFloat(d.openPrice), high: parseFloat(d.highPrice), low: parseFloat(d.lowPrice), volume: Math.round(parseFloat(d.volume)) });
+            }
+          }
+        }
+      }
+
+      const res = await fetch('https://fapi.binance.com/fapi/v1/ticker/bookTicker');
+      if (res.ok) {
+        for (const data of (await res.json()) as any[]) {
+          const perp = venueToPerp.get(data?.symbol);
+          if (!perp) continue;
+          const eventTime = Number(data.time);
+          const bid = parseFloat(data.bidPrice);
+          const ask = parseFloat(data.askPrice);
+          // Missing provider event time -> reject the quote rather than stamping it with the poll time
+          if (!(Number.isFinite(eventTime) && eventTime > 0 && bid > 0 && ask >= bid)) continue;
+          const spec = PERPETUAL_SPECS[perp];
+          const decimals = Math.max(2, (spec?.pricePrecision ?? 2) + 1);
+          const livePrice = Number(((bid + ask) / 2).toFixed(decimals));
+          const st = this.perpStats.get(perp);
+          const open = st?.open ?? livePrice;
+          const canonicalTick = BINANCE_REST_SPOT_PROVIDER_ADAPTER.toCanonicalExecutionTick({
+            providerSymbol: perp,
+            price: livePrice,
+            providerEventTime: eventTime,
+            open,
+            high: Math.max(st?.high ?? livePrice, livePrice),
+            low: Math.min(st?.low ?? livePrice, livePrice),
+            close: livePrice,
+            volume: st?.volume ?? 0,
+            prevClose: open,
+            changePercent: open > 0 ? Number((((livePrice - open) / open) * 100).toFixed(3)) : 0,
+            changeAmount: Number((livePrice - open).toFixed(decimals)),
+            tickSize: spec?.tickSize ?? 0.01,
+          });
+          const updated = this.ingestCanonicalSpotTick(canonicalTick);
+          if (updated) await this.broadcastTick(updated);
+        }
+      }
+
+      if (now - this.perpPremiumFetchedAt >= 10_000) {
+        this.perpPremiumFetchedAt = now;
+        const pRes = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex');
+        if (pRes.ok) {
+          for (const p of (await pRes.json()) as any[]) {
+            const perp = venueToPerp.get(p?.symbol);
+            const markPrice = parseFloat(p?.markPrice);
+            const time = Number(p?.time);
+            if (perp && markPrice > 0 && time > 0) {
+              this.perpPremium.set(perp, {
+                markPrice, indexPrice: parseFloat(p.indexPrice), predictedFundingRate: parseFloat(p.lastFundingRate),
+                nextFundingTime: Number(p.nextFundingTime), time,
+              });
+            }
+          }
+        }
+      }
+
+      for (const perp of SUPPORTED_PERPETUAL_SYMBOLS) {
+        const history = this.perpFundingHistory.get(perp) ?? [];
+        const fetchedAt = this.perpFundingFetchedAt.get(perp) ?? 0;
+        const premium = this.perpPremium.get(perp);
+        const lastSettled = history[history.length - 1]?.fundingTime ?? 0;
+        const fundingDue = premium !== undefined && premium.nextFundingTime <= now && lastSettled < premium.nextFundingTime;
+        if (!(now - fetchedAt >= 300_000 || (fundingDue && now - fetchedAt >= 15_000))) continue;
+        this.perpFundingFetchedAt.set(perp, now);
+        const fRes = await fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${perpetualVenueSymbol(perp)}&limit=100`);
+        if (!fRes.ok) continue;
+        const rows: any[] = await fRes.json();
+        if (!Array.isArray(rows)) continue;
+        const parsed = rows
+          .map((r) => ({ fundingTime: Number(r.fundingTime), fundingRate: parseFloat(r.fundingRate), markPrice: parseFloat(r.markPrice) }))
+          .filter((r) => r.fundingTime > 0 && Number.isFinite(r.fundingRate) && r.markPrice > 0)
+          .sort((a, b) => a.fundingTime - b.fundingTime);
+        if (parsed.length > 0) this.perpFundingHistory.set(perp, parsed);
+      }
+    } catch (err) {
+      this.logger.debug(`Binance futures tick notice: ${(err as Error).message}`);
+    }
+  }
+
+  /** Settled funding events for a perpetual (oldest first). Empty when none have been fetched yet. */
+  public getPerpFundingSettlements(symbol: string): IPerpFundingSettlement[] {
+    return [...(this.perpFundingHistory.get((symbol || '').toUpperCase()) ?? [])];
+  }
+
+  /** Latest mark price / predicted funding snapshot for a perpetual, or null when unavailable. */
+  public getPerpPremium(symbol: string): IPerpPremiumSnapshot | null {
+    return this.perpPremium.get((symbol || '').toUpperCase()) ?? null;
   }
 
   /**
@@ -560,8 +740,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
   }
 
   public async broadcastTick(ticker: ILiveRealTicker) {
-    const isBtc = ticker.symbol.includes('BTC');
-    const providerId = isBtc ? 'BINANCE_SPOT' : (ticker.providerId || undefined);
+    const isPerp = ticker.symbol.endsWith('_PERP');
+    const isBtc = ticker.symbol.includes('BTC') && !isPerp;
+    const providerId = isPerp ? 'BINANCE_FUTURES' : isBtc ? 'BINANCE_SPOT' : (ticker.providerId || undefined);
 
     const payload = {
       symbol: ticker.symbol,
@@ -1801,7 +1982,9 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     const isFresh = Boolean(eventTime && now - eventTime <= 5000 && eventTime <= now + 5000);
 
     let providerId = ticker.providerId || 'BINANCE_SPOT';
-    if (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' || providerId === 'BINANCE_REST' || providerId === 'BINANCE_DIRECT') {
+    if (sym.endsWith('_PERP')) {
+      providerId = 'BINANCE_FUTURES';
+    } else if (sym === 'BTCUSDT_SPOT' || sym === 'BTCUSDT' || providerId === 'BINANCE_REST' || providerId === 'BINANCE_DIRECT') {
       providerId = 'BINANCE_SPOT';
     }
 

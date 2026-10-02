@@ -2,6 +2,7 @@ import {
   Direction,
   ICandle,
   ISignalSetup,
+  LiquidityType,
   MTFMode,
   SignalGrade,
   SignalState,
@@ -13,12 +14,23 @@ import { IMTFTimeframeData, MultiTimeframeAnalyzer } from './mtf-analyzer';
 import { TradeLevelsCalculator } from './trade-levels';
 import { IScoringInputs, IScoringWeights, SignalScorer } from './signal-scorer';
 import { ReasoningGenerator } from './reasoning-generator';
-import { calculateEMA, calculateRSI } from '@quant/indicators';
+import { calculateATR, calculateEMA, calculateRSI } from '@quant/indicators';
+import { DisplacementEngine } from './displacement';
 import { SessionFilter } from './session-filter';
 import { SaiyanOCCEngine } from './saiyan-occ-engine';
 import { SnapshotBuilder } from './quant/snapshot-builder';
 import { ICanonicalMarketSnapshot } from './canonical-market-snapshot';
 import { CandleNormalizer } from './candle-normalizer';
+
+/** A liquidity sweep or structure break older than this many execution candles no longer counts as a trigger. */
+const SWEEP_LOOKBACK_BARS = 20;
+const STRUCTURE_LOOKBACK_BARS = 20;
+/** Candles inspected for a measured displacement candle in the trade direction. */
+const DISPLACEMENT_LOOKBACK_BARS = 5;
+/** An order block / FVG further than this (in ATR) from price is not a point of interest for this signal. */
+const POI_MAX_DISTANCE_ATR = 1.5;
+/** Premium/discount tolerance around equilibrium, as a share of the dealing range height. */
+const ZONE_TOLERANCE_OF_RANGE = 0.05;
 
 export interface IGenerateFromSnapshotsOptions {
   executionSnapshot: ICanonicalMarketSnapshot;
@@ -424,40 +436,80 @@ export class SignalGenerator {
     }
 
     // 6. Identify Trigger Components (Liquidity Sweep, Order Block, FVG, Structure Break)
-    const recentSweeps = execAnalysis.liquiditySweeps.slice(-4);
-    const hasSweep =
-      recentSweeps.length > 0 &&
-      recentSweeps.some((s) =>
-        candidateDir === Direction.BULLISH
-          ? s.priceLevel <= currentPrice * 1.005
-          : s.priceLevel >= currentPrice * 0.995,
-      );
+    // Indices below refer to the analysed (closed) candles.
+    const lastClosedIdx = execAnalysis.candlesCount - 1;
+    const isBull = candidateDir === Direction.BULLISH;
+    const atrSeries = calculateATR(execCandles, 14);
+    const currentAtr =
+      Number(atrSeries[execCandles.length - 1]) > 0
+        ? Number(atrSeries[execCandles.length - 1])
+        : Math.max(1e-9, lastCandle.high - lastCandle.low);
 
-    const recentBOS = execAnalysis.breaksOfStructure.slice(-3);
-    const recentCHOCH = execAnalysis.changesOfCharacter.slice(-3);
-    const hasStructureBreak =
-      recentBOS.some((b) => b.direction === candidateDir) ||
-      recentCHOCH.some((c) => c.direction === candidateDir);
+    // Liquidity sweep: a RECENT sweep of the opposite-side pool (sell-side lows for a long, buy-side highs for a
+    // short) that closed back inside the level (reclaimed), with price still on the right side of it.
+    const sweepSideTypes = isBull
+      ? [LiquidityType.SELL_SIDE, LiquidityType.EQUAL_LOWS]
+      : [LiquidityType.BUY_SIDE, LiquidityType.EQUAL_HIGHS];
+    const recentSweeps = execAnalysis.liquiditySweeps.filter(
+      (s) =>
+        sweepSideTypes.includes(s.type) &&
+        s.sweepState === 'SWEEP_RECLAIMED' &&
+        (s.sweptAtIndex ?? -1) >= lastClosedIdx - SWEEP_LOOKBACK_BARS &&
+        (isBull ? currentPrice >= s.priceLevel : currentPrice <= s.priceLevel),
+    );
+    const hasSweep = recentSweeps.length > 0;
 
-    const activeFVG =
-      execAnalysis.activeFVGs.filter((f) => f.direction === candidateDir).slice(-1)[0] || null;
+    // Structure break in the trade direction within the recent window
+    const structureCutoff = lastClosedIdx - STRUCTURE_LOOKBACK_BARS;
+    const recentBOS = execAnalysis.breaksOfStructure.filter(
+      (b) => b.direction === candidateDir && b.candleIndex >= structureCutoff,
+    );
+    const recentCHOCH = execAnalysis.changesOfCharacter.filter(
+      (c) => c.direction === candidateDir && c.candleIndex >= structureCutoff,
+    );
+    const hasStructureBreak = recentBOS.length > 0 || recentCHOCH.length > 0;
+    const latestBreakIsChoch =
+      recentCHOCH.length > 0 &&
+      (recentBOS.length === 0 ||
+        recentCHOCH[recentCHOCH.length - 1].candleIndex > recentBOS[recentBOS.length - 1].candleIndex);
 
-    const activeOB =
-      execAnalysis.activeOrderBlocks.filter((ob) => ob.direction === candidateDir).slice(-1)[0] ||
-      null;
-
-    // High-Accuracy Hard Filter 2: Strict Dealing Range Equilibrium Check (Premium vs Discount)
-    const dealingRange = execAnalysis.dealingRange;
-    let inCorrectZone = true;
-    if (dealingRange) {
-      if (candidateDir === Direction.BULLISH && currentPrice > dealingRange.equilibrium * 1.01) {
-        inCorrectZone = false; // Buying at range highs is low probability
-      } else if (
-        candidateDir === Direction.BEARISH &&
-        currentPrice < dealingRange.equilibrium * 0.99
-      ) {
-        inCorrectZone = false; // Selling at range lows is low probability
+    // Points of interest: the nearest active zone in the trade direction that price is at, or can retest
+    // (below/around price for a long, above/around price for a short) within POI_MAX_DISTANCE_ATR.
+    const pickZone = <T>(zones: T[], lower: (z: T) => number, upper: (z: T) => number): T | null => {
+      let best: T | null = null;
+      let bestDist = Infinity;
+      for (let k = zones.length - 1; k >= 0; k--) {
+        const z = zones[k];
+        const lo = lower(z);
+        const hi = upper(z);
+        if (isBull ? lo > currentPrice : hi < currentPrice) continue; // zone on the wrong side of price
+        const dist = isBull ? Math.max(0, currentPrice - hi) : Math.max(0, lo - currentPrice);
+        if (dist <= POI_MAX_DISTANCE_ATR * currentAtr && dist < bestDist) {
+          best = z;
+          bestDist = dist;
+        }
       }
+      return best;
+    };
+    let activeFVG = pickZone(
+      execAnalysis.activeFVGs.filter((f) => f.direction === candidateDir),
+      (f) => f.lowerBound,
+      (f) => f.upperBound,
+    );
+    let activeOB = pickZone(
+      execAnalysis.activeOrderBlocks.filter((ob) => ob.direction === candidateDir),
+      (ob) => ob.low,
+      (ob) => ob.high,
+    );
+    // "Tapped" = the last candle actually traded into the zone; otherwise the zone is a pending retest entry.
+    const tapped = (lo: number, hi: number) => (isBull ? lastCandle.low <= hi : lastCandle.high >= lo);
+
+    // Displacement: measured on the recent candles (largest range/ATR among real displacement candles)
+    let displacementRatio = 0;
+    for (let k = Math.max(0, execCandles.length - DISPLACEMENT_LOOKBACK_BARS); k < execCandles.length; k++) {
+      const kAtr = Number(atrSeries[k]) > 0 ? Number(atrSeries[k]) : currentAtr;
+      const m = DisplacementEngine.calculate(execCandles[k], candidateDir, kAtr);
+      if (m.isDisplacement) displacementRatio = Math.max(displacementRatio, m.rangeAtrRatio);
     }
 
     // High-Accuracy Filter 3: Indicator Momentum & Trend Alignment
@@ -505,13 +557,17 @@ export class SignalGenerator {
         : execAnalysis.confirmedSwingHighs;
     const anchorSwing = anchorSwings.slice(-1)[0] || null;
 
-    const levels = TradeLevelsCalculator.calculateLevels(
-      candidateDir,
-      execCandles,
-      anchorSwing,
-      activeOB,
-      activeFVG,
-    );
+    // The stop must sit beyond the chosen point of interest. If the order block is too wide for that within the
+    // maximum risk, refine to the FVG, then to the swing, instead of placing the stop inside the zone.
+    let levels = TradeLevelsCalculator.calculateLevels(candidateDir, execCandles, anchorSwing, activeOB, activeFVG, symbol);
+    if (!levels && activeOB) {
+      activeOB = null;
+      levels = TradeLevelsCalculator.calculateLevels(candidateDir, execCandles, anchorSwing, null, activeFVG, symbol);
+    }
+    if (!levels && activeFVG) {
+      activeFVG = null;
+      levels = TradeLevelsCalculator.calculateLevels(candidateDir, execCandles, anchorSwing, null, null, symbol);
+    }
 
     if (!levels) {
       return SignalGenerator.createNoTradeSignal(
@@ -522,6 +578,21 @@ export class SignalGenerator {
       );
     }
 
+    const fvgTapped = activeFVG ? tapped(activeFVG.lowerBound, activeFVG.upperBound) : false;
+    const obTapped = activeOB ? tapped(activeOB.low, activeOB.high) : false;
+
+    // Premium/discount: the planned entry must be in discount for a long (premium for a short), judged against the
+    // dealing range height rather than a percentage of price.
+    const dealingRange = execAnalysis.dealingRange;
+    let inCorrectZone = true;
+    if (dealingRange) {
+      const tol = (dealingRange.high - dealingRange.low) * ZONE_TOLERANCE_OF_RANGE;
+      const entryPrice = levels.entryZone.optimal;
+      inCorrectZone = isBull
+        ? entryPrice <= dealingRange.equilibrium + tol
+        : entryPrice >= dealingRange.equilibrium - tol;
+    }
+
     // 8. Institutional Confluence Scoring
     const scoringInputs: IScoringInputs = {
       direction: candidateDir,
@@ -529,8 +600,11 @@ export class SignalGenerator {
       htfAlignmentScore: mtf.alignmentScore,
       hasLiquiditySweep: hasSweep,
       hasBOSOrCHOCH: hasStructureBreak,
-      hasOBOrFVG: activeFVG !== null || activeOB !== null,
-      displacementRatio: activeFVG ? 1.5 : hasStructureBreak ? 1.2 : 0.9,
+      hasBOS: recentBOS.length > 0,
+      hasCHOCH: recentCHOCH.length > 0,
+      hasOrderBlock: activeOB !== null,
+      hasFVG: activeFVG !== null,
+      displacementRatio,
       inCorrectZone,
       hasVolumeExpansion,
       riskRewardRatio: levels.riskRewardRatios.rr2,
@@ -554,15 +628,15 @@ export class SignalGenerator {
     }
     if (hasStructureBreak) {
       explicitReasons.push(
-        recentCHOCH.length > 0 ? `${candidateDir}_CHOCH_CONFIRMED` : `${candidateDir}_BOS_CONFIRMED`,
+        latestBreakIsChoch ? `${candidateDir}_CHOCH_CONFIRMED` : `${candidateDir}_BOS_CONFIRMED`,
       );
     }
     if (activeFVG) {
-      explicitReasons.push(`${candidateDir}_FVG_MITIGATION`);
-      triggerDesc = `Mitigation tap into active ${candidateDir} Fair Value Gap [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]`;
+      explicitReasons.push(fvgTapped ? `${candidateDir}_FVG_MITIGATION` : `${candidateDir}_FVG_RETEST_PENDING`);
+      triggerDesc = `${fvgTapped ? 'Mitigation tap into' : 'Pending retest of'} active ${candidateDir} Fair Value Gap [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]`;
     } else if (activeOB) {
-      explicitReasons.push(`${candidateDir}_ORDER_BLOCK_TAP`);
-      triggerDesc = `Institutional ${candidateDir} Order Block tap [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]`;
+      explicitReasons.push(obTapped ? `${candidateDir}_ORDER_BLOCK_TAP` : `${candidateDir}_ORDER_BLOCK_RETEST_PENDING`);
+      triggerDesc = `${obTapped ? 'Institutional' : 'Pending retest of'} ${candidateDir} Order Block${obTapped ? ' tap' : ''} [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]`;
     } else if (hasStructureBreak) {
       triggerDesc = `Fresh ${candidateDir} structural breakout / CHoCH expansion with ${rvol.toFixed(1)}x RVOL volume`;
     }
@@ -659,7 +733,7 @@ export class SignalGenerator {
         candleTime: activeOB?.timestamp ? new Date(activeOB.timestamp).getTime() : (activeOB !== null ? decisionTimestamp.getTime() : undefined),
         timeframe: String(executionTf),
         symbol,
-        details: activeOB ? `Order Block tap [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]` : undefined,
+        details: activeOB ? `Order Block ${obTapped ? 'tap' : 'retest pending'} [${activeOB.low.toFixed(2)} - ${activeOB.high.toFixed(2)}]` : undefined,
       },
       fvg: {
         matched: activeFVG !== null,
@@ -669,7 +743,7 @@ export class SignalGenerator {
         candleTime: activeFVG?.timestamp ? new Date(activeFVG.timestamp).getTime() : (activeFVG !== null ? decisionTimestamp.getTime() : undefined),
         timeframe: String(executionTf),
         symbol,
-        details: activeFVG ? `FVG mitigation [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]` : undefined,
+        details: activeFVG ? `FVG ${fvgTapped ? 'mitigation' : 'retest pending'} [${activeFVG.lowerBound.toFixed(2)} - ${activeFVG.upperBound.toFixed(2)}]` : undefined,
       },
       liquiditySweep: {
         matched: hasSweep,

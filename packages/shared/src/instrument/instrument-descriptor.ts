@@ -6,6 +6,7 @@ export type AssetClass = 'EQUITY' | 'INDEX' | 'CRYPTO' | 'COMMODITY';
 export type CostScheduleId =
   | 'NSE_OPTION_DELIVERY'
   | 'BINANCE_CRYPTO_SPOT'
+  | 'BINANCE_USDM_FUTURES'
   | 'COMEX_COMMODITY_SPOT'
   | 'NSE_CASH_EQUITY';
 
@@ -154,6 +155,24 @@ export const INSTRUMENT_DESCRIPTORS: Record<string, InstrumentDescriptor> = {
     supportsOptions: false,
     marginModel: 'SPOT',
     costScheduleId: 'BINANCE_CRYPTO_SPOT',
+  },
+  BTCUSDT_PERP: {
+    instrumentId: 'inst_btcusdt_perp',
+    canonicalSymbol: 'BTCUSDT_PERP',
+    venue: 'BINANCE_FUTURES_USDT',
+    productType: 'FUTURE',
+    assetClass: 'CRYPTO',
+    quoteCurrency: 'USDT',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: 0.001,
+    quantityPrecision: 3,
+    priceTickSize: 0.1,
+    supportsLong: true,
+    supportsShort: true,
+    supportsOptions: false,
+    marginModel: 'ISOLATED',
+    costScheduleId: 'BINANCE_USDM_FUTURES',
   },
   XAUUSD_SPOT: {
     instrumentId: 'inst_xauusd_spot',
@@ -313,4 +332,28 @@ export function getAuthoritativeDescriptor(symbol: string): InstrumentDescriptor
     throw new Error(`[UNKNOWN_INSTRUMENT_DESCRIPTOR] No authoritative InstrumentDescriptor for symbol: ${symbol}`);
   }
   return descriptor;
+}
+
+// Descriptors for the generated perpetuals (same venue / cost schedule as BTCUSDT_PERP)
+import { PERPETUAL_SPECS } from './instrument-registry';
+for (const [symbol, spec] of Object.entries(PERPETUAL_SPECS)) {
+  if (INSTRUMENT_DESCRIPTORS[symbol]) continue;
+  INSTRUMENT_DESCRIPTORS[symbol] = {
+    instrumentId: `inst_${symbol.toLowerCase()}`,
+    canonicalSymbol: symbol,
+    venue: 'BINANCE_FUTURES_USDT',
+    productType: 'FUTURE',
+    assetClass: 'CRYPTO',
+    quoteCurrency: 'USDT',
+    accountCurrency: 'INR',
+    contractSize: 1,
+    lotSize: spec.lotSize,
+    quantityPrecision: spec.quantityPrecision,
+    priceTickSize: spec.tickSize,
+    supportsLong: true,
+    supportsShort: true,
+    supportsOptions: false,
+    marginModel: 'ISOLATED',
+    costScheduleId: 'BINANCE_USDM_FUTURES',
+  };
 }

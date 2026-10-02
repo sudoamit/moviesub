@@ -1191,6 +1191,10 @@ model AlgoBot {
   minScore           Int                 @default(80)
   smcCondition       AlgoBotSmcCondition @default(ANY_CONFLUENCE)
   lots               Int                 @default(1)
+  /// Percent of account capital risked per trade (sizes the order from the stop distance). Null = 1%.
+  riskPercentage     Float?
+  /// Leverage for margin products (e.g. BTCUSDT_PERP), validated against the instrument maximum. Null = instrument default; spot is always 1x.
+  leverage           Float?
   autoExecutePaper   Boolean             @default(false)
   notifyWebhook      Boolean             @default(true)
   isActive           Boolean             @default(true)
@@ -1396,3 +1400,219 @@ model TradeReservation {
   @@map("trade_reservations")
 }
 
+
+/// A strategy discovered and validated by the strategy lab. Lifecycle: SHADOW (virtual trades on live data)
+/// -> LIVE (paper orders) -> RETIRED. Promotion and retirement are automatic (LabStrategiesService).
+model LabStrategy {
+  id                   String             @id
+  name                 String
+  symbol               String
+  timeframe            String
+  genomeJson           Json
+  status               String             @default("SHADOW")
+  statusReason         String?
+  /// Leverage for live orders (must keep liquidation beyond the strategy's stop).
+  leverage             Float              @default(10)
+  riskPercentage       Float              @default(0.5)
+  /// Backtest reference used for promotion / retirement: expectancyR, sdR, trades, maxDrawdownR, ...
+  backtestJson         Json
+  lastProcessedBarTime DateTime?
+  promotedAt           DateTime?
+  retiredAt            DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  trades               LabStrategyTrade[]
+
+  @@map("lab_strategies")
+}
+
+model LabStrategyTrade {
+  id              String      @id @default(uuid())
+  strategyId      String
+  strategy        LabStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  /// SHADOW (virtual) or LIVE (backed by a paper position)
+  mode            String
+  side            String
+  signalBarTime   DateTime
+  entryTime       DateTime
+  entryPrice      Float
+  initialStop     Float
+  currentStop     Float
+  extremeClose    Float
+  barsHeld        Int         @default(0)
+  status          String      @default("OPEN")
+  exitTime        DateTime?
+  exitPrice       Float?
+  exitReason      String?
+  netR            Float?
+  costR           Float?
+  paperPositionId String?
+  /// Trade-quality features at the signal bar, the model's predicted R and the applied size multiplier.
+  featuresJson    Json?
+  predictedR      Float?
+  sizeMultiplier  Float?
+  qualityModelId  String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@unique([strategyId, signalBarTime])
+  @@index([strategyId, status])
+  @@map("lab_strategy_trades")
+}
+
+/// One automatic discovery pass of the strategy lab (history update, search, cross-market confirmation).
+model LabDiscoveryRun {
+  id          String    @id @default(uuid())
+  status      String    @default("RUNNING")
+  trigger     String    @default("SCHEDULED")
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  registered  String[]
+  summaryJson Json?
+  error       String?
+
+  @@index([startedAt])
+  @@map("lab_discovery_runs")
+}
+
+/// A trained trade-quality model for a lab strategy. Only ACTIVE models (proven out-of-sample lift) affect trades.
+model LabQualityModel {
+  id             String   @id @default(uuid())
+  strategyId     String
+  status         String
+  trigger        String
+  trainedAt      DateTime @default(now())
+  examples       Int
+  labExamples    Int
+  modelJson      Json
+  validationJson Json
+
+  @@index([strategyId, trainedAt])
+  @@map("lab_quality_models")
+}
+
+/// Market observer: periodic snapshots the AI learns from (option-chain summaries, implied volatility, prices).
+model MarketObservation {
+  id      String   @id @default(uuid())
+  /// NIFTY | BANKNIFTY | BTC | ETH | GOLD
+  asset   String
+  /// OPTION_CHAIN | VOLATILITY | PRICE
+  kind    String
+  takenAt DateTime @default(now())
+  /// Underlying price at the time of the snapshot (forward returns are measured from it)
+  price   Float
+  metrics Json
+
+  @@index([asset, kind, takenAt])
+  @@map("market_observations")
+}
+
+/// News headlines from free RSS feeds, scored per asset by an LLM (sentiment -1..1, importance 0..1).
+model NewsItem {
+  id          String    @id @default(uuid())
+  source      String
+  url         String    @unique
+  title       String
+  summary     String?
+  publishedAt DateTime
+  fetchedAt   DateTime  @default(now())
+  scoredAt    DateTime?
+  scoreModel  String?
+  /// { "NIFTY": { "sentiment": 0.4, "importance": 0.7 }, "BTC": {...} } - only assets the headline is relevant to
+  scores      Json?
+
+  @@index([publishedAt])
+  @@index([scoredAt])
+  @@map("news_items")
+}
+
+/// NIFTY intraday strategies forward-tested live (WATCH: recorded with real option prices, never placed).
+model IntradayStrategy {
+  id           String          @id
+  name         String
+  genomeJson   Json
+  /// WATCH | RETIRED
+  status       String          @default("WATCH")
+  statusReason String?
+  /// Study statistics at registration / last refresh (modelled option P&L)
+  studyJson    Json
+  createdAt    DateTime        @default(now())
+  retiredAt    DateTime?
+  trades       IntradayTrade[]
+
+  @@map("intraday_strategies")
+}
+
+model IntradayTrade {
+  id               String           @id @default(uuid())
+  strategyId       String
+  strategy         IntradayStrategy @relation(fields: [strategyId], references: [id])
+  /// Session date (IST)
+  date             String
+  side             Int
+  signalTime       DateTime
+  indexEntry       Float
+  indexStop        Float
+  indexTarget      Float?
+  /// ITM option traded for the signal, e.g. "NIFTY 24850 CE", with its real live prices
+  optionContract   String
+  optionEntry      Float?
+  optionExit       Float?
+  /// OPEN | CLOSED
+  status           String           @default("OPEN")
+  exitTime         DateTime?
+  indexExit        Float?
+  exitReason       String?
+  indexPoints      Float?
+  /// Real option P&L in premium points (null when a live option price was unavailable)
+  optionPoints     Float?
+  /// What the study's option model predicted for this trade
+  modelPoints      Float?
+  /// Market context at entry (option chain metrics, gap, time) for learning
+  featuresJson     Json?
+  createdAt        DateTime         @default(now())
+
+  @@unique([strategyId, date])
+  @@index([status])
+  @@map("intraday_trades")
+}
+
+/// Post-trade review: what happened and which mistakes explain a loss (written once the market showed what came next).
+model TradeReview {
+  id          String   @id @default(uuid())
+  /// LAB (crypto lab strategies) | NIFTY (NIFTY intraday watch strategies)
+  kind        String
+  tradeId     String   @unique
+  strategyId  String
+  /// WIN | LOSS
+  outcome     String
+  resultR     Float
+  maxFavourableR Float
+  mistakes    String[]
+  createdAt   DateTime @default(now())
+
+  @@index([kind, strategyId])
+  @@map("trade_reviews")
+}
+
+/// A lesson: a repeated mistake, the proposed fix, how it did on history, and the variant tried live if adopted.
+model TradeLesson {
+  id              String   @id @default(uuid())
+  kind            String
+  strategyId      String
+  mistake         String
+  /// Times the mistake appeared and share of the strategy's losses when the lesson was drawn
+  evidenceJson    Json
+  fixDescription  String?
+  fixGenomeJson   Json?
+  /// History test of the fix vs the original rules
+  testJson        Json?
+  /// ADOPTED (variant trading in shadow/watch) | REJECTED_BY_HISTORY | NO_FIX_AVAILABLE
+  status          String
+  reason          String
+  childStrategyId String?
+  createdAt       DateTime @default(now())
+
+  @@unique([kind, strategyId, mistake])
+  @@map("trade_lessons")
+}

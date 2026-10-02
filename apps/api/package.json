@@ -33,6 +33,7 @@
     "@quant/risk-engine": "*",
     "@quant/backtesting": "*",
     "@quant/learning-engine": "*",
+    "@quant/strategy-lab": "*",
     "@types/bcryptjs": "^2.4.6",
     "@types/passport-jwt": "^4.0.1",
     "bcryptjs": "^2.4.3",

@@ -64,3 +64,9 @@ prisma/*.db-journal
 *.tgz
 *.rar
 *.7z
+
+# Strategy lab history cache
+data/strategy-lab/
+
+# Local dev server logs
+.logs/

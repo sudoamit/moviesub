@@ -25,6 +25,10 @@ import { AILearningModule } from './ai-learning/ai-learning.module';
 import { LearningModule } from './learning/learning.module';
 import { ResearchModule } from './research/research.module';
 import { TradingDomainModule } from './trading-domain/trading-domain.module';
+import { LabStrategiesModule } from './lab-strategies/lab-strategies.module';
+import { MarketObserverModule } from './market-observer/market-observer.module';
+import { NiftyLabModule } from './nifty-lab/nifty-lab.module';
+import { MistakeLearningModule } from './mistake-learning/mistake-learning.module';
 
 @Module({
   imports: [
@@ -61,6 +65,10 @@ import { TradingDomainModule } from './trading-domain/trading-domain.module';
     LearningModule,
     ResearchModule,
     TradingDomainModule,
+    LabStrategiesModule,
+    MarketObserverModule,
+    NiftyLabModule,
+    MistakeLearningModule,
   ],
   providers: [
     {

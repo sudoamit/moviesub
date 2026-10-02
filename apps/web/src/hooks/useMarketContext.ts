@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { toTradedSymbol } from '../models/traded-symbols';
 import { ChartMarketSnapshot, CanonicalCandleAggregator } from '@quant/shared';
 import { ChartSnapshotValidator } from '@quant/trading-engine';
 import { useMarketStream } from '../context/MarketStreamContext';
@@ -29,14 +30,8 @@ export function useMarketContext(initialSymbol = 'NIFTY', initialTimeframe = '15
   const aggregatorRef = useRef(new CanonicalCandleAggregator());
 
   // Normalize symbol naming
-  const normalizeSymbol = useCallback((rawSym: string): string => {
-    const s = (rawSym || '').toUpperCase();
-    if (s === 'BTC' || s === 'BTC/USDT' || s === 'BITCOIN' || s === 'BTCUSDT' || s === 'BTCUSDT_SPOT') {
-      return 'BTCUSDT_SPOT';
-    }
-    if (s === 'GOLD' || s === 'XAU' || s === 'XAU/USD' || s === 'SPOTGOLD') return 'XAUUSD';
-    return s;
-  }, []);
+  // Only traded instruments can be selected (NIFTY, Gold, BTC perp); a saved removed symbol falls back to NIFTY.
+  const normalizeSymbol = useCallback((rawSym: string): string => toTradedSymbol(rawSym), []);
 
   const handleSelectSymbol = useCallback(
     (rawSym: string) => {

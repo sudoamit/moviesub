@@ -268,7 +268,6 @@ describe('Spot-Only Trading Architecture Invariants (Requirement 15)', () => {
       'BANKNIFTY_FUT',
       'NIFTY_OPTION',
       'BANKNIFTY_OPTION',
-      'BTCUSDT_PERP',
     ])('strictly rejects forbidden derivative symbol %s', (sym) => {
       expect(FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(sym)).toBe(true);
 
@@ -282,6 +281,14 @@ describe('Spot-Only Trading Architecture Invariants (Requirement 15)', () => {
           candles: [],
         });
       }).toThrow(/FORBIDDEN_DERIVATIVE_INSTRUMENT/);
+    });
+
+    test('BTCUSDT_PERP is a supported perpetual, but never accepted by the spot engine', () => {
+      expect(FORBIDDEN_DERIVATIVE_INSTRUMENTS.has('BTCUSDT_PERP')).toBe(false);
+      expect(() => canonicalizeSpotSymbol('BTCUSDT_PERP')).toThrow(/UNSUPPORTED_SPOT_INSTRUMENT/);
+      expect(() =>
+        SpotBacktestSimulator.runSimulation({ symbol: 'BTCUSDT_PERP', candles: [] }),
+      ).toThrow(/UNSUPPORTED_SPOT_INSTRUMENT/);
     });
 
     test('legacy aliases (NIFTY, BANKNIFTY, BTCUSDT) cannot bypass spot-only allowlist in SpotBacktestSimulator', () => {

@@ -33,6 +33,8 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
   TransactionCostScheduleManager,
+  isPerpetualSymbol,
+  computeIsolatedLiquidationPrice,
 } from '@quant/shared';
 import { PortfolioRiskManager, PositionSizer, TradeAccountingEngine } from '@quant/risk-engine';
 import { IAlgoBot } from './algo-bots.service';
@@ -442,6 +444,12 @@ export class TradeDecisionService {
    * Maximum estimated round-trip fees as a fraction of planned risk (R). Default 0.5R; override with
    * TRADING_MAX_COST_TO_RISK (e.g. pipeline-wiring tests whose synthetic setups are not economic).
    */
+  /**
+   * A linear market entry is refused once the chase has used up this share of the setup's planned
+   * reward-to-risk: TP1 must still pay at least (1 - fraction) x planned R from the live price.
+   */
+  static readonly MAX_CHASE_RR_FRACTION = 0.5;
+
   static get MAX_COST_TO_RISK(): number {
     const configured = Number(process.env.TRADING_MAX_COST_TO_RISK);
     return Number.isFinite(configured) && configured > 0 ? configured : 0.5;
@@ -721,6 +729,12 @@ export class TradeDecisionService {
     systemConfig?: any;
     portfolioError?: any;
     liveQuoteError?: any;
+    /**
+     * Option bots: the live UNDERLYING (index) quote and the signal's original underlying levels. The option
+     * order's own levels are rebuilt from the live premium, so a missed setup is detected on the underlying.
+     */
+    underlyingLiveQuote?: { price: number; timestamp: Date } | null;
+    underlyingLevels?: { direction: string; stopLoss: number; tp1: number } | null;
   }): IPreTradeDecisionResult {
     const { bot, signal, portfolio, liveQuote, systemConfig, portfolioError, liveQuoteError } = params;
 
@@ -1061,6 +1075,54 @@ export class TradeDecisionService {
       }
     }
 
+    // Linear instruments (spot / futures) fill at the LIVE price with a market order, not at the planned entry.
+    // Size and risk from where the order will actually fill, and refuse a chased entry: if price has already run
+    // toward TP1 so that TP1 keeps under half of its planned R (or price is past the stop or TP1), the setup is gone.
+    const isLinearLive =
+      !isOptionBotOrSignal && !(signal as any).contractSymbol && Boolean(liveQuote && liveQuote.price > 0);
+    const sizingEntry: number | undefined = isLinearLive ? liveQuote!.price : optEntry;
+    if (isLinearLive && isLevelsValid && optEntry && sl && tp1) {
+      const live = liveQuote!.price;
+      const isLong = signal.direction === 'BULLISH';
+      const riskFromLive = isLong ? live - sl : sl - live;
+      const rewardToTp1 = isLong ? tp1 - live : live - tp1;
+      // Only a chase is rejected, never the signal's own geometry: TP1 must keep half of its planned R.
+      const plannedRr = Math.abs(tp1 - optEntry) / Math.abs(optEntry - sl);
+      const minRr = plannedRr * (1 - TradeDecisionService.MAX_CHASE_RR_FRACTION);
+      // Price still inside the signal's own entry zone is a valid entry, not a chase.
+      const zMin = Number(signal.entryZone?.min);
+      const zMax = Number(signal.entryZone?.max);
+      const insideEntryZone = zMin > 0 && zMax >= zMin && live >= zMin && live <= zMax;
+      if (riskFromLive <= 0 || rewardToTp1 <= 0 || (!insideEntryZone && rewardToTp1 / riskFromLive < minRr)) {
+        reasons.push({
+          code: 'ENTRY_MISSED_RR_DEGRADED',
+          message:
+            `Live price ${live} has moved away from the planned entry ${optEntry}: ` +
+            (riskFromLive <= 0
+              ? `it is already beyond the stop ${sl}.`
+              : rewardToTp1 <= 0
+                ? `it is already beyond TP1 ${tp1}.`
+                : `TP1 now pays ${(rewardToTp1 / riskFromLive).toFixed(2)}R of a planned ${plannedRr.toFixed(2)}R (min ${minRr.toFixed(2)}R).`),
+        });
+      }
+    }
+
+    // Option setups: once the underlying has already reached the setup's stop or TP1, the setup is over - buying
+    // the option now would trade a move that already happened (same rule as the terminal's missed-entry screen).
+    const u = params.underlyingLevels;
+    const uLive = params.underlyingLiveQuote?.price;
+    if (isOptionBotOrSignal && u && uLive && uLive > 0 && u.stopLoss > 0 && u.tp1 > 0) {
+      const isLongU = u.direction === 'BULLISH';
+      const hitStop = isLongU ? uLive <= u.stopLoss : uLive >= u.stopLoss;
+      const hitTp1 = isLongU ? uLive >= u.tp1 : uLive <= u.tp1;
+      if (hitStop || hitTp1) {
+        reasons.push({
+          code: 'ENTRY_MISSED_RR_DEGRADED',
+          message: `Underlying ${bot.symbol} at ${uLive} has already reached the setup's ${hitStop ? `stop ${u.stopLoss}` : `TP1 ${u.tp1}`}; the option entry is missed.`,
+        });
+      }
+    }
+
     const requestedLeverage = (isOptionBotOrSignal || Boolean((signal as any).contractSymbol))
       ? 1.0
       : ((bot as any).leverage ??
@@ -1069,7 +1131,7 @@ export class TradeDecisionService {
          (instrument?.defaultLeverage ?? 1.0));
 
     let sizing: IPositionSizing | null = null;
-    if (instrument && isLevelsValid && optEntry && sl) {
+    if (instrument && isLevelsValid && sizingEntry && sl) {
       const botRiskPct =
         typeof (bot as any).riskPercentage === 'number' && (bot as any).riskPercentage > 0
           ? (bot as any).riskPercentage
@@ -1080,7 +1142,7 @@ export class TradeDecisionService {
           accountBalance: initialCapital,
           availableMargin: availableCash,
           riskPercentage: botRiskPct,
-          entryPrice: optEntry,
+          entryPrice: sizingEntry,
           stopLoss: sl,
           symbol: instrument.symbol,
           instrument,
@@ -1133,8 +1195,9 @@ export class TradeDecisionService {
         const botSym = canonicalizeExecutionSymbol(bot.symbol);
         const botInst = hasInstrument(botSym) ? getAuthoritativeInstrument(botSym) : instrument;
         const rawBotQty = this.resolveOrderQuantity(bot, botInst);
+        // Floored units: calculatedUnits is rounded to nearest and can exceed the risk budget.
         const maxAuthoritativeUnits =
-          sizing.calculatedUnits > 0 ? sizing.calculatedUnits : (sizing.roundedUnits > 0 ? sizing.roundedUnits : rawBotQty);
+          sizing.roundedUnits > 0 ? sizing.roundedUnits : (sizing.calculatedUnits > 0 ? sizing.calculatedUnits : rawBotQty);
         resolvedQuantity = Math.min(rawBotQty, maxAuthoritativeUnits);
         const effLot = Number(botInst.lotSize || 1);
         const effPrec =
@@ -1150,7 +1213,7 @@ export class TradeDecisionService {
     const pitConverter = PointInTimeCurrencyConverter.getInstance();
     const fxRate = quoteCurrency === 'INR' ? 1.0 : pitConverter.getRate(quoteCurrency, 'INR', Date.now()).fxRate;
 
-    const riskDistance = isLevelsValid && optEntry && sl ? Math.abs(optEntry - sl) : 0;
+    const riskDistance = isLevelsValid && sizingEntry && sl ? Math.abs(sizingEntry - sl) : 0;
     const riskAmount = isLevelsValid
       ? Number((riskDistance * resolvedQuantity * contractSize * fxRate).toFixed(2))
       : 0;
@@ -1163,12 +1226,12 @@ export class TradeDecisionService {
     // its fee schedule is a cash-equity placeholder (open audit item M-1), so a cost gate on it would be noise.
     const isLegacyIndexDerivative =
       !isOptionBotOrSignal && ['NIFTY', 'BANKNIFTY'].includes(String(instrument?.symbol).toUpperCase());
-    if (resolvedQuantity > 0 && riskAmount > 0 && optEntry && sl && instrument && !isLegacyIndexDerivative) {
+    if (resolvedQuantity > 0 && riskAmount > 0 && sizingEntry && sl && instrument && !isLegacyIndexDerivative) {
       try {
         const costSymbol = (signal as any).contractSymbol || instrument.symbol;
         const costs = TransactionCostScheduleManager.getInstance();
         const entryFees = costs.calculateCostForSymbol(
-          optEntry * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'ENTRY', 'BUY',
+          sizingEntry * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'ENTRY', 'BUY',
         ).totalChargesAccount;
         const exitFees = costs.calculateCostForSymbol(
           sl * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'EXIT', 'SELL',
@@ -1182,6 +1245,24 @@ export class TradeDecisionService {
         }
       } catch (costErr: any) {
         this.logger.debug(`Cost-vs-risk estimate unavailable: ${costErr?.message}`);
+      }
+    }
+
+    // Gate 13.6: Perpetual futures - the stop must trigger before the isolated-margin liquidation price.
+    if (instrument && isPerpetualSymbol(instrument.symbol) && sizingEntry && sl && isLevelsValid) {
+      const lev = Math.max(1, Number(requestedLeverage) || Number(instrument.defaultLeverage) || 1);
+      const liq = computeIsolatedLiquidationPrice(
+        sizingEntry,
+        signal.direction === 'BULLISH' ? 'LONG' : 'SHORT',
+        lev,
+        Number(instrument.maintenanceMarginRate ?? 0),
+      );
+      const stopFirst = signal.direction === 'BULLISH' ? sl > liq : sl < liq;
+      if (!stopFirst) {
+        reasons.push({
+          code: 'STOP_BEYOND_LIQUIDATION',
+          message: `Stop ${sl} is beyond the ${lev}x liquidation price ${liq.toFixed(2)} for entry ${optEntry}.`,
+        });
       }
     }
 
@@ -1218,12 +1299,15 @@ export class TradeDecisionService {
 
     if (portfolio) {
       const openPositions = portfolio.openPositions || (portfolio as any).positions || [];
-      const instLeverage = instrument?.defaultLeverage || 1.0;
+      // The leverage this order will actually use (bot setting, else instrument default); spot is always 1x.
+      const instLeverage =
+        instrument?.marginMode === 'SPOT' ? 1.0 : Number(requestedLeverage) || instrument?.defaultLeverage || 1.0;
       const instMarginMode = (instrument?.marginMode || 'SPOT') as any;
+      // Same margin the execution boundary charges: notional / leverage, never below the venue minimum rate.
       const instInitialMarginRate =
-        instrument?.initialMarginRate !== undefined
-          ? instrument.initialMarginRate
-          : 1.0 / instLeverage;
+        instMarginMode === 'SPOT'
+          ? 1.0
+          : Math.max(instrument?.initialMarginRate ?? 0, 1.0 / instLeverage);
       const instMaintenanceMarginRate =
         instrument?.maintenanceMarginRate !== undefined
           ? instrument.maintenanceMarginRate
@@ -1235,7 +1319,7 @@ export class TradeDecisionService {
           ? 'CRYPTO'
           : 'EQUITY');
 
-      const totalPosValQuote = (optEntry || 0) * resolvedQuantity * contractSize;
+      const totalPosValQuote = (sizingEntry || 0) * resolvedQuantity * contractSize;
       const totalPosValINR = Number((totalPosValQuote * fxRate).toFixed(2));
       const requiredMarginINR =
         instMarginMode === 'SPOT'
@@ -1255,7 +1339,7 @@ export class TradeDecisionService {
         accountBalance: initialCapital,
         riskPercentage: riskPercent,
         riskAmount,
-        entryPrice: optEntry || 0,
+        entryPrice: sizingEntry || 0,
         stopLoss: sl || 0,
         calculatedUnits: resolvedQuantity,
         roundedUnits: resolvedQuantity,
@@ -1267,7 +1351,7 @@ export class TradeDecisionService {
         accountBalance: initialCapital,
         riskPercentage: riskPercent,
         riskAmount,
-        entryPrice: optEntry || 0,
+        entryPrice: sizingEntry || 0,
         stopLoss: sl || 0,
         riskPerUnit: riskDistance,
         calculatedUnits: resolvedQuantity,

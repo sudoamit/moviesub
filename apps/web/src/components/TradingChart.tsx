@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { TRADED_SYMBOLS } from '../models/traded-symbols';
 import {
   createChart,
   IChartApi,
@@ -1568,15 +1569,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           <div className="flex items-center gap-1.5">
             {onSymbolChange ? (
               <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs font-mono">
-                {[
-                  { sym: 'NIFTY', label: 'NIFTY' },
-                  { sym: 'BANKNIFTY', label: 'BANKNIFTY' },
-                  { sym: 'XAUUSD', label: 'GOLD 🥇' },
-                  { sym: 'BTCUSDT', label: 'BTC ⚡' },
-                  { sym: 'RELIANCE', label: 'RELIANCE' },
-                  { sym: 'HDFCBANK', label: 'HDFC' },
-                  { sym: 'INFY', label: 'INFY' },
-                ].map((item) => (
+                {TRADED_SYMBOLS.map((t) => ({ sym: t.symbol, label: t.shortLabel })).map((item) => (
                   <button
                     key={item.sym}
                     onClick={() => onSymbolChange(item.sym)}

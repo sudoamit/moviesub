@@ -24,11 +24,11 @@ export class IndianOptionsExpiryEngine {
     ].includes(sym);
     const isCrypto = sym.startsWith('BTC') || sym.startsWith('ETH') || sym === 'BTCUSDT';
 
-    // NSE Exchange Specific Weekly Expiry Days:
-    // NIFTY: Tuesday (Day 2)
-    // BANKNIFTY: Wednesday (Day 3)
-    // FINNIFTY: Tuesday (Day 2)
-    // MIDCPNIFTY: Monday (Day 1)
+    // NSE Exchange Specific Expiry Days:
+    // NIFTY: weekly, Tuesday (Day 2)
+    // BANKNIFTY / FINNIFTY / MIDCPNIFTY: monthly only (NSE discontinued their weekly series), last Tuesday
+    // of the month. Exchange holidays move an expiry to the previous trading day; no holiday calendar is
+    // modelled here (consumers that see the exchange's own expiry list should prefer it).
     // SENSEX: Friday (Day 5)
     // CRYPTO (Deribit/Binance): Friday (Day 5)
     // Indian Single-Stock Equities: Monthly Only (Last Thursday of Month, Day 4)
@@ -37,18 +37,19 @@ export class IndianOptionsExpiryEngine {
       : sym === 'NIFTY'
         ? 2 // Tuesday
         : sym === 'BANKNIFTY'
-          ? 3 // Wednesday
+          ? 2 // Tuesday (monthly)
           : sym === 'FINNIFTY'
-            ? 2 // Tuesday
+            ? 2 // Tuesday (monthly)
             : sym === 'MIDCPNIFTY'
-              ? 1 // Monday
+              ? 2 // Tuesday (monthly)
               : sym === 'SENSEX'
                 ? 5 // Friday
                 : 4; // 4 = Thursday (Equities)
 
     const results: IExpiryInfo[] = [];
+    const isMonthlyOnlyIndex = ['BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].includes(sym);
 
-    if (isEquity) {
+    if (isEquity || isMonthlyOnlyIndex) {
       // Single-stock equities only trade monthly series on NSE
       // 1. Current Month Expiry
       const currentMonth = this.getLastWeekdayOfMonth(

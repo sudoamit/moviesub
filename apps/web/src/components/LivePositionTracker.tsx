@@ -26,6 +26,9 @@ import {
   Radio,
   Sliders,
   Bot,
+  Radar,
+  RefreshCw,
+  Search,
 } from 'lucide-react';
 import {
   ISignalSetup,
@@ -313,11 +316,14 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   const [isPlacingOrder, setIsPlacingOrder] = useState<boolean>(false);
   const [orderRejectionReason, setOrderRejectionReason] = useState<string | null>(null);
 
+  const [accountCapital, setAccountCapital] = useState<number>(0);
+
   const fetchPaperPosition = React.useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/paper-trading/portfolio`);
       if (!res.ok) return;
       const data = await res.json();
+      if (Number(data?.initialCapital) > 0) setAccountCapital(Number(data.initialCapital));
       const positions = Array.isArray(data?.openPositions) ? data.openPositions : [];
       const normSym = symbol.toUpperCase().replace(/_SPOT$/, '');
       const matchingPositions = positions.filter(
@@ -328,6 +334,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             ((symbol === 'GOLD' || symbol === 'XAUUSD') &&
               (p.symbol === 'XAUUSD' || p.symbol === 'GOLD')) ||
             p.contractSymbol?.startsWith(symbol)) &&
+          // The BTC perpetual is a separate instrument from BTC spot (and vice versa).
+          (p.symbol === 'BTCUSDT_PERP') === (symbol.toUpperCase() === 'BTCUSDT_PERP') &&
           (p.status === 'OPEN' || p.status === 'PARTIALLY_CLOSED' || !p.status),
       );
       const found =
@@ -559,7 +567,24 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         ? lockedEntryPremium
         : optionData?.plannedEntryPremium || 0; // No fabricated premium: 0 means no planned premium yet.
 
-  const liveOptionPremium = optionData?.optionLtp || optionEntryPremium;
+  // While an option position is open, everything shown about "the contract" is the HELD contract: its own
+  // server-valued premium, strike and type. The smart-strike recommendation follows the latest signal and can be
+  // a different strike (e.g. holding 22550 PE while 22500 PE is recommended), so it must not be mixed in.
+  const heldOptionContract: string | null = filledOptionPosition?.contractSymbol || null;
+  const heldOptionMatch = heldOptionContract ? heldOptionContract.match(/(\d+(?:\.\d+)?)\s+(CE|PE)/i) : null;
+  const displayStrike = heldOptionMatch ? Number(heldOptionMatch[1]) : activeStrike;
+  const displayOptType = heldOptionMatch ? heldOptionMatch[2].toUpperCase() : isBull ? 'CE' : 'PE';
+  const displayContract: string =
+    heldOptionContract ||
+    (optionData?.recommendedStrike === activeStrike && optionData?.contractName
+      ? optionData.contractName
+      : `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`);
+  // Greeks / expiry from the recommendation are only valid when it is the held contract.
+  const optionDataMatchesHeld = !heldOptionContract || optionData?.contractName === heldOptionContract;
+
+  const liveOptionPremium = filledOptionPosition
+    ? Number(filledOptionPosition.currentPrice) || optionEntryPremium
+    : optionData?.optionLtp || optionEntryPremium;
 
   // 3. Trigger Condition Evaluation
   // For Options: entry triggers strictly according to Option Premium within +/- 1% of Planned Entry Premium.
@@ -578,6 +603,103 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
   const isTriggerSatisfied =
     hasActiveTrade || (isOptionsAsset ? isOptionTriggerSatisfied : isSpotTriggerSatisfied);
+
+  // "Ready for execution" means the setup CAN be executed (manually, with the button). Whether the bot places it
+  // automatically depends on the bot's own settings; list every reason it will not, so the card never implies an
+  // automatic trade that is not going to happen.
+  const autoTradeBlockers: string[] = (() => {
+    if (!bot) return ['No bot is configured for this symbol'];
+    const reasons: string[] = [];
+    if (!bot.isActive) reasons.push('the bot is switched off');
+    if (!bot.autoExecutePaper) reasons.push('auto-trading is OFF for this bot (paused)');
+    const botStrategy = String(bot.strategy || 'SMC').toUpperCase().includes('SAIYAN') ? 'SAIYAN_OCC' : 'SMC';
+    const signalStrategy = effectiveStrategy.includes('SAIYAN') ? 'SAIYAN_OCC' : 'SMC';
+    if (signal && botStrategy !== signalStrategy) {
+      reasons.push(`the bot trades ${botStrategy === 'SMC' ? 'SMC' : 'Saiyan'} signals, this is a ${signalStrategy === 'SMC' ? 'SMC' : 'Saiyan'} signal`);
+    }
+    const score = Number((signal as any)?.score);
+    const minScore = Number(bot.minScore);
+    if (Number.isFinite(score) && Number.isFinite(minScore) && score < minScore) {
+      reasons.push(`signal score ${score} is below the bot minimum of ${minScore}`);
+    }
+    return reasons;
+  })();
+
+  // Spot / futures / options market entries fill at the live market price. Once price has run so far toward TP1
+  // that TP1 keeps less than half of the setup's planned R, or has already breached stop or TP1, the entry is missed:
+  // executing now would be a chase with an unacceptable risk/reward degradation.
+  const entryMissedReason: string | null = (() => {
+    // An active filled position or already closed position is never a missed entry
+    if (hasActiveTrade || paperPosition?.status === 'CLOSED' || !signal || !executionEligible) return null;
+
+    // 1. Options setup missed entry evaluation
+    if (isOptionsAsset) {
+      const plannedSpotEntry = Number((signal as any)?.entryZone?.optimal) || 0;
+      const spotSl = Number(signal?.stopLoss) || 0;
+      const spotTp1 = Number((signal as any)?.takeProfits?.tp1 ?? (signal as any)?.tp1) || 0;
+
+      // Check underlying spot boundary invalidations if CMP is available
+      if (currentCMP > 0 && plannedSpotEntry > 0 && spotSl > 0 && spotTp1 > 0) {
+        if (isBull) {
+          if (currentCMP <= spotSl) {
+            return `Underlying spot (${nativeCurrency}${currentCMP}) hit stop loss (${nativeCurrency}${spotSl}) before option entry was filled.`;
+          }
+          if (currentCMP >= spotTp1) {
+            return `Underlying spot (${nativeCurrency}${currentCMP}) reached TP1 (${nativeCurrency}${spotTp1}) before option entry was filled.`;
+          }
+        } else {
+          if (currentCMP >= spotSl) {
+            return `Underlying spot (${nativeCurrency}${currentCMP}) hit stop loss (${nativeCurrency}${spotSl}) before option entry was filled.`;
+          }
+          if (currentCMP <= spotTp1) {
+            return `Underlying spot (${nativeCurrency}${currentCMP}) reached TP1 (${nativeCurrency}${spotTp1}) before option entry was filled.`;
+          }
+        }
+      }
+
+      // Check option premium runaway or targets if option premium quotes exist
+      if (optionEntryPremium > 0 && liveOptionPremium > 0) {
+        // If option premium has surged >= 5% above planned entry, entry is missed (avoid chasing premium)
+        if (liveOptionPremium >= optionEntryPremium * 1.05) {
+          return `Option premium (${currencySymbol}${liveOptionPremium}) moved > 5% above planned entry (${currencySymbol}${optionEntryPremium}, +${(((liveOptionPremium - optionEntryPremium) / optionEntryPremium) * 100).toFixed(1)}%). Chasing entry is prohibited.`;
+        }
+        // If option TP1 is reached before fill
+        if (optionData?.plannedTp1 && liveOptionPremium >= optionData.plannedTp1) {
+          return `Option premium (${currencySymbol}${liveOptionPremium}) reached Target 1 (${currencySymbol}${optionData.plannedTp1}) before entry.`;
+        }
+        // If option Stop Loss is breached before fill
+        if (optionData?.plannedSl && liveOptionPremium <= optionData.plannedSl) {
+          return `Option premium (${currencySymbol}${liveOptionPremium}) hit Stop Loss (${currencySymbol}${optionData.plannedSl}) before entry.`;
+        }
+      }
+      return null;
+    }
+
+    // 2. Spot / crypto / linear setup missed entry evaluation
+    if (!(currentCMP > 0)) return null;
+    const plannedEntry = Number((signal as any)?.entryZone?.optimal) || 0;
+    const sl = Number(signal?.stopLoss) || 0;
+    const tp1Level = Number((signal as any)?.takeProfits?.tp1 ?? (signal as any)?.tp1) || 0;
+    if (!(plannedEntry > 0 && sl > 0 && tp1Level > 0)) return null;
+    // Only judge well-formed setups (stop and TP1 on opposite sides of the planned entry).
+    const wellFormed = isBull ? sl < plannedEntry && tp1Level > plannedEntry : sl > plannedEntry && tp1Level < plannedEntry;
+    if (!wellFormed) return null;
+    const risk = isBull ? currentCMP - sl : sl - currentCMP;
+    const reward = isBull ? tp1Level - currentCMP : currentCMP - tp1Level;
+    const plannedRr = Math.abs(tp1Level - plannedEntry) / Math.abs(plannedEntry - sl);
+    const minRr = plannedRr * 0.5;
+    if (risk <= 0) return `Price ${currentCMP} is already beyond the stop ${sl}.`;
+    if (reward <= 0) return `Price ${currentCMP} is already beyond TP1 ${tp1Level}.`;
+    // Price still inside the signal's own entry zone is a valid entry, not a chase.
+    const zMin = Number((signal as any)?.entryZone?.min) || 0;
+    const zMax = Number((signal as any)?.entryZone?.max) || 0;
+    const insideEntryZone = zMin > 0 && zMax >= zMin && currentCMP >= zMin && currentCMP <= zMax;
+    if (!insideEntryZone && reward / risk < minRr) {
+      return `Price ${currentCMP} has moved ${Math.abs(currentCMP - plannedEntry).toFixed(2)} away from the planned entry ${plannedEntry}: TP1 would pay only ${(reward / risk).toFixed(2)}R of a planned ${plannedRr.toFixed(2)}R.`;
+    }
+    return null;
+  })();
+  const isEntryMissed = entryMissedReason !== null;
 
   const distanceToTrigger = isOptionsAsset
     ? optionEntryPremium > 0 && liveOptionPremium > 0
@@ -636,8 +758,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
       // Structural ineligibility (e.g. a spot short) applies immediately. Operational ineligibility
       // (no live option feed) only blocks once the trigger is met: until then the setup is WAITING,
       // and it can never become READY without the backend's eligibility.
-      executionEligible: executionEligible && (!isTriggerSatisfied || isBackendOptionEligible),
-      canExecute: canExecute && (!isTriggerSatisfied || isBackendOptionEligible),
+      executionEligible: executionEligible && !isEntryMissed && (!isTriggerSatisfied || isBackendOptionEligible),
+      canExecute: canExecute && !isEntryMissed && (!isTriggerSatisfied || isBackendOptionEligible),
     });
   }, [
     hasActiveTrade,
@@ -654,6 +776,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     executionEligible,
     canExecute,
     isBackendOptionEligible,
+    isEntryMissed,
   ]);
 
   const canDisplayLiveMetrics = shouldDisplayLiveTradeMetrics(lifecycleState);
@@ -711,8 +834,57 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     isSaneSpot,
     defaultStrike,
     initialSpotCandidate,
-    isGold,
   ]);
+
+  const [isRefreshingScan, setIsRefreshingScan] = useState<boolean>(false);
+
+  const handleForceRescan = async () => {
+    setIsRefreshingScan(true);
+    try {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('quant_rescan_requested', {
+            detail: { symbol, reason: 'MANUAL_RESCAN_REQUEST' },
+          }),
+        );
+      }
+    } catch {}
+    setTimeout(() => {
+      setIsRefreshingScan(false);
+    }, 1000);
+  };
+
+  // When an entry is missed, immediately purge locked setup parameters from localStorage and notify scanner
+  useEffect(() => {
+    if (isEntryMissed && !hasActiveTrade && typeof window !== 'undefined') {
+      localStorage.removeItem(spotStorageKey);
+      localStorage.removeItem(strikeStorageKey);
+      localStorage.removeItem(lockStorageKey);
+      setLockedSpotEntry(0);
+      setLockedEntryPremium(0);
+      lockedSpotRef.current = 0;
+      lockedEntryRef.current = 0;
+
+      window.dispatchEvent(
+        new CustomEvent('quant_rescan_requested', {
+          detail: { symbol, reason: 'ENTRY_MISSED' },
+        }),
+      );
+    }
+  }, [isEntryMissed, hasActiveTrade, spotStorageKey, strikeStorageKey, lockStorageKey, symbol]);
+
+  // Periodic background check to look for a new setup while in missed entry standby
+  useEffect(() => {
+    if (!isEntryMissed || hasActiveTrade || typeof window === 'undefined') return;
+    const interval = setInterval(() => {
+      window.dispatchEvent(
+        new CustomEvent('quant_rescan_requested', {
+          detail: { symbol, reason: 'POLL_NEW_SETUP' },
+        }),
+      );
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [isEntryMissed, hasActiveTrade, symbol]);
 
   // Fetch Live Option Smart Strike Data & Locked Entry Premium
   useEffect(() => {
@@ -755,14 +927,29 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   }, [symbol, direction, currentCMP, underlyingTriggerPrice, activeStrike, isOptionsAsset, lockStorageKey]);
 
   // Base Standard Sizing: 65 Qty (1 Lot) for NIFTY, 15 Qty (1 Lot) for BANKNIFTY, 0.01 for BTC, 1 for Gold/Equities
+  // BTC perpetual: sized by risk like the perp bot - PERP_RISK_PERCENT of capital lost at the stop,
+  // floored to the 0.001 BTC contract step and capped at 5 BTC. Falls back to 0.01 BTC until capital is known.
+  const PERP_RISK_PERCENT = 0.5;
+  const perpRiskQty = (() => {
+    if (symbol.toUpperCase() !== 'BTCUSDT_PERP' || accountCapital <= 0) return 0;
+    const entry = Number((signal as any)?.entryZone?.optimal) || 0;
+    const sl = Number(signal?.stopLoss) || 0;
+    const fx = (paperPosition as any)?.fxRateUsed ?? 92.5;
+    const riskPerBtcInr = Math.abs(entry - sl) * fx;
+    if (!(entry > 0) || !(sl > 0) || riskPerBtcInr <= 0) return 0;
+    const qty = Math.floor(((accountCapital * PERP_RISK_PERCENT) / 100 / riskPerBtcInr) * 1000) / 1000;
+    return Math.min(5, qty);
+  })();
   const lotSize =
     symbol === 'NIFTY'
       ? 65
       : symbol === 'BANKNIFTY'
         ? 15
-        : isCrypto
-          ? 0.01
-          : 1;
+        : perpRiskQty > 0
+          ? perpRiskQty
+          : isCrypto
+            ? 0.01
+            : 1;
   const activeQty = paperPosition
     ? Number(paperPosition.quantity)
     : isAutoScaledOut
@@ -843,21 +1030,26 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
   // FX rates from backend running position (Gold: USD/INR 87.5, BTC: USDT/INR 92.5)
   const cryptoFxRate = (paperPosition as any)?.fxRateUsed ?? (isGold ? 87.5 : isCrypto ? 92.5 : 1.0);
 
-  // Read leverage from localStorage or default (1x for BTC spot & Indian indices, 5x for Gold CFD)
-  const defaultLeverage = isGold ? 5 : 1;
+  // Read leverage from localStorage or default (1x for BTC spot & Indian indices, 5x for Gold CFD and BTC perp).
+  // BTC spot never uses the saved leverage; the BTC perpetual does (capped at its 50x maximum).
+  const isPerp = symbol.toUpperCase() === 'BTCUSDT_PERP';
+  const defaultLeverage = isGold || isPerp ? 5 : 1;
   const [activeLeverage, setActiveLeverage] = React.useState<number>(defaultLeverage);
   React.useEffect(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('quant_risk_leverage');
-      if (saved && !isNaN(Number(saved)) && Number(saved) > 1 && !isCrypto) {
-        setActiveLeverage(Number(saved));
+      if (saved && !isNaN(Number(saved)) && Number(saved) > 1 && (!isCrypto || isPerp)) {
+        setActiveLeverage(isPerp ? Math.min(50, Number(saved)) : Number(saved));
       } else {
         setActiveLeverage(defaultLeverage);
       }
     }
-  }, [defaultLeverage, isCrypto]);
+  }, [defaultLeverage, isCrypto, isPerp]);
 
-  const effectiveLeverage = isCrypto
+  // Perp: the open position's leverage, else the saved leverage setting (1-50x), else the 5x default.
+  const effectiveLeverage = isPerp
+    ? ((paperPosition as any)?.leverage ? Number((paperPosition as any).leverage) : activeLeverage)
+    : isCrypto
     ? 1
     : ((paperPosition as any)?.leverage ? Number((paperPosition as any).leverage) : (activeLeverage > 1 ? activeLeverage : defaultLeverage));
 
@@ -1345,7 +1537,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
     if (lifecycleState !== 'ready') {
       setOrderRejectionReason(
         lifecycleState === 'not_eligible'
-          ? optionData?.ineligibilityReasons?.[0] || executionIneligibilityReason || 'Setup is not eligible for execution.'
+          ? entryMissedReason || optionData?.ineligibilityReasons?.[0] || executionIneligibilityReason || 'Setup is not eligible for execution.'
           : 'Setup is not ready: the trigger condition has not been met.',
       );
       return;
@@ -1388,8 +1580,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           signalId: signal?.id,
         };
       } else {
-        // Spot Equity / Crypto / Commodity (Long-Only)
-        if (!canExecute || !isBull) {
+        // Spot Equity / Crypto / Commodity (Long-Only); the BTC perpetual can also go short.
+        if (!canExecute || (!isBull && !isPerp)) {
           throw new Error(
             executionIneligibilityReason ||
               `EXECUTION BLOCKED: Spot instrument '${symbol}' is long-only. Short selling spot is not permitted by exchange rules. BUY entries only.`,
@@ -1404,7 +1596,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
         payload = {
           symbol,
-          direction: 'BUY',
+          direction: isPerp && !isBull ? 'SELL' : 'BUY',
           quantity: numericQty,
           orderType: 'MARKET',
           stopLoss: safeInitialSL,
@@ -1413,6 +1605,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           target3: tp3,
           leverage: effectiveLeverage,
           signalId: signal?.id,
+          // Planned entry: the server refuses the order if price has run too far from it (chased entry).
+          signalPrice: Number((signal as any)?.entryZone?.optimal) || undefined,
           instrumentType: 'SPOT',
         };
       }
@@ -1520,8 +1714,8 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
 
   const lockedStrikeLabel = useMemo(() => {
     if (symbol !== 'NIFTY' && symbol !== 'BANKNIFTY') return '';
-    return `${activeStrike} ${isBull ? 'CE' : 'PE'}`;
-  }, [activeStrike, isBull, symbol]);
+    return `${displayStrike} ${displayOptType}`;
+  }, [displayStrike, displayOptType, symbol]);
 
   const isSetupClosed =
     !paperPosition &&
@@ -1580,6 +1774,108 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
         <p className="mt-2 text-sm text-slate-400">
           No active {activeStrategyLabel} signal for {symbol}. A trade setup appears here once the strategy produces one.
         </p>
+      </div>
+    );
+  }
+
+  // If entry was missed, remove that entry and render the dedicated "Scanning for New Setup" screen
+  if (isEntryMissed && !hasActiveTrade) {
+    return (
+      <div className="bg-[#111827]/95 backdrop-blur-md border border-amber-500/40 rounded-xl p-6 shadow-2xl space-y-5 relative overflow-hidden font-mono">
+        {/* Glow effect */}
+        <div className="absolute -top-12 -right-12 w-48 h-48 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+              <Radar className="w-5 h-5 text-amber-400 animate-spin" style={{ animationDuration: '4s' }} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-white text-sm font-black tracking-wide">
+                  {symbol} • {activeStrategyLabel}
+                </span>
+                <span className="bg-amber-950/80 text-amber-300 border border-amber-800 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wider">
+                  Entry Missed — Setup Removed
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Timeframe: <span className="text-cyan-300 font-semibold">{timeframe}</span> | Session:{' '}
+                <span className={isMarketOpen ? 'text-emerald-400' : 'text-amber-400'}>{marketSessionLabel}</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleForceRescan}
+              disabled={isRefreshingScan}
+              className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 active:scale-95 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingScan ? 'animate-spin' : ''}`} />
+              {isRefreshingScan ? 'Scanning...' : 'Scan For Setup Now'}
+            </button>
+          </div>
+        </div>
+
+        {/* Missed Entry Invalidation Banner & Explanation */}
+        <div className="bg-amber-950/30 border border-amber-600/30 rounded-lg p-3.5 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1 text-xs">
+            <div className="text-amber-200 font-bold">
+              Entry Window Invalidated — No-Chase Rule Enforced
+            </div>
+            <p className="text-slate-300 leading-relaxed font-sans">
+              {entryMissedReason} To protect capital and preserve statistical edge, previous entry parameters have been purged. The engine is actively scanning for a fresh setup.
+            </p>
+          </div>
+        </div>
+
+        {/* Live Market Scanning Radar & Telemetry */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Authoritative Live CMP</span>
+            <div className="text-xl font-black text-white flex items-center gap-1.5">
+              <span>{nativeCurrency}{currentCMP > 0 ? currentCMP.toLocaleString() : '---'}</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            </div>
+            <span className="text-[10px] text-slate-500">Live ticks streaming continuously</span>
+          </div>
+
+          <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Scanner Engine</span>
+            <div className="text-base font-bold text-cyan-300 flex items-center gap-1.5">
+              <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
+              <span>{isSaiyanStrategy ? 'Saiyan OCC Flow' : 'SMC Order Block & FVG'}</span>
+            </div>
+            <span className="text-[10px] text-cyan-500/80">Listening for multi-timeframe alignment</span>
+          </div>
+
+          <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Next Setup State</span>
+            <div className="text-base font-bold text-amber-300 flex items-center gap-1.5">
+              <Search className="w-4 h-4 text-amber-400" />
+              <span>SEARCHING FOR NEW SETUP</span>
+            </div>
+            <span className="text-[10px] text-slate-400">Auto-evaluating on new candle formations</span>
+          </div>
+        </div>
+
+        {/* High-tech Radar Scanning Animation Strip */}
+        <div className="bg-slate-950/60 border border-slate-800/80 rounded-lg p-3 flex items-center justify-between text-xs text-slate-400">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500"></span>
+            </span>
+            <span className="text-cyan-300 font-medium">Scanner Active:</span>
+            <span>Watching liquidity sweeps & candle closures for {symbol}...</span>
+          </div>
+          <span className="text-[11px] text-slate-500 hidden sm:inline">
+            Status: STANDBY_SEEKING_SETUP
+          </span>
+        </div>
       </div>
     );
   }
@@ -1681,7 +1977,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
             lifecycleState === 'not_eligible' ? (
               <span className="bg-slate-800 text-amber-300 border border-amber-700/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-1">
                 <AlertCircle className="w-3 h-3 text-amber-400" />
-                {isStructurallyIneligible ? 'NO TRADE (SPOT LONG-ONLY)' : 'NOT ELIGIBLE (NO LIVE OPTION QUOTE)'}
+                {isEntryMissed ? 'ENTRY MISSED (PRICE MOVED AWAY)' : isStructurallyIneligible ? 'NO TRADE (SPOT LONG-ONLY)' : 'NOT ELIGIBLE (NO LIVE OPTION QUOTE)'}
               </span>
             ) : lifecycleState === 'rejected' ? (
               <span className="bg-rose-950/90 text-rose-300 border border-rose-700/80 px-2 py-0.5 rounded text-[10px] font-mono font-bold flex items-center gap-1">
@@ -1769,7 +2065,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 : lifecycleState === 'rejected'
                   ? 'STATUS: ORDER REJECTED'
                   : lifecycleState === 'not_eligible'
-                    ? (isStructurallyIneligible ? 'STATUS: NOT ELIGIBLE (LONG-ONLY)' : 'STATUS: NOT ELIGIBLE (NO LIVE OPTION QUOTE)')
+                    ? (isEntryMissed ? 'STATUS: ENTRY MISSED' : isStructurallyIneligible ? 'STATUS: NOT ELIGIBLE (LONG-ONLY)' : 'STATUS: NOT ELIGIBLE (NO LIVE OPTION QUOTE)')
                     : lifecycleState === 'ready'
                       ? 'STATUS: READY FOR EXECUTION'
                       : 'STATUS: POTENTIAL SETUP'}
@@ -1783,29 +2079,31 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <span className="bg-cyan-500 text-slate-950 px-2 py-0.5 rounded text-[11px] font-black tracking-wide">
-                RECOMMENDED CONTRACT
+                {heldOptionContract ? 'ACTIVE CONTRACT' : 'RECOMMENDED CONTRACT'}
               </span>
-              <strong className="text-white text-sm font-black tracking-wider">
-                {optionData.recommendedStrike === activeStrike && optionData.contractName
-                  ? optionData.contractName
-                  : `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`}
-              </strong>
-              <span className="text-slate-400 text-[11px]">({optionData.expiryLabel})</span>
+              <strong className="text-white text-sm font-black tracking-wider">{displayContract}</strong>
+              <span className="text-slate-400 text-[11px]">
+                ({optionDataMatchesHeld ? optionData.expiryLabel : (filledOptionPosition?.expiry || 'expiry n/a')})
+              </span>
             </div>
 
             <div className="flex items-center gap-3 text-[11px]">
-              <span className="text-slate-400">
-                Delta: <strong className="text-cyan-300">{optionData.delta}</strong>
-              </span>
-              <span className="text-slate-600">•</span>
-              <span className="text-slate-400">
-                Theta: <strong className="text-rose-400">{optionData.theta}/day</strong>
-              </span>
-              <span className="text-slate-600">•</span>
-              <span className="text-slate-400">
-                IV: <strong className="text-amber-300">{optionData.iv}%</strong>
-              </span>
-              <span className="text-slate-600">•</span>
+              {optionDataMatchesHeld && (
+                <>
+                  <span className="text-slate-400">
+                    Delta: <strong className="text-cyan-300">{optionData.delta}</strong>
+                  </span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-slate-400">
+                    Theta: <strong className="text-rose-400">{optionData.theta}/day</strong>
+                  </span>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-slate-400">
+                    IV: <strong className="text-amber-300">{optionData.iv}%</strong>
+                  </span>
+                  <span className="text-slate-600">•</span>
+                </>
+              )}
               <span className="text-emerald-400 font-bold flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                 {isOptionMode ? 'Premium Outlay' : 'Margin'}: {currencySymbol}
@@ -1910,7 +2208,19 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                   </div>
                 </div>
 
-                {isNotEligible && !isStructurallyIneligible ? (
+                {isNotEligible && isEntryMissed ? (
+                  <div className="mt-2 space-y-1.5 font-mono">
+                    <div className="text-white text-base font-black tracking-wide flex items-center gap-2">
+                      <span>{symbol}</span>
+                      <span className="text-[10px] font-bold text-amber-300 bg-amber-950/60 border border-amber-800 px-2 py-0.5 rounded">
+                        ENTRY MISSED
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                      {entryMissedReason} Waiting for a new setup - chasing the market would mean a larger stop and a smaller reward.
+                    </p>
+                  </div>
+                ) : isNotEligible && !isStructurallyIneligible ? (
                   <div className="mt-2 space-y-1.5 font-mono">
                     <div className="text-white text-base font-black tracking-wide flex items-center gap-2">
                       <span>{optionData?.contractName || `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`}</span>
@@ -1945,7 +2255,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                       <span>
                         {isOptionMode && !isCrypto && !isGold
                           ? (optionData?.contractName || `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`)
-                          : `${symbol} Spot`}
+                          : symbol.toUpperCase() === 'BTCUSDT_PERP'
+                            ? `${symbol} Perpetual`
+                            : `${symbol} Spot`}
                       </span>
                       {isOptionMode && !isCrypto && !isGold && optionData?.expiryLabel && (
                         <span className="text-slate-400 text-xs font-normal">
@@ -2174,9 +2486,9 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
           <span className="text-[10px] text-indigo-300 font-bold block mt-0.5 truncate">
             {hasActiveTrade
               ? isOptionMode && !isCrypto && !isGold
-                ? `⚡ ${optionData?.recommendedStrike === activeStrike && optionData?.contractName ? optionData.contractName : `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'}`} (Locked)`
+                ? `⚡ ${displayContract} (Locked)`
                 : isCrypto
-                  ? `0.01 BTC Contract (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
+                  ? `${totalQuantity} BTC ${isPerp ? `Perp ${isBull ? 'Long' : 'Short'} ${effectiveLeverage}x` : 'Contract'} (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                   : isGold
                     ? `${totalQuantity} oz Gold Spot (${currencySymbol}${totalMarginUsed.toLocaleString(undefined, { maximumFractionDigits: 0 })} Margin)`
                     : `${symbol === 'NIFTY' ? '1 Lot (65 Qty)' : '1 Lot'}`
@@ -2185,7 +2497,7 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                 : isOptionMode && !isCrypto && !isGold
                   ? `${symbol} ${activeStrike} ${isBull ? 'CE' : 'PE'} (1 Lot • 65 Qty)`
                   : isCrypto
-                    ? '0.01 BTC Order Size'
+                    ? (isPerp ? `${totalQuantity} BTC Perp ${isBull ? 'Long' : 'Short'} @ ${effectiveLeverage}x` : '0.01 BTC Order Size')
                     : isGold
                       ? `${totalQuantity} oz Gold Order Size`
                       : `${symbol === 'NIFTY' ? '1 Lot (65 Qty)' : '1 Lot'}`}
@@ -2418,12 +2730,12 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                         ? 'WAITING FOR TRIGGER'
                         : 'TRIGGER SATISFIED'}
                   </span>
-                  Current {symbol}: <strong className="text-white">₹{dp(currentCMP).toFixed(2)}</strong> | Option LTP: <strong className="text-white">₹{dp(liveOptionPremium).toFixed(2)}</strong> | Planned Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)} (±1%)</strong> | Distance: <strong className="text-cyan-300">₹{dp(distanceToTrigger).toFixed(2)}</strong> | Contract: <strong className="text-indigo-300">{symbol} {activeStrike} {isBull ? 'CE' : 'PE'}</strong> | Qty: <strong className="text-white">{numericQty} Qty</strong>
+                  Current {symbol}: <strong className="text-white">₹{dp(currentCMP).toFixed(2)}</strong> | Option LTP: <strong className="text-white">₹{dp(liveOptionPremium).toFixed(2)}</strong> | Planned Entry: <strong className="text-cyan-300">₹{dp(optionEntryPremium).toFixed(2)} (±1%)</strong> | Distance: <strong className="text-cyan-300">₹{dp(distanceToTrigger).toFixed(2)}</strong> | Contract: <strong className="text-indigo-300">{displayContract}</strong> | Qty: <strong className="text-white">{numericQty} Qty</strong>
                 </>
               ) : (
                 <>
                   <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold mr-2 ${
-                    !canExecute
+                    !canExecute || isEntryMissed
                       ? 'bg-slate-800 text-amber-300 border border-slate-700'
                       : !isTriggerSatisfied
                         ? 'bg-amber-950 text-amber-300 border border-amber-800'
@@ -2431,9 +2743,11 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                   }`}>
                     {!canExecute
                       ? 'NOT ELIGIBLE FOR SPOT EXECUTION'
-                      : !isTriggerSatisfied
-                        ? 'WAITING FOR TRIGGER'
-                        : 'TRIGGER SATISFIED'}
+                      : isEntryMissed
+                        ? 'ENTRY MISSED'
+                        : !isTriggerSatisfied
+                          ? 'WAITING FOR TRIGGER'
+                          : 'TRIGGER SATISFIED'}
                   </span>
                   Current {symbol}: <strong className="text-white">{nativeCurrency}{dp(currentCMP).toFixed(2)}</strong> | Planned Entry: <strong className="text-amber-300">{nativeCurrency}{dp(underlyingTriggerPrice).toFixed(2)}</strong> | Planned Stop: <strong className="text-rose-300">{nativeCurrency}{dp(safeInitialSL).toFixed(2)}</strong> | Qty: <strong className="text-white">{canExecute ? numericQty : '0'}</strong>
                 </>
@@ -2463,19 +2777,25 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                   }`}
                   title={
                     bot.isActive
-                      ? 'Bot is ACTIVE: monitoring signals automatically'
-                      : 'Bot is INACTIVE: click to activate auto-monitoring'
+                      ? bot.autoExecutePaper
+                        ? 'Bot is ACTIVE and auto-trading: qualifying signals are placed in the paper account automatically'
+                        : 'Bot is ACTIVE but auto-trading is OFF: it does not place trades; use the Execute button to trade manually'
+                      : 'Bot is INACTIVE: click to activate'
                   }
                 >
                   <Bot className="w-3.5 h-3.5" />
-                  {isTogglingBot ? 'Updating...' : bot.isActive ? 'Active' : 'Off'}
+                  {isTogglingBot
+                    ? 'Updating...'
+                    : bot.isActive
+                      ? `Active · Auto ${bot.autoExecutePaper ? 'ON' : 'OFF'}`
+                      : 'Off'}
                 </button>
               </div>
             )}
 
             {/* A non-executable setup (e.g. a bearish signal on long-only spot) has no trade, so nothing is
                 shown here: no execute button and no "no execution" notice. */}
-            {!canExecute ? null : (
+            {!canExecute || isEntryMissed ? null : (
               <button
                 type="button"
                 onClick={handleExecutePaperOrder}
@@ -2519,6 +2839,16 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
               </button>
             )}
           </div>
+          {canExecute && !isEntryMissed && (
+            <div
+              className={`w-full text-[11px] ${autoTradeBlockers.length ? 'text-amber-300' : 'text-emerald-300'}`}
+              data-testid="auto-trade-status"
+            >
+              {autoTradeBlockers.length
+                ? `Manual only: this setup will NOT be traded automatically (${autoTradeBlockers.join('; ')}). Use the Execute button to place it yourself.`
+                : 'Auto-trade ON: the bot places this setup automatically when the trigger is reached.'}
+            </div>
+          )}
         </div>
       )}
 

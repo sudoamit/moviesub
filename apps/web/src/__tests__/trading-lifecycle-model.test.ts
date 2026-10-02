@@ -680,6 +680,52 @@ describe('Authoritative Trading Lifecycle & Standby vs Active Trade State Model'
         expect(html).toContain('Trigger Band:');
         expect(html).toContain('(±1%)');
       });
+
+      it('TEST 12: When entry is missed (TP1 reached or SL breached), removes entry setup card and renders Searching For New Setup screen', () => {
+        // NIFTY mockSignal: optimal = 24175.65, tp1 = 24250, sl = 24100
+        // Live price has already run to 24260 (beyond TP1) without an active filled position
+        const htmlMissedTp = ReactDOMServer.renderToStaticMarkup(
+          React.createElement(LivePositionTracker, {
+            symbol: 'NIFTY',
+            signal: mockSignal,
+            livePrice: 24260,
+            activePosition: null,
+            activeExecution: null,
+          }),
+        );
+
+        // Entry setup card must be REMOVED
+        expect(htmlMissedTp).toContain('Entry Missed — Setup Removed');
+        expect(htmlMissedTp).toContain('SEARCHING FOR NEW SETUP');
+        expect(htmlMissedTp).toContain('Scan For Setup Now');
+        expect(htmlMissedTp).toContain('Entry Window Invalidated — No-Chase Rule Enforced');
+        expect(htmlMissedTp).not.toContain('EXECUTION READINESS');
+        expect(htmlMissedTp).not.toContain('Execute Paper Trade');
+
+        // Linear spot test: BTCUSDT_SPOT bullish setup where price crashed past stop loss (82000 < 83500 sl)
+        const btcBullish = {
+          ...mockSignal,
+          symbol: 'BTCUSDT_SPOT',
+          entryZone: { min: 84000, max: 84200, optimal: 84100 },
+          stopLoss: 83500,
+          takeProfits: { tp1: 85500, tp2: 86500, tp3: 88000 },
+        };
+        const htmlMissedSl = ReactDOMServer.renderToStaticMarkup(
+          React.createElement(LivePositionTracker, {
+            symbol: 'BTCUSDT_SPOT',
+            signal: btcBullish,
+            livePrice: 83400, // crashed below SL
+            activePosition: null,
+            activeExecution: null,
+          }),
+        );
+
+        expect(htmlMissedSl).toContain('Entry Missed — Setup Removed');
+        expect(htmlMissedSl).toContain('SEARCHING FOR NEW SETUP');
+        expect(htmlMissedSl).toContain('Price 83400 is already beyond the stop 83500');
+        expect(htmlMissedSl).not.toContain('Execute Paper Trade @ Market');
+      });
     });
   });
 });
+

@@ -69,6 +69,8 @@ export class LiquidityEngine {
         if (consumedHighIndices.has(h2.index)) continue;
 
         const currentAvg = cluster.reduce((sum, s) => sum + s.price, 0) / cluster.length;
+        // Equal highs must rest untaken: once price traded through the level, later highs are a new pool
+        if (LiquidityEngine.tradedThrough(candles, cluster[cluster.length - 1].index, h2.index, currentAvg + tolerance, 'ABOVE')) break;
         if (Math.abs(h2.price - currentAvg) <= tolerance) {
           cluster.push(h2);
         }
@@ -89,7 +91,7 @@ export class LiquidityEngine {
           pools.push({
             id: `eqh-${cluster.map((s) => s.index).join('-')}`,
             type: LiquidityType.EQUAL_HIGHS,
-            priceLevel: Number(avgLevel.toFixed(2)),
+            priceLevel: avgLevel,
             firstTimestamp,
             lastTimestamp,
             touchCount: cluster.length,
@@ -139,6 +141,7 @@ export class LiquidityEngine {
         if (consumedLowIndices.has(l2.index)) continue;
 
         const currentAvg = cluster.reduce((sum, s) => sum + s.price, 0) / cluster.length;
+        if (LiquidityEngine.tradedThrough(candles, cluster[cluster.length - 1].index, l2.index, currentAvg - tolerance, 'BELOW')) break;
         if (Math.abs(l2.price - currentAvg) <= tolerance) {
           cluster.push(l2);
         }
@@ -159,7 +162,7 @@ export class LiquidityEngine {
           pools.push({
             id: `eql-${cluster.map((s) => s.index).join('-')}`,
             type: LiquidityType.EQUAL_LOWS,
-            priceLevel: Number(avgLevel.toFixed(2)),
+            priceLevel: avgLevel,
             firstTimestamp,
             lastTimestamp,
             touchCount: cluster.length,
@@ -250,6 +253,20 @@ export class LiquidityEngine {
     }
 
     return { pools, sweeps };
+  }
+
+  /** True when a candle strictly between two swing indices traded beyond `level`. */
+  private static tradedThrough(
+    candles: ICandle[],
+    fromIndex: number,
+    toIndex: number,
+    level: number,
+    side: 'ABOVE' | 'BELOW',
+  ): boolean {
+    for (let k = fromIndex + 1; k < toIndex && k < candles.length; k++) {
+      if (side === 'ABOVE' ? candles[k].high > level : candles[k].low < level) return true;
+    }
+    return false;
   }
 }
 

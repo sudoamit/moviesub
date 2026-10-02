@@ -241,10 +241,12 @@ describe('Authoritative BTC Spot Source of Truth Pipeline Tests (Q.1 - Q.12)', (
     expect(spotInst?.marginMode).toBe('SPOT');
     expect(spotInst?.venueProfile?.venueId).toBe('BINANCE_SPOT');
 
-    expect(FORBIDDEN_DERIVATIVE_INSTRUMENTS.has('BTCUSDT_PERP')).toBe(true);
-    expect(() => getAuthoritativeInstrument('BTCUSDT_PERP')).toThrow(
-      /FORBIDDEN_DERIVATIVE_INSTRUMENT/,
-    );
+    // The perpetual is a distinct isolated-margin instrument on the futures venue, never the spot spec.
+    expect(FORBIDDEN_DERIVATIVE_INSTRUMENTS.has('BTCUSDT_PERP')).toBe(false);
+    const perpInst = getAuthoritativeInstrument('BTCUSDT_PERP');
+    expect(perpInst.marginMode).toBe('ISOLATED');
+    expect(perpInst.venueProfile?.venueId).toBe('BINANCE_FUTURES_USDT');
+    expect(perpInst.id).not.toBe(spotInst.id);
   });
 
   // 10. Synthetic streamer is permanently isolated and prevented in production

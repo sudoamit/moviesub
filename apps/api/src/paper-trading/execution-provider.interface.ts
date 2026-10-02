@@ -18,6 +18,11 @@ export interface IPaperOrderRequest {
   executionMode?: ExecutionMode;
   signalPrice?: number;
   signalTime?: string;
+  /**
+   * Internal only (not accepted from the HTTP DTO): 'TRAIL' positions skip the TP1/TP2/TP3 ladder; only the
+   * stop (tightened by the owning strategy via tightenStop) and liquidation close them.
+   */
+  exitPlan?: 'TRAIL';
   stopLoss?: number;
   target1?: number;
   target2?: number;
