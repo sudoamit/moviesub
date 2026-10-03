@@ -237,7 +237,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
           riskPercentage: 0.92, // ₹920 risk
           entryPrice,
           stopLoss,
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSDT_PERP',
           leverage: lev,
           timestamp: t0,
         });
@@ -259,7 +259,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         maxRiskPercentage: 10.0,
         entryPrice: 90000,
         stopLoss: 88000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage: 2,
         timestamp: t0,
       });
@@ -269,14 +269,14 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('Section 30: Exceeding instrument maximum leverage causes strict rejection', () => {
-      // BTCUSDT maxLeverage = 20
+      // BTCUSDT_PERP maxLeverage = 50 (legacy 'BTCUSDT' now resolves to 1x spot; leverage needs the explicit PERP)
       const sizing25x = PositionSizer.calculatePosition({
         accountBalance: 100000,
         riskPercentage: 1.0,
         entryPrice: 90000,
         stopLoss: 88000,
-        symbol: 'BTCUSDT',
-        requestedLeverage: 25, // > 20x
+        symbol: 'BTCUSDT_PERP',
+        requestedLeverage: 60, // > 50x
         timestamp: t0,
       });
 
@@ -307,7 +307,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       const lot: PositionLot = {
         id: 'lot_btc_1',
         tradeId: 'tr_btc_1',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         direction: Direction.BULLISH,
         initialQuantity: 0.005,
         remainingQuantity: 0,
@@ -414,7 +414,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         },
         {
           id: 'pos_btc',
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSDT_PERP',
           assetType: 'CRYPTO',
           direction: Direction.BULLISH,
           entryPrice: 90000,
@@ -480,7 +480,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   // =========================================================================
   describe('7. Mandatory Accounting Invariants', () => {
     it('INVARIANT: ACCOUNT_CURRENCY_ALWAYS_INR', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const nifty = getAuthoritativeInstrument('NIFTY');
       const gold = getAuthoritativeInstrument('GOLD');
       const xau = getAuthoritativeInstrument('XAUUSD');
@@ -525,7 +525,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: riskPct,
         entryPrice: 90000,
         stopLoss: 88000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         timestamp: 1700000000000,
       });
 
@@ -563,7 +563,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
           fees: 20,
         },
         {
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSDT_PERP',
           entry: 90000,
           stop: 88000,
           exit: 95000,
@@ -817,7 +817,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('Dynamically sets initialMarginRate to 1/leverage when requested leverage is within limits', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT'); // maxLeverage: 20
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP'); // maxLeverage: 50
       const model = resolveMarginModel(btc, { requestedLeverage: 10 });
       expect(model.effectiveLeverage).toBe(10);
       expect(model.initialMarginRate).toBe(0.10); // 1 / 10 = 10%
@@ -839,7 +839,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: 1.0,
         entryPrice,
         stopLoss,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage,
         timestamp: 1700000000000,
       });
@@ -852,9 +852,9 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       const expectedInitialMargin = notionalAccount * 0.25;
       expect(sizing.initialMarginRequired).toBeCloseTo(expectedInitialMargin, 1);
 
-      // Verify liquidation price uses the EXACT SAME 25% initial margin rate (not the default instrument 5%)
-      // Long Liq = 90000 * (1 - 0.25 + 0.025) = 90000 * 0.775 = 69750
-      expect(sizing.liquidationPrice).toBe(69750);
+      // Verify liquidation price uses the EXACT SAME 25% initial margin rate (not an instrument default)
+      // Long Liq = 90000 * (1 - 0.25 + 0.004 BTCUSDT_PERP MMR) = 90000 * 0.754 = 67860
+      expect(sizing.liquidationPrice).toBe(67860);
     });
   });
 
@@ -1038,7 +1038,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: 1.0,
         entryPrice: 90000,
         stopLoss: 88000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage: 10,
         timestamp: 1700000000000,
       });
@@ -1047,14 +1047,14 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       expect(sizing.resolvedMarginModel).toBeDefined();
       expect(sizing.resolvedMarginModel?.effectiveLeverage).toBe(10);
       expect(sizing.resolvedMarginModel?.initialMarginRate).toBe(0.10);
-      expect(sizing.resolvedMarginModel?.maintenanceMarginRate).toBe(0.025);
+      expect(sizing.resolvedMarginModel?.maintenanceMarginRate).toBe(0.004); // BTCUSDT_PERP MMR
       expect(sizing.resolvedMarginModel?.liquidationModel).toBe('ISOLATED_LINEAR');
 
       // Check TradeLifecycleManager attaches it to completed trade
       const lot: PositionLot = {
         id: 'lot_btc_snap',
         tradeId: 'tr_btc_snap',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         direction: Direction.BULLISH,
         initialQuantity: 0.005,
         remainingQuantity: 0,
@@ -1195,7 +1195,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('Invariant C: Identical resolved margin model yields identical margin and liquidation pricing', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
 
       const notionalAccount = 100000;
@@ -1208,8 +1208,8 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
 
       // Margin uses 10% rate -> ₹10,000
       expect(margin.initialMarginRequired).toBe(10000);
-      // Liq price uses EXACT SAME 10% rate + 2.5% MMR -> 90000 * (1 - 0.10 + 0.025) = 83250
-      expect(liqPrice).toBe(83250);
+      // Liq price uses EXACT SAME 10% rate + 0.4% MMR -> 90000 * (1 - 0.10 + 0.004) = 81360
+      expect(liqPrice).toBe(81360);
     });
   });
 
@@ -1218,7 +1218,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   // =========================================================================
   describe('22. Cryptographic Accounting Snapshot & Hash Integrity', () => {
     it('buildAccountingSnapshot constructs a comprehensive snapshot with deterministic SHA-256 hash', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1256,7 +1256,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: 1.0,
         entryPrice: 90000,
         stopLoss: 88000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage: 10,
         timestamp: 1700000000000,
       });
@@ -1285,7 +1285,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: 2.0,
         entryPrice: 92000,
         stopLoss: 89000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage: 5,
         timestamp: 1700000000000,
       });
@@ -1295,7 +1295,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         riskPercentage: 2.0,
         entryPrice: 92000,
         stopLoss: 89000,
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         requestedLeverage: 5,
         timestamp: 1700000000000,
       });
@@ -1312,7 +1312,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       const lot: PositionLot = {
         id: 'lot_btc_replay',
         tradeId: 'tr_btc_replay',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         direction: Direction.BULLISH,
         initialQuantity: 0.01,
         remainingQuantity: 0,
@@ -1383,7 +1383,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   // =========================================================================
   describe('24. Tamper Detection & Cryptographic Provenance Defense', () => {
     it('Altering FX rate, timestamp, source, or margin model changes snapshotHash', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1435,7 +1435,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   // =========================================================================
   describe('25. Cross-Currency P&L via Accounting Snapshot & FX Snapshot', () => {
     it('calculateTradePnl consumes ITradeAccountingSnapshot directly and attaches it to result', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1493,7 +1493,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
   // =========================================================================
   describe('26. Universal AccountingSnapshot Consumption Across All Primitives & Engines', () => {
     it('All TradeAccountingEngine primitives consume ITradeAccountingSnapshot as single source of truth', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1515,7 +1515,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       // 2. calculateMargin consuming snapshot
       const margin = TradeAccountingEngine.calculateMargin(notional.notionalAccount, snapshot);
       expect(margin.initialMarginRequired).toBe(41400); // 10% of ₹414,000 = ₹41,400 INR
-      expect(margin.maintenanceMarginRequired).toBe(10350); // 2.5% of ₹414,000 = ₹10,350 INR
+      expect(margin.maintenanceMarginRequired).toBe(1656); // 0.4% (BTCUSDT_PERP MMR) of ₹414,000 = ₹1,656 INR
 
       // 3. calculateStopRisk consuming snapshot
       const stopRisk = TradeAccountingEngine.calculateStopRisk(90000, 88000, 0.05, snapshot);
@@ -1527,8 +1527,8 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
         direction: 'LONG',
         accountingSnapshot: snapshot,
       });
-      // 90000 * (1 - 0.10 + 0.025) = 90000 * 0.925 = 83250
-      expect(liqPrice).toBe(83250);
+      // 90000 * (1 - 0.10 + 0.004 BTCUSDT_PERP MMR) = 90000 * 0.904 = 81360
+      expect(liqPrice).toBe(81360);
 
       // 5. calculateTradePnl consuming snapshot
       const pnl = TradeAccountingEngine.calculateTradePnl({
@@ -1544,7 +1544,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('PortfolioRiskManager evaluates open positions and proposed orders via ITradeAccountingSnapshot', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1560,7 +1560,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
 
       const openPos = {
         id: 'pos_btc_1',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         assetType: 'CRYPTO',
         direction: Direction.BULLISH,
         entryPrice: 90000,
@@ -1614,7 +1614,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
     });
 
     it('PositionLot preserves accountingSnapshot through lifecycle to completed trade', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
       const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -1629,7 +1629,7 @@ describe('Phase 11.5 — Multi-Asset Currency, Contract & Margin Integrity', () 
       });
 
       const signal = {
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         direction: Direction.BULLISH,
         stopLoss: 88000,
       };

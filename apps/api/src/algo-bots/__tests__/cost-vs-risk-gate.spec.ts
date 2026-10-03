@@ -1,4 +1,4 @@
-import { Direction, SignalGrade, SignalState, TradeDecisionType } from '@quant/shared';
+import { Direction, getAuthoritativeDescriptor, SignalGrade, SignalState, TradeDecisionType, TransactionCostScheduleManager } from '@quant/shared';
 import { TradeDecisionService } from '../trade-decision.service';
 
 /**
@@ -222,5 +222,56 @@ describe('Cost-vs-risk gate (COST_EXCEEDS_EDGE)', () => {
     it('does not flag the setup while NIFTY is between the stop and TP1', () => {
       expect(JSON.stringify(run(22600))).not.toContain('ENTRY_MISSED_RR_DEGRADED');
     });
+  });
+});
+
+describe('Cost gate fails closed (COST_DATA_UNAVAILABLE)', () => {
+  const service = new TradeDecisionService({} as any);
+  const nowMs = Date.now();
+  const bot: any = { id: 'bot_fc', symbol: 'BTCUSDT_SPOT', strategy: 'SMC', direction: 'BULLISH', timeframe: '15m', minScore: 70, smcCondition: 'ANY_CONFLUENCE', lots: 100, autoExecutePaper: true, isActive: true };
+  const signal: any = {
+    id: 'sig_fc', symbol: 'BTCUSDT_SPOT', strategy: 'SMC', strategyMode: 'SMC', timeframe: '15m', direction: Direction.BULLISH,
+    state: SignalState.ACTIVE, grade: SignalGrade.A_PLUS, score: 90, canonicalCandleTime: nowMs, canonicalDecisionTime: new Date(nowMs),
+    entryZone: { min: 82990, max: 83010, optimal: 83000 }, stopLoss: 83000 * 0.99,
+    takeProfits: { tp1: 83000 * 1.015, tp2: 83000 * 1.025, tp3: 83000 * 1.04 }, riskRewardRatios: { rr1: 1.5, rr2: 2.5, rr3: 4 },
+    reasoning: { summary: 'fail closed' }, scoreBreakdown: { totalScore: 90 },
+    triggerEvidence: { orderBlock: { matched: true, timestamp: new Date(nowMs - 60000) }, fvg: { matched: true, timestamp: new Date(nowMs - 60000) }, liquiditySweep: { matched: true, timestamp: new Date(nowMs - 60000) }, structureBreak: { matched: true, timestamp: new Date(nowMs - 60000) } },
+    timestamp: new Date(nowMs),
+  };
+  const evaluate = () =>
+    service.evaluatePreTradeDecision({
+      bot, signal,
+      portfolio: { accountId: 'acc', initialCapital: 10000000, cashBalance: 10000000, availableMargin: 10000000, openPositions: [] } as any,
+      liveQuote: { symbol: 'BTCUSDT_SPOT', price: 83000, timestamp: new Date() } as any,
+    } as any);
+  afterEach(() => jest.restoreAllMocks());
+
+  it('baseline: the same setup is taken when costs resolve (1% stop)', () => {
+    expect(evaluate().decision).toBe(TradeDecisionType.TAKE);
+  });
+
+  it('REGRESSION: a cost-schedule error rejects the trade (previously logged at debug level and the trade continued)', () => {
+    jest.spyOn(TransactionCostScheduleManager.prototype, 'calculateCostForSymbol').mockImplementation(() => { throw new Error('fee schedule missing'); });
+    const res = evaluate();
+    expect(res.decision).toBe(TradeDecisionType.REJECT);
+    expect(res.decisionReasonCode).toBe('COST_DATA_UNAVAILABLE');
+    expect(res.decisionReason).toMatch(/fee schedule missing/);
+  });
+
+  it('a non-numeric fee (NaN) rejects instead of silently passing NaN > 0.5 === false', () => {
+    jest.spyOn(TransactionCostScheduleManager.prototype, 'calculateCostForSymbol').mockReturnValue({ totalChargesAccount: NaN } as any);
+    const res = evaluate();
+    expect(res.decision).toBe(TradeDecisionType.REJECT);
+    expect(res.decisionReasonCode).toBe('COST_DATA_UNAVAILABLE');
+  });
+
+  it('an unknown fee schedule (invalid cost configuration) rejects', () => {
+    const real = getAuthoritativeDescriptor('BTCUSDT_SPOT');
+    jest.spyOn(TransactionCostScheduleManager.prototype, 'calculateCostForSymbol').mockImplementation((turnover: unknown) =>
+      TransactionCostScheduleManager.getInstance().calculateCost({ descriptor: { ...real, costScheduleId: 'NOT_A_SCHEDULE' as any }, turnoverQuote: Number(turnover) }),
+    );
+    const res = evaluate();
+    expect(res.decisionReasonCode).toBe('COST_DATA_UNAVAILABLE');
+    expect(res.decisionReason).toMatch(/unknown cost schedule/);
   });
 });

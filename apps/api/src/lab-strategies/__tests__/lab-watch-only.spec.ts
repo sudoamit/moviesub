@@ -2,14 +2,20 @@ import { LabStrategiesService } from '../lab-strategies.service';
 import { CandlesService } from '../../candles/candles.service';
 
 describe('lab runner: watch-only instruments', () => {
-  const ref = { expectancyR: 0.43, sdR: 2.2, trades: 191, maxDrawdownR: 10.3 };
-  // A shadow record consistent with the backtest (promotes a perpetual, see lab-lifecycle.spec)
-  const goodShadow = [2, -1, -1, 3, -1, 1.5, -1, 0.5].map((netR) => ({ netR }));
+  // Fully validated strategy (development + validation + golden) with a confirmed shadow record (see lab-lifecycle.spec)
+  const ref = {
+    expectancyR: 0.43, sdR: 2.2, trades: 400, maxDrawdownR: 10.3,
+    evidence: { holdOut: { trades: 120, expectancyR: 0.4, tStat: 2.6 } },
+    golden: { passed: true, trades: 50, expectancyR: 0.3, datasetVersion: 'X@2026-10-01#1' },
+  };
+  const goodShadow = Array.from({ length: 40 }, (_, i) => ({ netR: i % 5 < 3 ? 2 : -1, exitReason: 'TARGET' }));
 
   const setup = () => {
     const prisma: any = {
       labStrategyTrade: { findMany: jest.fn().mockResolvedValue(goodShadow) },
       labStrategy: { update: jest.fn().mockResolvedValue({}) },
+      labPromotionRecord: { create: jest.fn().mockResolvedValue({}) },
+      $transaction: jest.fn(async (ops: any[]) => Promise.all(ops)),
     };
     const service = new LabStrategiesService(prisma, {} as any, {} as any, {} as any);
     return { prisma, service };
@@ -17,13 +23,19 @@ describe('lab runner: watch-only instruments', () => {
 
   it('promotes a perpetual-futures strategy that passed its shadow test', async () => {
     const { prisma, service } = setup();
-    await (service as any).applyLifecycle({ id: 'btc', symbol: 'BTCUSDT_PERP', status: 'SHADOW', backtestJson: ref });
+    await (service as any).applyLifecycle({ id: 'btc', symbol: 'BTCUSDT_PERP', status: 'SHADOW', backtestJson: ref, strategyVersion: 'sv-1' });
     expect(prisma.labStrategy.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'LIVE' }) }));
+    // the promotion is recorded with the exact evidence, rules version and strategy version
+    const rec = prisma.labPromotionRecord.create.mock.calls[0][0].data;
+    expect(rec).toMatchObject({ strategyId: 'btc', strategyVersion: 'sv-1', datasetVersion: 'X@2026-10-01#1', lifecycleRulesVersion: 'lifecycle/v2' });
+    expect(rec.evidenceJson.evidence.current.trades).toBe(40);
+    // only trades of the current strategy version count as evidence
+    expect(prisma.labStrategyTrade.findMany.mock.calls[0][0].where).toMatchObject({ strategyVersion: 'sv-1', mode: 'SHADOW' });
   });
 
   it('keeps a NIFTY strategy in SHADOW (watch only) even when it qualifies for promotion', async () => {
     const { prisma, service } = setup();
-    await (service as any).applyLifecycle({ id: 'nifty', symbol: 'NIFTY', status: 'SHADOW', backtestJson: ref });
+    await (service as any).applyLifecycle({ id: 'nifty', symbol: 'NIFTY', status: 'SHADOW', backtestJson: ref, strategyVersion: 'sv-2' });
     const calls = prisma.labStrategy.update.mock.calls.map((c: any[]) => c[0].data);
     expect(calls.some((d: any) => d.status === 'LIVE')).toBe(false);
     expect(calls[0].statusReason).toMatch(/stays in SHADOW \(watch only\)/);

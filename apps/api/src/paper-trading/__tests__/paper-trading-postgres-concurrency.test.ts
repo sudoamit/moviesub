@@ -10,6 +10,42 @@ import {
   resolveMarginModel,
 } from '@quant/shared';
 
+/**
+ * Makes `model.method` throw INSIDE interactive transactions on this client. The service writes through the
+ * transaction's own client (`tx`), so patching the top-level delegate (as these tests used to) never reached the
+ * code under test and the "rollback" was never exercised. Returns a function that restores the original.
+ */
+function forceFailureInsideTransaction(prisma: any, model: string, method: string, message: string): () => void {
+  const original = prisma.$transaction;
+  prisma.$transaction = (arg: any, opts?: any) => {
+    if (typeof arg !== 'function') return original.call(prisma, arg, opts);
+    return original.call(
+      prisma,
+      (tx: any) =>
+        arg(
+          new Proxy(tx, {
+            get(target, key) {
+              if (key !== model) return target[key];
+              return new Proxy(target[key], {
+                get(delegate, m) {
+                  return m === method
+                    ? () => {
+                        throw new Error(message);
+                      }
+                    : delegate[m];
+                },
+              });
+            },
+          }),
+        ),
+      opts,
+    );
+  };
+  return () => {
+    prisma.$transaction = original;
+  };
+}
+
 describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration Test Suite', () => {
   let prismaA: PrismaClient;
   let prismaB: PrismaClient;
@@ -149,13 +185,15 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const target1 = 52000.0;
     const livePrice = 52100.0;
     const marketEventTime = new Date();
-    const idempotencyKey = `tp1_partial_${position.id}`;
+    // Current policy: TP1 takes 30% (DEFAULT_PARTIAL_EXIT_POLICY 30/30/40) under the key `tp1_partial:<id>`.
+    // (This test was written for a 50% TP1 and the key `tp1_partial_<id>`; both changed since.)
+    const idempotencyKey = `tp1_partial:${position.id}`;
 
     try {
       // Execute concurrently across two independent Prisma clients connected to real PostgreSQL
       await Promise.all([
-        (serviceA as any).executePartialScaleOut(position, target1, livePrice, marketEventTime),
-        (serviceB as any).executePartialScaleOut(position, target1, livePrice, marketEventTime),
+        (serviceA as any).executePartialScaleOut(position, 'TP1', target1, livePrice, marketEventTime),
+        (serviceB as any).executePartialScaleOut(position, 'TP1', target1, livePrice, marketEventTime),
       ]);
 
       // 1. Assert exactly 1 TP1 PaperOrder in PostgreSQL
@@ -176,27 +214,30 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       });
       expect(updatedPosition).not.toBeNull();
       expect(updatedPosition!.status).toBe('PARTIALLY_CLOSED');
-      expect(Number(updatedPosition!.quantity)).toBe(5.0);
-      expect(Number(updatedPosition!.usedMargin)).toBe(25000.0);
+      expect(Number(updatedPosition!.quantity)).toBe(7.0); // 10 - 30%
+      expect(Number(updatedPosition!.usedMargin)).toBe(35000.0); // 70% of 50,000
 
       // 4. Assert PaperAccount balance, realized P&L, and charges mutated exactly ONCE
       const updatedAccount = await prismaA.paperAccount.findUnique({
         where: { id: account.id },
       });
-      const exitTurnover = 52100.0 * 5.0;
-      const exitCharges = paperTradingA.calculateCharges(exitTurnover, true);
+      const exitTurnover = 52100.0 * 3.0; // USDT
       const btcFxRate = PointInTimeCurrencyConverter.getInstance().getRate(
         'USDT',
         'INR',
         Date.now(),
       ).fxRate;
+      // Charges in INR from the canonical schedule: 0.1% spot fee on the USDT turnover, converted at the FX rate.
+      // (The old legacy call calculateCharges(turnover, true) skipped the USDT->INR conversion and expected Rs 156.30
+      // instead of Rs 14,379.60.)
+      const exitCharges = paperTradingA.calculateCharges(exitTurnover, 'CRYPTO', btcFxRate, Date.now(), 'EXIT', 'BTCUSDT_SPOT');
       const expectedPartialNetPnL = Number(
-        ((52100 - 50000) * btcFxRate * 5.0 - exitCharges.totalCharges).toFixed(2),
+        ((52100 - 50000) * btcFxRate * 3.0 - exitCharges.totalCharges).toFixed(2),
       );
 
       expect(Number(updatedAccount!.realizedPnL)).toBeCloseTo(expectedPartialNetPnL, 2);
       expect(Number(updatedAccount!.cashBalance) - 500000.0).toBeCloseTo(expectedPartialNetPnL, 2);
-      expect(Number(updatedAccount!.usedMargin)).toBe(25000.0);
+      expect(Number(updatedAccount!.usedMargin)).toBe(35000.0);
       expect(Number(updatedAccount!.totalChargesPaid)).toBeCloseTo(exitCharges.totalCharges, 2);
     } finally {
       // Cleanup in FK dependency order: PaperFill -> PaperOrder -> PaperPosition -> PaperAccount
@@ -396,10 +437,7 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
 
     try {
       // Execute production placeOrder() with an intercepted error inside transaction to verify atomic rollback
-      const origCreateMany = prismaA.auditEvent.createMany;
-      (prismaA.auditEvent as any).createMany = () => {
-        throw new Error('[FORCED_POSTGRES_ENTRY_TRANSACTION_FAILURE]');
-      };
+      const restore = forceFailureInsideTransaction(prismaA, 'auditEvent', 'createMany', '[FORCED_POSTGRES_ENTRY_TRANSACTION_FAILURE]');
 
       try {
         await expect(
@@ -408,13 +446,16 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
             contractSymbol: 'BTCUSDT',
             direction: 'BUY',
             orderType: 'MARKET',
-            quantity: 2.0,
-            stopLoss: 48000.0,
-            target1: 52000.0,
+            // A valid order, so execution reaches the forced failure inside the transaction. (The old one, 2 BTC
+            // with TP1 52,000 against a 52,000 quote, was correctly rejected before the transaction as
+            // INVALID_TAKE_PROFIT, so the rollback was never exercised.)
+            quantity: 0.01,
+            stopLoss: 51900.0,
+            target1: 52300.0,
           }),
         ).rejects.toThrow('[FORCED_POSTGRES_ENTRY_TRANSACTION_FAILURE]');
       } finally {
-        prismaA.auditEvent.createMany = origCreateMany;
+        restore();
       }
 
       // Assert 100% atomic rollback in real PostgreSQL database via independent client prismaB
@@ -459,7 +500,7 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
       },
     });
 
-    const inst3 = getAuthoritativeInstrument('BTCUSDT');
+    const inst3 = getAuthoritativeInstrument('BTCUSDT_PERP');
     const entryTime3 = new Date();
     const snap3 = buildAccountingSnapshot({
       accountCurrency: 'INR',
@@ -478,8 +519,8 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     const position = await prismaA.paperPosition.create({
       data: {
         accountId: account.id,
-        symbol: 'BTCUSDT',
-        contractSymbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
+        contractSymbol: 'BTCUSDT_PERP',
         instrumentType: 'SPOT',
         direction: 'BULLISH',
         quantity: 2.0,
@@ -497,18 +538,16 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
     });
 
     try {
+      // 5x leverage exists only on the explicit perpetual; legacy 'BTCUSDT' now resolves to 1x spot
       // Execute production closePosition() with an intercepted error inside transaction to verify atomic rollback
-      const origTradeCreate = prismaA.paperTrade.create;
-      (prismaA.paperTrade as any).create = () => {
-        throw new Error('[FORCED_POSTGRES_CLOSE_TRANSACTION_FAILURE]');
-      };
+      const restore = forceFailureInsideTransaction(prismaA, 'paperTrade', 'create', '[FORCED_POSTGRES_CLOSE_TRANSACTION_FAILURE]');
 
       try {
         await expect(
           paperTradingA.closePosition(position.id, 'MANUAL_CLOSE', 55000.0),
         ).rejects.toThrow('[FORCED_POSTGRES_CLOSE_TRANSACTION_FAILURE]');
       } finally {
-        prismaA.paperTrade.create = origTradeCreate;
+        restore();
       }
 
       // Assert 100% atomic rollback via independent client prismaB: position remains OPEN, balance/margin/charges/realizedPnL unchanged
@@ -613,7 +652,9 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         prodService.closePosition(pos.id, 'Cached Quote Exit', {
           executionMode: 'LIVE_MARKET' as any,
         }),
-      ).rejects.toThrow(/cached tick from before provider reconnection/);
+        // The pre-reconnection tick is rejected; the connection-epoch check now catches it before the
+        // cached-tick check, so either message proves the same property.
+      ).rejects.toThrow(/cached tick from before provider reconnection|from connection epoch \d+ \(active connection epoch: \d+\)/);
 
       // 3. Ingest fresh valid tick -> closePosition against real PostgreSQL succeeds
       const tFresh = Date.now() + 1000;
@@ -627,7 +668,12 @@ describe('AI FIX 143 — True PostgreSQL Concurrency & Idempotency Integration T
         executionMode: 'LIVE_MARKET' as any,
       });
       expect(trade).toBeDefined();
-      expect(Number(trade.exitPrice)).toBe(53000.0);
+      // Filled at the fresh 53,000 quote less the paper engine's simulated exit slippage for a market SELL. That
+      // slippage is random (ExecutionPriceResolver.calculateSlippage draws 2-10 bps), so the fill is checked
+      // against the model's range; the old expectation of exactly 53,000 ignored slippage.
+      const exit = Number(trade.exitPrice);
+      expect(exit).toBeLessThanOrEqual(53000.0 * (1 - 2 / 10000) + 0.05);
+      expect(exit).toBeGreaterThanOrEqual(53000.0 * (1 - 10 / 10000) - 0.05);
 
       // Verify PostgreSQL database state
       const dbPos = await prismaA.paperPosition.findUnique({ where: { id: pos.id } });

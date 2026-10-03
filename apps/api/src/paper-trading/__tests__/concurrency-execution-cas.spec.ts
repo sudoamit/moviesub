@@ -249,7 +249,9 @@ describe('FIX 203: Concurrency Execution CAS Integration Suite (PostgreSQL)', ()
         quantity: 65,
         orderType: 'MARKET',
         leverage: 1,
-        price: 150.0,
+        // the mocked option quote is 160: a client reference 150 diverges by more than the 5% tolerance and is
+        // correctly rejected (PRICE_MISMATCH); this test is about concurrent closes, so send the quoted premium
+        price: 160.0,
         stopLoss: 100.0,
         target1: 200.0,
         allowPriceOverride: true,

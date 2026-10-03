@@ -765,13 +765,13 @@ export class ReconciliationService implements IReconciliationDomainService {
           });
         }
 
+        // updateMany on a missing execution is a no-op; any other error must abort the whole transaction (in
+        // Postgres the transaction is already aborted at that point, so swallowing it only hid the cause)
         if (order.executionId) {
-          try {
-            await tx.algoBotExecution.updateMany({
-              where: { id: order.executionId },
-              data: { state: 'CANCELLED', failedAt: new Date() },
-            });
-          } catch {}
+          await tx.algoBotExecution.updateMany({
+            where: { id: order.executionId },
+            data: { state: 'CANCELLED', failedAt: new Date() },
+          });
         }
       });
 
@@ -793,13 +793,13 @@ export class ReconciliationService implements IReconciliationDomainService {
           data: { status: OrderState.REJECTED },
         });
 
+        // updateMany on a missing execution is a no-op; any other error must abort the whole transaction (in
+        // Postgres the transaction is already aborted at that point, so swallowing it only hid the cause)
         if (order.executionId) {
-          try {
-            await tx.algoBotExecution.updateMany({
-              where: { id: order.executionId },
-              data: { state: 'FAILED_FINAL', failedAt: new Date(), failureReason: 'Broker rejected order' },
-            });
-          } catch {}
+          await tx.algoBotExecution.updateMany({
+            where: { id: order.executionId },
+            data: { state: 'FAILED_FINAL', failedAt: new Date(), failureReason: 'Broker rejected order' },
+          });
         }
       });
 

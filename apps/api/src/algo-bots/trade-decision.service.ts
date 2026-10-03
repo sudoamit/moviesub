@@ -33,6 +33,9 @@ import {
   TradeDecisionType,
   TradeLifecycleState,
   TransactionCostScheduleManager,
+  CostDataUnavailableError,
+  estimatedSlippageRate,
+  MAX_COST_TO_RISK as SHARED_MAX_COST_TO_RISK,
   isPerpetualSymbol,
   computeIsolatedLiquidationPrice,
 } from '@quant/shared';
@@ -452,7 +455,7 @@ export class TradeDecisionService {
 
   static get MAX_COST_TO_RISK(): number {
     const configured = Number(process.env.TRADING_MAX_COST_TO_RISK);
-    return Number.isFinite(configured) && configured > 0 ? configured : 0.5;
+    return Number.isFinite(configured) && configured > 0 ? configured : SHARED_MAX_COST_TO_RISK; // canonical default (0.5R)
   }
 
   private readonly logger = new Logger(TradeDecisionService.name);
@@ -1177,24 +1180,43 @@ export class TradeDecisionService {
       (signal as any).executionInstrumentType === 'OPTION' ||
       (bot as any).executionInstrumentType === 'OPTION';
 
+    // An invalid bot configuration (e.g. lots <= 0) rejects this bot with a reason; it must not throw out of the
+    // whole evaluation (that used to surface only as a scanner warning, with no rejection recorded)
+    const tryResolveQuantity = (inst: any): number | null => {
+      try {
+        return this.resolveOrderQuantity(bot, inst);
+      } catch (err: any) {
+        reasons.push({
+          code: 'QUANTITY_RESOLUTION_FAILED',
+          message: err?.message || 'order quantity could not be resolved',
+        });
+        return null;
+      }
+    };
+
     if (sizing && sizing.isValid && instrument) {
       if (isOptionsBot) {
-        const optionLotsQty = this.resolveOrderQuantity(bot, instrument);
-        const maxUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
-        // Options trade in whole lots only: floor the risk-capped quantity to a lot multiple.
-        const optLotSize = Number(instrument.lotSize || 1);
-        const cappedUnits = Math.min(maxUnits, optionLotsQty);
-        resolvedQuantity = Math.floor(cappedUnits / optLotSize) * optLotSize;
-        if (resolvedQuantity <= 0) {
-          reasons.push({
-            code: 'INVALID_QUANTITY',
-            message: `RISK_TOO_SMALL_FOR_ONE_LOT: risk budget allows ${Number(maxUnits).toFixed(2)} units, below one lot of ${optLotSize}`,
-          });
+        const optionLotsQty = tryResolveQuantity(instrument);
+        if (optionLotsQty === null) {
+          resolvedQuantity = 0;
+        } else {
+          const maxUnits = sizing.roundedUnits > 0 ? sizing.roundedUnits : sizing.calculatedUnits;
+          // Options trade in whole lots only: floor the risk-capped quantity to a lot multiple.
+          const optLotSize = Number(instrument.lotSize || 1);
+          const cappedUnits = Math.min(maxUnits, optionLotsQty);
+          resolvedQuantity = Math.floor(cappedUnits / optLotSize) * optLotSize;
+          if (resolvedQuantity <= 0) {
+            reasons.push({
+              code: 'INVALID_QUANTITY',
+              message: `RISK_TOO_SMALL_FOR_ONE_LOT: risk budget allows ${Number(maxUnits).toFixed(2)} units, below one lot of ${optLotSize}`,
+            });
+          }
         }
       } else {
         const botSym = canonicalizeExecutionSymbol(bot.symbol);
         const botInst = hasInstrument(botSym) ? getAuthoritativeInstrument(botSym) : instrument;
-        const rawBotQty = this.resolveOrderQuantity(bot, botInst);
+        const rawBotQtyOrNull = tryResolveQuantity(botInst);
+        const rawBotQty = rawBotQtyOrNull ?? 0;
         // Floored units: calculatedUnits is rounded to nearest and can exceed the risk budget.
         const maxAuthoritativeUnits =
           sizing.roundedUnits > 0 ? sizing.roundedUnits : (sizing.calculatedUnits > 0 ? sizing.calculatedUnits : rawBotQty);
@@ -1220,31 +1242,65 @@ export class TradeDecisionService {
     const riskPercent =
       initialCapital > 0 ? Number(((riskAmount / initialCapital) * 100).toFixed(2)) : 1.0;
 
-    // Gate 13.5: Cost vs risk. Estimated entry + exit fees (same schedule execution charges) must not exceed
-    // half of the planned risk; otherwise fees alone consume most of a 1R move and the trade is fee-negative.
+    // Gate 13.5: Cost vs risk (canonical definition, packages/shared cost-model.ts): entry fees + exit fees at the
+    // stop (the schedule execution charges) + estimated slippage on both fills must not exceed MAX_COST_TO_RISK of the
+    // planned risk; otherwise costs alone consume most of a 1R move and the trade is cost-negative.
     // Skipped for non-option NIFTY/BANKNIFTY: that legacy index "derivative" is not a live-traded product and
     // its fee schedule is a cash-equity placeholder (open audit item M-1), so a cost gate on it would be noise.
     const isLegacyIndexDerivative =
-      !isOptionBotOrSignal && ['NIFTY', 'BANKNIFTY'].includes(String(instrument?.symbol).toUpperCase());
-    if (resolvedQuantity > 0 && riskAmount > 0 && sizingEntry && sl && instrument && !isLegacyIndexDerivative) {
+      !isOptionBotOrSignal &&
+      ['NIFTY', 'BANKNIFTY'].includes(String(instrument?.symbol).toUpperCase());
+    if (instrument && !isLegacyIndexDerivative && resolvedQuantity > 0) {
+      // FAIL CLOSED: this is a risk-control gate. If the cost of the trade cannot be resolved, it is not executed.
       try {
+        if (!(riskAmount > 0) || !sizingEntry || !sl) {
+          throw new CostDataUnavailableError(
+            'planned risk could not be resolved (entry / stop / quantity)',
+          );
+        }
         const costSymbol = (signal as any).contractSymbol || instrument.symbol;
         const costs = TransactionCostScheduleManager.getInstance();
+        // ACTUAL schedule fees for the entry and for the planned worst exit (at the stop), account currency
         const entryFees = costs.calculateCostForSymbol(
-          sizingEntry * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'ENTRY', 'BUY',
+          sizingEntry * resolvedQuantity * contractSize,
+          costSymbol,
+          fxRate,
+          Date.now(),
+          'ENTRY',
+          'BUY',
         ).totalChargesAccount;
         const exitFees = costs.calculateCostForSymbol(
-          sl * resolvedQuantity * contractSize, costSymbol, fxRate, Date.now(), 'EXIT', 'SELL',
+          sl * resolvedQuantity * contractSize,
+          costSymbol,
+          fxRate,
+          Date.now(),
+          'EXIT',
+          'SELL',
         ).totalChargesAccount;
-        const costInR = (entryFees + exitFees) / riskAmount;
+        // ESTIMATED slippage on both fills where the canonical model has an estimate (none for option premiums)
+        let slippageRate = 0;
+        try {
+          slippageRate = estimatedSlippageRate(instrument.symbol);
+        } catch {
+          slippageRate = 0;
+        }
+        const slippage =
+          (sizingEntry + sl) * resolvedQuantity * contractSize * slippageRate * fxRate;
+        const costInR = (entryFees + exitFees + slippage) / riskAmount;
+        if (!Number.isFinite(costInR) || costInR < 0) {
+          throw new CostDataUnavailableError(`cost estimate is not a valid number (${costInR})`);
+        }
         if (costInR > TradeDecisionService.MAX_COST_TO_RISK) {
           reasons.push({
             code: 'COST_EXCEEDS_EDGE',
-            message: `Estimated round-trip fees ₹${(entryFees + exitFees).toFixed(2)} are ${costInR.toFixed(2)}R of planned risk ₹${riskAmount.toFixed(2)} (max ${TradeDecisionService.MAX_COST_TO_RISK}R). Stop is too tight for this instrument's costs.`,
+            message: `Estimated round-trip cost ₹${(entryFees + exitFees + slippage).toFixed(2)} (fees ₹${(entryFees + exitFees).toFixed(2)} + estimated slippage ₹${slippage.toFixed(2)}) is ${costInR.toFixed(2)}R of planned risk ₹${riskAmount.toFixed(2)} (max ${TradeDecisionService.MAX_COST_TO_RISK}R). Stop is too tight for this instrument's costs.`,
           });
         }
       } catch (costErr: any) {
-        this.logger.debug(`Cost-vs-risk estimate unavailable: ${costErr?.message}`);
+        reasons.push({
+          code: 'COST_DATA_UNAVAILABLE',
+          message: `Transaction costs could not be resolved, so the trade is not executed: ${costErr?.message ?? costErr}`,
+        });
       }
     }
 

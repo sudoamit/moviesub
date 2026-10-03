@@ -2,6 +2,7 @@ import { backtestGenome } from './backtest';
 import { aggregateBars, computeFeatures, Features } from './primitives';
 import { INSTRUMENT_PROFILES } from './profiles';
 import { Bar, InstrumentProfile, Side, StrategyGenome } from './types';
+import { QUALITY_FEATURE_VERSION } from './versioning';
 
 /**
  * Trade-quality model ("meta-labelling"): predicts the expected net R of a strategy's signal from the market
@@ -30,7 +31,11 @@ export const QUALITY_FEATURES = [
 ] as const;
 
 export interface QualityExample {
+  /** FEATURE TIME: the signal bar's open time - features use only data up to this bar's close */
   t: number;
+  /** LABEL TIME: when the trade's outcome (y) was known (exit). Training examples must have labelTime before the
+   * period they are evaluated against (purging). Defaults to t for older callers. */
+  labelTime?: number;
   market: string;
   x: number[];
   /** Net R, clipped to limit the pull of rare outliers. */
@@ -60,6 +65,13 @@ export interface QualityValidation {
   active: boolean;
   skipRuleValidated: boolean;
   reason: string;
+  /** Training examples dropped because their outcome was only known after the test fold began */
+  purgedExamples?: number;
+  /** Trained on the primary market's earlier trades, tested on OTHER markets' later trades (when pooled) */
+  unseenMarket?: { examples: number; liftR: number } | null;
+  /** Feature / label periods covered by the out-of-sample predictions */
+  validationPeriod?: { from: number; to: number } | null;
+  featureVersion?: string;
 }
 
 const Y_CLIP: [number, number] = [-1.5, 5];
@@ -173,6 +185,7 @@ export function buildQualityDataset(genome: StrategyGenome, timeframe: string, m
     for (const t of backtestGenome(genome, bars, f, profile)) {
       out.push({
         t: bars[t.signalIndex].t,
+        labelTime: bars[t.exitIndex].t + profile.barMs,
         market: symbol,
         x: extractQualityFeatures(bars, f, ema200, t.signalIndex, t.side),
         y: Math.max(Y_CLIP[0], Math.min(Y_CLIP[1], t.netR)),
@@ -256,7 +269,7 @@ function spearman(a: number[], b: number[]): number {
  */
 export function validateQualityModel(
   examples: QualityExample[],
-  options: { folds?: number; lambda?: number; minLiftR?: number; minLiftT?: number; minExamples?: number } = {},
+  options: { folds?: number; lambda?: number; minLiftR?: number; minLiftT?: number; minExamples?: number; primaryMarket?: string } = {},
 ): QualityValidation {
   const folds = options.folds ?? 5, minLiftR = options.minLiftR ?? 0.15, minLiftT = options.minLiftT ?? 2, minExamples = options.minExamples ?? 100;
   const inactive = (reason: string, extra: Partial<QualityValidation> = {}): QualityValidation => ({
@@ -266,12 +279,35 @@ export function validateQualityModel(
   if (examples.length < minExamples) return inactive(`only ${examples.length} examples (need ${minExamples})`);
 
   const size = Math.floor(examples.length / folds);
+  const labelOf = (e: QualityExample) => e.labelTime ?? e.t;
   const preds: number[] = [], actual: number[] = [];
+  let purged = 0;
   for (let k = 1; k < folds; k++) {
-    const train = examples.slice(0, k * size);
     const test = examples.slice(k * size, k === folds - 1 ? examples.length : (k + 1) * size);
+    const testStart = test[0].t;
+    // PURGING: an earlier trade whose outcome was only known after the test fold began would leak the future
+    const earlier = examples.slice(0, k * size);
+    const train = earlier.filter((e) => labelOf(e) < testStart);
+    purged += earlier.length - train.length;
+    if (train.length < 20) continue;
     const m = fitQualityModel(train, options.lambda ?? 10);
     for (const e of test) { preds.push(predictQuality(m, e.x)); actual.push(e.y); }
+  }
+  // UNSEEN MARKET (pooled datasets): train on the primary market's earlier trades, test on the other markets later
+  let unseenMarket: { examples: number; liftR: number } | null = null;
+  const markets = [...new Set(examples.map((e) => e.market.split(':')[0]))];
+  if (options.primaryMarket && markets.length > 1) {
+    const cut = examples[Math.floor(examples.length * 0.6)].t;
+    const tr = examples.filter((e) => e.market.split(':')[0] === options.primaryMarket && labelOf(e) < cut);
+    const te = examples.filter((e) => e.market.split(':')[0] !== options.primaryMarket && e.t >= cut);
+    if (tr.length >= 50 && te.length >= 30) {
+      const m = fitQualityModel(tr, options.lambda ?? 10);
+      const p = te.map((e) => predictQuality(m, e.x));
+      const ord = p.map((_, i) => i).sort((a, b) => p[b] - p[a]);
+      const h = Math.floor(ord.length / 2);
+      const avg = (ix: number[]) => ix.reduce((a, i) => a + te[i].y, 0) / Math.max(1, ix.length);
+      unseenMarket = { examples: te.length, liftR: avg(ord.slice(0, h)) - avg(ord.slice(h)) };
+    }
   }
   const order = preds.map((p, i) => i).sort((a, b) => preds[b] - preds[a]);
   const half = Math.floor(order.length / 2);
@@ -284,27 +320,56 @@ export function validateQualityModel(
   const liftTStat = se > 0 ? liftR / se : 0;
   const negIdx = preds.map((p, i) => (p < 0 ? i : -1)).filter((i) => i >= 0);
   const negativePredictionR = negIdx.length ? mean(negIdx.map((i) => actual[i])) : null;
-  const active = liftR >= minLiftR && liftTStat >= minLiftT;
+  // Active only with a proven lift on future periods, and not contradicted on unseen markets (when tested)
+  const active = liftR >= minLiftR && liftTStat >= minLiftT && (unseenMarket === null || unseenMarket.liftR >= 0);
   // Skipping needs clear evidence: the trades it would drop must have lost at least 0.1R on average out of sample.
   const skipRuleValidated = active && negIdx.length >= 20 && negativePredictionR !== null && negativePredictionR <= -0.1;
   return {
     oosPredictions: preds.length, topHalfR: mean(top), bottomHalfR: mean(bottom), liftR, liftTStat,
     spearman: spearman(preds, actual), negativePredictionR, negativePredictionCount: negIdx.length,
     active, skipRuleValidated,
+    purgedExamples: purged,
+    unseenMarket,
+    featureVersion: QUALITY_FEATURE_VERSION,
+    validationPeriod: preds.length ? { from: examples[size].t, to: examples[examples.length - 1].t } : null,
     reason: active
       ? `out-of-sample lift ${liftR.toFixed(2)}R (t ${liftTStat.toFixed(2)}) over ${preds.length} trades`
-      : `no proven lift: ${liftR.toFixed(2)}R (t ${liftTStat.toFixed(2)}) over ${preds.length} out-of-sample trades; needs >= ${minLiftR}R and t >= ${minLiftT}`,
+      : unseenMarket !== null && unseenMarket.liftR < 0 && liftR >= minLiftR && liftTStat >= minLiftT
+        ? `lift does not hold on unseen markets (${unseenMarket.liftR.toFixed(2)}R over ${unseenMarket.examples} trades)`
+        : `no proven lift: ${liftR.toFixed(2)}R (t ${liftTStat.toFixed(2)}) over ${preds.length} out-of-sample trades; needs >= ${minLiftR}R and t >= ${minLiftT}`,
   };
+}
+
+/**
+ * RISK MAPPING (quality model -> position size). The model may only REDUCE exposure:
+ *
+ *   multiplier(p) = 1                                              if p >= 0
+ *                 = 1 - (1 - MIN) * min(1, -p / REDUCTION_SPAN_R)  if p < 0      (MIN = 0.5, SPAN = 0.5R)
+ *
+ * where p is the predicted net R of the trade. It uses fixed units of R (no division by the strategy's mean R,
+ * which made the old p / mean ratio explode as the mean approached 0), is bounded in [MIN, 1], continuous,
+ * monotonic (a higher prediction never gets a smaller size) and deterministic. Skipping a trade is a separate,
+ * separately validated rule. A multiplier above 1 requires an explicit configuration AND a separately validated
+ * amplification (allowAmplification) - nothing turns it on by default.
+ */
+export const MAX_QUALITY_SIZE_MULTIPLIER = 1.0;
+export const MIN_QUALITY_SIZE_MULTIPLIER = 0.5;
+export const QUALITY_REDUCTION_SPAN_R = 0.5;
+
+export function qualitySizeMultiplier(predictedR: number): number {
+  if (!Number.isFinite(predictedR)) return MIN_QUALITY_SIZE_MULTIPLIER; // unusable prediction: the safe side
+  if (predictedR >= 0) return MAX_QUALITY_SIZE_MULTIPLIER;
+  const cut = Math.min(1, -predictedR / QUALITY_REDUCTION_SPAN_R);
+  return 1 - (1 - MIN_QUALITY_SIZE_MULTIPLIER) * cut;
 }
 
 /** Position-size multiplier and skip decision from a prediction (only used when the model is active). */
 export function qualityDecision(
   predictedR: number,
-  strategyMeanR: number,
+  _strategyMeanR: number,
   validation: Pick<QualityValidation, 'active' | 'skipRuleValidated'>,
 ): { skip: boolean; sizeMultiplier: number } {
   if (!validation.active) return { skip: false, sizeMultiplier: 1 };
   if (validation.skipRuleValidated && predictedR < 0) return { skip: true, sizeMultiplier: 0 };
-  const ratio = strategyMeanR > 0 ? predictedR / strategyMeanR : 1;
-  return { skip: false, sizeMultiplier: Math.max(0.5, Math.min(1.5, ratio)) };
+  return { skip: false, sizeMultiplier: Math.min(MAX_QUALITY_SIZE_MULTIPLIER, qualitySizeMultiplier(predictedR)) };
 }

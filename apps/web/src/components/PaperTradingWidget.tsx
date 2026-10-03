@@ -54,6 +54,10 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   // Synchronous in-flight guard: React state updates are async, so two fast clicks could both pass isSubmitting.
   const submitInFlightRef = useRef<boolean>(false);
+  // Idempotency key of the order being attempted: reused when the SAME order is sent again (a retry after a
+  // timeout or network error returns the position the server already opened), replaced after a success or when
+  // any order parameter changes.
+  const pendingOrderRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const [lots, setLots] = useState<number>(1);
   const [customQty, setCustomQty] = useState<number>(0);
   const [orderSide, setOrderSide] = useState<'BUY' | 'SELL'>(
@@ -221,8 +225,14 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
     try {
       setIsSubmitting(true);
       submitInFlightRef.current = true;
-      // One key per submission: if this request is ever re-sent, the server returns the same position.
-      const idempotencyKey = `ui_widget:${currentSymbol}:${side}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+      const fingerprint = [currentSymbol, side, totalQuantity, finalSL, finalTP1, finalTP2, finalTP3, requestedLeverage].join('|');
+      if (pendingOrderRef.current?.fingerprint !== fingerprint) {
+        pendingOrderRef.current = {
+          fingerprint,
+          key: `ui_widget:${currentSymbol}:${side}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`,
+        };
+      }
+      const idempotencyKey = pendingOrderRef.current.key;
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
       const res = await fetch(`${apiBase}/api/paper-trading/order`, {
         method: 'POST',
@@ -248,8 +258,13 @@ export const PaperTradingWidget: React.FC<PaperTradingWidgetProps> = ({
         throw new Error(data.message || 'Failed to place order');
       }
 
+      pendingOrderRef.current = null; // done: the next order gets a new key
+      // Report the server's actual fill, not the price this screen last displayed
+      const fillPrice = Number(data?.entryPrice);
       setStatusMessage(
-        `✓ Virtual Order Executed: ${side} ${totalQuantity} ${currentSymbol} @ ${currencySymbol}${cmpINR.toFixed(2)} (${data?.leverage || requestedLeverage}x)`,
+        `✓ Virtual Order Executed: ${side} ${data?.quantity ?? totalQuantity} ${currentSymbol} filled @ ${
+          Number.isFinite(fillPrice) && fillPrice > 0 ? `${currencySymbol}${fillPrice.toFixed(2)}` : 'price pending'
+        } (${data?.leverage || requestedLeverage}x)`,
       );
       setTimeout(() => setStatusMessage(null), 5000);
       if (typeof window !== 'undefined') {

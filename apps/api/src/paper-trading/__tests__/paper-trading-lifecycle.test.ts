@@ -748,18 +748,21 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
 
   // TEST N: OPTION CONTRACT
   it('TEST N: OPTION CONTRACT — spot price move does NOT accidentally trigger option auto-close if option LTP has not reached threshold', async () => {
-    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
-      symbol: 'NIFTY',
-      price: 24000,
+    // Separate quotes for the index and the option contract. (The old fixture quoted every symbol, including the
+    // contract, at the index level of 24,000, so the 150 premium was correctly rejected as PRICE_MISMATCH.)
+    const quotes: Record<string, number> = { NIFTY: 24000, 'NIFTY 24000 PE': 150 };
+    (streamerService.getValidatedTicker as jest.Mock).mockImplementation((sym: string) => ({
+      symbol: sym,
+      price: quotes[String(sym).toUpperCase()] ?? quotes.NIFTY,
       provenance: 'LIVE_PROVIDER',
       lastUpdated: Date.now(),
       marketEventTime: Date.now(),
-    });
+    }));
 
     const pos = await paperService.placeOrder({
       symbol: 'NIFTY',
       direction: 'BUY',
-      quantity: 10,
+      quantity: 65, // one NIFTY lot
       orderType: 'MARKET',
       instrumentType: 'OPTION',
       contractSymbol: 'NIFTY 24000 PE',
@@ -774,13 +777,8 @@ describe('AI FIX 133 — Authoritative Paper Trading Lifecycle Test Suite (Tests
     });
 
     // Spot NIFTY drops, but option contract LTP has NOT crossed SL (option LTP = 120 > SL 100)
-    (streamerService.getValidatedTicker as jest.Mock).mockReturnValue({
-      symbol: 'NIFTY',
-      price: 23500, // Spot NIFTY moved, but position is option!
-      provenance: 'LIVE_PROVIDER',
-      lastUpdated: Date.now(),
-      marketEventTime: Date.now(),
-    });
+    quotes.NIFTY = 23500; // the index moved...
+    quotes['NIFTY 24000 PE'] = 120; // ...but the option's LTP is still above its 100 stop
 
     await monitorService.evaluateActivePositions();
 

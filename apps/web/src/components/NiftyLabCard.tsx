@@ -7,7 +7,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 const REFRESH_MS = 60_000;
 
 interface Fit { trades: number; delta: number; thetaPerHour: number; cost: number; residualSd: number; modelBias: number | null }
-interface Live { trades: number; realPriced: number; meanPoints: number; totalPoints: number; tStat: number; winRate: number; verdict: 'WATCHING' | 'CONFIRMED' | 'RETIRE'; reason: string }
+interface PointsSummary { basis: 'REAL_OPTION' | 'MODELLED_OPTION' | 'INDEX_PROXY'; trades: number; meanPoints: number; totalPoints: number; tStat: number; winRate: number }
+interface Live { trades: number; realPriced: number; missingRealPrice?: number; real?: PointsSummary; modelled?: PointsSummary; indexProxy?: PointsSummary; meanPoints: number; totalPoints: number; tStat: number; winRate: number; verdict: 'WATCHING' | 'CONFIRMED' | 'RETIRE'; reason: string }
 interface Trade {
   id: string; date: string; side: number; signalTime: string; indexEntry: number; optionContract: string; optionEntry: number | null;
   status: 'OPEN' | 'CLOSED'; exitReason: string | null; indexPoints: number | null; optionPoints: number | null; modelPoints: number | null;
@@ -121,8 +122,13 @@ export function NiftyLabCard() {
                 </div>
                 <div className="text-slate-400">
                   study {pts(st.study?.full?.mean)} pts/trade over {st.study?.full?.trades ?? 0} trades (modelled) •
-                  live <span className={st.live.meanPoints >= 0 ? 'text-emerald-300' : 'text-rose-300'}>{pts(st.live.meanPoints)}</span> pts/trade over {st.live.trades} ({st.live.realPriced} real-priced) • {st.live.reason}
+                  live REAL option <span className={st.live.meanPoints >= 0 ? 'text-emerald-300' : 'text-rose-300'}>{st.live.realPriced ? pts(st.live.meanPoints) : 'n/a'}</span> pts/trade over {st.live.realPriced} real-priced of {st.live.trades} • {st.live.reason}
                 </div>
+                {(st.live.modelled?.trades || st.live.indexProxy?.trades) ? (
+                  <div className="text-slate-500">
+                    not real results: MODELLED option {pts(st.live.modelled?.meanPoints)} pts/trade ({st.live.modelled?.trades ?? 0}) • INDEX PROXY {pts(st.live.indexProxy?.meanPoints)} NIFTY pts/trade ({st.live.indexProxy?.trades ?? 0})
+                  </div>
+                ) : null}
                 {open && (
                   <div className="text-cyan-300">
                     OPEN {open.side > 0 ? 'LONG' : 'SHORT'} {open.optionContract} @ {open.optionEntry ?? 'n/a'} (NIFTY {open.indexEntry.toFixed(1)}, {new Date(open.signalTime).toLocaleTimeString()})
@@ -130,7 +136,7 @@ export function NiftyLabCard() {
                 )}
                 {recent.map((t) => (
                   <div key={t.id} className="text-slate-500">
-                    {t.date} {t.side > 0 ? 'LONG' : 'SHORT'} {t.optionContract} • {t.exitReason} • NIFTY {pts(t.indexPoints)} • option <span className={(t.optionPoints ?? t.modelPoints ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{pts(t.optionPoints)}</span> (model {pts(t.modelPoints)})
+                    {t.date} {t.side > 0 ? 'LONG' : 'SHORT'} {t.optionContract} • {t.exitReason} • NIFTY {pts(t.indexPoints)} • real option <span className={t.optionPoints === null ? 'text-slate-500' : t.optionPoints >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{t.optionPoints === null ? 'n/a' : pts(t.optionPoints)}</span> (modelled {pts(t.modelPoints)})
                   </div>
                 ))}
               </div>

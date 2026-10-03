@@ -70,6 +70,9 @@ export interface IPaperPosition {
   readonly entryTime: string;
   averageEntryPrice: number;
   currentPrice: number;
+  /** LIVE: priced from a validated live quote; STALE: last stored price (no validated quote right now) */
+  priceStatus?: 'LIVE' | 'STALE';
+  priceStaleReason?: string;
   stopLoss?: number;
   initialStopLoss?: number;
   target1?: number;

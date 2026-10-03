@@ -247,7 +247,10 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
     expect(signal.symbol).toBe('BTCUSDT');
     expect(signal.state).toBe(SignalState.ACTIVE);
     expect(signal.direction).toBe(Direction.BULLISH);
-    expect(signal.score).toBeGreaterThanOrEqual(70);
+    // The fixture is a sweep + CHoCH in the discount zone with HTF alignment and volume, but no FVG, order block or
+    // displacement candle: the corrected SMC scorer gives exactly 65 (grade B). Pinned so a scoring change is noticed.
+    expect(signal.score).toBe(65);
+    expect(signal.scoreBreakdown).toMatchObject({ htfBias: 15, liquiditySweep: 15, bos: 15, fvg: 0, orderBlock: 0, displacement: 0 });
     expect(signal.canonicalCandleTime).toBe(decisionTime.getTime());
     expect(signal.triggerEvidence?.liquiditySweep?.matched).toBe(true);
     expect(signal.entryZone.optimal).toBeGreaterThan(0);
@@ -267,7 +270,7 @@ describe('Fix 178 — Real End-to-End Paper Execution Integration Test', () => {
       symbol: 'BTCUSDT',
       direction: 'BULLISH',
       timeframe: '15m',
-      minScore: 70,
+      minScore: 65, // the score this fixture's setup earns (see the signal assertions above)
       smcCondition: 'LIQUIDITY_SWEEP',
       lots: 1,
       autoExecutePaper: true,

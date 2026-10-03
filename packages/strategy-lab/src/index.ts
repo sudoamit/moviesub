@@ -11,3 +11,7 @@ export * from './ema7';
 export * from './nifty-intraday';
 export * from './nifty-study';
 export * from './mistakes';
+export * from './trade-engine';
+export * from './dataset';
+export * from './stats';
+export * from './versioning';

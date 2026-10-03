@@ -4,6 +4,7 @@ import { aggregateBars, computeFeatures } from './primitives';
 import { INSTRUMENT_PROFILES } from './profiles';
 import { normalQuantile, searchStrategies, StrategyEvaluation } from './search';
 import { Bar, InstrumentProfile, SimulatedTrade, StrategyGenome } from './types';
+import { GoldenClearance, ResearchDataset } from './dataset';
 
 export type LabTimeframe = '15m' | '1h' | '4h';
 const FACTOR: Record<LabTimeframe, number> = { '15m': 1, '1h': 4, '4h': 16 };
@@ -144,7 +145,13 @@ export function discoverStrategies(
     for (const tf of target.timeframes) {
       const { bars, profile, features } = prepare(bars15, target.symbol, tf);
       const res = searchStrategies(bars, profile, { genomes, features });
-      runs.push({ symbol: target.symbol, timeframe: tf, bars: res.bars, tested: res.genomesTested, screenSurvivors: res.screenSurvivors, passed: res.passed.length });
+      // Search metadata: the best of many tested genomes is selection-biased; these counts make that visible
+      runs.push({
+        symbol: target.symbol, timeframe: tf, bars: res.bars, from: new Date(res.fromTime).toISOString(), to: new Date(res.toTime).toISOString(),
+        validationFrom: new Date(res.splitTime).toISOString(), tested: res.genomesTested, screenSurvivors: res.screenSurvivors,
+        rejectedAtScreen: res.genomesTested - res.screenSurvivors, rejectedAtValidation: res.screenSurvivors - res.passed.length,
+        passed: res.passed.length,
+      });
       for (const p of res.passed) {
         strict.push({
           id: strategyId(target.symbol, tf, p.genome), symbol: target.symbol, timeframe: tf, genome: p.genome,
@@ -218,4 +225,69 @@ export function safeLeverage(medianStopPct: number, maintenanceMarginRate = 0.00
   if (!(medianStopPct > 0)) return 1;
   const lev = Math.floor(1 / (2 * medianStopPct + maintenanceMarginRate));
   return Math.max(1, Math.min(max, lev));
+}
+
+/**
+ * GOLDEN HOLDOUT GATE (evaluated once per candidate, only after it passed every development gate).
+ * Pass = enough golden trades, positive expectancy after costs, and no collapse versus the validation period.
+ */
+export const GOLDEN_CRITERIA = {
+  minTrades: 20,
+  minExpectancyR: 0,
+  /** Golden expectancy must be at least this share of the validation expectancy */
+  minShareOfValidationExpectancy: 0.25,
+};
+
+export interface GoldenEvaluation {
+  datasetVersion: string;
+  from: string;
+  to: string;
+  trades: number;
+  expectancyR: number;
+  totalR: number;
+  tStat: number;
+  maxDrawdownR: number;
+  validationExpectancyR: number | null;
+  passed: boolean;
+  reason: string;
+}
+
+/** Evaluates a cleared candidate on the golden holdout of its dataset (logged by the dataset). */
+export function evaluateGolden(
+  genome: StrategyGenome,
+  dataset: ResearchDataset,
+  clearance: GoldenClearance,
+  symbol: string,
+  tf: LabTimeframe,
+  validationExpectancyR: number | null,
+  criteria = GOLDEN_CRITERIA,
+): GoldenEvaluation {
+  const factor = FACTOR[tf];
+  // Warm-up: enough development bars for every indicator (long EMA / percentile windows) at this timeframe
+  const g = dataset.goldenBarsWithWarmup(clearance, factor * 600);
+  const { bars, profile, features } = prepare(g.bars, symbol, tf);
+  const goldenStartT = dataset.manifest.goldenStart;
+  const trades = backtestGenome(genome, bars, features, profile).filter((t) => bars[t.signalIndex].t >= goldenStartT);
+  const m = computeMetrics(trades);
+  let passed = false, reason: string;
+  if (m.trades < criteria.minTrades) reason = `only ${m.trades} golden trades (need ${criteria.minTrades})`;
+  else if (m.expectancyR <= criteria.minExpectancyR) reason = `golden expectancy ${m.expectancyR.toFixed(3)}R after costs`;
+  else if (validationExpectancyR !== null && validationExpectancyR > 0 && m.expectancyR < criteria.minShareOfValidationExpectancy * validationExpectancyR) {
+    reason = `golden ${m.expectancyR.toFixed(3)}R collapsed vs validation ${validationExpectancyR.toFixed(3)}R`;
+  } else { passed = true; reason = `golden ${m.expectancyR.toFixed(3)}R over ${m.trades} trades (t ${m.tStat.toFixed(2)})`; }
+  g.record(m.trades, passed);
+  return {
+    datasetVersion: dataset.manifest.datasetVersion,
+    from: new Date(goldenStartT).toISOString(),
+    to: new Date(dataset.manifest.goldenEnd).toISOString(),
+    trades: m.trades, expectancyR: m.expectancyR, totalR: m.totalR, tStat: m.tStat, maxDrawdownR: m.maxDrawdownR,
+    validationExpectancyR, passed, reason,
+  };
+}
+
+/** Defence in depth: research functions must never be handed bars from a dataset's golden window. */
+export function assertDevelopmentOnly(bars: Bar[], dataset: { manifest: { goldenStart: number; datasetVersion: string } }): void {
+  if (bars.length && bars[bars.length - 1].t >= dataset.manifest.goldenStart) {
+    throw new Error(`GOLDEN_CONTAMINATION: bars reach into the golden holdout of ${dataset.manifest.datasetVersion}`);
+  }
 }

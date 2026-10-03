@@ -114,7 +114,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
 
       const pos = {
         id: 'pos_legacy_1',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         quantity: 0.1,
         entryPrice: 95123.45,
         entryTime: new Date('2026-09-12T03:42:00.000Z'),
@@ -192,7 +192,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
 
   describe('3. Strict Authoritative Instrument Registry (Fail-Closed)', () => {
     it('successfully resolves registered instruments with canonical currencies', () => {
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       expect(btc.currency).toBe('USDT');
 
       const nifty = getAuthoritativeInstrument('NIFTY');
@@ -211,7 +211,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
   describe('4. Opening Accounting Snapshot & Execution Timestamp Provenance', () => {
     it('anchors opening snapshot timestamp to simulated execution fill timestamp', () => {
       const simulatedFillTime = new Date('2026-09-12T10:00:04.000Z');
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
 
       const converter = PointInTimeCurrencyConverter.getInstance();
       const fxRes = converter.getRate(btc.currency, 'INR', simulatedFillTime.getTime());
@@ -527,7 +527,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
       const exitFillTimestamp = new Date('2026-09-12T10:30:02.050Z');
 
       // 1. Authoritative Instrument & Snapshot
-      const btc = getAuthoritativeInstrument('BTCUSDT');
+      const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
       expect(btc.currency).toBe('USDT');
 
       const converter = PointInTimeCurrencyConverter.getInstance();
@@ -601,7 +601,7 @@ describe('Execution Provenance, Cash Parity & Journal Accounting Integrity', () 
       const journalRecord: ITradeJournalRecord = {
         id: 'journal-accept-1',
         tradeId: 'trade-accept-1',
-        symbol: 'BTCUSDT',
+        symbol: 'BTCUSDT_PERP',
         direction: 'BULLISH',
         side: 'BUY',
         quantity: 0.1,

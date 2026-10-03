@@ -8,6 +8,7 @@ import { spearman } from '../market-observer/observer-learning';
 
 export interface ClosedWatchTrade {
   strategyId: string;
+  strategyVersion?: string | null;
   side: number;
   indexPoints: number;
   hours: number;
@@ -69,43 +70,92 @@ function solve3(A: number[][], b: number[]): number[] | null {
 
 export type WatchVerdict = 'WATCHING' | 'CONFIRMED' | 'RETIRE';
 
-export interface StrategyLiveStats {
+/**
+ * Where a P&L number comes from. These are NEVER mixed:
+ * - REAL_OPTION: live option premium at entry and exit (the only basis that counts as a trading result);
+ * - MODELLED_OPTION: option P&L estimated from index points with an option model (research only);
+ * - INDEX_PROXY: index points (research only; not what an option trade earns).
+ */
+export type PnlBasis = 'REAL_OPTION' | 'MODELLED_OPTION' | 'INDEX_PROXY';
+
+export interface PointsSummary {
+  basis: PnlBasis;
   trades: number;
-  /** Trades whose P&L is the real option price (rest use the model) */
-  realPriced: number;
   meanPoints: number;
   totalPoints: number;
   tStat: number;
   winRate: number;
+}
+
+export interface StrategyLiveStats {
+  /** All closed watch trades */
+  trades: number;
+  /** Trades with a real option price at entry and exit (the verdict uses only these) */
+  realPriced: number;
+  /** Closed trades without a real option result (excluded from the verdict, never filled in with the model) */
+  missingRealPrice: number;
+  /** REAL_OPTION figures (kept at the top level for existing consumers) */
+  basis: 'REAL_OPTION';
+  meanPoints: number;
+  totalPoints: number;
+  tStat: number;
+  winRate: number;
+  real: PointsSummary;
+  modelled: PointsSummary;
+  indexProxy: PointsSummary;
   verdict: WatchVerdict;
   reason: string;
 }
 
 export const MIN_VERDICT_TRADES = 20;
 
-/** Real option P&L when available, otherwise the modelled P&L. */
-export const tradePoints = (t: ClosedWatchTrade) => (t.optionPoints ?? t.modelPoints ?? 0);
+/** Real option P&L only (null when the trade has no real option price). Never substitutes the model. */
+export const realOptionPoints = (t: ClosedWatchTrade): number | null =>
+  t.optionPoints !== null && Number.isFinite(t.optionPoints) ? t.optionPoints : null;
 
-export function strategyVerdict(trades: ClosedWatchTrade[]): StrategyLiveStats {
-  const v = trades.map(tradePoints);
-  const n = v.length;
-  const mean = n ? v.reduce((a, b) => a + b, 0) / n : 0;
-  const sd = n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;
-  const tStat = sd > 0 ? (mean / sd) * Math.sqrt(n) : 0;
-  let verdict: WatchVerdict = 'WATCHING';
-  let reason = `${n}/${MIN_VERDICT_TRADES} live trades before a verdict`;
-  if (n >= MIN_VERDICT_TRADES) {
-    if (mean > 0 && tStat >= 2) { verdict = 'CONFIRMED'; reason = `profitable live: ${mean.toFixed(1)} pts/trade over ${n} trades (t ${tStat.toFixed(2)})`; }
-    else if (tStat <= -2 || (n >= 2 * MIN_VERDICT_TRADES && mean < 0)) { verdict = 'RETIRE'; reason = `losing live: ${mean.toFixed(1)} pts/trade over ${n} trades (t ${tStat.toFixed(2)})`; }
-    else reason = `not proven yet: ${mean.toFixed(1)} pts/trade over ${n} trades (t ${tStat.toFixed(2)})`;
-  }
+export function summarizePoints(basis: PnlBasis, values: number[]): PointsSummary {
+  const n = values.length;
+  const mean = n ? values.reduce((a, b) => a + b, 0) / n : 0;
+  const sd = n > 1 ? Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;
   return {
+    basis,
     trades: n,
-    realPriced: trades.filter((t) => t.optionPoints !== null).length,
     meanPoints: mean,
     totalPoints: mean * n,
-    tStat,
-    winRate: n ? v.filter((x) => x > 0).length / n : 0,
+    tStat: sd > 0 ? (mean / sd) * Math.sqrt(n) : 0,
+    winRate: n ? values.filter((x) => x > 0).length / n : 0,
+  };
+}
+
+const finite = (v: Array<number | null>) => v.filter((x): x is number => x !== null && Number.isFinite(x));
+
+export function strategyVerdict(trades: ClosedWatchTrade[]): StrategyLiveStats {
+  const real = summarizePoints('REAL_OPTION', finite(trades.map(realOptionPoints)));
+  const modelled = summarizePoints('MODELLED_OPTION', finite(trades.map((t) => t.modelPoints)));
+  const indexProxy = summarizePoints('INDEX_PROXY', finite(trades.map((t) => t.indexPoints)));
+  const n = real.trades;
+  const missing = trades.length - n;
+  const note = missing ? `; ${missing} trade(s) without a real option price excluded` : '';
+  let verdict: WatchVerdict = 'WATCHING';
+  let reason = `${n}/${MIN_VERDICT_TRADES} real-priced live trades before a verdict${note}`;
+  if (n >= MIN_VERDICT_TRADES) {
+    const m = real.meanPoints, t = real.tStat;
+    if (m > 0 && t >= 2) { verdict = 'CONFIRMED'; reason = `profitable live (real option prices): ${m.toFixed(1)} pts/trade over ${n} trades (t ${t.toFixed(2)})${note}`; }
+    else if (t <= -2 || (n >= 2 * MIN_VERDICT_TRADES && m < 0)) { verdict = 'RETIRE'; reason = `losing live (real option prices): ${m.toFixed(1)} pts/trade over ${n} trades (t ${t.toFixed(2)})${note}`; }
+    else reason = `not proven yet (real option prices): ${m.toFixed(1)} pts/trade over ${n} trades (t ${t.toFixed(2)})${note}`;
+  }
+  return {
+    trades: trades.length,
+    realPriced: n,
+    missingRealPrice: missing,
+    basis: 'REAL_OPTION',
+    meanPoints: real.meanPoints,
+    totalPoints: real.totalPoints,
+    tStat: real.tStat,
+    winRate: real.winRate,
+    real,
+    modelled,
+    indexProxy,
     verdict,
     reason,
   };
@@ -126,9 +176,10 @@ export const MIN_CONDITION_TRADES = 60;
 export function conditionInsights(trades: ClosedWatchTrade[]): ConditionInsight[] {
   const names = [...new Set(trades.flatMap((t) => Object.keys(t.features ?? {})))].sort();
   return names.map((feature) => {
-    const rows = trades.filter((t) => Number.isFinite(t.features?.[feature]));
+    // learned from REAL option results only (modelled P&L would teach the model its own assumptions)
+    const rows = trades.filter((t) => Number.isFinite(t.features?.[feature]) && realOptionPoints(t) !== null);
     const n = rows.length;
-    const ic = spearman(rows.map((t) => t.features![feature]), rows.map(tradePoints));
+    const ic = spearman(rows.map((t) => t.features![feature]), rows.map((t) => realOptionPoints(t) as number));
     const tStat = n > 2 && Math.abs(ic) < 1 ? ic * Math.sqrt((n - 2) / (1 - ic * ic)) : 0;
     const status = n < MIN_CONDITION_TRADES ? 'COLLECTING' : Math.abs(tStat) >= 3 ? 'LEARNED' : 'NO_RELATIONSHIP';
     return {

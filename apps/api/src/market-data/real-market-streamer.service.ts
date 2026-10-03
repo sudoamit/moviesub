@@ -35,6 +35,11 @@ import {
   perpetualVenueSymbol,
 } from '@quant/shared';
 
+/** Every market-data request gives up after this long, so a hung provider can never pile up requests. */
+const MARKET_DATA_FETCH_TIMEOUT_MS = Number(process.env.MARKET_DATA_FETCH_TIMEOUT_MS || 4000);
+const fetchWithTimeout = (url: string, init: RequestInit = {}) =>
+  fetch(url, { ...init, signal: AbortSignal.timeout(MARKET_DATA_FETCH_TIMEOUT_MS) });
+
 export type QuoteProvenance = 'LIVE_PROVIDER' | 'BOOTSTRAP' | 'STALE' | 'DEGRADED' | 'UNKNOWN';
 export type ProviderConnectionState = 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING' | 'RECONNECTED';
 
@@ -217,20 +222,20 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     );
 
     // 1. Fetch Real Binance Bitcoin Price every 2 seconds
-    this.binanceTimer = setInterval(async () => {
-      await this.fetchRealBinancePrice();
-      await this.fetchRealBinanceFuturesPrice();
-    }, 2000);
+    // Each poll is skipped while the previous one of its kind is still running (a slow provider never stacks requests)
+    this.binanceTimer = setInterval(
+      () => this.pollOnce('binance', async () => {
+        await this.fetchRealBinancePrice();
+        await this.fetchRealBinanceFuturesPrice();
+      }),
+      2000,
+    );
 
     // 2. Fetch Real NSE Indian Market Quotes every 3.5 seconds
-    this.nseTimer = setInterval(async () => {
-      await this.fetchRealNSEQuotes();
-    }, 3500);
+    this.nseTimer = setInterval(() => this.pollOnce('nse', () => this.fetchRealNSEQuotes()), 3500);
 
     // 3. Live NSE option quotes (NIFTY / BANKNIFTY) every 2 seconds
-    this.nseOptionTimer = setInterval(async () => {
-      await this.fetchRealNseOptionQuotes();
-    }, 2000);
+    this.nseOptionTimer = setInterval(() => this.pollOnce('nse-options', () => this.fetchRealNseOptionQuotes()), 2000);
 
     // Initial fetch
     this.fetchRealBinancePrice();
@@ -282,7 +287,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       let anySuccess = false;
       for (const { underlying, slug, step } of underlyings) {
         try {
-          const res = await fetch(
+          const res = await fetchWithTimeout(
             `https://groww.in/v1/api/option_chain_service/v1/option_chain/${slug}`,
             {
               headers: {
@@ -398,18 +403,47 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     return ya !== null && ya === toYmd(b);
   }
 
+  private readonly pollsInFlight = new Set<string>();
+
+  private async pollOnce(name: string, poll: () => Promise<unknown>): Promise<void> {
+    if (this.pollsInFlight.has(name)) return;
+    this.pollsInFlight.add(name);
+    try {
+      await poll();
+    } catch (err) {
+      this.logger.debug(`market data poll ${name}: ${(err as Error).message}`);
+    } finally {
+      this.pollsInFlight.delete(name);
+    }
+  }
+
+  /** Latest executed trade on Binance spot (price and exchange trade time); null when unavailable. */
+  private async latestSpotTrade(venueSymbol: string): Promise<{ price: number; time: number } | null> {
+    const res = await fetchWithTimeout(`https://api.binance.com/api/v3/trades?symbol=${venueSymbol}&limit=1`);
+    if (!res.ok) return null;
+    const [t] = (await res.json()) as Array<{ price: string; time: number }>;
+    const price = Number(t?.price);
+    const time = Number(t?.time);
+    return price > 0 && Number.isFinite(price) && time > 0 && Number.isFinite(time) ? { price, time } : null;
+  }
+
   private async fetchRealBinancePrice() {
     const now = Date.now();
     try {
-      const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+      const res = await fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
       if (!res.ok) {
         return;
       }
       const data = await res.json();
+      // ticker/24hr is served from a cache (its lastPrice / closeTime lag by seconds): it supplies only the day's
+      // statistics. The execution price and its time come from the latest actual trade.
+      const btcTrade = await this.latestSpotTrade('BTCUSDT');
 
-      if (data && (data.lastPrice || data.c)) {
+      if (data && btcTrade) {
         const ticker = this.ingestBinanceTickerData({
           ...data,
+          lastPrice: String(btcTrade.price),
+          closeTime: btcTrade.time,
           symbol: 'BTCUSDT_SPOT',
           providerTransport: 'REST_POLLING',
         });
@@ -417,18 +451,15 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
       }
 
       // Fetch Binance PAXGUSDT Price
-      const paxgRes = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
+      const paxgRes = await fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
       if (paxgRes.ok) {
         const paxgData = await paxgRes.json();
-        if (paxgData && paxgData.lastPrice) {
-          const rawCloseTime = paxgData.closeTime;
-          const eventTime = rawCloseTime ? Number(rawCloseTime) : null;
-          if (!eventTime || eventTime <= 0 || !Number.isFinite(eventTime)) {
-            // Missing provider event time -> reject quote without fabricating Date.now()
-            return;
-          }
-
-          const livePrice = parseFloat(paxgData.lastPrice);
+        // Price and time of the latest actual PAXG trade (PAXG is thinly traded: the freshness checks downstream
+        // reject it when no trade has happened recently, instead of presenting a cached figure as current)
+        const paxgTrade = await this.latestSpotTrade('PAXGUSDT');
+        if (paxgData && paxgTrade) {
+          const eventTime = paxgTrade.time;
+          const livePrice = paxgTrade.price;
           const open = parseFloat(paxgData.openPrice);
           const high = parseFloat(paxgData.highPrice);
           const low = parseFloat(paxgData.lowPrice);
@@ -507,7 +538,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
       if (now - this.perpStatsFetchedAt >= 10_000) {
         this.perpStatsFetchedAt = now;
-        const sRes = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr');
+        const sRes = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/ticker/24hr');
         if (sRes.ok) {
           for (const d of (await sRes.json()) as any[]) {
             const perp = venueToPerp.get(d?.symbol);
@@ -518,7 +549,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         }
       }
 
-      const res = await fetch('https://fapi.binance.com/fapi/v1/ticker/bookTicker');
+      const res = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/ticker/bookTicker');
       if (res.ok) {
         for (const data of (await res.json()) as any[]) {
           const perp = venueToPerp.get(data?.symbol);
@@ -554,7 +585,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
 
       if (now - this.perpPremiumFetchedAt >= 10_000) {
         this.perpPremiumFetchedAt = now;
-        const pRes = await fetch('https://fapi.binance.com/fapi/v1/premiumIndex');
+        const pRes = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/premiumIndex');
         if (pRes.ok) {
           for (const p of (await pRes.json()) as any[]) {
             const perp = venueToPerp.get(p?.symbol);
@@ -578,7 +609,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
         const fundingDue = premium !== undefined && premium.nextFundingTime <= now && lastSettled < premium.nextFundingTime;
         if (!(now - fetchedAt >= 300_000 || (fundingDue && now - fetchedAt >= 15_000))) continue;
         this.perpFundingFetchedAt.set(perp, now);
-        const fRes = await fetch(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${perpetualVenueSymbol(perp)}&limit=100`);
+        const fRes = await fetchWithTimeout(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${perpetualVenueSymbol(perp)}&limit=100`);
         if (!fRes.ok) continue;
         const rows: any[] = await fRes.json();
         if (!Array.isArray(rows)) continue;
@@ -678,7 +709,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     changePercent?: number;
   } | null> {
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `https://groww.in/v1/api/stocks_data/v1/accord_points/exchange/NSE/segment/CASH/latest_indices_ohlc/${sym}`,
         { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', Accept: 'application/json' } },
       );
@@ -718,7 +749,7 @@ export class RealMarketStreamerService implements OnModuleInit, OnModuleDestroy 
     changePercent?: number;
   } | null> {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1m&range=1d`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const data: any = await res.json();
     const meta = data?.chart?.result?.[0]?.meta;
     if (!meta || !meta.regularMarketPrice || !meta.regularMarketTime) return null;

@@ -82,7 +82,7 @@ export class LabQualityService implements OnModuleInit, OnModuleDestroy {
           id: s.id, symbol: s.symbol, timeframe: s.timeframe, genome: s.genomeJson,
           closedTrades: s.trades
             .filter((t) => Array.isArray(t.featuresJson) && t.netR !== null)
-            .map((t) => ({ t: t.signalBarTime.getTime(), x: t.featuresJson, netR: Number(t.netR) })),
+            .map((t) => ({ t: t.signalBarTime.getTime(), labelTime: (t.exitTime ?? t.signalBarTime).getTime(), x: t.featuresJson, netR: Number(t.netR) })),
         })),
       };
       const inputFile = path.join(tmp, 'input.json'), outFile = path.join(tmp, 'out.json');

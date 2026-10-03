@@ -1,5 +1,6 @@
 import { InstrumentDescriptor, CostScheduleId, getAuthoritativeDescriptor } from './instrument-descriptor';
 import { PointInTimeCurrencyConverter } from '../currency/currency-converter';
+import { CANONICAL_FEE_RATES, CostDataUnavailableError } from './cost-model';
 
 export type ExecutionStage = 'ENTRY' | 'TP1_PARTIAL' | 'TP2_PARTIAL' | 'FINAL_EXIT' | 'EXIT' | 'LIFECYCLE';
 
@@ -74,6 +75,10 @@ export class TransactionCostScheduleManager {
 
   public calculateCost(input: CostCalculationInput): TransactionChargesBreakdown {
     const { descriptor, turnoverQuote, executionTimestamp = Date.now(), stage = 'ENTRY', side = 'BUY' } = input;
+    // Fail closed: a cost computed from an invalid turnover would be silently wrong
+    if (!descriptor || !Number.isFinite(turnoverQuote) || turnoverQuote < 0) {
+      throw new CostDataUnavailableError(`invalid turnover ${turnoverQuote} for ${descriptor?.canonicalSymbol ?? 'unknown instrument'}`);
+    }
     const converter = PointInTimeCurrencyConverter.getInstance();
 
     let fxRate = input.overrideFxRate;
@@ -147,8 +152,8 @@ export class TransactionCostScheduleManager {
       }
 
       case 'BINANCE_CRYPTO_SPOT': {
-        // Binance 0.1% maker/taker in USDT
-        const totalChargesQuote = Number((grossTurnoverQuote * 0.001).toFixed(4));
+        // Binance spot taker rate in USDT (canonical rate: cost-model.ts)
+        const totalChargesQuote = Number((grossTurnoverQuote * CANONICAL_FEE_RATES.BINANCE_CRYPTO_SPOT!.taker).toFixed(4));
         const totalChargesAccount = Number((totalChargesQuote * fxRate).toFixed(2));
 
         return {
@@ -181,8 +186,8 @@ export class TransactionCostScheduleManager {
       }
 
       case 'BINANCE_USDM_FUTURES': {
-        // Binance USDⓈ-M futures regular tier: 0.05% taker (market orders), charged in USDT on notional
-        const totalChargesQuote = Number((grossTurnoverQuote * 0.0005).toFixed(4));
+        // Binance USDⓈ-M futures regular tier taker rate (market orders), in USDT on notional (cost-model.ts)
+        const totalChargesQuote = Number((grossTurnoverQuote * CANONICAL_FEE_RATES.BINANCE_USDM_FUTURES!.taker).toFixed(4));
         const totalChargesAccount = Number((totalChargesQuote * fxRate).toFixed(2));
 
         return {
@@ -215,8 +220,8 @@ export class TransactionCostScheduleManager {
       }
 
       case 'COMEX_COMMODITY_SPOT': {
-        // Spot metals 0.02% spread/fee in USD
-        const totalChargesQuote = Number((grossTurnoverQuote * 0.0002).toFixed(4));
+        // Spot metals fee in USD (canonical rate: cost-model.ts)
+        const totalChargesQuote = Number((grossTurnoverQuote * CANONICAL_FEE_RATES.COMEX_COMMODITY_SPOT!.taker).toFixed(4));
         const totalChargesAccount = Number((totalChargesQuote * fxRate).toFixed(2));
 
         return {
@@ -248,8 +253,7 @@ export class TransactionCostScheduleManager {
         };
       }
 
-      case 'NSE_CASH_EQUITY':
-      default: {
+      case 'NSE_CASH_EQUITY': {
         // NSE Cash Delivery Rates: Brokerage ₹20 flat, STT 0.1% buy & sell, Exchange 0.00325%, Stamp 0.015% buy, SEBI ₹10/cr, GST 18%
         const brokerage = 20.0;
         const stt = Number((grossTurnoverAccount * 0.001).toFixed(2));
@@ -290,6 +294,9 @@ export class TransactionCostScheduleManager {
           stage,
         };
       }
+      default:
+        // Fail closed: never charge an unknown schedule as if it were another instrument
+        throw new CostDataUnavailableError(`unknown cost schedule ${String((descriptor as any).costScheduleId)} for ${descriptor.canonicalSymbol}`);
     }
   }
 }

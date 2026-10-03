@@ -231,7 +231,10 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
               }
               const now = Date.now();
               return {
-                price: 64985.0,
+                // At the setup's planned entry (64,700; zone 64,691-64,709). The old 64,985 left TP1 (65,347) only
+                // 0.59R from a 64,376.5 stop against a planned 2R, which is correctly rejected as a chased entry
+                // (ENTRY_MISSED_RR_DEGRADED).
+                price: 64700.0,
                 marketEventTime: now - 100,
                 lastUpdated: now,
               };
@@ -359,7 +362,7 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
         symbol: 'BTCUSDT',
         direction: 'BULLISH',
         timeframe: '15m',
-        minScore: 75,
+        minScore: 65, // the candle fixture scores 65 (sweep + CHoCH, no FVG / order block / displacement)
         smcCondition: 'LIQUIDITY_SWEEP',
         lots: 1,
         autoExecutePaper: true,
@@ -371,7 +374,7 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
         symbol: 'BTCUSDT',
         direction: 'BULLISH',
         timeframe: '15m',
-        minScore: 75,
+        minScore: 65, // the candle fixture scores 65 (sweep + CHoCH, no FVG / order block / displacement)
         smcCondition: 'LIQUIDITY_SWEEP',
         lots: 1,
         autoExecutePaper: true,
@@ -439,7 +442,8 @@ describe('Fix 183 — Primary Release-Gate End-to-End Execution Pipeline (Real P
     expect(evaluatedSignal.symbol).toBe('BTCUSDT');
     expect(evaluatedSignal.direction).toBe(Direction.BULLISH);
     expect(evaluatedSignal.state).toBe(SignalState.ACTIVE);
-    expect(evaluatedSignal.score).toBeGreaterThanOrEqual(75);
+    // Sweep + CHoCH without FVG / order block / displacement: the corrected SMC scorer gives 65 (see bot minScore)
+    expect(evaluatedSignal.score).toBe(65);
     expect(evaluatedSignal.triggerEvidence?.liquiditySweep?.matched).toBe(true);
 
     // Canonical timestamp invariant

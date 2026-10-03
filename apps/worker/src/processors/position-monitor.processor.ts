@@ -161,11 +161,14 @@ export class PositionMonitorProcessor extends WorkerHost {
   }
 
   private calculateCharges(turnover: number, isCrypto: boolean, symbol?: string) {
-    const sym = symbol || (isCrypto ? 'BTCUSDT_SPOT' : 'RELIANCE');
+    // The position's own symbol decides the schedule (a perpetual is never charged as spot or equity), and the
+    // schedule converts quote-currency fees to the account currency itself (no fixed 1.0 FX rate).
+    const sym = symbol || (isCrypto ? 'BTCUSDT_SPOT' : undefined);
+    if (!sym) throw new Error('COST_DATA_UNAVAILABLE: position symbol required to compute exit charges');
     const breakdown = TransactionCostScheduleManager.getInstance().calculateCostForSymbol(
       turnover,
       sym,
-      1.0,
+      undefined,
       Date.now(),
       'EXIT',
       'SELL',
@@ -358,7 +361,7 @@ export class PositionMonitorProcessor extends WorkerHost {
     const isCrypto = pos.symbol === 'BTCUSDT';
     const quantity = Number(pos.quantity);
     const exitTurnover = finalExitPrice * quantity;
-    const exitCharges = this.calculateCharges(exitTurnover, isCrypto);
+    const exitCharges = this.calculateCharges(exitTurnover, isCrypto, pos.contractSymbol || pos.symbol);
     const entryCharges = (pos.chargesJson as any) || { totalCharges: 0 };
     const totalCharges = Number((entryCharges.totalCharges + exitCharges.totalCharges).toFixed(2));
 

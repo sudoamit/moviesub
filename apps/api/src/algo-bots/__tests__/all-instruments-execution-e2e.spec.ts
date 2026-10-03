@@ -214,7 +214,9 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
           timeframe: '15m',
           minScore: 75,
           smcCondition: 'ORDER_BLOCK',
-          lots: 1,
+          // 10 lots: partial exits are whole lots, so a 30% TP1 / TP2 needs more than one lot (with a single lot
+          // TP1 closes the whole position: 'full close: below one lot for partial')
+          lots: 10,
           autoExecutePaper: true,
           notifyWebhook: false,
           isActive: true,
@@ -233,24 +235,26 @@ describe('FIX 203: Real PostgreSQL End-to-End Suite for All 7 Instruments', () =
       expect(pos!.contractSymbol).toBe(contractSymbol);
       expect(pos!.instrumentType).toBe('OPTION');
       expect(pos!.direction).toBe(Direction.BULLISH); // long option
-      expect(Number(pos!.quantity)).toBe(65); // NIFTY lot size 65
+      expect(Number(pos!.quantity)).toBe(650); // 10 lots of 65
+      // Option target ladder 1.5R / 2.5R / 4R from the 150 entry quote and its 105 stop (risk 45 per unit)
+      expect([Number(pos!.target1), Number(pos!.target2), Number(pos!.target3)]).toEqual([217.5, 262.5, 330]);
       expect(pos!.tradeDecisionId).toBeDefined();
 
       // Trigger TP1
-      optionQuotes[contractSymbol] = { price: 195.0, lastUpdated: nowMs };
+      optionQuotes[contractSymbol] = { price: 218.0, lastUpdated: nowMs };
       await monitorService.evaluateSinglePosition(pos);
       const posAfterTp1 = await prisma.paperPosition.findUnique({ where: { id: posId } });
       expect(posAfterTp1!.status).toBe(PositionState.PARTIALLY_CLOSED);
-      expect(Number(posAfterTp1!.quantity)).toBe(45.5); // 30% partial close
+      expect(Number(posAfterTp1!.quantity)).toBe(455); // 30% = 3 whole lots (195) closed
 
       // Trigger TP2
-      optionQuotes[contractSymbol] = { price: 240.0, lastUpdated: nowMs };
+      optionQuotes[contractSymbol] = { price: 263.0, lastUpdated: nowMs };
       await monitorService.evaluateSinglePosition(posAfterTp1);
       const posAfterTp2 = await prisma.paperPosition.findUnique({ where: { id: posId } });
-      expect(Number(posAfterTp2!.quantity)).toBe(26);
+      expect(Number(posAfterTp2!.quantity)).toBe(260); // another 3 lots closed; 4-lot runner left
 
       // Trigger TP3 runner close
-      optionQuotes[contractSymbol] = { price: 285.0, lastUpdated: nowMs };
+      optionQuotes[contractSymbol] = { price: 331.0, lastUpdated: nowMs };
       await monitorService.evaluateSinglePosition(posAfterTp2);
       const closedPos = await prisma.paperPosition.findUnique({ where: { id: posId } });
       expect(closedPos!.status).toBe(PositionState.CLOSED);

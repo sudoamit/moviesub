@@ -61,6 +61,29 @@ export class PredictTradeDto {
   signalId?: string;
 }
 
+/** Minimum out-of-sample evidence before the model's probabilities may be shown as meaningful. */
+export const MIN_RELIABLE_ROC_AUC = 0.55;
+export const MIN_RELIABLE_OOS_EXAMPLES = 50;
+
+/**
+ * Whether the model's out-of-sample metrics support showing its probabilities. An AUC at or below 0.5 means the
+ * model ranks winners no better (or worse) than chance, whatever its accuracy: on a one-sided test set,
+ * predicting the majority class gives high accuracy with no skill.
+ */
+export function assessModelReliability(
+  metrics: { rocAuc?: number | null } | null,
+  outOfSampleExamples: number | null | undefined,
+): { reliable: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const auc = metrics?.rocAuc;
+  if (typeof auc !== 'number' || !Number.isFinite(auc)) reasons.push('no out-of-sample ROC-AUC recorded');
+  else if (auc < MIN_RELIABLE_ROC_AUC)
+    reasons.push(`out-of-sample ROC-AUC ${auc.toFixed(3)} is below ${MIN_RELIABLE_ROC_AUC} (${auc <= 0.5 ? 'no better than chance' : 'too weak'})`);
+  if (typeof outOfSampleExamples !== 'number' || outOfSampleExamples < MIN_RELIABLE_OOS_EXAMPLES)
+    reasons.push(`only ${outOfSampleExamples ?? 'unknown'} out-of-sample examples (need ${MIN_RELIABLE_OOS_EXAMPLES})`);
+  return { reliable: reasons.length === 0, reasons };
+}
+
 @Injectable()
 export class AILearningService implements OnModuleInit {
   private readonly logger = new Logger(AILearningService.name);
@@ -231,31 +254,36 @@ export class AILearningService implements OnModuleInit {
       if (dbModel && dbModel.activeVersion) {
         const v = dbModel.activeVersion;
         const metrics = (v.metricsJson as any) || {};
+        // Report only what was stored: a missing value is null, never a made-up default
+        const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+        const datasetStats = {
+          trainingExamples: num(v.trainingExampleCount),
+          validationExamples: num(v.validationExampleCount),
+          outOfSampleExamples: num(v.outOfSampleExampleCount),
+          totalExamples:
+            v.trainingExampleCount != null && v.validationExampleCount != null && v.outOfSampleExampleCount != null
+              ? v.trainingExampleCount + v.validationExampleCount + v.outOfSampleExampleCount
+              : null,
+        };
+        const storedMetrics = {
+          accuracy: num(metrics.accuracy),
+          precision: num(metrics.precision),
+          recall: num(metrics.recall),
+          f1Score: num(metrics.f1Score),
+          brierScore: num(metrics.brierScore),
+          logLoss: num(metrics.logLoss),
+          rocAuc: num(metrics.rocAuc),
+          profitFactor: num(metrics.profitFactor),
+          expectancyR: num(metrics.expectancyR),
+        };
         return {
           modelVersion: v.version,
           status: v.status,
           isTrained: true,
           trainedAt: v.createdAt.toISOString(),
-          datasetStats: {
-            trainingExamples: v.trainingExampleCount || 154,
-            validationExamples: v.validationExampleCount || 51,
-            outOfSampleExamples: v.outOfSampleExampleCount || 52,
-            totalExamples:
-              (v.trainingExampleCount || 154) +
-              (v.validationExampleCount || 51) +
-              (v.outOfSampleExampleCount || 52),
-          },
-          metrics: {
-            accuracy: metrics.accuracy ?? 0.981,
-            precision: metrics.precision ?? 0.965,
-            recall: metrics.recall ?? 0.972,
-            f1Score: metrics.f1Score ?? 0.968,
-            brierScore: metrics.brierScore ?? 0.045,
-            logLoss: metrics.logLoss ?? 0.12,
-            rocAuc: metrics.rocAuc ?? 0.985,
-            profitFactor: metrics.profitFactor ?? 2.85,
-            expectancyR: metrics.expectancyR ?? 1.45,
-          },
+          datasetStats,
+          metrics: storedMetrics,
+          reliability: assessModelReliability(storedMetrics, datasetStats.outOfSampleExamples),
           calibration: metrics.calibrationReport || null,
           featureCount: 17,
           featureSchemaVersion: FEATURE_SCHEMA_VERSION,
@@ -288,6 +316,7 @@ export class AILearningService implements OnModuleInit {
           totalExamples: 0,
         },
         metrics: null,
+        reliability: assessModelReliability(null, 0),
         calibration: null,
         featureCount: 17,
         featureSchemaVersion: FEATURE_SCHEMA_VERSION,
@@ -326,6 +355,7 @@ export class AILearningService implements OnModuleInit {
         profitFactor: activeVersionState.metrics.profitFactor,
         expectancyR: activeVersionState.metrics.expectancyR,
       },
+      reliability: assessModelReliability(activeVersionState.metrics, activeVersionState.outOfSampleExampleCount),
       calibration: activeVersionState.calibrationReport,
       featureCount: activeModel.getWeights().length,
       featureSchemaVersion: FEATURE_SCHEMA_VERSION,
@@ -573,9 +603,13 @@ export class AILearningService implements OnModuleInit {
       modelVersion: model.modelVersion,
     });
 
+    // The stored out-of-sample evidence decides whether this probability may be presented as meaningful
+    const modelReliability = (await this.getModelState()).reliability;
+
     return {
       symbol: sym,
       timeframe: tf,
+      modelReliability,
       deterministicScore: signal.score,
       deterministicGrade: signal.grade,
       direction: signal.direction,

@@ -646,7 +646,10 @@ export function getAuthoritativeInstrument(
   if (!symbol || typeof symbol !== 'string') {
     throw new Error(`INVALID_INSTRUMENT_SPECIFICATION: Symbol must be a non-empty string, got ${symbol}`);
   }
-  const sym = symbol.toUpperCase();
+  // BTC identity is never ambiguous: the legacy aliases (BTC, BTCUSD, BTCUSDT) resolve to BTCUSDT_SPOT before the
+  // lookup, so the leveraged legacy 'BTCUSDT' registry entry can never be selected. Futures exposure exists only
+  // under the explicit BTCUSDT_PERP identity.
+  const sym = canonicalizeExecutionSymbol(symbol);
   if (FORBIDDEN_DERIVATIVE_INSTRUMENTS.has(sym)) {
     throw new Error(
       `FORBIDDEN_DERIVATIVE_INSTRUMENT: Derivative instrument '${symbol}' is not supported in the spot-only trading architecture.`,

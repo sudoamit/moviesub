@@ -21,6 +21,8 @@ describe('Scanner Live Pipeline E2E Test', () => {
   let mockCandlesService: any;
 
   let executionsDb: Map<string, any>;
+
+  const tradeDecisionsDb = new Map<string, any>();
   let positionsDb: Map<string, any>;
 
   const now = Date.now();
@@ -114,6 +116,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
     process.env.PAPER_TRADING_ENABLED = 'true';
     process.env.ENABLE_PAPER_ALGO_BOTS = 'true';
     executionsDb = new Map();
+    tradeDecisionsDb.clear();
     positionsDb = new Map();
 
     const candleStream = buildRealCandleStream();
@@ -154,14 +157,14 @@ describe('Scanner Live Pipeline E2E Test', () => {
       instrument: {
         findMany: jest.fn().mockResolvedValue([
           {
-            symbol: 'BTCUSDT',
+            symbol: 'BTCUSDT_PERP',
             name: 'Bitcoin USDT',
             currency: 'USDT',
             isActive: true,
           },
         ]),
         findUnique: jest.fn().mockResolvedValue({
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSDT_PERP',
           name: 'Bitcoin USDT',
           currency: 'USDT',
           isActive: true,
@@ -172,7 +175,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
           {
             id: 'bot_btc_e2e',
             name: 'BTCUSDT Liquidity Sweeper Live E2E',
-            symbol: 'BTCUSDT',
+            symbol: 'BTCUSDT_PERP',
             direction: 'ANY',
             timeframe: '15m',
             minScore: 70,
@@ -257,10 +260,29 @@ describe('Scanner Live Pipeline E2E Test', () => {
       paperTrade: {
         findMany: jest.fn().mockResolvedValue([]),
       },
+      // Stateful like the real table: the lifecycle service re-reads a decision it just created before each
+      // state transition (a findUnique that always returned null made every commit fail)
       tradeDecision: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn().mockImplementation(async ({ data }) => ({ id: `td_${Date.now()}`, ...data })),
-        update: jest.fn().mockImplementation(async ({ data }) => ({ id: `td_${Date.now()}`, ...data })),
+        findUnique: jest.fn().mockImplementation(async ({ where }) => tradeDecisionsDb.get(where.id) ?? null),
+        findFirst: jest.fn().mockImplementation(async ({ where } = {}) =>
+          where?.id ? tradeDecisionsDb.get(where.id) ?? null : [...tradeDecisionsDb.values()].pop() ?? null,
+        ),
+        create: jest.fn().mockImplementation(async ({ data }) => {
+          const rec = { id: data.id ?? `td_${Date.now()}_${tradeDecisionsDb.size}`, ...data };
+          tradeDecisionsDb.set(rec.id, rec);
+          return rec;
+        }),
+        update: jest.fn().mockImplementation(async ({ where, data }) => {
+          const rec = { ...(tradeDecisionsDb.get(where.id) ?? { id: where.id }), ...data };
+          tradeDecisionsDb.set(rec.id, rec);
+          return rec;
+        }),
+        updateMany: jest.fn().mockImplementation(async ({ where, data }) => {
+          const rec = tradeDecisionsDb.get(where?.id);
+          if (!rec) return { count: 0 };
+          tradeDecisionsDb.set(rec.id, { ...rec, ...data });
+          return { count: 1 };
+        }),
       },
       algoBotExecution: {
         create: jest.fn().mockImplementation(async ({ data }) => {
@@ -352,11 +374,12 @@ describe('Scanner Live Pipeline E2E Test', () => {
   });
 
   it('proves the full application flow: ScannerService.triggerScan() -> SignalsService -> AlgoBotsService -> PaperTradingService position placement', async () => {
-    // 1. Run authoritative market scan trigger
+    // 1. Run authoritative market scan trigger. The setup is a SHORT, so it runs on the perpetual: legacy 'BTCUSDT'
+    //    now resolves to BTCUSDT_SPOT, where a short is correctly rejected (SPOT_SHORT_SELLING_FORBIDDEN).
     const scanSummary: any = await scannerService.triggerScan(Timeframe.M15, {
       strategyConfig: {
         deterministicSignal: {
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSDT_PERP',
           direction: Direction.BEARISH,
           score: 85,
           state: SignalState.ACTIVE,
@@ -389,6 +412,7 @@ describe('Scanner Live Pipeline E2E Test', () => {
     expect(scanSummary.activeCount).toBe(1);
     expect(scanSummary.scoreThresholdMetCount).toBe(1);
     expect(scanSummary.botMatchedCount).toBe(1);
+    expect(scanSummary.botErrorCount).toBe(0);
     expect(scanSummary.executionAttemptedCount).toBe(1);
     expect(scanSummary.executedCount).toBe(1);
     expect(scanSummary.failedCount).toBe(0);
@@ -397,9 +421,9 @@ describe('Scanner Live Pipeline E2E Test', () => {
     const portfolio = await paperTradingService.getPortfolio();
     expect(portfolio.openPositions.length).toBeGreaterThanOrEqual(1);
 
-    const position = portfolio.openPositions.find((p) => p.symbol === 'BTCUSDT');
+    const position = portfolio.openPositions.find((p) => p.symbol === 'BTCUSDT_PERP');
     expect(position).toBeDefined();
-    expect(position?.symbol).toBe('BTCUSDT');
+    expect(position?.symbol).toBe('BTCUSDT_PERP');
     expect(position?.direction).toBe('SELL'); // BEARISH signal maps to SELL order
 
     // 4. Verify DB execution reservation state machine

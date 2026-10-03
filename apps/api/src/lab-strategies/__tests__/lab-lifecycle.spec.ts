@@ -1,5 +1,6 @@
 import { backtestGenome, Bar, computeFeatures, InstrumentProfile, StrategyGenome } from '@quant/strategy-lab';
-import { advanceTrade, decideLifecycle, netR } from '../lab-lifecycle';
+import { PositionSizer } from '@quant/risk-engine';
+import { advanceTrade, assertLiveRunnable, assessLabEvidence, compoundedBalance, netR, sizeFromCoinBalance } from '../lab-lifecycle';
 
 const H4 = 4 * 3_600_000;
 const profile: InstrumentProfile = {
@@ -65,38 +66,89 @@ describe('lab strategy lifecycle', () => {
     }
   });
 
-  describe('automatic promotion and retirement', () => {
-    const ref = { expectancyR: 0.43, sdR: 2.2, trades: 191, maxDrawdownR: 10.3 };
+  it('the live runner refuses LIMIT-entry genomes instead of silently trading them at market', () => {
+    expect(() => assertLiveRunnable({ ...genome, entryMode: 'LIMIT' })).toThrow(/LIMIT_ENTRY_NOT_SUPPORTED_LIVE/);
+    expect(() => assertLiveRunnable(genome)).not.toThrow();
+  });
 
-    it('waits for enough shadow trades', () => {
-      expect(decideLifecycle('SHADOW', ref, [1, 2, -1]).action).toBe('NONE');
+  describe('evidence-based promotion and retirement (lifecycle/v2)', () => {
+    // Development evidence as discovery stores it: reference stats + validation (holdOut) + golden holdout
+    const validated = {
+      expectancyR: 0.3, sdR: 1.6, trades: 400, maxDrawdownR: 14,
+      evidence: { holdOut: { trades: 120, expectancyR: 0.25, tStat: 2.4 } },
+      golden: { passed: true, trades: 60, expectancyR: 0.2, datasetVersion: 'BTCUSDT_PERP@2026-10-01#abcd1234' },
+    };
+    // 40 trades: 60% +2R winners, 40% -1R losers -> +0.8R expectancy, lower 95% CI bound clearly above 0
+    const strong = Array.from({ length: 40 }, (_, i) => (i % 5 < 3 ? 2 : -1));
+
+    it('REGRESSION: 8 shadow trades "consistent with the backtest" (old rule z >= -1.5) no longer promote', () => {
+      const old8 = [2, -1, -1, 3, -1, 1.5, -1, 0.5];
+      const a = assessLabEvidence('SHADOW', validated, old8);
+      expect(a.action).toBe('NONE');
+      expect(a.state).toBe('SHADOW_RUNNING');
     });
 
-    it('promotes a shadow record consistent with the backtest', () => {
-      expect(decideLifecycle('SHADOW', ref, [2, -1, -1, 3, -1, 1.5, -1, 0.5]).action).toBe('PROMOTE');
+    it('UNVALIDATED: strong shadow results cannot promote without development + golden evidence', () => {
+      const legacy = { expectancyR: 0.43, sdR: 2.2, trades: 191, maxDrawdownR: 10.3 }; // registered before golden holdouts
+      const a = assessLabEvidence('SHADOW', legacy, strong);
+      expect(a.state).toBe('UNVALIDATED');
+      expect(a.action).toBe('NONE');
+      expect(a.reason).toMatch(/validationTrades.*goldenHoldoutPassed/);
+      expect(assessLabEvidence('SHADOW', { ...validated, golden: { ...validated.golden, passed: false } }, strong).state).toBe('UNVALIDATED');
     });
 
-    it('does not promote a shadow record far below the backtest', () => {
-      expect(decideLifecycle('SHADOW', ref, [-1, -1, -1, -1, -1, -1, -1, -1]).action).toBe('NONE');
+    it('state flow: BACKTEST_VALIDATED (no shadow trades) -> SHADOW_RUNNING -> SHADOW_CONFIRMED (promote)', () => {
+      expect(assessLabEvidence('SHADOW', validated, []).state).toBe('BACKTEST_VALIDATED');
+      expect(assessLabEvidence('SHADOW', validated, strong.slice(0, 12)).state).toBe('SHADOW_RUNNING');
+      const a = assessLabEvidence('SHADOW', validated, strong);
+      expect(a.state).toBe('SHADOW_CONFIRMED');
+      expect(a.action).toBe('PROMOTE');
+      expect(a.checks.every((c) => c.passed)).toBe(true);
+      // the exact evidence relied on is part of the decision
+      expect(a.rulesVersion).toBe('lifecycle/v2');
+      expect(a.evidence.golden).toMatchObject({ passed: true, datasetVersion: 'BTCUSDT_PERP@2026-10-01#abcd1234' });
+      expect(a.evidence.validation).toMatchObject({ trades: 120, expectancyR: 0.25 });
+      expect(a.evidence.current.trades).toBe(40);
+      expect(a.evidence.current.ciLowR).toBeGreaterThan(0);
     });
 
-    it('retires a strategy whose results are significantly below the backtest', () => {
-      expect(decideLifecycle('SHADOW', ref, Array(12).fill(-1)).action).toBe('RETIRE');
-      expect(decideLifecycle('LIVE', ref, Array(12).fill(-1)).action).toBe('RETIRE');
+    it('SHADOW_NOT_DISPROVEN: positive but statistically weak shadow results do not promote', () => {
+      const weak = Array.from({ length: 30 }, (_, i) => (i % 3 === 0 ? 2.2 : -1)); // mean +0.07R, wide CI
+      const a = assessLabEvidence('SHADOW', validated, weak);
+      expect(a.state).toBe('SHADOW_NOT_DISPROVEN');
+      expect(a.action).toBe('NONE');
+      expect(a.checks.find((c) => c.name === 'shadowExpectancyCiLow')!.passed).toBe(false);
     });
 
-    it('retires a live strategy whose drawdown exceeds twice the backtest worst', () => {
-      const res = decideLifecycle('LIVE', ref, [5, 5, -7, -7, -7, 2]);
-      expect(res.action).toBe('RETIRE');
-      expect(res.reason).toMatch(/drawdown/);
+    it('economic checks block promotion: losing streak, drawdown, degradation vs validation, data quality', () => {
+      const streak = [...Array(11).fill(-1), ...Array.from({ length: 40 }, (_, i) => (i % 5 < 3 ? 2.5 : -1))];
+      expect(assessLabEvidence('SHADOW', validated, streak).checks.find((c) => c.name === 'losingStreak')!.passed).toBe(false);
+      expect(assessLabEvidence('SHADOW', { ...validated, maxDrawdownR: 1 }, strong).checks.find((c) => c.name === 'shadowDrawdown')!.passed).toBe(false);
+      const highValidation = { ...validated, evidence: { holdOut: { trades: 120, expectancyR: 2, tStat: 5 } } };
+      expect(assessLabEvidence('SHADOW', highValidation, strong).checks.find((c) => c.name === 'noDegradationVsValidation')!.passed).toBe(false);
+      const dq = assessLabEvidence('SHADOW', validated, strong, 1);
+      expect(dq.action).toBe('NONE');
+      expect(dq.checks.find((c) => c.name === 'noDataQualityViolations')!.passed).toBe(false);
+    });
+
+    it('retirement stays quick: clearly losing (upper CI < 0), far below backtest, or live drawdown', () => {
+      const losing = Array(15).fill(-1);
+      expect(assessLabEvidence('SHADOW', validated, losing)).toMatchObject({ action: 'RETIRE', state: 'RETIRED' });
+      expect(assessLabEvidence('LIVE', validated, losing).action).toBe('RETIRE');
+      const below = Array.from({ length: 20 }, (_, i) => (i % 2 ? 0.4 : -1.2)); // mean -0.4 vs backtest +0.3
+      expect(assessLabEvidence('LIVE', validated, below).reason).toMatch(/clearly losing|far below backtest/);
+      const ddLive = [3, 3, -10, -10, -10, 3];
+      const r = assessLabEvidence('LIVE', validated, ddLive);
+      expect(r.action).toBe('RETIRE');
+      expect(r.reason).toMatch(/drawdown/);
+      expect(assessLabEvidence('LIVE', validated, strong).state).toBe('LIVE');
     });
   });
 
   describe('per-instrument compounding capital', () => {
-    const { sizeFromCoinBalance, compoundedBalance } = require('../lab-lifecycle');
 
     it('risks 3% of the coin balance: Rs 50,000 and a 1,000 USDT stop distance on BTC -> 0.016 BTC', () => {
-      const s = sizeFromCoinBalance({ balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 1000, fx: 92.5, leverage: 20, lot: 0.001, precision: 3 });
+      const s = sizeFromCoinBalance({ symbol: 'BTCUSDT_PERP', balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 1000, fx: 92.5, leverage: 20 });
       // 1,500 / (1,000 x 92.5) = 0.0162 -> 0.016 (rounded down to the lot)
       expect(s.qty).toBe(0.016);
       expect(s.riskInr).toBeCloseTo(1480, 0);
@@ -104,13 +156,33 @@ describe('lab strategy lifecycle', () => {
     });
 
     it('never uses more margin than the coin balance (tight stop, low leverage)', () => {
-      const s = sizeFromCoinBalance({ balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 10, fx: 92.5, leverage: 2, lot: 0.001, precision: 3 });
+      const s = sizeFromCoinBalance({ symbol: 'BTCUSDT_PERP', balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 10, fx: 92.5, leverage: 2 });
       expect(s.marginInr).toBeLessThanOrEqual(50000);
       expect(s.qty).toBe(0.018); // 50,000 x 2 / (60,000 x 92.5) = 0.018
     });
 
     it('does not trade a depleted balance', () => {
-      expect(sizeFromCoinBalance({ balance: 0, riskPct: 3, sizeMultiplier: 1, entry: 100, stopDistance: 1, fx: 92.5, leverage: 10, lot: 0.01, precision: 2 }).qty).toBe(0);
+      expect(sizeFromCoinBalance({ symbol: 'SOLUSDT_PERP', balance: 0, riskPct: 3, sizeMultiplier: 1, entry: 100, stopDistance: 1, fx: 92.5, leverage: 10 }).qty).toBe(0);
+    });
+
+    it('uses the canonical server sizer: same quantity as PositionSizer for the same inputs (long and short)', () => {
+      const fx = 92.5;
+      const conv = { getRate: (f: any, t: any, ts: number) => ({ convertedAmount: fx, originalAmount: 1, fromCurrency: f, toCurrency: t, fxPair: 'USDT/INR', fxRate: fx, fxTimestamp: ts, fxSource: 't', fxVersion: 't', fxSnapshotHash: 't' }) };
+      for (const [side, stop] of [['LONG', 59000], ['SHORT', 61000]] as const) {
+        const lab = sizeFromCoinBalance({ symbol: 'BTCUSDT_PERP', side, balance: 80000, riskPct: 2, sizeMultiplier: 0.75, entry: 60000, stopDistance: 1000, fx, leverage: 10 });
+        const canon = PositionSizer.calculatePosition({ accountBalance: 80000, availableMargin: 80000, riskPercentage: 1.5, entryPrice: 60000, stopLoss: stop, direction: side === 'LONG' ? 'BUY' : 'SELL', symbol: 'BTCUSDT_PERP', requestedLeverage: 10, currencyConverter: conv as any });
+        expect(canon.isValid).toBe(true);
+        expect(lab.qty).toBe(canon.roundedUnits);
+      }
+    });
+
+    it('rejects (never clamps) a requested risk above the lab cap, and leverage above the instrument maximum', () => {
+      expect(sizeFromCoinBalance({ symbol: 'BTCUSDT_PERP', balance: 50000, riskPct: 50, sizeMultiplier: 1, entry: 60000, stopDistance: 1000, fx: 92.5, leverage: 20 }).qty).toBe(0);
+      const overLev = sizeFromCoinBalance({ symbol: 'BTCUSDT_PERP', balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 100, fx: 92.5, leverage: 125 });
+      expect(overLev.qty).toBe(0);
+      expect(overLev.rejectionReason).toMatch(/leverage/i);
+      // spot can never be sized with leverage
+      expect(sizeFromCoinBalance({ symbol: 'BTCUSDT_SPOT', balance: 50000, riskPct: 3, sizeMultiplier: 1, entry: 60000, stopDistance: 1000, fx: 92.5, leverage: 50 }).qty).toBe(0);
     });
 
     it('compounds the balance trade by trade', () => {

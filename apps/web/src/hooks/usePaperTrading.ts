@@ -12,6 +12,9 @@ export interface AuthoritativePosition {
   quantity: number;
   entryPrice: number;
   currentPrice: number;
+  /** STALE: the server has no validated live quote; currentPrice is the last stored price */
+  priceStatus?: 'LIVE' | 'STALE';
+  priceStaleReason?: string;
   stopLoss?: number;
   takeProfit?: number;
   unrealizedPnL: number;

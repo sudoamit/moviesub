@@ -531,7 +531,11 @@ describe('Production Trading & Accounting Invariants Regression Tests', () => {
   // TEST 14 — FOURTH TEST: Approved Leveraged Instrument
   // =========================================================================
   it('TEST 14: Approved leveraged derivative instrument validates margin correctly under leverage', () => {
-    const btcDeriv = getAuthoritativeInstrument('BTCUSDT');
+    // The approved leveraged BTC instrument is the explicit BTCUSDT_PERP identity. The legacy 'BTCUSDT' alias is
+    // spot and can never resolve to a leveraged derivative (canonical BTC identity invariant).
+    expect(getAuthoritativeInstrument('BTCUSDT').symbol).toBe('BTCUSDT_SPOT');
+    expect(getAuthoritativeInstrument('BTCUSDT').maxLeverage).toBe(1);
+    const btcDeriv = getAuthoritativeInstrument('BTCUSDT_PERP');
     expect(btcDeriv.marginMode).toBe('ISOLATED');
     expect(btcDeriv.maxLeverage).toBeGreaterThanOrEqual(20);
 
@@ -546,7 +550,7 @@ describe('Production Trading & Accounting Invariants Regression Tests', () => {
       riskPercentage: 1.0,
       entryPrice,
       stopLoss,
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_PERP',
       instrument: btcDeriv,
       requestedLeverage,
     });

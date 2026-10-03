@@ -61,10 +61,18 @@ interface LabStrategy {
   /** The instrument's own capital (shared by its strategies): starting amount, live balance, shadow balance. */
   capital: { start: number; liveBalance: number; shadowBalance: number } | null;
   lifecycle: {
-    rules: { minShadowTrades: number; promoteMinZ: number; minTradesForRetirement: number; retireZ: number; maxDrawdownMultiple: number };
+    rules: { minShadowTrades: number; minShadowCiLowR: number; minTradesForRetirement: number };
+    rulesVersion: string;
+    strategyVersion: string | null;
+    /** UNVALIDATED | BACKTEST_VALIDATED | SHADOW_RUNNING | SHADOW_NOT_DISPROVEN | SHADOW_CONFIRMED | LIVE | RETIRED */
+    evidenceState: string | null;
+    evidence: {
+      reason: string;
+      checks: Array<{ name: string; passed: boolean; value: number | string | null; required: string }>;
+      evidence: { current: { ciLowR: number; ciHighR: number; trades: number } };
+    } | null;
     closedInCurrentMode: number;
     totalRInCurrentMode: number;
-    zVsBacktest: number;
     drawdownR: number;
   };
 }
@@ -204,9 +212,13 @@ export const LabStrategiesCard: React.FC = () => {
                 </span>
               </div>
               <div className="bg-slate-900/80 border border-slate-800 rounded p-2">
-                <span className="text-slate-500 block text-[10px] uppercase font-bold">vs backtest (z)</span>
-                <span className="text-slate-200 font-bold">{lc.closedInCurrentMode ? lc.zVsBacktest.toFixed(2) : '—'}</span>
-                <span className="text-slate-500"> • retire if &lt; {lc.rules.retireZ} after {lc.rules.minTradesForRetirement}</span>
+                <span className="text-slate-500 block text-[10px] uppercase font-bold">Expectancy 95% CI ({s.status.toLowerCase()})</span>
+                <span className="text-slate-200 font-bold">
+                  {lc.evidence && lc.closedInCurrentMode > 1
+                    ? `${fmtR(lc.evidence.evidence.current.ciLowR)} … ${fmtR(lc.evidence.evidence.current.ciHighR)}`
+                    : '—'}
+                </span>
+                <span className="text-slate-500"> • promote only if the low end &gt; {lc.rules.minShadowCiLowR}R</span>
               </div>
             </div>
 
@@ -238,12 +250,22 @@ export const LabStrategiesCard: React.FC = () => {
             {s.status === 'SHADOW' && (
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px] text-slate-400">
-                  <span>Promotion to LIVE: {lc.closedInCurrentMode}/{lc.rules.minShadowTrades} shadow trades, then z ≥ {lc.rules.promoteMinZ}</span>
+                  <span>
+                    Evidence: <span className="text-slate-200 font-bold">{lc.evidenceState ?? 'not assessed yet'}</span> • {lc.closedInCurrentMode}/{lc.rules.minShadowTrades} shadow trades of version {lc.strategyVersion ?? '—'}
+                  </span>
                   <span>~{Math.max(0, Math.ceil(((lc.rules.minShadowTrades - lc.closedInCurrentMode) / Math.max(bt.tradesPerYear, 1)) * 12))} months at the backtest rate</span>
                 </div>
                 <div className="h-1.5 bg-slate-800 rounded">
                   <div className="h-1.5 bg-amber-400 rounded" style={{ width: `${shadowProgress * 100}%` }} />
                 </div>
+                {lc.evidence && (
+                  <div className="text-[10px] text-slate-400">
+                    {lc.evidence.reason}
+                    <span className="text-slate-500">
+                      {' '}• checks: {lc.evidence.checks.map((c) => `${c.passed ? '✓' : '✗'} ${c.name}`).join('  ')} ({lc.rulesVersion})
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 

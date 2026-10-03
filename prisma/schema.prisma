@@ -1419,9 +1419,17 @@ model LabStrategy {
   lastProcessedBarTime DateTime?
   promotedAt           DateTime?
   retiredAt            DateTime?
+  /// Current version identity (genome, trade engine, features, cost model, sizing); trades of other versions are not evidence
+  strategyVersion      String?
+  versionJson          Json?
+  /// UNVALIDATED | BACKTEST_VALIDATED | SHADOW_RUNNING | SHADOW_NOT_DISPROVEN | SHADOW_CONFIRMED | LIVE | RETIRED
+  evidenceState        String?
+  /// Latest lifecycle assessment (checks, statistics, rules version)
+  evidenceJson         Json?
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
   trades               LabStrategyTrade[]
+  promotions           LabPromotionRecord[]
 
   @@map("lab_strategies")
 }
@@ -1452,6 +1460,8 @@ model LabStrategyTrade {
   predictedR      Float?
   sizeMultiplier  Float?
   qualityModelId  String?
+  /// Strategy version the trade was taken under
+  strategyVersion String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -1570,6 +1580,8 @@ model IntradayTrade {
   modelPoints      Float?
   /// Market context at entry (option chain metrics, gap, time) for learning
   featuresJson     Json?
+  /// Rules / engine version the trade was recorded under
+  strategyVersion  String?
   createdAt        DateTime         @default(now())
 
   @@unique([strategyId, date])
@@ -1615,4 +1627,21 @@ model TradeLesson {
 
   @@unique([kind, strategyId, mistake])
   @@map("trade_lessons")
+}
+
+/// Exact evidence behind an automatic SHADOW -> LIVE promotion (immutable audit record).
+model LabPromotionRecord {
+  id               String      @id @default(uuid())
+  strategyId       String
+  strategy         LabStrategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  strategyVersion  String
+  datasetVersion   String?
+  lifecycleRulesVersion String
+  /// backtest, validation, golden-holdout and shadow statistics, costs, drawdown, every check with its threshold
+  evidenceJson     Json
+  reason           String
+  createdAt        DateTime    @default(now())
+
+  @@index([strategyId])
+  @@map("lab_promotion_records")
 }

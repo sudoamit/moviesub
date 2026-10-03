@@ -1,6 +1,8 @@
-import { prepareSeries } from '@quant/strategy-lab';
+import * as fs from 'fs';
+import * as path from 'path';
+import { prepareSeries, simulateIntraday } from '@quant/strategy-lab';
 import { calibrateOptionModel, ClosedWatchTrade, conditionInsights, entryFeatures, strategyVerdict } from '../nifty-lab-learning';
-import { NiftyLabService } from '../nifty-lab.service';
+import { currentVersionTrades, intradayStrategyVersion, NiftyLabService } from '../nifty-lab.service';
 
 let seed = 3;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) - 0.5;
@@ -28,8 +30,46 @@ describe('NIFTY lab learning', () => {
     expect(strategyVerdict(good).verdict).toBe('CONFIRMED');
     const bad = Array.from({ length: 30 }, (_, i) => trade({ optionPoints: i % 4 === 0 ? 15 : -12 }));
     expect(strategyVerdict(bad).verdict).toBe('RETIRE');
-    // real prices are preferred over the model
+    // real prices are used, never the model
     expect(strategyVerdict([trade({ optionPoints: -5, modelPoints: 50 })]).meanPoints).toBe(-5);
+  });
+
+  it('REAL, MODELLED and INDEX PROXY results are reported separately and never substituted', () => {
+    // REGRESSION: the verdict used optionPoints ?? modelPoints, so 30 trades with only a (rosy) model result
+    // were CONFIRMED as "profitable live" without a single real option price.
+    const modelOnly = Array.from({ length: 30 }, (_, i) => trade({ indexPoints: 40, optionPoints: null, modelPoints: i % 3 ? 25 : -5 }));
+    const v = strategyVerdict(modelOnly);
+    expect(v.verdict).toBe('WATCHING');
+    expect(v.realPriced).toBe(0);
+    expect(v.missingRealPrice).toBe(30);
+    expect(v.basis).toBe('REAL_OPTION');
+    expect(v.real.trades).toBe(0);
+    expect(v.meanPoints).toBe(0);
+    expect(v.modelled).toMatchObject({ basis: 'MODELLED_OPTION', trades: 30 });
+    expect(v.modelled.meanPoints).toBeCloseTo(15, 9);
+    expect(v.indexProxy).toMatchObject({ basis: 'INDEX_PROXY', trades: 30, meanPoints: 40 });
+
+    // mixed: real results decide; trades without a real price are excluded (not filled with the model)
+    const mixed = [
+      ...Array.from({ length: 20 }, () => trade({ optionPoints: -8, modelPoints: 30 })),
+      ...Array.from({ length: 15 }, () => trade({ optionPoints: null, modelPoints: 60 })),
+    ];
+    const m = strategyVerdict(mixed);
+    expect(m.realPriced).toBe(20);
+    expect(m.missingRealPrice).toBe(15);
+    expect(m.meanPoints).toBe(-8);
+    expect(m.real.totalPoints).toBe(-160);
+    expect(m.reason).toMatch(/15 trade\(s\) without a real option price excluded/);
+  });
+
+  it('entry-condition learning uses real option results only', () => {
+    const rows = Array.from({ length: 120 }, () => {
+      const pcr = 0.6 + Math.abs(rnd()) * 1.2;
+      return trade({ optionPoints: null, modelPoints: (pcr - 1) * 60, features: { pcrOi: pcr } });
+    });
+    const ins = conditionInsights(rows).find((x) => x.feature === 'pcrOi')!;
+    expect(ins.trades).toBe(0);
+    expect(ins.status).toBe('COLLECTING');
   });
 
   it('finds an entry condition that goes with better trades, and stays quiet on noise', () => {
@@ -91,7 +131,7 @@ describe('NIFTY lab live runner', () => {
       marketObservation: { findFirst: jest.fn(async () => ({ metrics: { pcrOi: 1.2, atmIv: 0.12 } })) },
     };
     const quotes = [180, 236];
-    const paper: any = { getValidatedOptionPrice: jest.fn(async () => ({ price: quotes.shift(), timestamp: new Date() })) };
+    const paper: any = { getValidatedOptionPrice: jest.fn(async () => ({ price: quotes.shift(), timestamp: new Date() })), placeOrder: jest.fn() };
     const svc = new NiftyLabService(prisma, {} as any, paper);
     const st = { id: 'S1', name: 'ORB', genomeJson: genome };
 
@@ -111,7 +151,7 @@ describe('NIFTY lab live runner', () => {
     bars = build(8);
     s = prepareSeries(bars, M15);
     ses = s.sessions[s.sessions.length - 1];
-    const sim = require('@quant/strategy-lab').simulateIntraday(genome, s, ses.date, `${ses.date}~`)[0];
+    const sim = simulateIntraday(genome as any, s, ses.date, `${ses.date}~`)[0];
     expect(sim.exitReason).toBe('TARGET');
     await (svc as any).runStrategy(st, s, ses, ses.date, sim.exitTime + 30_000);
     const close = updates.find((u) => u.data.status === 'CLOSED');
@@ -119,6 +159,28 @@ describe('NIFTY lab live runner', () => {
     expect(close.data.optionExit).toBe(236);
     expect(close.data.optionPoints).toBe(56);
     expect(close.data.indexPoints).toBeCloseTo(80, 6);
+    // versioned, and watch only: nothing was ever sent to the order path
+    expect(created[0].strategyVersion).toBe(intradayStrategyVersion(genome));
+    expect(paper.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('NIFTY_LAB_WATCH can never reach placeOrder: the lab holds only a quote function', () => {
+    const paper: any = { getValidatedOptionPrice: jest.fn(), placeOrder: jest.fn() };
+    const svc: any = new NiftyLabService({} as any, {} as any, paper);
+    expect(Object.values(svc).includes(paper)).toBe(false);
+    // no order-placing call anywhere in the lab's source
+    for (const f of ['nifty-lab.service.ts', 'nifty-lab-learning.ts', 'nifty-lab.controller.ts']) {
+      const src: string = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+      expect(src).not.toMatch(/\.(placeOrder|executeOrder|closePosition|openPosition)\s*\(|\bpaper\.(?!getValidatedOptionPrice\()/);
+    }
+  });
+
+  it('strategy version: stable for the same rules, changes with the rules; other versions are not evidence', () => {
+    expect(intradayStrategyVersion(genome)).toBe(intradayStrategyVersion({ ...genome }));
+    expect(intradayStrategyVersion({ ...genome, stop: 'PTS60' })).not.toBe(intradayStrategyVersion(genome));
+    const v = intradayStrategyVersion(genome);
+    const rows = [{ strategyVersion: v }, { strategyVersion: 'iv-other' }, { strategyVersion: null }];
+    expect(currentVersionTrades(rows, v)).toEqual([{ strategyVersion: v }, { strategyVersion: null }]);
   });
 
   it('does not record a stale signal (no real entry price available for it)', async () => {

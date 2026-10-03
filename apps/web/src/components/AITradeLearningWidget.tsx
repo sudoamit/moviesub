@@ -34,7 +34,13 @@ interface ICalibrationBinItem {
   calibrationError: number;
 }
 
+interface IModelReliability {
+  reliable: boolean;
+  reasons: string[];
+}
+
 interface IModelState {
+  reliability?: IModelReliability;
   modelVersion: string;
   featureSchemaVersion: string;
   status: string;
@@ -75,6 +81,7 @@ interface IModelState {
 }
 
 interface IPredictionData {
+  modelReliability?: IModelReliability;
   symbol: string;
   timeframe: string;
   deterministicScore: number;
@@ -317,9 +324,15 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 text-[10px] font-bold px-2 py-0.5 rounded">
                 {modelState?.modelVersion || 'v1.0.0-PROD'}
               </span>
-              <span className="bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3" /> ACTIVE PRODUCTION
-              </span>
+              {modelState?.reliability?.reliable ? (
+                <span className="bg-emerald-950/80 text-emerald-400 border border-emerald-500/40 text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> VALIDATED OUT OF SAMPLE
+                </span>
+              ) : (
+                <span className="bg-amber-950/80 text-amber-300 border border-amber-500/40 text-[10px] font-bold px-2 py-0.5 rounded">
+                  NOT RELIABLE
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Supervised Logistic Regression predicting TP vs SL probability with Wilson Score
@@ -396,6 +409,14 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {modelState && modelState.reliability && !modelState.reliability.reliable && (
+        <div role="note" className="border border-amber-500/40 bg-amber-950/30 rounded-xl px-4 py-3 text-sm font-sans text-amber-200">
+          <strong className="font-semibold">This model&apos;s probabilities are not reliable.</strong>{' '}
+          {modelState.reliability.reasons.join('; ')}. High accuracy alone means little when one outcome dominates the
+          test set. The model does not influence any trade decision.
         </div>
       )}
 
@@ -532,22 +553,19 @@ export const AITradeLearningWidget: React.FC<{ initialSymbol?: string }> = ({
                     Calibrated Win Probability
                   </span>
                   <div className="flex items-center justify-center gap-1.5 mt-1">
-                    <span className="text-xl font-black text-emerald-400">
+                    <span
+                      className={`text-xl font-black ${prediction.modelReliability?.reliable ? 'text-emerald-400' : 'text-slate-500 line-through'}`}
+                      title={prediction.modelReliability?.reliable ? undefined : 'Model not reliable: ' + (prediction.modelReliability?.reasons ?? []).join('; ')}
+                    >
                       {(prediction.aiPrediction.winProbability * 100).toFixed(1)}%
                     </span>
                   </div>
                   <span className="text-[9px] text-slate-400 block mt-0.5">
-                    95% CI: [
-                    {(prediction.aiPrediction.confidenceInterval?.lower
-                      ? prediction.aiPrediction.confidenceInterval.lower * 100
-                      : 35
-                    ).toFixed(0)}
-                    % -{' '}
-                    {(prediction.aiPrediction.confidenceInterval?.upper
-                      ? prediction.aiPrediction.confidenceInterval.upper * 100
-                      : 55
-                    ).toFixed(0)}
-                    %]
+                    {!prediction.modelReliability?.reliable
+                      ? 'not reliable (see warning above)'
+                      : prediction.aiPrediction.confidenceInterval
+                        ? `95% CI: [${(prediction.aiPrediction.confidenceInterval.lower * 100).toFixed(0)}% - ${(prediction.aiPrediction.confidenceInterval.upper * 100).toFixed(0)}%]`
+                        : '95% CI: not available'}
                   </span>
                 </div>
 

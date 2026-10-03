@@ -117,6 +117,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
       let scoreRejectedCount = 0;
       let botEvaluatedCount = 0;
       let botMatchedCount = 0;
+      // Bot evaluations that threw: reported, never folded into "nothing happened"
+      let botErrorCount = 0;
       let botRejectedCount = 0;
       let botEligibleCount = 0;
       let executionAttemptedCount = 0;
@@ -192,6 +194,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 botResultSummary = `SKIPPED (${skipped.map((s) => `${s.botId}:${s.reasonCode}`).join(', ')})`;
               }
             } catch (err) {
+              botErrorCount++;
               botResultSummary = `error (${(err as Error).message})`;
               this.logger.warn(
                 `[ALGO BOT EXECUTION ERROR] Failed evaluating signal ${sig.symbol} (${sig.timeframe}): ${(err as Error).message}`,
@@ -237,6 +240,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         botEvaluatedCount,
         botMatchedCount,
         botRejectedCount,
+        botErrorCount,
         botEligibleCount,
         skippedCount,
         executionAttemptedCount,

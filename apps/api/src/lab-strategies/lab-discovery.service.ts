@@ -84,7 +84,17 @@ export class LabDiscoveryService implements OnModuleInit, OnModuleDestroy {
         where: { id: runId },
         data: {
           status: 'COMPLETED', finishedAt: new Date(), registered,
-          summaryJson: { history: result.history, runs: result.runs, candidates: result.candidates.map((c: any) => ({ id: c.id, path: c.path, reference: c.reference })) },
+          summaryJson: {
+            history: result.history,
+            // dataset versions and their TRAIN / VALIDATION / GOLDEN partitions
+            datasets: result.datasets,
+            // what was searched and how strictly (the best of many tested genomes is selection-biased)
+            searchConfig: result.searchConfig,
+            runs: result.runs,
+            developmentCandidates: result.developmentCandidates,
+            goldenEvaluations: result.goldenEvaluations,
+            candidates: result.candidates.map((c: any) => ({ id: c.id, path: c.path, datasetVersion: c.datasetVersion, golden: c.golden, reference: c.reference })),
+          },
         },
       });
       this.logger.log(`[LAB DISCOVERY] run ${runId} completed: ${registered.length} new strategies`);
@@ -114,8 +124,9 @@ export class LabDiscoveryService implements OnModuleInit, OnModuleDestroy {
         data: {
           id: c.id, name: `${c.symbol} ${c.timeframe}: ${c.description}`, symbol: c.symbol, timeframe: c.timeframe,
           genomeJson: c.genome, status: 'SHADOW', leverage, riskPercentage: Number(process.env.LAB_RISK_PERCENT || 3),
-          backtestJson: { ...c.reference, discoveryPath: c.path, evidence: c.evidence },
-          statusReason: `Auto-discovered (${c.path === 'STRICT' ? 'passed all search tests' : 'confirmed on an unseen sibling market'}); shadow trading before automatic promotion`,
+          // reference = DEVELOPMENT-period statistics; golden = one evaluation on the dataset's golden holdout
+          backtestJson: { ...c.reference, discoveryPath: c.path, evidence: c.evidence, datasetVersion: c.datasetVersion, golden: c.golden },
+          statusReason: `Auto-discovered (${c.path === 'STRICT' ? 'passed all search tests' : 'confirmed on an unseen sibling market'}, golden holdout passed); shadow trading before promotion`,
         },
       });
       registered.push(c.id);

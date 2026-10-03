@@ -450,12 +450,16 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
     const formattedPositions: IPaperPosition[] = [];
 
     for (const pos of openPositions) {
+      // Read-only view: without a validated live quote, the last stored price is shown marked STALE (never as live)
       let livePrice = Number(pos.currentPrice);
+      let priceStatus: 'LIVE' | 'STALE' = 'STALE';
+      let priceStaleReason: string | undefined;
       try {
         const liveQuote = await this.resolveLivePositionQuote(pos, 30);
         livePrice = liveQuote.price;
-      } catch {
-        // keep pos.currentPrice if live price fetch fails on read-only view
+        priceStatus = 'LIVE';
+      } catch (err: any) {
+        priceStaleReason = err?.message ?? 'no validated live quote';
       }
 
       const entryPrice = Number(pos.entryPrice);
@@ -586,6 +590,8 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
         entryTime: pos.entryTime.toISOString(),
         averageEntryPrice: entryPrice,
         currentPrice: livePrice,
+        priceStatus,
+        priceStaleReason,
         stopLoss,
         initialStopLoss,
         target1,
@@ -2156,7 +2162,17 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
       return position;
     });
-    } catch (txErr) {
+    } catch (txErr: any) {
+      // Two concurrent requests with the same idempotency key: both passed the pre-check, the unique key let
+      // only one transaction commit. The loser replays the winner's result instead of surfacing a DB error.
+      if (txErr?.code === 'P2002' && String(txErr?.meta?.target ?? '').includes('idempotency')) {
+        const winner = await this.prisma.paperOrder.findUnique({ where: { idempotencyKey }, include: { positions: true } });
+        if (winner?.status === OrderState.FILLED && winner.positions.length > 0) {
+          this.logger.warn(`[DUPLICATE ORDER DETECTED] concurrent request with key '${idempotencyKey}' replayed the committed order.`);
+          return this.mapDbPositionToInterface(winner.positions[0]);
+        }
+        throw new BadRequestException(`Duplicate order detected with status: ${winner?.status ?? 'IN_PROGRESS'}`);
+      }
       for (const record of deferredRejections) {
         await record();
       }
@@ -3476,11 +3492,17 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
 
     const enriched = await Promise.all(
       positions.map(async (pos: any) => {
+        // Without a validated live quote the last stored price is shown, explicitly marked STALE (never as live)
         let livePrice = Number(pos.currentPrice);
+        let priceStatus: 'LIVE' | 'STALE' = 'STALE';
+        let priceStaleReason: string | null = null;
         try {
           const liveQuote = await this.resolveLivePositionQuote(pos, 5);
           livePrice = liveQuote.price;
-        } catch {}
+          priceStatus = 'LIVE';
+        } catch (err: any) {
+          priceStaleReason = err?.message ?? 'no validated live quote';
+        }
 
         const entryPrice = Number(pos.entryPrice);
         const quantity = Number(pos.quantity);
@@ -3558,6 +3580,9 @@ export class PaperTradingService implements IExecutionProvider, OnModuleInit {
           entryPrice,
           currentPrice: livePrice,
           livePrice,
+          priceStatus,
+          priceStaleReason,
+          priceUpdatedAt: priceStatus === 'LIVE' ? new Date().toISOString() : (pos.updatedAt?.toISOString?.() ?? null),
           unrealizedPnL: pnlCalc.netPnlAccount,
           unrealizedR,
           priceMove,

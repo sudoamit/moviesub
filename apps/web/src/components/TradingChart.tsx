@@ -154,6 +154,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     expectedValueR: number;
     recommendation: string;
     deterministicScore: number;
+    reliable: boolean;
+    unreliableReason: string;
   } | null>(null);
 
   useEffect(() => {
@@ -173,6 +175,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
               expectedValueR: data.aiPrediction.expectedValueR,
               recommendation: data.aiPrediction.recommendation,
               deterministicScore: data.deterministicScore,
+              reliable: data.modelReliability?.reliable === true,
+              unreliableReason: (data.modelReliability?.reasons ?? ['no reliability assessment']).join('; '),
             });
           }
         }
@@ -1793,43 +1797,6 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         </div>
       </div>
 
-      {/* 2. Technical Key Levels & Order Flow Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-2 py-1.5 px-3 bg-surface-panel border border-surface-border rounded-lg mb-2 text-xs font-mono">
-        <div className="flex flex-wrap items-center gap-3 text-slate-300">
-          <span className="text-[11px] text-slate-400">
-            Entry: <strong className="text-white">{currSymbol}{entryPrice.toFixed(2)}</strong>
-          </span>
-          <span className="text-slate-600">•</span>
-          <span className="text-[11px] text-slate-400">
-            SL: <strong className="text-rose-400">{currSymbol}{slPrice.toFixed(2)}</strong>
-          </span>
-          <span className="text-slate-600">•</span>
-          <span className="text-[11px] text-slate-400">
-            TP1: <strong className="text-emerald-400">{currSymbol}{tp1Price.toFixed(2)}</strong>
-          </span>
-          {tp2Price > 0 && (
-            <>
-              <span className="text-slate-600">•</span>
-              <span className="text-[11px] text-slate-400">
-                TP2: <strong className="text-teal-400">{currSymbol}{tp2Price.toFixed(2)}</strong>
-              </span>
-            </>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <span
-            className={`px-2.5 py-0.5 rounded text-[11px] font-bold flex items-center gap-1.5 border ${
-              isBullish
-                ? 'bg-emerald-950/60 border-emerald-500/30 text-emerald-400'
-                : 'bg-rose-950/60 border-rose-500/30 text-rose-400'
-            }`}
-          >
-            {isBullish ? 'BULLISH FLOW' : 'BEARISH FLOW'}
-          </span>
-        </div>
-      </div>
-
       {/* 2. Glassmorphic Dual Telemetry Floating Island */}
       <div className="bg-[#0B101D]/90 border border-slate-800/90 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs font-mono shadow-2xl backdrop-blur-2xl relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/5 via-transparent to-emerald-500/5 pointer-events-none" />
@@ -1898,6 +1865,16 @@ export const TradingChart: React.FC<TradingChartProps> = ({
             </strong>
           </div>
 
+          {aiPredictionInfo && !aiPredictionInfo.reliable ? (
+            // An unvalidated model's probability is not shown as if it meant something
+            <span
+              title={aiPredictionInfo.unreliableReason}
+              className="px-2.5 py-1 rounded-lg border border-amber-500/40 bg-amber-950/40 text-amber-300 text-[10px] font-bold"
+            >
+              AI model not reliable
+            </span>
+          ) : (
+            <>
           <div className="bg-slate-950/80 px-2.5 py-1 rounded-lg border border-slate-800 flex items-center gap-1.5">
             <span className="text-[10px] text-slate-400 font-bold uppercase">AI PROB:</span>
             <strong className="text-emerald-400 font-black">
@@ -1925,6 +1902,8 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           >
             ⚡ {aiPredictionInfo?.recommendation || 'N/A'}
           </span>
+            </>
+          )}
         </div>
       </div>
 

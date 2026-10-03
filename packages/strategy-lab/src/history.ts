@@ -59,6 +59,22 @@ export async function fetchYahoo15m(symbol: string): Promise<Bar[]> {
   return bars;
 }
 
+/**
+ * Appends bars not stored yet. Stored bars are write-once: a provider re-sending (or revising) an already stored
+ * bar never changes it, so a frozen research dataset version (dataset.ts) keeps exactly the data it was built from.
+ */
+export function mergeBars(existing: Bar[], fresh: Bar[]): { merged: Bar[]; added: number } {
+  const byT = new Map<number, Bar>();
+  for (const b of existing) byT.set(b.t, b);
+  let added = 0;
+  for (const b of fresh) {
+    if (byT.has(b.t)) continue;
+    byT.set(b.t, b);
+    added++;
+  }
+  return { merged: [...byT.values()].sort((a, b) => a.t - b.t), added };
+}
+
 export function historyFile(dir: string, symbol: string): string {
   return path.join(dir, `${symbol}_15m.json`);
 }
@@ -69,8 +85,8 @@ export function loadHistory(dir: string, symbol: string): Bar[] {
 }
 
 /**
- * Brings the cached 15m history up to date (appends new closed bars; Yahoo history is merged, keeping old bars
- * so it grows beyond Yahoo's 60-day window over time). `initialDays` is used when there is no cache yet.
+ * Brings the cached 15m history up to date (appends new closed bars; existing bars are never rewritten; Yahoo
+ * history is merged, keeping old bars so it grows beyond Yahoo's 60-day window over time). `initialDays` is used when there is no cache yet.
  */
 export async function updateHistory(dir: string, symbol: string, initialDays = 2600): Promise<{ added: number; total: number }> {
   const src = HISTORY_SOURCES[symbol];
@@ -82,14 +98,7 @@ export async function updateHistory(dir: string, symbol: string, initialDays = 2
     src.kind === 'BINANCE'
       ? await fetchBinanceKlines(src.base, src.symbol, src.limit, lastT ? lastT + M15 : Date.now() - initialDays * 86_400_000)
       : await fetchYahoo15m(src.symbol);
-  const byT = new Map<number, Bar>();
-  for (const b of existing) byT.set(b.t, b);
-  let added = 0;
-  for (const b of fresh) {
-    if (!byT.has(b.t)) added++;
-    byT.set(b.t, b);
-  }
-  const merged = [...byT.values()].sort((a, b) => a.t - b.t);
+  const { merged, added } = mergeBars(existing, fresh);
   fs.writeFileSync(historyFile(dir, symbol), JSON.stringify(merged));
   return { added, total: merged.length };
 }

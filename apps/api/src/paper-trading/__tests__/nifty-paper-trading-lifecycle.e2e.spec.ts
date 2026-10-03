@@ -660,28 +660,30 @@ describe('NIFTY Paper-Trading Lifecycle End-to-End Suite (14 Invariant Tests)', 
   // ─────────────────────────────────────────────────────────────────────────────
   // Test 13: Explicit derivative option contract supports short opening
   // ─────────────────────────────────────────────────────────────────────────────
-  it('Test 13: Explicit derivative option contract supports short opening when configured', async () => {
+  it('Test 13: Options are long-only: a naked option short is rejected, buying the same contract opens', async () => {
+    // Obsolete expectation replaced: option shorts were once accepted "when configured". Since AI fix 210
+    // (38a2a62) options are unconditionally long-only (a naked short has unlimited risk), and the options-only
+    // bot invariants (Fix 202, invariant 20) depend on it.
     currentTickerPrice = 120.0;
-
-    // Option short (selling an option call or put) is allowed
-    const optPos = await paperTrading.placeOrder({
+    const contract = {
       symbol: 'NIFTY 24000 CE',
       contractSymbol: 'NIFTY 24000 CE',
-      instrumentType: 'OPTION',
+      instrumentType: 'OPTION' as const,
       strike: 24000,
-      optionType: 'CE',
-      direction: 'SELL',
-      orderType: 'MARKET',
-      quantity: 50,
+      optionType: 'CE' as const,
+      orderType: 'MARKET' as const,
+      quantity: 65, // one NIFTY lot
       price: 120.0,
-      stopLoss: 180.0,
-      target1: 60.0,
       allowPriceOverride: true,
       executionMode: 'TEST' as any,
-    });
+    };
 
-    expect(optPos).toBeDefined();
-    expect(optPos.direction).toBe('SELL');
+    await expect(
+      paperTrading.placeOrder({ ...contract, direction: 'SELL', stopLoss: 180.0, target1: 60.0 } as any),
+    ).rejects.toThrow('OPTION_NAKED_SHORT_FORBIDDEN');
+
+    const optPos = await paperTrading.placeOrder({ ...contract, direction: 'BUY', stopLoss: 80.0, target1: 180.0 } as any);
+    expect(optPos.direction).toBe('BUY');
     expect(optPos.instrumentType).toBe('OPTION');
     expect(optPos.status).toBe(PositionState.OPEN);
   });

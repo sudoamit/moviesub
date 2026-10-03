@@ -83,4 +83,52 @@ describe('ScannerService leader lease', () => {
     expect(res.status).toBe('SKIPPED_FOLLOWER_INSTANCE');
     expect(signalsService.getAllSignals).not.toHaveBeenCalled();
   });
+  it('two instances triggering at the same moment: exactly one scans, the other skips', async () => {
+    const redis = fakeRedis();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // hold the first scan open so both lease attempts overlap
+    const slowSignals: any = { getAllSignals: jest.fn(async () => { await gate; return []; }) };
+    const a = new ScannerService(redis.service, slowSignals, algoBotsService);
+    const b = new ScannerService(redis.service, slowSignals, algoBotsService);
+
+    const pa = a.triggerScan(Timeframe.M15, 'SMC');
+    const pb = b.triggerScan(Timeframe.M15, 'SMC');
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    const statuses = (await Promise.all([pa, pb])).map((r: any) => r.status);
+
+    expect(statuses.filter((x) => x === 'SKIPPED_FOLLOWER_INSTANCE')).toHaveLength(1);
+    expect(slowSignals.getAllSignals).toHaveBeenCalledTimes(1);
+    expect(redis.store.has('scanner:leader')).toBe(false); // the leader released its own lease
+  });
+
+  it("a scan that outlived its lease never deletes the next leader's lease", async () => {
+    const redis = fakeRedis();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slowSignals: any = { getAllSignals: jest.fn(async () => { await gate; return []; }) };
+    const a = new ScannerService(redis.service, slowSignals, algoBotsService);
+    const pa = a.triggerScan(Timeframe.M15, 'SMC');
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A's lease expires while it is still scanning; instance B takes the leadership
+    redis.store.delete('scanner:leader');
+    const bLease = JSON.stringify({ token: 'instance_b', acquiredAt: Date.now() });
+    redis.store.set('scanner:leader', { value: bLease, expiresAt: Date.now() + 30_000 });
+
+    release();
+    await pa;
+    expect(redis.store.get('scanner:leader')?.value).toBe(bLease);
+  });
+
+  it('fails closed (skips) when the held lease cannot be inspected', async () => {
+    const redis = fakeRedis();
+    redis.store.set('scanner:leader', { value: JSON.stringify({ token: 'x', acquiredAt: Date.now() }), expiresAt: Date.now() + 30_000 });
+    redis.client.pttl.mockRejectedValueOnce(new Error('redis timeout'));
+    const scanner = new ScannerService(redis.service, signalsService, algoBotsService);
+    const res: any = await scanner.triggerScan(Timeframe.M15, 'SMC');
+    expect(res.status).toBe('SKIPPED_FOLLOWER_INSTANCE');
+    expect(signalsService.getAllSignals).not.toHaveBeenCalled();
+  });
 });

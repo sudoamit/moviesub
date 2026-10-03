@@ -62,6 +62,8 @@ interface LivePositionTrackerProps {
 
 interface RunningPaperPosition {
   id?: string;
+  priceStatus?: 'LIVE' | 'STALE';
+  priceStaleReason?: string;
   symbol: string;
   contractSymbol?: string;
   direction: 'BUY' | 'SELL';
@@ -2342,6 +2344,14 @@ export const LivePositionTracker: React.FC<LivePositionTrackerProps> = ({
                       : 'ACTIVE TRADE • NET UNREALIZED P&L'}
                 </span>
                 <div className="flex items-center gap-1.5">
+                  {!isClosed && paperPosition?.priceStatus === 'STALE' && (
+                    <span
+                      title={`No validated live quote: ${paperPosition?.priceStaleReason ?? 'unknown reason'}. P&L uses the last stored price.`}
+                      className="text-[10px] font-bold px-2 py-0.5 rounded border border-amber-500/50 bg-amber-950/60 text-amber-300"
+                    >
+                      PRICE STALE
+                    </span>
+                  )}
                   <span
                     className={`text-xs font-black px-2 py-0.5 rounded ${
                       isProfitableDisplay

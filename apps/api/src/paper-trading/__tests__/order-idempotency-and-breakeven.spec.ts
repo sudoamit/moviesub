@@ -65,6 +65,52 @@ describe('Order idempotency and server-side breakeven', () => {
       expect(prisma.paperPosition.create).toHaveBeenCalledTimes(1);
       expect(second.id).toBe(first.id);
     });
+
+    it('two CONCURRENT requests with the same key open one position; the loser replays the winner (no DB error)', async () => {
+      const orders = new Map<string, any>();
+      const prisma: any = {
+        paperOrder: {
+          findUnique: jest.fn(async ({ where }: any) => orders.get(where.idempotencyKey) ?? null),
+          count: jest.fn().mockResolvedValue(0),
+          // the unique index on idempotencyKey: a second insert fails like Postgres/Prisma does
+          create: jest.fn(async ({ data }: any) => {
+            if (orders.has(data.idempotencyKey)) {
+              throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: ['idempotencyKey'] } });
+            }
+            const o = { id: `ord-${orders.size + 1}`, ...data, positions: [] as any[] };
+            orders.set(data.idempotencyKey, o);
+            return o;
+          }),
+        },
+        paperPosition: {
+          count: jest.fn().mockResolvedValue(0),
+          findMany: jest.fn().mockResolvedValue([]),
+          create: jest.fn(async ({ data }: any) => {
+            const p = { id: 'pos-race', ...data };
+            [...orders.values()].pop()!.positions.push(p);
+            return p;
+          }),
+        },
+        paperTrade: { findMany: jest.fn().mockResolvedValue([]) },
+        paperFill: { create: jest.fn(async ({ data }: any) => ({ id: 'fill-1', ...data })) },
+        paperAccount: { findUnique: jest.fn().mockResolvedValue(account), update: jest.fn() },
+        auditEvent: { createMany: jest.fn() },
+        $transaction: jest.fn(async (cb: any) => cb(prisma)),
+      };
+      const service = buildService(prisma);
+      const req = {
+        symbol: 'BTCUSDT_SPOT', direction: 'BUY' as const, quantity: 0.01, orderType: 'MARKET' as const,
+        stopLoss: 59500, target1: 61000, idempotencyKey: 'ui:race:1',
+      };
+
+      const [a, b] = await Promise.all([service.placeOrder(req), service.placeOrder(req)]);
+
+      // both passed the pre-check (no order existed yet), the unique key admitted one
+      expect(prisma.paperOrder.create).toHaveBeenCalledTimes(2);
+      expect(prisma.paperPosition.create).toHaveBeenCalledTimes(1);
+      expect(a.id).toBe('pos-race');
+      expect(b.id).toBe('pos-race');
+    });
   });
 
   describe('moveStopToBreakeven', () => {

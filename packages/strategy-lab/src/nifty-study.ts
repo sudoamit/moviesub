@@ -1,4 +1,5 @@
 import { Bar } from './types';
+import { GoldenClearance, ResearchDataset } from './dataset';
 import {
   describeIntraday,
   enumerateIntradayGenomes,
@@ -126,5 +127,27 @@ export function runNiftyStudy(
     passed: rows.filter((r) => r.passed).map(({ signature: _sig, ...r }) => r),
     optionModel: opts.model ?? null,
     watchCandidates,
+  };
+}
+
+/** Golden holdout gate for a NIFTY intraday candidate that passed the development study. */
+export const NIFTY_GOLDEN_CRITERIA = { minTrades: 15, minMeanPoints: 0 };
+
+export function evaluateNiftyGolden(
+  genome: IntradayGenome,
+  dataset: ResearchDataset,
+  clearance: GoldenClearance,
+  instrument: IntradayInstrument = 'ITM_OPTION',
+  criteria = NIFTY_GOLDEN_CRITERIA,
+): { datasetVersion: string; trades: number; mean: number; total: number; tStat: number; passed: boolean; reason: string } {
+  const g = dataset.goldenBarsWithWarmup(clearance, 25 * 60); // ~60 sessions of warm-up (daily trend / CPR history)
+  const s = prepareSeries(g.bars, 15 * 60_000);
+  const goldenFrom = new Date(dataset.manifest.goldenStart + 5.5 * 3_600_000).toISOString().slice(0, 10);
+  const st = intradayStats(simulateIntraday(genome, s, goldenFrom), instrument);
+  const passed = st.trades >= criteria.minTrades && st.mean > criteria.minMeanPoints;
+  g.record(st.trades, passed);
+  return {
+    datasetVersion: dataset.manifest.datasetVersion, trades: st.trades, mean: st.mean, total: st.total, tStat: st.tStat, passed,
+    reason: passed ? `golden ${st.mean.toFixed(1)} pts/trade over ${st.trades} trades` : `golden ${st.mean.toFixed(1)} pts/trade over ${st.trades} trades (need >= ${criteria.minTrades} trades and > ${criteria.minMeanPoints})`,
   };
 }

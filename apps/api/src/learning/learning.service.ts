@@ -36,16 +36,10 @@ export class LearningService {
     const shadowCandidates = ShadowTradingEngine.getActiveCandidates();
 
     return {
-      activeStrategy: activeStrat || {
-        strategyVersion: 'v2.0-smc-quant',
-        expectancyR: 0.42,
-        winRate: 58.5,
-      },
-      activeModel: activeModel || {
-        modelVersion: 'v2.0-ml-canonical',
-        brierScore: 0.18,
-        expectedValueR: 1.25,
-      },
+      // No invented fallbacks: report what the registries hold. Nothing writes trading experiences to this
+      // engine yet, so totalExperiences is the real (empty) evidence behind any figures.
+      activeStrategy: activeStrat ?? null,
+      activeModel: activeModel ?? null,
       totalExperiences: experiences.length,
       driftStatus: drift,
       activeShadowCount: shadowCandidates.length,

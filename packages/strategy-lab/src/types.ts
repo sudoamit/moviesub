@@ -26,6 +26,8 @@ export interface InstrumentProfile {
   takerFeeRate: number;
   /** Adverse slippage per market fill (spread + impact), as a fraction of notional. */
   slippageRate: number;
+  /** SCHEDULE: fee rates from the shared execution schedule; INDEX_PROXY: research-only approximation */
+  costBasis?: 'SCHEDULE' | 'INDEX_PROXY';
   /** Bar duration in ms. */
   barMs: number;
   killzones: SessionWindow[];

@@ -21,10 +21,12 @@ describe('LabQualityService.assess', () => {
     expect(a).toMatchObject({ active: false, skip: false, sizeMultiplier: 1 });
   });
 
-  it('sizes by the prediction when ACTIVE, and skips only with a validated skip rule', async () => {
+  it('when ACTIVE only reduces size (never above 1.0x), and skips only with a validated skip rule', async () => {
     const active = (skipRuleValidated: boolean) => service({ id: 'm2', status: 'ACTIVE', modelJson, validationJson: { skipRuleValidated } });
-    expect((await active(false).assess('s', x(1), 0.4)).sizeMultiplier).toBe(1.5);   // 0.9R vs 0.4R mean -> capped 1.5x
-    expect((await active(false).assess('s', x(-0.5), 0.4)).sizeMultiplier).toBe(0.5); // 0.15R -> floored 0.5x
+    // REGRESSION: a strong prediction no longer increases risk (was 1.5x); sizing only ever reduces exposure
+    expect((await active(false).assess('s', x(1), 0.4)).sizeMultiplier).toBe(1);      // 0.9R predicted -> 1.0x (max)
+    expect((await active(false).assess('s', x(-0.5), 0.4)).sizeMultiplier).toBe(1);   // 0.15R (positive) -> 1.0x
+    expect((await active(false).assess('s', x(-3), 0.4)).sizeMultiplier).toBe(0.5);   // -1.1R -> reduced to 0.5x
     expect((await active(false).assess('s', x(-3), 0.4)).skip).toBe(false);
     expect((await active(true).assess('s', x(-3), 0.4)).skip).toBe(true);
   });

@@ -335,14 +335,14 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       }),
     ).rejects.toThrow('INVALID_STOP_LOSS');
 
-    // Invalid stopLoss for SELL (stopLoss <= price)
+    // Invalid stopLoss for SELL (stopLoss <= price). A short needs an instrument that can be shorted: the old
+    // fixture used a bare 'NIFTY 24000 PE' (no strike / type / expiry), which is now correctly rejected earlier
+    // as an invalid option contract, so it never reached the stop-loss check this test is about.
     await expect(
       service.placeOrder({
-        symbol: 'NIFTY',
-        contractSymbol: 'NIFTY 24000 PE',
-        instrumentType: 'OPTION',
+        symbol: 'BTCUSDT_PERP',
         direction: 'SELL',
-        quantity: 25,
+        quantity: 0.01,
         orderType: 'MARKET',
         price: 24100.0,
         stopLoss: 24050.0,
@@ -379,14 +379,12 @@ describe('PaperTradingService Persistent Execution & Safety', () => {
       }),
     ).rejects.toThrow('INVALID_TAKE_PROFIT');
 
-    // Invalid target1 for SELL (target1 >= price)
+    // Invalid target1 for SELL (target1 >= price), on a shortable instrument (see the stop-loss test above)
     await expect(
       service.placeOrder({
-        symbol: 'NIFTY',
-        contractSymbol: 'NIFTY 24000 PE',
-        instrumentType: 'OPTION',
+        symbol: 'BTCUSDT_PERP',
         direction: 'SELL',
-        quantity: 25,
+        quantity: 0.01,
         orderType: 'MARKET',
         price: 24100.0,
         allowPriceOverride: true,

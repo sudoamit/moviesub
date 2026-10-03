@@ -392,7 +392,7 @@ describe('AI Fix 104 — 27-Point Final Execution Source of Truth Suite', () => 
 
   // TEST 23 — Accounting snapshot immutable
   it('TEST 23 — Accounting snapshot immutable: snapshotHash is deterministic and reproducible', () => {
-    const btc = getAuthoritativeInstrument('BTCUSDT');
+    const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
     const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
     const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -422,7 +422,7 @@ describe('AI Fix 104 — 27-Point Final Execution Source of Truth Suite', () => 
 
   // TEST 24 — Same accounting result reaches PaperTrade
   it('TEST 24 — Same accounting result reaches PaperTrade', () => {
-    const btc = getAuthoritativeInstrument('BTCUSDT');
+    const btc = getAuthoritativeInstrument('BTCUSDT_PERP');
     const marginModel = resolveMarginModel(btc, { requestedLeverage: 10 });
     const fx = converter.getRate('USDT', 'INR', 1700000000000);
 
@@ -469,7 +469,7 @@ describe('AI Fix 104 — 27-Point Final Execution Source of Truth Suite', () => 
     const journalRecord: ITradeJournalRecord = {
       id: 'trade-canonical-1',
       tradeId: 'trade-canonical-1',
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_PERP',
       direction: 'BULLISH',
       side: 'BUY',
       quantity: 0.1,
@@ -515,7 +515,7 @@ describe('AI Fix 104 — 27-Point Final Execution Source of Truth Suite', () => 
     const record: ITradeJournalRecord = {
       id: 'trade-front-1',
       tradeId: 'trade-front-1',
-      symbol: 'BTCUSDT',
+      symbol: 'BTCUSDT_PERP',
       direction: 'BULLISH',
       side: 'BUY',
       quantity: 0.25,

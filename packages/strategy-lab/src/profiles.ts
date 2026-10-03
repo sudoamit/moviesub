@@ -1,4 +1,20 @@
+import { CostScheduleId, estimatedSlippageRate, feeRateForSchedule, feeRateForSymbol } from '@quant/shared';
 import { InstrumentProfile } from './types';
+
+/**
+ * Fee rates come from the shared canonical cost model (the same rates execution and accounting charge);
+ * slippage is the shared ESTIMATED slippage for that instrument. Nothing here restates a fee number.
+ */
+function scheduleCosts(symbol: string, researchOnlySchedule?: CostScheduleId): Pick<InstrumentProfile, 'makerFeeRate' | 'takerFeeRate' | 'slippageRate' | 'costBasis'> {
+  // Research-only confirmation markets (not executable here) use their venue's schedule, named explicitly
+  const fee = (l: 'MAKER' | 'TAKER') => (researchOnlySchedule ? feeRateForSchedule(researchOnlySchedule, l) : feeRateForSymbol(symbol, l));
+  return {
+    makerFeeRate: fee('MAKER'),
+    takerFeeRate: fee('TAKER'),
+    slippageRate: estimatedSlippageRate(symbol),
+    costBasis: 'SCHEDULE',
+  };
+}
 
 const M15 = 15 * 60 * 1000;
 
@@ -9,10 +25,7 @@ const M15 = 15 * 60 * 1000;
 export const INSTRUMENT_PROFILES: Record<string, InstrumentProfile> = {
   BTCUSDT_PERP: {
     symbol: 'BTCUSDT_PERP',
-    // Binance USDⓈ-M regular tier: maker 0.02%, taker 0.05%; ~0.01% slippage per market fill
-    makerFeeRate: 0.0002,
-    takerFeeRate: 0.0005,
-    slippageRate: 0.0001,
+    ...scheduleCosts('BTCUSDT_PERP'),
     barMs: M15,
     killzones: [
       { name: 'London open', startHourUtc: 7, endHourUtc: 10 },
@@ -25,10 +38,8 @@ export const INSTRUMENT_PROFILES: Record<string, InstrumentProfile> = {
       symbol,
       {
         symbol,
-        // Binance USDⓈ-M: maker 0.02%, taker 0.05%; alts get ~0.02% slippage per market fill
-        makerFeeRate: 0.0002,
-        takerFeeRate: 0.0005,
-        slippageRate: 0.0002,
+        // XRP / DOGE / AVAX are research-only confirmation markets on the same venue
+        ...scheduleCosts(symbol, ['XRPUSDT_PERP', 'DOGEUSDT_PERP', 'AVAXUSDT_PERP'].includes(symbol) ? 'BINANCE_USDM_FUTURES' : undefined),
         barMs: M15,
         killzones: [
           { name: 'London open', startHourUtc: 7, endHourUtc: 10 },
@@ -41,9 +52,7 @@ export const INSTRUMENT_PROFILES: Record<string, InstrumentProfile> = {
   // Confirmation market for out-of-market validation.
   ETHUSDT_PERP: {
     symbol: 'ETHUSDT_PERP',
-    makerFeeRate: 0.0002,
-    takerFeeRate: 0.0005,
-    slippageRate: 0.0001,
+    ...scheduleCosts('ETHUSDT_PERP'),
     barMs: M15,
     killzones: [
       { name: 'London open', startHourUtc: 7, endHourUtc: 10 },
@@ -53,10 +62,7 @@ export const INSTRUMENT_PROFILES: Record<string, InstrumentProfile> = {
   },
   XAUUSD: {
     symbol: 'XAUUSD',
-    // Paper engine charges 0.02% per side (COMEX schedule); ~0.01% spread/slippage per market fill
-    makerFeeRate: 0.0002,
-    takerFeeRate: 0.0002,
-    slippageRate: 0.0001,
+    ...scheduleCosts('XAUUSD'),
     barMs: M15,
     killzones: [
       { name: 'London open', startHourUtc: 7, endHourUtc: 10 },
@@ -66,7 +72,9 @@ export const INSTRUMENT_PROFILES: Record<string, InstrumentProfile> = {
   },
   NIFTY: {
     symbol: 'NIFTY',
-    // Simulated on the index as a proxy for the option trade: ~0.05% of underlying round trip (premium spread + charges)
+    // INDEX PROXY (not an executable fee schedule): the option trade is simulated on the index with ~0.05% of the
+    // underlying per round trip for premium spread + charges. Never used for execution or accounting.
+    costBasis: 'INDEX_PROXY',
     makerFeeRate: 0.0002,
     takerFeeRate: 0.0002,
     slippageRate: 0.00005,

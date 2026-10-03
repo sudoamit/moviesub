@@ -9,20 +9,23 @@ import {
   signalAt,
   stopFor,
   StrategyGenome,
+  labStrategyVersion,
 } from '@quant/strategy-lab';
-import { getAuthoritativeInstrument, isPerpetualSymbol, PointInTimeCurrencyConverter, roundPrice, Timeframe } from '@quant/shared';
+import { isPerpetualSymbol, PointInTimeCurrencyConverter, roundPrice, Timeframe } from '@quant/shared';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
 import { PaperTradingService } from '../paper-trading/paper-trading.service';
 import { LabQualityService } from './lab-quality.service';
 import {
   advanceTrade,
+  assertLiveRunnable,
+  assessLabEvidence,
+  LIFECYCLE_RULES_VERSION,
+  DEFAULT_PROMOTION_RULES,
   BacktestReference,
   CAPITAL_PER_INSTRUMENT,
   compoundedBalance,
   sizeFromCoinBalance,
-  decideLifecycle,
-  DEFAULT_LIFECYCLE_RULES,
   drawdownR,
   netR,
   OpenLabTrade,
@@ -40,7 +43,8 @@ export const MAX_OPEN_LAB_TRADES = 6;
  * Runs lab strategies (validated in packages/strategy-lab) on live candles:
  * - SHADOW: virtual trades, managed bar by bar with the backtester's rules;
  * - LIVE: paper orders with a trailing stop (positions marked exitPlan TRAIL; the monitor enforces the stop);
- * - automatic promotion (SHADOW -> LIVE) and retirement (-> RETIRED) via decideLifecycle.
+ * - automatic promotion (SHADOW -> LIVE) and retirement (-> RETIRED) via assessLabEvidence (evidence states,
+ * promotion records; see lab-lifecycle.ts).
  */
 @Injectable()
 export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
@@ -102,7 +106,15 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
 
   async runStrategy(s: any): Promise<void> {
     const genome = s.genomeJson as StrategyGenome;
+    assertLiveRunnable(genome);
     const profile = this.profileFor(s.symbol, s.timeframe);
+    // Strategy version: any change of rules, engine, features, costs or sizing starts a new evidence record
+    const version = labStrategyVersion({ symbol: s.symbol, timeframe: s.timeframe, genome, riskPercentage: s.riskPercentage, leverage: s.leverage, profile });
+    if (s.strategyVersion !== version.strategyVersion) {
+      if (s.strategyVersion) this.logger.warn(`[LAB] ${s.id}: new strategy version ${version.strategyVersion} (was ${s.strategyVersion}); earlier trades are no longer evidence`);
+      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { strategyVersion: version.strategyVersion, versionJson: version.components as any } });
+      s.strategyVersion = version.strategyVersion;
+    }
     const bars = await this.closedBars(s.symbol, s.timeframe);
     if (bars.length < 260) throw new Error(`only ${bars.length} closed ${s.timeframe} bars`);
     const last = bars[bars.length - 1];
@@ -224,7 +236,7 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
     if (s.status === 'LIVE' && q.skip) {
       await this.prisma.labStrategyTrade.create({
         data: {
-          strategyId: s.id, mode: 'LIVE', side, signalBarTime: new Date(barTime), entryTime: new Date(), entryPrice: ref,
+          strategyId: s.id, strategyVersion: s.strategyVersion ?? null, mode: 'LIVE', side, signalBarTime: new Date(barTime), entryTime: new Date(), entryPrice: ref,
           initialStop: stop, currentStop: stop, extremeClose: ref, status: 'SKIPPED', exitReason: 'SKIPPED_BY_QUALITY_MODEL', ...qualityData,
         },
       });
@@ -239,14 +251,13 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
       // Each instrument trades its own compounding balance (starting capital + realized P&L of its live trades).
       const balance = await this.coinBalance(s.symbol);
       const fx = PointInTimeCurrencyConverter.getInstance().getRate('USDT', 'INR', Date.now()).fxRate;
-      const inst = getAuthoritativeInstrument(s.symbol);
       const sizing = sizeFromCoinBalance({
-        balance, riskPct: s.riskPercentage, sizeMultiplier: q.sizeMultiplier, entry: ref, stopDistance: risk, fx,
-        leverage: s.leverage, lot: Number(inst.lotSize) || 0.001, precision: inst.quantityPrecision ?? 3,
+        symbol: s.symbol, side, balance, riskPct: s.riskPercentage, sizeMultiplier: q.sizeMultiplier, entry: ref, stopDistance: risk, fx,
+        leverage: s.leverage,
       });
       const qty = sizing.qty;
       if (!(qty > 0)) {
-        this.logger.warn(`[LAB] ${s.id}: no size (balance ₹${balance.toFixed(0)}) - signal not traded`);
+        this.logger.warn(`[LAB] ${s.id}: no size (balance ₹${balance.toFixed(0)}${sizing.rejectionReason ? `: ${sizing.rejectionReason}` : ''}) - signal not traded`);
         return;
       }
       this.logger.log(`[LAB] ${s.symbol} balance ₹${balance.toFixed(0)}: risking ₹${sizing.riskInr} (${s.riskPercentage}%), margin ₹${sizing.marginInr}`);
@@ -269,7 +280,7 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
     }
     await this.prisma.labStrategyTrade.create({
       data: {
-        strategyId: s.id, mode: s.status, side, signalBarTime: new Date(barTime), entryTime: new Date(),
+        strategyId: s.id, strategyVersion: s.strategyVersion ?? null, mode: s.status, side, signalBarTime: new Date(barTime), entryTime: new Date(),
         entryPrice, initialStop: actualStop, currentStop: actualStop, extremeClose: entryPrice, paperPositionId,
         ...qualityData,
       },
@@ -277,26 +288,47 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`[LAB] ${s.status} ${side} ${s.symbol} (${s.id}) at ${entryPrice}, stop ${actualStop}`);
   }
 
-  private async applyLifecycle(s: any): Promise<void> {
-    if (s.status !== 'SHADOW' && s.status !== 'LIVE') return;
+  /** Evidence of the CURRENT strategy version in the current mode (other versions are not evidence). */
+  private async currentEvidence(s: any) {
     const closed = await this.prisma.labStrategyTrade.findMany({
-      where: { strategyId: s.id, status: 'CLOSED', mode: s.status },
+      where: { strategyId: s.id, status: 'CLOSED', mode: s.status, strategyVersion: s.strategyVersion ?? undefined },
       orderBy: { exitTime: 'asc' },
     });
-    const decision = decideLifecycle(s.status, s.backtestJson as BacktestReference, closed.map((t) => Number(t.netR)));
-    if (decision.action === 'PROMOTE' && !isPerpetualSymbol(s.symbol)) {
+    // Data-quality violations: results that are not real bar-close outcomes (lost position, missing result)
+    const violations = closed.filter((t) => t.exitReason === 'POSITION_MISSING' || t.netR === null || !Number.isFinite(Number(t.netR))).length;
+    const results = closed.filter((t) => t.netR !== null && Number.isFinite(Number(t.netR))).map((t) => Number(t.netR));
+    return assessLabEvidence(s.status, s.backtestJson as any, results, violations);
+  }
+
+  private async applyLifecycle(s: any): Promise<void> {
+    if (s.status !== 'SHADOW' && s.status !== 'LIVE') return;
+    const a = await this.currentEvidence(s);
+    const persist = { evidenceState: a.state, evidenceJson: a as any };
+    if (a.action === 'PROMOTE' && !isPerpetualSymbol(s.symbol)) {
       // The runner executes perpetual futures only (NIFTY is traded through options): such strategies are watched
       // in shadow mode and never placed in the paper account.
-      const reason = `${decision.reason}; stays in SHADOW (watch only): live execution for ${s.symbol} is not available`;
-      if (reason !== s.statusReason) await this.prisma.labStrategy.update({ where: { id: s.id }, data: { statusReason: reason } });
-    } else if (decision.action === 'PROMOTE') {
-      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { status: 'LIVE', promotedAt: new Date(), statusReason: decision.reason } });
-      this.logger.log(`[LAB] ${s.id} PROMOTED to LIVE: ${decision.reason}`);
-    } else if (decision.action === 'RETIRE') {
-      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { status: 'RETIRED', retiredAt: new Date(), statusReason: decision.reason } });
-      this.logger.warn(`[LAB] ${s.id} RETIRED: ${decision.reason}`);
-    } else if (decision.reason !== s.statusReason) {
-      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { statusReason: decision.reason } });
+      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { ...persist, statusReason: `${a.reason}; stays in SHADOW (watch only): live execution for ${s.symbol} is not available` } });
+    } else if (a.action === 'PROMOTE') {
+      // Promotion and its evidence record are written together (audit trail of exactly what was relied on)
+      await this.prisma.$transaction([
+        this.prisma.labPromotionRecord.create({
+          data: {
+            strategyId: s.id,
+            strategyVersion: s.strategyVersion ?? 'unversioned',
+            datasetVersion: (s.backtestJson as any)?.datasetVersion ?? (s.backtestJson as any)?.golden?.datasetVersion ?? null,
+            lifecycleRulesVersion: LIFECYCLE_RULES_VERSION,
+            evidenceJson: { ...a, rules: DEFAULT_PROMOTION_RULES, costModel: s.versionJson?.costModelVersion ?? null } as any,
+            reason: a.reason,
+          },
+        }),
+        this.prisma.labStrategy.update({ where: { id: s.id }, data: { ...persist, status: 'LIVE', evidenceState: 'LIVE', promotedAt: new Date(), statusReason: a.reason } }),
+      ]);
+      this.logger.log(`[LAB] ${s.id} PROMOTED to LIVE: ${a.reason}`);
+    } else if (a.action === 'RETIRE') {
+      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { ...persist, status: 'RETIRED', retiredAt: new Date(), statusReason: a.reason } });
+      this.logger.warn(`[LAB] ${s.id} RETIRED: ${a.reason}`);
+    } else {
+      await this.prisma.labStrategy.update({ where: { id: s.id }, data: { ...persist, statusReason: a.reason } });
     }
   }
 
@@ -332,8 +364,7 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
     return strategies.map((s) => {
       const closed = s.trades.filter((t) => t.status === 'CLOSED');
       // Results that drive the automatic decision: closed trades in the current mode.
-      const modeResults = closed.filter((t) => t.mode === s.status).map((t) => Number(t.netR ?? 0));
-      const ref = s.backtestJson as unknown as BacktestReference;
+      const modeResults = closed.filter((t) => t.mode === s.status && (!s.strategyVersion || t.strategyVersion === s.strategyVersion)).map((t) => Number(t.netR ?? 0));
       return {
         ...s,
         summary: {
@@ -343,10 +374,13 @@ export class LabStrategiesService implements OnModuleInit, OnModuleDestroy {
         },
         capital: balances.get(s.symbol) ?? null,
         lifecycle: {
-          rules: DEFAULT_LIFECYCLE_RULES,
+          rules: DEFAULT_PROMOTION_RULES,
+          rulesVersion: LIFECYCLE_RULES_VERSION,
+          strategyVersion: s.strategyVersion,
+          evidenceState: s.evidenceState ?? null,
+          evidence: s.evidenceJson ?? null,
           closedInCurrentMode: modeResults.length,
           totalRInCurrentMode: modeResults.reduce((a, b) => a + b, 0),
-          zVsBacktest: zVsBacktest(ref, modeResults),
           drawdownR: drawdownR(modeResults),
         },
       };

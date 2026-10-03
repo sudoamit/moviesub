@@ -13,6 +13,7 @@ import {
   simulateIntraday,
 } from '@quant/strategy-lab';
 import { Timeframe } from '@quant/shared';
+import { createHash } from 'crypto';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { CandlesService } from '../candles/candles.service';
 import { PaperTradingService } from '../paper-trading/paper-trading.service';
@@ -33,6 +34,27 @@ const FRESH_MS = 3 * 60_000;
 
 const istDate = (t: number) => new Date(t + IST).toISOString().slice(0, 10);
 
+/** Version of the intraday simulator semantics the watch runner forward-tests (bump when simulateIntraday changes). */
+export const INTRADAY_ENGINE_VERSION = 'intraday-sim/v1';
+
+/** Strategy version: rules (genome) + simulator. Trades recorded under another version are not evidence for this one. */
+export function intradayStrategyVersion(genome: unknown): string {
+  const stable = (v: any): any =>
+    v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
+  return `iv-${createHash('sha256').update(JSON.stringify({ genome: stable(genome), engine: INTRADAY_ENGINE_VERSION })).digest('hex').slice(0, 12)}`;
+}
+
+/**
+ * Trades that are evidence for the given version. Unversioned (legacy) rows predate versioning; a strategy's genome
+ * is fixed for its id and the simulator is unchanged since, so they were recorded under the same rules.
+ */
+export function currentVersionTrades<T extends { strategyVersion?: string | null }>(trades: T[], version: string | null): T[] {
+  return version ? trades.filter((t) => !t.strategyVersion || t.strategyVersion === version) : trades;
+}
+
+/** The ONLY market-access capability the watch lab receives: a validated option quote. It cannot place orders. */
+export type OptionQuoteFn = (contract: string, maxAgeSeconds: number) => Promise<{ price: number }>;
+
 /**
  * NIFTY intraday lab: forward-tests the study's strategies on live data (WATCH mode: trades are recorded with the
  * real live price of the ITM option, never placed) and learns from each closed trade: the real cost of trading
@@ -46,11 +68,19 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
   private studying = false;
   private readonly dataDir = process.env.LAB_DATA_DIR || path.resolve(__dirname, '../../../../data/strategy-lab');
 
+  /**
+   * WATCH ONLY (NIFTY_LAB_WATCH): the lab keeps a quote function, never the paper-trading service itself, so no
+   * code path in this class can reach placeOrder.
+   */
+  private readonly quoteOption: OptionQuoteFn;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly candles: CandlesService,
-    private readonly paper: PaperTradingService,
-  ) {}
+    paper: PaperTradingService,
+  ) {
+    this.quoteOption = (contract, maxAgeSeconds) => paper.getValidatedOptionPrice(contract, maxAgeSeconds);
+  }
 
   onModuleInit() {
     if (process.env.NODE_ENV === 'test' || process.env.NIFTY_LAB_ENABLED === 'false') return;
@@ -129,7 +159,7 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
 
   private async optionPrice(contract: string): Promise<number | null> {
     try {
-      const q = await this.paper.getValidatedOptionPrice(contract, 30);
+      const q = await this.quoteOption(contract, 30);
       return q.price > 0 ? q.price : null;
     } catch {
       return null;
@@ -157,6 +187,7 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.intradayTrade.create({
         data: {
           strategyId: st.id,
+          strategyVersion: intradayStrategyVersion(st.genomeJson),
           date: today,
           side: tr.side,
           signalTime: new Date(tr.entryTime),
@@ -194,13 +225,14 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
       },
     });
     this.logger.log(`[NIFTY LAB] closed ${t.optionContract} (${reason}): NIFTY ${indexPoints.toFixed(1)} pts, option ${optionExit !== null && t.optionEntry !== null ? (optionExit - t.optionEntry).toFixed(1) : 'n/a'} pts`);
-    await this.review(t.strategyId);
+    await this.review(t.strategyId, t.strategyVersion ?? null);
   }
 
   private async closedTrades(where: any = {}): Promise<ClosedWatchTrade[]> {
     const rows = await this.prisma.intradayTrade.findMany({ where: { status: 'CLOSED', ...where }, orderBy: { exitTime: 'asc' } });
     return rows.map((r) => ({
       strategyId: r.strategyId,
+      strategyVersion: r.strategyVersion ?? null,
       side: r.side,
       indexPoints: r.indexPoints ?? 0,
       hours: r.exitTime ? (r.exitTime.getTime() - r.signalTime.getTime()) / 3_600_000 : 0,
@@ -210,9 +242,9 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
-  /** Applies the live verdict to a strategy (retire a strategy that is clearly losing on real trades). */
-  private async review(strategyId: string) {
-    const v = strategyVerdict(await this.closedTrades({ strategyId }));
+  /** Applies the live verdict to a strategy (retire a strategy that is clearly losing on REAL option trades of its current version). */
+  private async review(strategyId: string, strategyVersion: string | null) {
+    const v = strategyVerdict(currentVersionTrades(await this.closedTrades({ strategyId }), strategyVersion));
     if (v.verdict === 'RETIRE') {
       await this.prisma.intradayStrategy.update({ where: { id: strategyId }, data: { status: 'RETIRED', retiredAt: new Date(), statusReason: v.reason } });
       this.logger.warn(`[NIFTY LAB] ${strategyId} RETIRED: ${v.reason}`);
@@ -284,7 +316,8 @@ export class NiftyLabService implements OnModuleInit, OnModuleDestroy {
         status: st.status,
         statusReason: st.statusReason,
         study: st.studyJson,
-        live: strategyVerdict(closed.filter((c) => c.strategyId === st.id)),
+        strategyVersion: intradayStrategyVersion(st.genomeJson),
+        live: strategyVerdict(currentVersionTrades(closed.filter((c) => c.strategyId === st.id), intradayStrategyVersion(st.genomeJson))),
         trades: st.trades,
       })),
     };
